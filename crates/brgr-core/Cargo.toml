@@ -9,8 +9,9 @@ rust-version.workspace = true
 brgr-protocol = { path = "../brgr-protocol" }
 brgr-runner = { path = "../brgr-runner" }
 brgr-store = { path = "../brgr-store" }
+serde_json.workspace = true
+sha2.workspace = true
 thiserror.workspace = true
 
 [lints]
 workspace = true
-

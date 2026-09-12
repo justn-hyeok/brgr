@@ -4,10 +4,15 @@
 //! report observations, but they cannot bypass task revision or attempt state
 //! validation.
 
+use std::{fmt::Write as _, io::Cursor, path::Path, time::Duration};
+
 use brgr_protocol::{
     AttemptId, AttemptState, ProtocolError, ResultEnvelope, ResultId, TaskId, TaskSpec,
     TerminalOutcome,
 };
+use brgr_runner::{HarnessManifest, ProcessRunner, RunRequest, RunnerError};
+use brgr_store::{Store, StoreError};
+use sha2::{Digest, Sha256};
 
 /// An immutable, validated snapshot of a task specification.
 ///
@@ -295,6 +300,168 @@ pub enum CoreError {
         state: AttemptState,
         outcome: TerminalOutcome,
     },
+}
+
+/// Runs fresh attempts through the shared state, process, and persistence
+/// contract.
+pub struct Supervisor {
+    store: Store,
+}
+
+impl Supervisor {
+    /// Opens the durable supervisor store.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SupervisorError`] when the private store cannot be opened.
+    pub fn open(store_root: impl AsRef<Path>) -> Result<Self, SupervisorError> {
+        Ok(Self {
+            store: Store::open(store_root)?,
+        })
+    }
+
+    /// Executes one fresh, bounded attempt and publishes its terminal result.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SupervisorError`] when validation, execution, sealing, or the
+    /// terminal transaction fails.
+    pub async fn run_fresh(
+        &mut self,
+        spec: TaskSpec,
+        manifest: &HarnessManifest,
+    ) -> Result<ResultEnvelope, SupervisorError> {
+        let revision = TaskRevision::new(spec.clone())?;
+        let request_bytes = serde_json::to_vec(&spec)?;
+        self.store.record_task(&spec, &sha256(&request_bytes))?;
+
+        let attempt_id = AttemptId::new();
+        let mut attempt = Attempt::new(revision, attempt_id, 1)?;
+        self.store
+            .create_attempt(spec.task_id, spec.revision, attempt_id)?;
+        transition(&self.store, &mut attempt, AttemptState::Starting)?;
+        transition(&self.store, &mut attempt, AttemptState::Running)?;
+
+        let execution = ProcessRunner::run(
+            manifest,
+            RunRequest {
+                workspace: Path::new(&spec.workspace),
+                prompt: &spec.objective,
+                model: spec.route.requested_model.as_deref(),
+                effort: spec.route.requested_effort.as_deref(),
+                deadline: Duration::from_secs(spec.budget.deadline_seconds),
+            },
+        )
+        .await;
+
+        let result = match execution {
+            Ok(output) if output.succeeded(manifest) && !output.result.is_empty() => {
+                transition(&self.store, &mut attempt, AttemptState::Collecting)?;
+                let artifact = self.store.seal_artifact_reader(
+                    Cursor::new(output.result),
+                    &spec.artifact_contract.media_type,
+                    spec.artifact_contract.max_bytes,
+                )?;
+                result_for(
+                    &spec,
+                    attempt_id,
+                    TerminalOutcome::Candidate,
+                    vec![artifact],
+                    None,
+                )
+            }
+            Ok(output) => {
+                let reason = if output.timed_out {
+                    "attempt deadline elapsed".to_owned()
+                } else if output.output_truncated {
+                    "process output exceeded the configured limit".to_owned()
+                } else if output.result.is_empty() {
+                    "process produced no result artifact".to_owned()
+                } else {
+                    format!("process exited with status {:?}", output.exit_code)
+                };
+                result_for(
+                    &spec,
+                    attempt_id,
+                    TerminalOutcome::Failed,
+                    vec![],
+                    Some(reason),
+                )
+            }
+            Err(error) => result_for(
+                &spec,
+                attempt_id,
+                TerminalOutcome::Failed,
+                vec![],
+                Some(error.to_string()),
+            ),
+        };
+
+        attempt.record_terminal(result.clone())?;
+        self.store.commit_terminal_result(&spec.owner_id, &result)?;
+        Ok(result)
+    }
+
+    #[must_use]
+    pub fn store(&self) -> &Store {
+        &self.store
+    }
+
+    #[must_use]
+    pub fn store_mut(&mut self) -> &mut Store {
+        &mut self.store
+    }
+}
+
+fn transition(
+    store: &Store,
+    attempt: &mut Attempt,
+    next: AttemptState,
+) -> Result<(), SupervisorError> {
+    attempt.transition(next)?;
+    store.set_attempt_state(attempt.id(), next)?;
+    Ok(())
+}
+
+fn result_for(
+    spec: &TaskSpec,
+    attempt_id: AttemptId,
+    outcome: TerminalOutcome,
+    artifacts: Vec<brgr_protocol::ArtifactRef>,
+    error: Option<String>,
+) -> ResultEnvelope {
+    ResultEnvelope {
+        schema: brgr_protocol::SCHEMA_V1.to_owned(),
+        task_id: spec.task_id,
+        revision: spec.revision,
+        attempt_id,
+        result_id: ResultId::new(),
+        outcome,
+        artifacts,
+        error,
+        unresolved_effects: vec![],
+    }
+}
+
+fn sha256(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    let mut encoded = String::with_capacity(64);
+    for byte in digest {
+        write!(&mut encoded, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    encoded
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum SupervisorError {
+    #[error(transparent)]
+    Core(#[from] CoreError),
+    #[error(transparent)]
+    Store(#[from] StoreError),
+    #[error(transparent)]
+    Runner(#[from] RunnerError),
+    #[error(transparent)]
+    Serialization(#[from] serde_json::Error),
 }
 
 #[cfg(test)]

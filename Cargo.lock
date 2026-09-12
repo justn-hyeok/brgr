@@ -128,6 +128,8 @@ dependencies = [
  "brgr-protocol",
  "brgr-runner",
  "brgr-store",
+ "serde_json",
+ "sha2",
  "thiserror",
 ]
 

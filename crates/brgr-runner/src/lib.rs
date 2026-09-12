@@ -99,6 +99,7 @@ pub struct ExecutionOutput {
     pub exit_code: Option<i32>,
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
+    pub result: Vec<u8>,
     pub timed_out: bool,
     pub output_truncated: bool,
     pub elapsed: Duration,
@@ -190,11 +191,13 @@ impl ProcessRunner {
         };
         let (stdout, stdout_truncated) = join_capture(stdout_task.await)?;
         let (stderr, stderr_truncated) = join_capture(stderr_task.await)?;
+        let result = collect_result(manifest, request.workspace, &substitutions, &stdout)?;
 
         Ok(ExecutionOutput {
             exit_code: status.and_then(|value| value.code()),
             stdout,
             stderr,
+            result,
             timed_out,
             output_truncated: stdout_truncated || stderr_truncated,
             elapsed: started.elapsed(),
@@ -324,6 +327,40 @@ fn substitute(argument: &str, values: &Substitutions<'_>) -> Result<String, Runn
     Ok(output)
 }
 
+fn collect_result(
+    manifest: &HarnessManifest,
+    workspace: &Path,
+    values: &Substitutions<'_>,
+    stdout: &[u8],
+) -> Result<Vec<u8>, RunnerError> {
+    match &manifest.result.source {
+        ResultSource::Stdout => Ok(stdout.to_vec()),
+        ResultSource::File { path } => {
+            let rendered = substitute(path, values)?;
+            let relative = Path::new(&rendered);
+            if relative.is_absolute()
+                || relative
+                    .components()
+                    .any(|part| matches!(part, std::path::Component::ParentDir))
+            {
+                return Err(RunnerError::ResultPathOutsideWorkspace(rendered));
+            }
+            let result_path = workspace.join(relative);
+            let metadata = std::fs::symlink_metadata(&result_path)?;
+            if !metadata.file_type().is_file() {
+                return Err(RunnerError::ResultNotRegularFile(result_path));
+            }
+            if metadata.len() > manifest.result.max_bytes {
+                return Err(RunnerError::ResultTooLarge {
+                    max_bytes: manifest.result.max_bytes,
+                    observed_bytes: metadata.len(),
+                });
+            }
+            Ok(std::fs::read(result_path)?)
+        }
+    }
+}
+
 async fn read_bounded<R>(reader: R, limit: u64) -> Result<(Vec<u8>, bool), std::io::Error>
 where
     R: AsyncRead + Unpin,
@@ -372,6 +409,12 @@ pub enum RunnerError {
     MissingSubstitution(String),
     #[error("unknown substitution in argument: {0}")]
     UnknownSubstitution(String),
+    #[error("result path must stay relative to the task workspace: {0}")]
+    ResultPathOutsideWorkspace(String),
+    #[error("result is not a regular file: {}", .0.display())]
+    ResultNotRegularFile(PathBuf),
+    #[error("result exceeds {max_bytes} bytes (observed {observed_bytes})")]
+    ResultTooLarge { max_bytes: u64, observed_bytes: u64 },
     #[error("child process did not expose its {0} pipe")]
     MissingPipe(&'static str),
     #[error("capture task failed")]
