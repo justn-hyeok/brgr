@@ -13,6 +13,7 @@ path = "src/main.rs"
 anyhow.workspace = true
 brgr-core = { path = "../brgr-core" }
 brgr-protocol = { path = "../brgr-protocol" }
+brgr-registry = { path = "../brgr-registry" }
 brgr-runner = { path = "../brgr-runner" }
 brgr-store = { path = "../brgr-store" }
 clap.workspace = true
@@ -26,4 +27,3 @@ tempfile.workspace = true
 
 [lints]
 workspace = true
-

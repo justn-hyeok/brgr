@@ -111,6 +111,7 @@ dependencies = [
  "assert_cmd",
  "brgr-core",
  "brgr-protocol",
+ "brgr-registry",
  "brgr-runner",
  "brgr-store",
  "clap",
@@ -138,6 +139,19 @@ dependencies = [
  "serde_json",
  "thiserror",
  "uuid",
+]
+
+[[package]]
+name = "brgr-registry"
+version = "0.1.0"
+dependencies = [
+ "brgr-runner",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+ "tokio",
 ]
 
 [[package]]

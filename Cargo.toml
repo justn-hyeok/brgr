@@ -3,6 +3,7 @@ members = [
   "crates/brgr-cli",
   "crates/brgr-core",
   "crates/brgr-protocol",
+  "crates/brgr-registry",
   "crates/brgr-runner",
   "crates/brgr-store",
 ]
