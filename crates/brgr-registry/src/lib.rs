@@ -12,7 +12,8 @@ use std::{
 
 use brgr_runner::{
     Capability, CapabilityStatus, ExecutionMode, HarnessManifest, LaunchSpec, MANIFEST_SCHEMA_V1,
-    PROCESS_ADAPTER_V1, ProbeSpec, ProcessRunner, ResultSource, ResultSpec, RunnerError,
+    OMP_ROLE_ADAPTER_V1, PROCESS_ADAPTER_V1, ProbeSpec, ProcessRunner, ResultSource, ResultSpec,
+    RunnerError,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -78,8 +79,12 @@ impl Registry {
             .ok_or(RegistryError::UnsupportedHarness)?
             .to_owned();
         let realpath = executable.canonicalize()?;
-        let version =
-            ProcessRunner::probe(&realpath, &["--version".to_owned()], PROBE_DEADLINE).await?;
+        let version_argv = if requested_name == "omp-role" {
+            vec!["--help".to_owned()]
+        } else {
+            vec!["--version".to_owned()]
+        };
+        let version = ProcessRunner::probe(&realpath, &version_argv, PROBE_DEADLINE).await?;
         let help = ProcessRunner::probe(&realpath, &["--help".to_owned()], PROBE_DEADLINE).await?;
         if version.exit_code != Some(0) || help.exit_code != Some(0) {
             return Err(RegistryError::ProbeFailed);
@@ -162,57 +167,129 @@ fn generate_manifest(
     help: &str,
 ) -> Result<HarnessManifest, RegistryError> {
     match requested_name {
-        "gjc"
-            if ["--mode=<value>", "--no-session", "--no-mcp", "-p, --print"]
-                .iter()
-                .all(|flag| help.contains(flag)) =>
-        {
-            let capabilities = BTreeMap::from([
-                (
-                    "completion".to_owned(),
-                    supported("process_exit_with_json_capture"),
-                ),
-                ("cancel".to_owned(), supported("local_process_only")),
-                ("model_select".to_owned(), supported("--model")),
-                ("effort_select".to_owned(), supported("--thinking")),
-            ]);
-            Ok(HarnessManifest {
-                schema: MANIFEST_SCHEMA_V1.to_owned(),
-                id: "local.gjc".to_owned(),
-                adapter: PROCESS_ADAPTER_V1.to_owned(),
-                executable,
-                probe: ProbeSpec {
-                    version_argv: vec!["--version".to_owned()],
-                    help_argv: vec!["--help".to_owned()],
-                },
-                launch: LaunchSpec {
-                    argv: vec![
-                        "-p".to_owned(),
-                        "--mode=json".to_owned(),
-                        "--no-session".to_owned(),
-                        "--no-mcp".to_owned(),
-                        "@${input.prompt_file}".to_owned(),
-                    ],
-                    env_allow: vec![
-                        "HOME".to_owned(),
-                        "PATH".to_owned(),
-                        "LANG".to_owned(),
-                        "TMPDIR".to_owned(),
-                    ],
-                    mode: ExecutionMode::OneShot,
-                },
-                result: ResultSpec {
-                    source: ResultSource::Stdout,
-                    media_type: "application/x-ndjson".to_owned(),
-                    max_bytes: 1_048_576,
-                    success_exit_codes: vec![0],
-                },
-                capabilities,
-            })
-        }
-        "gjc" => Err(RegistryError::RequiredFlagsMissing),
+        "gjc" => generate_gjc_manifest(executable, help),
+        "omp-role" => generate_omp_manifest(executable, help),
         _ => Err(RegistryError::UnsupportedHarness),
     }
+}
+
+fn generate_gjc_manifest(
+    executable: PathBuf,
+    help: &str,
+) -> Result<HarnessManifest, RegistryError> {
+    if !["--mode=<value>", "--no-session", "--no-mcp", "-p, --print"]
+        .iter()
+        .all(|flag| help.contains(flag))
+    {
+        return Err(RegistryError::RequiredFlagsMissing);
+    }
+    Ok(HarnessManifest {
+        schema: MANIFEST_SCHEMA_V1.to_owned(),
+        id: "local.gjc".to_owned(),
+        adapter: PROCESS_ADAPTER_V1.to_owned(),
+        executable,
+        probe: ProbeSpec {
+            version_argv: vec!["--version".to_owned()],
+            help_argv: vec!["--help".to_owned()],
+        },
+        launch: LaunchSpec {
+            argv: vec![
+                "-p".to_owned(),
+                "--mode=json".to_owned(),
+                "--no-session".to_owned(),
+                "--no-mcp".to_owned(),
+                "@${input.prompt_file}".to_owned(),
+            ],
+            model_argv: vec!["--model".to_owned(), "${route.model}".to_owned()],
+            effort_argv: vec!["--thinking".to_owned(), "${route.effort}".to_owned()],
+            env_allow: vec![
+                "HOME".to_owned(),
+                "PATH".to_owned(),
+                "LANG".to_owned(),
+                "TMPDIR".to_owned(),
+            ],
+            mode: ExecutionMode::OneShot,
+        },
+        result: ResultSpec {
+            source: ResultSource::Stdout,
+            media_type: "application/x-ndjson".to_owned(),
+            max_bytes: 1_048_576,
+            success_exit_codes: vec![0],
+        },
+        capabilities: BTreeMap::from([
+            (
+                "completion".to_owned(),
+                supported("process_exit_with_json_capture"),
+            ),
+            ("cancel".to_owned(), supported("local_process_only")),
+            ("model_select".to_owned(), supported("--model")),
+            ("effort_select".to_owned(), supported("--thinking")),
+        ]),
+    })
+}
+
+fn generate_omp_manifest(
+    executable: PathBuf,
+    help: &str,
+) -> Result<HarnessManifest, RegistryError> {
+    if ![
+        "--expected-report",
+        "--reuse-worktree-objective",
+        "--reuse-worktree-owner",
+    ]
+    .iter()
+    .all(|flag| help.contains(flag))
+    {
+        return Err(RegistryError::RequiredFlagsMissing);
+    }
+    Ok(HarnessManifest {
+        schema: MANIFEST_SCHEMA_V1.to_owned(),
+        id: "local.omp".to_owned(),
+        adapter: OMP_ROLE_ADAPTER_V1.to_owned(),
+        executable,
+        probe: ProbeSpec {
+            version_argv: vec!["--help".to_owned()],
+            help_argv: vec!["--help".to_owned()],
+        },
+        launch: LaunchSpec {
+            argv: vec![],
+            model_argv: vec![],
+            effort_argv: vec![],
+            env_allow: vec![
+                "HOME".to_owned(),
+                "PATH".to_owned(),
+                "LANG".to_owned(),
+                "HERDR_ENV".to_owned(),
+                "HERDR_PANE_ID".to_owned(),
+            ],
+            mode: ExecutionMode::OneShot,
+        },
+        result: ResultSpec {
+            source: ResultSource::Stdout,
+            media_type: "text/markdown".to_owned(),
+            max_bytes: 1_048_576,
+            success_exit_codes: vec![0],
+        },
+        capabilities: BTreeMap::from([
+            (
+                "completion".to_owned(),
+                supported("contracted_report_and_terminal_herdr_state"),
+            ),
+            (
+                "presentation".to_owned(),
+                supported("herdr_optional_adapter"),
+            ),
+            (
+                "cancel".to_owned(),
+                Capability {
+                    status: CapabilityStatus::Unknown,
+                    semantics: "not_certified_in_v1".to_owned(),
+                    evidence_ref: None,
+                    tested_identity: None,
+                },
+            ),
+        ]),
+    })
 }
 
 fn supported(semantics: &str) -> Capability {

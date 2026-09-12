@@ -2,8 +2,9 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
+    os::unix::process::CommandExt,
     path::{Path, PathBuf},
-    process::Stdio,
+    process::{ExitStatus, Stdio},
     time::{Duration, Instant},
 };
 
@@ -14,11 +15,12 @@ use tokio::{
     io::{AsyncRead, AsyncReadExt},
     process::Command,
     task::JoinError,
-    time::timeout,
+    time::sleep,
 };
 
 pub const MANIFEST_SCHEMA_V1: &str = "brgr.harness/v1";
 pub const PROCESS_ADAPTER_V1: &str = "process/v1";
+pub const OMP_ROLE_ADAPTER_V1: &str = "omp-role/v1";
 const CAPTURE_OVERHEAD_BYTES: u64 = 1;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -43,6 +45,10 @@ pub struct ProbeSpec {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct LaunchSpec {
     pub argv: Vec<String>,
+    #[serde(default)]
+    pub model_argv: Vec<String>,
+    #[serde(default)]
+    pub effort_argv: Vec<String>,
     #[serde(default)]
     pub env_allow: Vec<String>,
     pub mode: ExecutionMode,
@@ -92,6 +98,8 @@ pub struct RunRequest<'a> {
     pub model: Option<&'a str>,
     pub effort: Option<&'a str>,
     pub deadline: Duration,
+    pub cancel_path: Option<&'a Path>,
+    pub pid_path: Option<&'a Path>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -101,6 +109,7 @@ pub struct ExecutionOutput {
     pub stderr: Vec<u8>,
     pub result: Vec<u8>,
     pub timed_out: bool,
+    pub cancelled: bool,
     pub output_truncated: bool,
     pub elapsed: Duration,
 }
@@ -130,6 +139,9 @@ impl ProcessRunner {
         request: RunRequest<'_>,
     ) -> Result<ExecutionOutput, RunnerError> {
         manifest.validate()?;
+        if manifest.adapter != PROCESS_ADAPTER_V1 {
+            return Err(RunnerError::UnsupportedAdapter(manifest.adapter.clone()));
+        }
         if !request.workspace.is_dir() {
             return Err(RunnerError::InvalidWorkspace(
                 request.workspace.to_path_buf(),
@@ -145,12 +157,7 @@ impl ProcessRunner {
             model: request.model,
             effort: request.effort,
         };
-        let argv = manifest
-            .launch
-            .argv
-            .iter()
-            .map(|argument| substitute(argument, &substitutions))
-            .collect::<Result<Vec<_>, _>>()?;
+        let argv = render_argv(manifest, &request, &substitutions)?;
 
         let started = Instant::now();
         let mut command = Command::new(&manifest.executable);
@@ -162,6 +169,7 @@ impl ProcessRunner {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
+        command.as_std_mut().process_group(0);
         for name in &manifest.launch.env_allow {
             if let Some(value) = std::env::var_os(name) {
                 command.env(name, value);
@@ -169,6 +177,9 @@ impl ProcessRunner {
         }
 
         let mut child = command.spawn()?;
+        if let Some(path) = request.pid_path {
+            std::fs::write(path, format!("{}\n", child.id().unwrap_or_default()))?;
+        }
         let stdout = child
             .stdout
             .take()
@@ -181,14 +192,11 @@ impl ProcessRunner {
         let stdout_task = tokio::spawn(read_bounded(stdout, limit));
         let stderr_task = tokio::spawn(read_bounded(stderr, limit));
 
-        let (status, timed_out) = if let Ok(status) = timeout(request.deadline, child.wait()).await
-        {
-            (Some(status?), false)
-        } else {
-            child.start_kill()?;
-            let status = child.wait().await?;
-            (Some(status), true)
-        };
+        let (status, timed_out, cancelled) =
+            wait_for_exit(&mut child, started, request.deadline, request.cancel_path).await?;
+        if let Some(path) = request.pid_path {
+            let _ = std::fs::remove_file(path);
+        }
         let (stdout, stdout_truncated) = join_capture(stdout_task.await)?;
         let (stderr, stderr_truncated) = join_capture(stderr_task.await)?;
         let result = collect_result(manifest, request.workspace, &substitutions, &stdout)?;
@@ -199,6 +207,7 @@ impl ProcessRunner {
             stderr,
             result,
             timed_out,
+            cancelled,
             output_truncated: stdout_truncated || stderr_truncated,
             elapsed: started.elapsed(),
         })
@@ -226,6 +235,8 @@ impl ProcessRunner {
             },
             launch: LaunchSpec {
                 argv: argv.to_vec(),
+                model_argv: vec![],
+                effort_argv: vec![],
                 env_allow: vec!["HOME".to_owned(), "PATH".to_owned(), "LANG".to_owned()],
                 mode: ExecutionMode::OneShot,
             },
@@ -246,6 +257,8 @@ impl ProcessRunner {
                 model: None,
                 effort: None,
                 deadline,
+                cancel_path: None,
+                pid_path: None,
             },
         )
         .await
@@ -263,7 +276,10 @@ impl HarnessManifest {
         if self.schema != MANIFEST_SCHEMA_V1 {
             return Err(RunnerError::UnsupportedSchema(self.schema.clone()));
         }
-        if self.adapter != PROCESS_ADAPTER_V1 {
+        if !matches!(
+            self.adapter.as_str(),
+            PROCESS_ADAPTER_V1 | OMP_ROLE_ADAPTER_V1
+        ) {
             return Err(RunnerError::UnsupportedAdapter(self.adapter.clone()));
         }
         if self.id.trim().is_empty() || !self.id.contains('.') {
@@ -301,6 +317,68 @@ struct Substitutions<'a> {
     workspace: &'a Path,
     model: Option<&'a str>,
     effort: Option<&'a str>,
+}
+
+fn render_argv(
+    manifest: &HarnessManifest,
+    request: &RunRequest<'_>,
+    values: &Substitutions<'_>,
+) -> Result<Vec<String>, RunnerError> {
+    let mut arguments = manifest.launch.argv.clone();
+    if request.model.is_some() {
+        arguments.extend(manifest.launch.model_argv.clone());
+    }
+    if request.effort.is_some() {
+        arguments.extend(manifest.launch.effort_argv.clone());
+    }
+    arguments
+        .iter()
+        .map(|argument| substitute(argument, values))
+        .collect()
+}
+
+async fn wait_for_exit(
+    child: &mut tokio::process::Child,
+    started: Instant,
+    deadline: Duration,
+    cancel_path: Option<&Path>,
+) -> Result<(Option<ExitStatus>, bool, bool), RunnerError> {
+    loop {
+        let cancelled = cancel_path.is_some_and(Path::exists);
+        let timed_out = started.elapsed() >= deadline;
+        if cancelled || timed_out {
+            let status = stop_process_group(child).await?;
+            return Ok((Some(status), timed_out, cancelled));
+        }
+        if let Some(status) = child.try_wait()? {
+            return Ok((Some(status), false, false));
+        }
+        sleep(Duration::from_millis(50)).await;
+    }
+}
+
+async fn stop_process_group(child: &mut tokio::process::Child) -> Result<ExitStatus, RunnerError> {
+    let pid = child.id().ok_or(RunnerError::MissingProcessId)?;
+    let term = std::process::Command::new("/bin/kill")
+        .arg("-TERM")
+        .arg(format!("-{pid}"))
+        .status()?;
+    if !term.success() {
+        child.start_kill()?;
+        return Ok(child.wait().await?);
+    }
+    let grace_started = Instant::now();
+    while grace_started.elapsed() < Duration::from_millis(500) {
+        if let Some(status) = child.try_wait()? {
+            return Ok(status);
+        }
+        sleep(Duration::from_millis(25)).await;
+    }
+    let _ = std::process::Command::new("/bin/kill")
+        .arg("-KILL")
+        .arg(format!("-{pid}"))
+        .status();
+    Ok(child.wait().await?)
 }
 
 fn substitute(argument: &str, values: &Substitutions<'_>) -> Result<String, RunnerError> {
@@ -417,6 +495,8 @@ pub enum RunnerError {
     ResultTooLarge { max_bytes: u64, observed_bytes: u64 },
     #[error("child process did not expose its {0} pipe")]
     MissingPipe(&'static str),
+    #[error("child process did not expose a process id")]
+    MissingProcessId,
     #[error("capture task failed")]
     CaptureTask(#[source] JoinError),
     #[error(transparent)]
@@ -439,6 +519,8 @@ mod tests {
             },
             launch: LaunchSpec {
                 argv: vec!["@${input.prompt_file}".to_owned()],
+                model_argv: vec![],
+                effort_argv: vec![],
                 env_allow: vec![],
                 mode: ExecutionMode::OneShot,
             },
@@ -464,6 +546,8 @@ mod tests {
                 model: None,
                 effort: None,
                 deadline: Duration::from_secs(2),
+                cancel_path: None,
+                pid_path: None,
             },
         )
         .await
@@ -485,6 +569,8 @@ mod tests {
                 model: None,
                 effort: None,
                 deadline: Duration::from_secs(2),
+                cancel_path: None,
+                pid_path: None,
             },
         )
         .await
@@ -492,6 +578,44 @@ mod tests {
 
         assert!(output.output_truncated);
         assert!(!output.succeeded(&manifest));
+    }
+
+    #[tokio::test]
+    async fn cancellation_stops_a_process_group_with_a_grandchild() {
+        let workspace = tempfile::tempdir().unwrap();
+        let cancel = workspace.path().join("cancel");
+        std::fs::write(&cancel, b"cancel").unwrap();
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../testdata/fixtures/gjc")
+            .canonicalize()
+            .unwrap();
+        let mut manifest = echo_manifest(4_096);
+        manifest.executable = fixture;
+        manifest.launch.argv = vec![
+            "-p".to_owned(),
+            "--mode=json".to_owned(),
+            "@${input.prompt_file}".to_owned(),
+        ];
+
+        let started = Instant::now();
+        let output = ProcessRunner::run(
+            &manifest,
+            RunRequest {
+                workspace: workspace.path(),
+                prompt: "SLOW",
+                model: None,
+                effort: None,
+                deadline: Duration::from_secs(10),
+                cancel_path: Some(&cancel),
+                pid_path: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(output.cancelled);
+        assert!(!output.timed_out);
+        assert!(started.elapsed() < Duration::from_secs(3));
     }
 
     #[test]

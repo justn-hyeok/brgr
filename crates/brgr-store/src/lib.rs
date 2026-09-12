@@ -14,8 +14,8 @@ use std::os::unix::fs::PermissionsExt;
 
 use artifact::ArtifactStore;
 use brgr_protocol::{
-    ArtifactRef, AttemptId, AttemptState, Decision, InboxItem, OwnerId, ResultEnvelope, ResultId,
-    SCHEMA_V1, TaskId, TaskSpec,
+    ArtifactRef, AttemptId, AttemptState, Decision, Event, InboxItem, OwnerId, ResultEnvelope,
+    ResultId, SCHEMA_V1, TaskId, TaskSpec,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use sha2::{Digest, Sha256};
@@ -64,6 +64,20 @@ CREATE TABLE IF NOT EXISTS decisions (
 CREATE TABLE IF NOT EXISTS idempotency_requests (
     request_id TEXT PRIMARY KEY,
     request_digest TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS events (
+    event_id TEXT PRIMARY KEY,
+    attempt_id TEXT NOT NULL,
+    producer TEXT NOT NULL,
+    producer_seq INTEGER NOT NULL,
+    event_json TEXT NOT NULL,
+    UNIQUE (attempt_id, producer, producer_seq),
+    FOREIGN KEY (attempt_id) REFERENCES attempts(attempt_id)
+);
+CREATE TABLE IF NOT EXISTS owner_bindings (
+    owner_id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    binding_epoch INTEGER NOT NULL CHECK (binding_epoch > 0)
 );
 ";
 
@@ -441,6 +455,172 @@ impl Store {
     ) -> Result<ArtifactRef, StoreError> {
         self.artifacts.seal_reader(reader, media_type, max_bytes)
     }
+
+    /// Loads the latest revision for a task.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the task is missing or stored data is invalid.
+    pub fn task(&self, task_id: TaskId) -> Result<TaskSpec, StoreError> {
+        let json = self
+            .connection
+            .query_row(
+                "SELECT spec_json FROM tasks WHERE task_id = ?1 ORDER BY revision DESC LIMIT 1",
+                [task_id.to_string()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .ok_or(StoreError::TaskNotFound(task_id))?;
+        Ok(serde_json::from_str(&json)?)
+    }
+
+    /// Lists the most recently created task revisions.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when stored data is invalid or storage fails.
+    pub fn tasks(&self, limit: usize) -> Result<Vec<TaskSpec>, StoreError> {
+        let bounded = i64::try_from(limit.min(100)).map_err(|_| StoreError::InvalidTaskLimit)?;
+        let mut statement = self.connection.prepare(
+            "SELECT t.spec_json FROM tasks t
+             JOIN (SELECT task_id, MAX(revision) AS revision FROM tasks GROUP BY task_id) latest
+             ON latest.task_id = t.task_id AND latest.revision = t.revision
+             ORDER BY t.rowid DESC LIMIT ?1",
+        )?;
+        let rows = statement.query_map([bounded], |row| row.get::<_, String>(0))?;
+        rows.map(|row| Ok(serde_json::from_str(&row?)?)).collect()
+    }
+
+    /// Returns the most recent attempt state for a task.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the task has no attempt or stored state is invalid.
+    pub fn attempt_state(&self, task_id: TaskId) -> Result<AttemptState, StoreError> {
+        let state = self
+            .connection
+            .query_row(
+                "SELECT state FROM attempts WHERE task_id = ?1 ORDER BY rowid DESC LIMIT 1",
+                [task_id.to_string()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .ok_or(StoreError::TaskNotFound(task_id))?;
+        parse_state(&state)
+    }
+
+    /// Returns the latest terminal result for a task.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when no terminal result exists or stored data is invalid.
+    pub fn latest_result(&self, task_id: TaskId) -> Result<ResultEnvelope, StoreError> {
+        let json = self
+            .connection
+            .query_row(
+                "SELECT envelope_json FROM results WHERE task_id = ?1 ORDER BY rowid DESC LIMIT 1",
+                [task_id.to_string()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .ok_or(StoreError::TaskNotFound(task_id))?;
+        Ok(serde_json::from_str(&json)?)
+    }
+
+    /// Records a producer event once by both event ID and producer sequence.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for malformed events, missing attempts, or conflicting
+    /// reuse of an event identity or producer sequence.
+    pub fn record_event(&self, event: &Event) -> Result<WriteOutcome, StoreError> {
+        validate_schema(&event.schema)?;
+        if event.producer.trim().is_empty() || event.producer_seq == 0 {
+            return Err(StoreError::InvalidEvent);
+        }
+        let producer_seq =
+            i64::try_from(event.producer_seq).map_err(|_| StoreError::NumericOverflow)?;
+        let json = serde_json::to_string(event)?;
+        if let Some(stored) = self
+            .connection
+            .query_row(
+                "SELECT event_json FROM events WHERE event_id = ?1",
+                [event.event_id.to_string()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+        {
+            return if stored == json {
+                Ok(WriteOutcome::AlreadyApplied)
+            } else {
+                Err(StoreError::EventConflict)
+            };
+        }
+        let inserted = self.connection.execute(
+            "INSERT INTO events (event_id, attempt_id, producer, producer_seq, event_json)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                event.event_id.to_string(),
+                event.attempt_id.to_string(),
+                event.producer,
+                producer_seq,
+                json,
+            ],
+        );
+        match inserted {
+            Ok(_) => Ok(WriteOutcome::Inserted),
+            Err(rusqlite::Error::SqliteFailure(error, _))
+                if error.code == rusqlite::ErrorCode::ConstraintViolation =>
+            {
+                Err(StoreError::EventConflict)
+            }
+            Err(error) => Err(StoreError::Database(error)),
+        }
+    }
+
+    /// Binds an owner to an explicit session epoch without inferring focus.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when an older epoch attempts to replace a newer
+    /// binding or persistence fails.
+    pub fn bind_owner(
+        &self,
+        owner_id: &OwnerId,
+        session_id: &str,
+        binding_epoch: u64,
+    ) -> Result<WriteOutcome, StoreError> {
+        if session_id.trim().is_empty() || binding_epoch == 0 {
+            return Err(StoreError::InvalidOwnerBinding);
+        }
+        let binding_epoch =
+            i64::try_from(binding_epoch).map_err(|_| StoreError::NumericOverflow)?;
+        let existing = self
+            .connection
+            .query_row(
+                "SELECT session_id, binding_epoch FROM owner_bindings WHERE owner_id = ?1",
+                [owner_id.as_str()],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .optional()?;
+        if let Some((stored_session, stored_epoch)) = existing {
+            if stored_session == session_id && stored_epoch == binding_epoch {
+                return Ok(WriteOutcome::AlreadyApplied);
+            }
+            if binding_epoch <= stored_epoch {
+                return Err(StoreError::OwnerBindingConflict);
+            }
+        }
+        self.connection.execute(
+            "INSERT INTO owner_bindings (owner_id, session_id, binding_epoch)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(owner_id) DO UPDATE SET
+               session_id = excluded.session_id,
+               binding_epoch = excluded.binding_epoch",
+            params![owner_id.as_str(), session_id, binding_epoch],
+        )?;
+        Ok(WriteOutcome::Inserted)
+    }
 }
 
 fn record_idempotency(
@@ -497,6 +677,19 @@ fn state_name(state: AttemptState) -> &'static str {
     }
 }
 
+fn parse_state(value: &str) -> Result<AttemptState, StoreError> {
+    match value {
+        "queued" => Ok(AttemptState::Queued),
+        "starting" => Ok(AttemptState::Starting),
+        "running" => Ok(AttemptState::Running),
+        "blocked" => Ok(AttemptState::Blocked),
+        "collecting" => Ok(AttemptState::Collecting),
+        "cancel_requested" => Ok(AttemptState::CancelRequested),
+        "terminal" => Ok(AttemptState::Terminal),
+        other => Err(StoreError::InvalidAttemptState(other.to_owned())),
+    }
+}
+
 fn sha256(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
     format_sha256(digest.as_ref())
@@ -541,6 +734,14 @@ pub enum StoreError {
     InvalidRequestDigest,
     #[error("attempt {0} does not exist")]
     AttemptNotFound(AttemptId),
+    #[error("task {0} does not exist")]
+    TaskNotFound(TaskId),
+    #[error("task list limit is invalid")]
+    InvalidTaskLimit,
+    #[error("numeric value exceeds SQLite integer range")]
+    NumericOverflow,
+    #[error("stored attempt state is invalid: {0}")]
+    InvalidAttemptState(String),
     #[error("terminal result does not belong to its attempt")]
     AttemptResultMismatch,
     #[error("terminal result must be delivered to the task owner")]
@@ -559,6 +760,14 @@ pub enum StoreError {
     DecisionConflict(ResultId),
     #[error("the owner inbox item does not exist")]
     InboxItemNotFound,
+    #[error("event producer and sequence must be non-empty and positive")]
+    InvalidEvent,
+    #[error("event identity or producer sequence conflicts with stored data")]
+    EventConflict,
+    #[error("owner binding session and epoch are invalid")]
+    InvalidOwnerBinding,
+    #[error("owner binding cannot replace the same or a newer epoch")]
+    OwnerBindingConflict,
     #[error("artifact limit must be positive")]
     InvalidArtifactLimit,
     #[error("artifact media type must not be empty")]
@@ -578,8 +787,8 @@ pub enum StoreError {
 #[cfg(test)]
 mod tests {
     use brgr_protocol::{
-        ArtifactContract, AttemptBudget, DecisionId, DecisionVerdict, Route, SCHEMA_V1,
-        TerminalOutcome,
+        ArtifactContract, AttemptBudget, DecisionId, DecisionVerdict, EventId, EventKind, Route,
+        SCHEMA_V1, TerminalOutcome,
     };
     use tempfile::TempDir;
 
@@ -630,6 +839,57 @@ mod tests {
         let reopened = Store::open(root.path()).unwrap();
         assert!(reopened.inbox(&task.owner_id, false).unwrap().is_empty());
         assert_eq!(reopened.inbox(&task.owner_id, true).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn event_sequence_and_owner_binding_are_idempotent() {
+        let root = TempDir::new().unwrap();
+        let mut store = Store::open(root.path()).unwrap();
+        let task = task();
+        let attempt_id = AttemptId::new();
+        store.record_task(&task, "digest-event").unwrap();
+        store
+            .create_attempt(task.task_id, task.revision, attempt_id)
+            .unwrap();
+        let event = Event {
+            schema: SCHEMA_V1.to_owned(),
+            event_id: EventId::new(),
+            attempt_id,
+            producer: "fixture".to_owned(),
+            producer_seq: 1,
+            kind: EventKind::Running,
+            payload: serde_json::json!({}),
+        };
+        assert_eq!(store.record_event(&event).unwrap(), WriteOutcome::Inserted);
+        assert_eq!(
+            store.record_event(&event).unwrap(),
+            WriteOutcome::AlreadyApplied
+        );
+        let conflicting = Event {
+            event_id: EventId::new(),
+            ..event
+        };
+        assert!(matches!(
+            store.record_event(&conflicting),
+            Err(StoreError::EventConflict)
+        ));
+
+        assert_eq!(
+            store.bind_owner(&task.owner_id, "session-a", 1).unwrap(),
+            WriteOutcome::Inserted
+        );
+        assert_eq!(
+            store.bind_owner(&task.owner_id, "session-a", 1).unwrap(),
+            WriteOutcome::AlreadyApplied
+        );
+        assert!(matches!(
+            store.bind_owner(&task.owner_id, "session-b", 1),
+            Err(StoreError::OwnerBindingConflict)
+        ));
+        assert_eq!(
+            store.bind_owner(&task.owner_id, "session-b", 2).unwrap(),
+            WriteOutcome::Inserted
+        );
     }
 
     #[test]

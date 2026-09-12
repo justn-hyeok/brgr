@@ -213,6 +213,28 @@ pub struct InboxItem {
     pub acknowledged: bool,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EventKind {
+    Starting,
+    Running,
+    Blocked,
+    Collecting,
+    CancelRequested,
+    Terminal,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct Event {
+    pub schema: String,
+    pub event_id: EventId,
+    pub attempt_id: AttemptId,
+    pub producer: String,
+    pub producer_seq: u64,
+    pub kind: EventKind,
+    pub payload: serde_json::Value,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum ProtocolError {
     #[error("owner id must contain 1 to 256 bytes")]

@@ -7,8 +7,8 @@
 use std::{fmt::Write as _, io::Cursor, path::Path, time::Duration};
 
 use brgr_protocol::{
-    AttemptId, AttemptState, ProtocolError, ResultEnvelope, ResultId, TaskId, TaskSpec,
-    TerminalOutcome,
+    AttemptId, AttemptState, Event, EventId, EventKind, ProtocolError, ResultEnvelope, ResultId,
+    TaskId, TaskSpec, TerminalOutcome,
 };
 use brgr_runner::{HarnessManifest, ProcessRunner, RunRequest, RunnerError};
 use brgr_store::{Store, StoreError};
@@ -331,16 +331,44 @@ impl Supervisor {
         spec: TaskSpec,
         manifest: &HarnessManifest,
     ) -> Result<ResultEnvelope, SupervisorError> {
+        self.run_fresh_controlled(spec, manifest, None, None).await
+    }
+
+    /// Executes a fresh attempt with optional cancellation and PID receipt
+    /// files used by the detached CLI supervisor.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SupervisorError`] under the same conditions as
+    /// [`Supervisor::run_fresh`].
+    pub async fn run_fresh_controlled(
+        &mut self,
+        spec: TaskSpec,
+        manifest: &HarnessManifest,
+        cancel_path: Option<&Path>,
+        pid_path: Option<&Path>,
+    ) -> Result<ResultEnvelope, SupervisorError> {
         let revision = TaskRevision::new(spec.clone())?;
         let request_bytes = serde_json::to_vec(&spec)?;
         self.store.record_task(&spec, &sha256(&request_bytes))?;
 
         let attempt_id = AttemptId::new();
         let mut attempt = Attempt::new(revision, attempt_id, 1)?;
+        let mut producer_seq = 0_u64;
         self.store
             .create_attempt(spec.task_id, spec.revision, attempt_id)?;
-        transition(&self.store, &mut attempt, AttemptState::Starting)?;
-        transition(&self.store, &mut attempt, AttemptState::Running)?;
+        transition(
+            &self.store,
+            &mut attempt,
+            AttemptState::Starting,
+            &mut producer_seq,
+        )?;
+        transition(
+            &self.store,
+            &mut attempt,
+            AttemptState::Running,
+            &mut producer_seq,
+        )?;
 
         let execution = ProcessRunner::run(
             manifest,
@@ -350,55 +378,33 @@ impl Supervisor {
                 model: spec.route.requested_model.as_deref(),
                 effort: spec.route.requested_effort.as_deref(),
                 deadline: Duration::from_secs(spec.budget.deadline_seconds),
+                cancel_path,
+                pid_path,
             },
         )
         .await;
 
-        let result = match execution {
-            Ok(output) if output.succeeded(manifest) && !output.result.is_empty() => {
-                transition(&self.store, &mut attempt, AttemptState::Collecting)?;
-                let artifact = self.store.seal_artifact_reader(
-                    Cursor::new(output.result),
-                    &spec.artifact_contract.media_type,
-                    spec.artifact_contract.max_bytes,
-                )?;
-                result_for(
-                    &spec,
-                    attempt_id,
-                    TerminalOutcome::Candidate,
-                    vec![artifact],
-                    None,
-                )
-            }
-            Ok(output) => {
-                let reason = if output.timed_out {
-                    "attempt deadline elapsed".to_owned()
-                } else if output.output_truncated {
-                    "process output exceeded the configured limit".to_owned()
-                } else if output.result.is_empty() {
-                    "process produced no result artifact".to_owned()
-                } else {
-                    format!("process exited with status {:?}", output.exit_code)
-                };
-                result_for(
-                    &spec,
-                    attempt_id,
-                    TerminalOutcome::Failed,
-                    vec![],
-                    Some(reason),
-                )
-            }
-            Err(error) => result_for(
-                &spec,
-                attempt_id,
-                TerminalOutcome::Failed,
-                vec![],
-                Some(error.to_string()),
-            ),
-        };
+        let result = finish_execution(
+            &self.store,
+            &spec,
+            manifest,
+            &mut attempt,
+            &mut producer_seq,
+            execution,
+        )?;
 
         attempt.record_terminal(result.clone())?;
         self.store.commit_terminal_result(&spec.owner_id, &result)?;
+        producer_seq = producer_seq.saturating_add(1);
+        self.store.record_event(&Event {
+            schema: brgr_protocol::SCHEMA_V1.to_owned(),
+            event_id: EventId::new(),
+            attempt_id,
+            producer: "brgr.supervisor".to_owned(),
+            producer_seq,
+            kind: EventKind::Terminal,
+            payload: serde_json::json!({"result_id": result.result_id}),
+        })?;
         Ok(result)
     }
 
@@ -413,13 +419,101 @@ impl Supervisor {
     }
 }
 
+fn finish_execution(
+    store: &Store,
+    spec: &TaskSpec,
+    manifest: &HarnessManifest,
+    attempt: &mut Attempt,
+    producer_seq: &mut u64,
+    execution: Result<brgr_runner::ExecutionOutput, RunnerError>,
+) -> Result<ResultEnvelope, SupervisorError> {
+    let attempt_id = attempt.id();
+    match execution {
+        Ok(output) if output.cancelled => {
+            transition(store, attempt, AttemptState::CancelRequested, producer_seq)?;
+            Ok(result_for(
+                spec,
+                attempt_id,
+                TerminalOutcome::Cancelled,
+                vec![],
+                Some("cancellation requested by owner".to_owned()),
+            ))
+        }
+        Ok(output) if output.succeeded(manifest) && !output.result.is_empty() => {
+            transition(store, attempt, AttemptState::Collecting, producer_seq)?;
+            let artifact = store.seal_artifact_reader(
+                Cursor::new(output.result),
+                &spec.artifact_contract.media_type,
+                spec.artifact_contract.max_bytes,
+            )?;
+            Ok(result_for(
+                spec,
+                attempt_id,
+                TerminalOutcome::Candidate,
+                vec![artifact],
+                None,
+            ))
+        }
+        Ok(output) => {
+            let reason = if output.timed_out {
+                "attempt deadline elapsed".to_owned()
+            } else if output.output_truncated {
+                "process output exceeded the configured limit".to_owned()
+            } else if output.result.is_empty() {
+                "process produced no result artifact".to_owned()
+            } else {
+                format!("process exited with status {:?}", output.exit_code)
+            };
+            Ok(result_for(
+                spec,
+                attempt_id,
+                TerminalOutcome::Failed,
+                vec![],
+                Some(reason),
+            ))
+        }
+        Err(error) => Ok(result_for(
+            spec,
+            attempt_id,
+            TerminalOutcome::Failed,
+            vec![],
+            Some(error.to_string()),
+        )),
+    }
+}
+
 fn transition(
     store: &Store,
     attempt: &mut Attempt,
     next: AttemptState,
+    producer_seq: &mut u64,
 ) -> Result<(), SupervisorError> {
     attempt.transition(next)?;
     store.set_attempt_state(attempt.id(), next)?;
+    *producer_seq = producer_seq.saturating_add(1);
+    let kind = match next {
+        AttemptState::Starting => EventKind::Starting,
+        AttemptState::Running => EventKind::Running,
+        AttemptState::Blocked => EventKind::Blocked,
+        AttemptState::Collecting => EventKind::Collecting,
+        AttemptState::CancelRequested => EventKind::CancelRequested,
+        AttemptState::Queued | AttemptState::Terminal => {
+            return Err(CoreError::InvalidTransition {
+                from: attempt.state(),
+                to: next,
+            }
+            .into());
+        }
+    };
+    store.record_event(&Event {
+        schema: brgr_protocol::SCHEMA_V1.to_owned(),
+        event_id: EventId::new(),
+        attempt_id: attempt.id(),
+        producer: "brgr.supervisor".to_owned(),
+        producer_seq: *producer_seq,
+        kind,
+        payload: serde_json::json!({}),
+    })?;
     Ok(())
 }
 
