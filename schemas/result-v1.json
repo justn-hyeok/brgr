@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://brgr.dev/schemas/result-v1.json",
+  "title": "brgr ResultEnvelope v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "task_id", "revision", "attempt_id", "result_id", "outcome", "artifacts", "error", "unresolved_effects"],
+  "properties": {
+    "schema": { "const": "brgr/v1" },
+    "task_id": { "type": "string", "format": "uuid" },
+    "revision": { "type": "integer", "minimum": 1 },
+    "attempt_id": { "type": "string", "format": "uuid" },
+    "result_id": { "type": "string", "format": "uuid" },
+    "outcome": { "enum": ["candidate", "failed", "cancelled", "lost"] },
+    "artifacts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["digest", "bytes", "media_type", "store_relative_path"],
+        "properties": {
+          "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+          "bytes": { "type": "integer", "minimum": 0 },
+          "media_type": { "type": "string" },
+          "store_relative_path": { "type": "string" }
+        }
+      }
+    },
+    "error": { "type": ["string", "null"] },
+    "unresolved_effects": { "type": "array", "items": { "type": "string" } }
+  }
+}
+
