@@ -116,6 +116,7 @@ dependencies = [
  "brgr-store",
  "clap",
  "predicates",
+ "serde",
  "serde_json",
  "tempfile",
  "tokio",
