@@ -27,3 +27,13 @@ permissions, digest locks, size limits, typed events, and environment allowlists
 prevent accidents and stale identity reuse; they do not isolate a hostile
 same-user process.
 
+Each attempt records a launch intent and supervisor incarnation before the
+harness starts. A restarted observer compares the recorded identity with the
+live process. An uncertain run becomes `lost` with unresolved effects and is
+never retried automatically. Only a transient failure before process spawn may
+use the one remaining attempt in the two-attempt budget.
+
+Brgr records owned OMP pane identity and queues cleanup after owner decision
+and inbox acknowledgment. Herdr 0.9.0 exposes only `pane.close(pane_id)`, so
+the queue reports eligibility but does not close panes automatically. This
+avoids claiming an atomic identity check that Herdr cannot currently perform.
