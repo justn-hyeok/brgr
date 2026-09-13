@@ -14,8 +14,8 @@ use std::os::unix::fs::PermissionsExt;
 
 use artifact::ArtifactStore;
 use brgr_protocol::{
-    ArtifactRef, AttemptId, AttemptState, Decision, Event, InboxItem, OwnerId, ResultEnvelope,
-    ResultId, SCHEMA_V1, TaskId, TaskSpec,
+    ArtifactRef, AttemptId, AttemptState, Decision, Event, EventId, EventKind, InboxItem, OwnerId,
+    ResultEnvelope, ResultId, SCHEMA_V1, TaskId, TaskSpec,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use sha2::{Digest, Sha256};
@@ -390,6 +390,26 @@ impl Store {
                 state_name(AttemptState::Terminal),
                 result.attempt_id.to_string(),
                 state_name(current),
+            ],
+        )?;
+        let terminal_event = Event {
+            schema: SCHEMA_V1.to_owned(),
+            event_id: EventId::new(),
+            attempt_id: result.attempt_id,
+            producer: "brgr.terminal".to_owned(),
+            producer_seq: 1,
+            kind: EventKind::Terminal,
+            payload: serde_json::json!({"result_id": result.result_id}),
+        };
+        transaction.execute(
+            "INSERT INTO events (event_id, attempt_id, producer, producer_seq, event_json)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                terminal_event.event_id.to_string(),
+                terminal_event.attempt_id.to_string(),
+                terminal_event.producer,
+                1_i64,
+                serde_json::to_string(&terminal_event)?,
             ],
         )?;
         transaction.commit()?;

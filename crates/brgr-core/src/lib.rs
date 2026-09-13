@@ -356,7 +356,7 @@ impl Supervisor {
         let mut attempt = Attempt::new(revision, attempt_id, 1)?;
         let mut producer_seq = 0_u64;
         self.store
-            .create_attempt(spec.task_id, spec.revision, attempt_id)?;
+            .claim_attempt(spec.task_id, spec.revision, attempt_id)?;
         transition(
             &self.store,
             &mut attempt,
@@ -395,16 +395,6 @@ impl Supervisor {
 
         attempt.record_terminal(result.clone())?;
         self.store.commit_terminal_result(&spec.owner_id, &result)?;
-        producer_seq = producer_seq.saturating_add(1);
-        self.store.record_event(&Event {
-            schema: brgr_protocol::SCHEMA_V1.to_owned(),
-            event_id: EventId::new(),
-            attempt_id,
-            producer: "brgr.supervisor".to_owned(),
-            producer_seq,
-            kind: EventKind::Terminal,
-            payload: serde_json::json!({"result_id": result.result_id}),
-        })?;
         Ok(result)
     }
 
@@ -488,8 +478,9 @@ fn transition(
     next: AttemptState,
     producer_seq: &mut u64,
 ) -> Result<(), SupervisorError> {
+    let previous = attempt.state();
     attempt.transition(next)?;
-    store.set_attempt_state(attempt.id(), next)?;
+    store.compare_and_set_attempt_state(attempt.id(), previous, next)?;
     *producer_seq = producer_seq.saturating_add(1);
     let kind = match next {
         AttemptState::Starting => EventKind::Starting,

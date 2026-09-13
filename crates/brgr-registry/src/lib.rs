@@ -438,8 +438,8 @@ fn generate_gjc_manifest(
             mode: ExecutionMode::OneShot,
         },
         result: ResultSpec {
-            source: ResultSource::Stdout,
-            media_type: "application/x-ndjson".to_owned(),
+            source: ResultSource::JsonlAssistantFinal,
+            media_type: "text/plain".to_owned(),
             max_bytes: 1_048_576,
             success_exit_codes: vec![0],
         },

@@ -122,6 +122,19 @@ enum HarnessCommand {
     Add {
         executable: PathBuf,
     },
+    Draft {
+        executable: PathBuf,
+    },
+    Test {
+        executable: PathBuf,
+    },
+    Activate {
+        executable: PathBuf,
+        #[arg(long)]
+        workspace: PathBuf,
+        #[arg(long)]
+        prompt: String,
+    },
     Status {
         #[arg(default_value = "local.gjc")]
         harness: String,
@@ -253,6 +266,10 @@ async fn main() -> Result<()> {
 
 async fn run_task(paths: &Paths, args: RunArgs, json_output: bool) -> Result<()> {
     let registry = Registry::open(&paths.registry)?;
+    match registry.health_probed(&args.harness).await? {
+        Health::Healthy => {}
+        Health::Drifted { .. } => bail!("harness {} probe identity changed", args.harness),
+    }
     let activated = registry
         .load_healthy(&args.harness)
         .with_context(|| format!("harness {} is not active and healthy", args.harness))?;
@@ -384,12 +401,26 @@ fn status(paths: &Paths, task: Option<TaskId>, json_output: bool) -> Result<()> 
 fn result(paths: &Paths, task: TaskId, ack: bool, json_output: bool) -> Result<()> {
     let store = Store::open(&paths.store)?;
     let spec = store.task(task)?;
+    require_owner(&spec.owner_id)?;
     let result = store.latest_result(task)?;
+    let artifacts = result
+        .artifacts
+        .iter()
+        .map(|reference| {
+            let bytes = store.read_artifact(reference, spec.artifact_contract.max_bytes)?;
+            Ok::<_, anyhow::Error>(json!({
+                "reference": reference,
+                "text": String::from_utf8_lossy(&bytes),
+            }))
+        })
+        .collect::<Result<Vec<_>>>()?;
     if ack {
-        require_owner(&spec.owner_id)?;
         store.acknowledge(&spec.owner_id, result.result_id)?;
     }
-    print_value(&serde_json::to_value(result)?, json_output);
+    print_value(
+        &json!({"result": result, "artifacts": artifacts}),
+        json_output,
+    );
     Ok(())
 }
 
@@ -428,6 +459,12 @@ fn decide(
     if result.outcome != TerminalOutcome::Candidate {
         bail!("only candidate results can be accepted or rejected");
     }
+    if result.artifacts.is_empty() {
+        bail!("candidate result has no sealed artifact");
+    }
+    for reference in &result.artifacts {
+        store.read_artifact(reference, spec.artifact_contract.max_bytes)?;
+    }
     let decision = Decision {
         schema: SCHEMA_V1.to_owned(),
         decision_id: DecisionId::new(),
@@ -439,8 +476,7 @@ fn decide(
         verdict,
         reason,
     };
-    store.record_decision(&decision)?;
-    store.acknowledge(&spec.owner_id, result.result_id)?;
+    store.record_decision_and_ack(&decision)?;
     print_value(&serde_json::to_value(decision)?, json_output);
     Ok(())
 }
@@ -452,8 +488,31 @@ async fn harness(paths: &Paths, command: HarnessCommand, json_output: bool) -> R
             let receipt = registry.add(&executable).await?;
             print_value(&serde_json::to_value(receipt)?, json_output);
         }
+        HarnessCommand::Draft { executable } => {
+            let manifest = registry.draft(&executable).await?;
+            print_value(&serde_json::to_value(manifest)?, json_output);
+        }
+        HarnessCommand::Test { executable } => {
+            let manifest = registry.draft(&executable).await?;
+            registry.contract_test(&manifest).await?;
+            print_value(
+                &json!({"harness": manifest.id, "contract": "passed", "activation": "requires_scratch_run"}),
+                json_output,
+            );
+        }
+        HarnessCommand::Activate {
+            executable,
+            workspace,
+            prompt,
+        } => {
+            let manifest = registry.draft(&executable).await?;
+            let receipt = registry
+                .activate_with_scratch(&manifest, &workspace, &prompt)
+                .await?;
+            print_value(&serde_json::to_value(receipt)?, json_output);
+        }
         HarnessCommand::Status { harness } => {
-            let health = registry.health(&harness)?;
+            let health = registry.health_probed(&harness).await?;
             let value = match health {
                 Health::Healthy => json!({"harness": harness, "health": "healthy"}),
                 Health::Drifted { expected, observed } => json!({
