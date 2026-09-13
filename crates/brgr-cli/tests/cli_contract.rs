@@ -107,6 +107,18 @@ fn real_cli_run_binds_candidate_to_its_owner() {
     ));
     assert_eq!(result["outcome"], "candidate");
     let task = result["task_id"].as_str().unwrap();
+    let readable = json_output(&run(
+        &home,
+        &["result", task],
+        &[("BRGR_OWNER_ID", "codex:owner-a")],
+    ));
+    assert_eq!(readable["artifacts"][0]["text"], "BRGR_FIXTURE_OK");
+    let unreadable = run(
+        &home,
+        &["result", task],
+        &[("BRGR_OWNER_ID", "codex:owner-b")],
+    );
+    assert!(!unreadable.status.success());
     let denied = run(
         &home,
         &["accept", task],

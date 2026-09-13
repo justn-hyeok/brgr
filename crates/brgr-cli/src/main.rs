@@ -212,6 +212,7 @@ impl Paths {
 struct LaunchEnvelope {
     spec: TaskSpec,
     harness_id: String,
+    protocol_generation: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -312,6 +313,7 @@ async fn run_task(paths: &Paths, args: RunArgs, json_output: bool) -> Result<()>
     let launch = LaunchEnvelope {
         spec,
         harness_id: args.harness,
+        protocol_generation: "brgr-v1".to_owned(),
     };
     let launch_path = paths.launches.join(format!("{task_id}.json"));
     write_json_atomic(&launch_path, &launch)?;
@@ -332,6 +334,9 @@ async fn run_task(paths: &Paths, args: RunArgs, json_output: bool) -> Result<()>
 
 async fn supervise(paths: &Paths, launch_path: &Path, json_output: bool) -> Result<()> {
     let launch: LaunchEnvelope = serde_json::from_slice(&fs::read(launch_path)?)?;
+    if launch.protocol_generation != "brgr-v1" {
+        bail!("unsupported task protocol generation");
+    }
     let manifest = Registry::open(&paths.registry)?.load_healthy(&launch.harness_id)?;
     let manifest = if manifest.adapter == brgr_runner::OMP_ROLE_ADAPTER_V1 {
         omp_process_manifest(paths, &launch, &manifest)?
@@ -683,38 +688,9 @@ fn run_omp_adapter(
     let report = paths.runs.join(format!("{task}.omp-report.md"));
     let prompt = fs::read_to_string(prompt_file)?;
 
-    let mut launch = ProcessCommand::new("python");
-    launch
-        .arg(launcher)
-        .args(["default", &agent, "--cwd"])
-        .arg(workspace)
-        .args(["--task", &task_slug])
-        .args(["--reuse-worktree-objective", &task_slug])
-        .args(["--reuse-worktree-owner", &agent])
-        .arg("--expected-report")
-        .arg(&report);
-    if let Some(value) = model {
-        launch.args(["--model", value]);
-    }
-    if let Some(value) = effort {
-        launch.args(["--effort", value]);
-    }
-    let launch_output = launch.output()?;
-    if !launch_output.status.success() {
-        let failure: serde_json::Value =
-            serde_json::from_slice(&launch_output.stdout).unwrap_or_else(|_| json!({}));
-        if failure.get("detail").and_then(serde_json::Value::as_str)
-            == Some("immutable agent session identity is missing")
-        {
-            recover_omp_contract(&agent, &task_slug, &report, &failure)?;
-        } else {
-            bail!(
-                "OMP launcher preflight failed: {}{}",
-                String::from_utf8_lossy(&launch_output.stdout),
-                String::from_utf8_lossy(&launch_output.stderr)
-            );
-        }
-    }
+    launch_omp(
+        launcher, workspace, &agent, &task_slug, &report, model, effort,
+    )?;
 
     let instruction = format!(
         "{prompt}\n\nWrite the final result as Markdown to {} before finishing.",
@@ -759,6 +735,70 @@ fn run_omp_adapter(
         }
         thread::sleep(Duration::from_millis(200));
     }
+}
+
+fn launch_omp(
+    launcher: &Path,
+    workspace: &Path,
+    agent: &str,
+    task_slug: &str,
+    report: &Path,
+    model: Option<&str>,
+    effort: Option<&str>,
+) -> Result<()> {
+    let mut launch = ProcessCommand::new("python");
+    launch
+        .arg(launcher)
+        .args(["default", agent, "--cwd"])
+        .arg(workspace)
+        .args(["--task", task_slug])
+        .args(["--reuse-worktree-objective", task_slug])
+        .args(["--reuse-worktree-owner", agent])
+        .arg("--expected-report")
+        .arg(report);
+    if let Some(value) = model {
+        launch.args(["--model", value]);
+    }
+    if let Some(value) = effort {
+        launch.args(["--effort", value]);
+    }
+    let launch_output = launch.output()?;
+    let receipt_path = if launch_output.status.success() {
+        let response: serde_json::Value = serde_json::from_slice(&launch_output.stdout)?;
+        response
+            .get("launcher_receipt")
+            .and_then(serde_json::Value::as_str)
+            .context("OMP launch is missing a launcher receipt")?
+            .to_owned()
+    } else {
+        let failure: serde_json::Value =
+            serde_json::from_slice(&launch_output.stdout).unwrap_or_else(|_| json!({}));
+        if failure.get("detail").and_then(serde_json::Value::as_str)
+            == Some("immutable agent session identity is missing")
+        {
+            recover_omp_contract(agent, task_slug, report, &failure)?;
+            failure
+                .get("receipt")
+                .and_then(serde_json::Value::as_str)
+                .context("OMP recovery is missing its launcher receipt")?
+                .to_owned()
+        } else {
+            bail!(
+                "OMP launcher preflight failed: {}{}",
+                String::from_utf8_lossy(&launch_output.stdout),
+                String::from_utf8_lossy(&launch_output.stderr)
+            );
+        }
+    };
+    let launcher_receipt: serde_json::Value = serde_json::from_slice(&fs::read(receipt_path)?)?;
+    if launcher_receipt
+        .get("codex_prompt_marked")
+        .and_then(serde_json::Value::as_bool)
+        != Some(false)
+    {
+        bail!("new OMP run could also activate the legacy parent callback");
+    }
+    Ok(())
 }
 
 fn recover_omp_contract(
