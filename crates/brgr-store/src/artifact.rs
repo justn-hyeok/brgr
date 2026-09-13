@@ -101,10 +101,18 @@ impl ArtifactStore {
                 sync_directory(&digest_directory)?;
             }
             Err(error) if error.error.kind() == io::ErrorKind::AlreadyExists => {
-                let existing = fs::metadata(&destination)?;
-                if !existing.is_file() || existing.len() != bytes {
-                    return Err(StoreError::ArtifactDigestCollision(digest));
-                }
+                let reference = ArtifactRef {
+                    digest: digest.clone(),
+                    bytes,
+                    media_type: media_type.to_owned(),
+                    store_relative_path: format!(
+                        "artifacts/sha256/{}/{}",
+                        &hex_digest[..2],
+                        &hex_digest[2..]
+                    ),
+                };
+                self.read_verified(&reference, max_bytes)
+                    .map_err(|_| StoreError::ArtifactDigestCollision(digest.clone()))?;
                 private_file(&destination)?;
             }
             Err(error) => return Err(StoreError::Io(error.error)),
@@ -126,6 +134,67 @@ impl ArtifactStore {
             .parent()
             .and_then(Path::parent)
             .expect("artifact root always has a store parent")
+    }
+
+    pub(crate) fn read_verified(
+        &self,
+        reference: &ArtifactRef,
+        max_bytes: u64,
+    ) -> Result<Vec<u8>, StoreError> {
+        let hex = reference
+            .digest
+            .strip_prefix("sha256:")
+            .filter(|value| {
+                value.len() == 64
+                    && value
+                        .bytes()
+                        .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+            })
+            .ok_or(StoreError::InvalidArtifactReference)?;
+        let expected = format!("artifacts/sha256/{}/{}", &hex[..2], &hex[2..]);
+        if reference.store_relative_path != expected || reference.media_type.trim().is_empty() {
+            return Err(StoreError::InvalidArtifactReference);
+        }
+        if reference.bytes > max_bytes {
+            return Err(StoreError::ArtifactTooLarge {
+                max_bytes,
+                observed_bytes: reference.bytes,
+            });
+        }
+        let directory = self.root.join(&hex[..2]);
+        for path in [
+            self.store_parent(),
+            self.root.parent().expect("sha256 root has parent"),
+            self.root.as_path(),
+            directory.as_path(),
+        ] {
+            if !fs::symlink_metadata(path)?.file_type().is_dir() {
+                return Err(StoreError::InvalidArtifactReference);
+            }
+        }
+        let path = directory.join(&hex[2..]);
+        let metadata = fs::symlink_metadata(&path)?;
+        if !metadata.file_type().is_file() {
+            return Err(StoreError::ArtifactNotRegularFile { path });
+        }
+        if metadata.len() != reference.bytes {
+            return Err(StoreError::ArtifactIntegrityMismatch);
+        }
+        let mut file = File::open(&path)?;
+        if !file.metadata()?.is_file() {
+            return Err(StoreError::ArtifactNotRegularFile { path });
+        }
+        let mut bytes = Vec::new();
+        Read::by_ref(&mut file)
+            .take(max_bytes.saturating_add(1))
+            .read_to_end(&mut bytes)?;
+        if u64::try_from(bytes.len()).map_err(|_| StoreError::ArtifactSizeOverflow)?
+            != reference.bytes
+            || format_sha256(Sha256::digest(&bytes).as_ref()) != reference.digest
+        {
+            return Err(StoreError::ArtifactIntegrityMismatch);
+        }
+        Ok(bytes)
     }
 }
 
@@ -182,6 +251,43 @@ mod tests {
             fs::metadata(artifact_path).unwrap().permissions().mode() & 0o777,
             0o600
         );
+        assert_eq!(store.read_verified(&first, 100).unwrap(), b"report");
+    }
+
+    #[test]
+    fn read_rejects_forged_path_modified_bytes_and_symlink() {
+        let root = TempDir::new().unwrap();
+        let store = ArtifactStore::open(root.path()).unwrap();
+        let reference = store
+            .seal_reader(Cursor::new(b"report"), "text/plain", 100)
+            .unwrap();
+        let path = root.path().join(&reference.store_relative_path);
+
+        let mut forged = reference.clone();
+        forged.store_relative_path = "../outside".to_owned();
+        assert!(matches!(
+            store.read_verified(&forged, 100),
+            Err(StoreError::InvalidArtifactReference)
+        ));
+        assert!(matches!(
+            store.read_verified(&reference, 3),
+            Err(StoreError::ArtifactTooLarge { .. })
+        ));
+
+        fs::write(&path, b"change").unwrap();
+        assert!(matches!(
+            store.read_verified(&reference, 100),
+            Err(StoreError::ArtifactIntegrityMismatch)
+        ));
+        fs::remove_file(&path).unwrap();
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(root.path().join("outside"), &path).unwrap();
+            assert!(matches!(
+                store.read_verified(&reference, 100),
+                Err(StoreError::ArtifactNotRegularFile { .. })
+            ));
+        }
     }
 
     fn walk_files(root: &Path) -> Vec<PathBuf> {

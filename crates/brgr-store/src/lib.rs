@@ -38,6 +38,8 @@ CREATE TABLE IF NOT EXISTS attempts (
     state TEXT NOT NULL,
     FOREIGN KEY (task_id, revision) REFERENCES tasks(task_id, revision)
 );
+CREATE UNIQUE INDEX IF NOT EXISTS one_active_attempt_per_revision
+ON attempts (task_id, revision) WHERE state <> 'terminal';
 CREATE TABLE IF NOT EXISTS results (
     result_id TEXT PRIMARY KEY,
     attempt_id TEXT NOT NULL UNIQUE,
@@ -171,7 +173,53 @@ impl Store {
         Ok(WriteOutcome::Inserted)
     }
 
-    /// Records a new attempt for an existing task revision.
+    /// Claims the sole active attempt slot for a task revision.
+    ///
+    /// A terminal attempt releases the slot for an explicit retry. A second
+    /// concurrent supervisor cannot create an overlapping live attempt.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the task is missing or an active attempt exists.
+    pub fn claim_attempt(
+        &self,
+        task_id: TaskId,
+        revision: u32,
+        attempt_id: AttemptId,
+    ) -> Result<(), StoreError> {
+        let inserted = self.connection.execute(
+            "INSERT INTO attempts (attempt_id, task_id, revision, state)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![
+                attempt_id.to_string(),
+                task_id.to_string(),
+                revision,
+                state_name(AttemptState::Queued),
+            ],
+        );
+        match inserted {
+            Ok(_) => Ok(()),
+            Err(rusqlite::Error::SqliteFailure(error, _))
+                if error.code == rusqlite::ErrorCode::ConstraintViolation =>
+            {
+                let active = self.connection.query_row(
+                    "SELECT 1 FROM attempts WHERE task_id = ?1 AND revision = ?2 AND state <> 'terminal' LIMIT 1",
+                    params![task_id.to_string(), revision],
+                    |_| Ok(()),
+                ).optional()?.is_some();
+                if active {
+                    Err(StoreError::ActiveAttemptExists { task_id, revision })
+                } else {
+                    Err(StoreError::Database(rusqlite::Error::SqliteFailure(
+                        error, None,
+                    )))
+                }
+            }
+            Err(error) => Err(StoreError::Database(error)),
+        }
+    }
+
+    /// Compatibility alias for `claim_attempt`.
     ///
     /// # Errors
     ///
@@ -182,20 +230,13 @@ impl Store {
         revision: u32,
         attempt_id: AttemptId,
     ) -> Result<(), StoreError> {
-        self.connection.execute(
-            "INSERT INTO attempts (attempt_id, task_id, revision, state)
-             VALUES (?1, ?2, ?3, ?4)",
-            params![
-                attempt_id.to_string(),
-                task_id.to_string(),
-                revision,
-                state_name(AttemptState::Queued),
-            ],
-        )?;
-        Ok(())
+        self.claim_attempt(task_id, revision, attempt_id)
     }
 
-    /// Updates the durable state for an attempt.
+    /// Updates the durable state for an attempt using the current state.
+    ///
+    /// Prefer `compare_and_set_attempt_state` when the caller has an observed
+    /// state: only that method rejects a competing writer's intervening update.
     ///
     /// # Errors
     ///
@@ -205,14 +246,59 @@ impl Store {
         attempt_id: AttemptId,
         state: AttemptState,
     ) -> Result<(), StoreError> {
-        let changed = self.connection.execute(
-            "UPDATE attempts SET state = ?1 WHERE attempt_id = ?2",
-            params![state_name(state), attempt_id.to_string()],
-        )?;
-        if changed == 0 {
-            return Err(StoreError::AttemptNotFound(attempt_id));
+        let current = self.attempt_state_by_id(attempt_id)?;
+        self.compare_and_set_attempt_state(attempt_id, current, state)
+    }
+
+    /// Applies a legal attempt transition only if the observed state is current.
+    ///
+    /// # Errors
+    ///
+    /// Returns a conflict for a stale writer or an invalid transition. Terminal
+    /// state is reserved for `commit_terminal_result`.
+    pub fn compare_and_set_attempt_state(
+        &self,
+        attempt_id: AttemptId,
+        expected: AttemptState,
+        next: AttemptState,
+    ) -> Result<(), StoreError> {
+        if !allowed_attempt_transition(expected, next) {
+            return Err(StoreError::AttemptTransitionInvalid {
+                from: expected,
+                to: next,
+            });
         }
-        Ok(())
+        let changed = self.connection.execute(
+            "UPDATE attempts SET state = ?1 WHERE attempt_id = ?2 AND state = ?3",
+            params![
+                state_name(next),
+                attempt_id.to_string(),
+                state_name(expected)
+            ],
+        )?;
+        if changed == 1 {
+            return Ok(());
+        }
+        let actual = self.attempt_state_by_id(attempt_id)?;
+        Err(StoreError::AttemptStateConflict { expected, actual })
+    }
+
+    /// Returns an attempt's durable state by its immutable ID.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a missing attempt or invalid stored state.
+    pub fn attempt_state_by_id(&self, attempt_id: AttemptId) -> Result<AttemptState, StoreError> {
+        let state = self
+            .connection
+            .query_row(
+                "SELECT state FROM attempts WHERE attempt_id = ?1",
+                [attempt_id.to_string()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .ok_or(StoreError::AttemptNotFound(attempt_id))?;
+        parse_state(&state)
     }
 
     /// Atomically stores one terminal result and its owner inbox item.
@@ -251,7 +337,7 @@ impl Store {
 
         let expected = transaction
             .query_row(
-                "SELECT a.task_id, a.revision, t.owner_id
+                "SELECT a.task_id, a.revision, t.owner_id, a.state
                  FROM attempts a
                  JOIN tasks t ON t.task_id = a.task_id AND t.revision = a.revision
                  WHERE a.attempt_id = ?1",
@@ -261,6 +347,7 @@ impl Store {
                         row.get::<_, String>(0)?,
                         row.get::<_, u32>(1)?,
                         row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
                     ))
                 },
             )
@@ -271,6 +358,13 @@ impl Store {
         }
         if expected.2 != owner_id.as_str() {
             return Err(StoreError::ResultOwnerMismatch);
+        }
+        let current = parse_state(&expected.3)?;
+        if current == AttemptState::Terminal {
+            return Err(StoreError::AttemptTransitionInvalid {
+                from: current,
+                to: AttemptState::Terminal,
+            });
         }
 
         transaction.execute(
@@ -291,10 +385,11 @@ impl Store {
             params![owner_id.as_str(), result.result_id.to_string()],
         )?;
         transaction.execute(
-            "UPDATE attempts SET state = ?1 WHERE attempt_id = ?2",
+            "UPDATE attempts SET state = ?1 WHERE attempt_id = ?2 AND state = ?3",
             params![
                 state_name(AttemptState::Terminal),
-                result.attempt_id.to_string()
+                result.attempt_id.to_string(),
+                state_name(current),
             ],
         )?;
         transaction.commit()?;
@@ -352,69 +447,54 @@ impl Store {
 
     /// Records the sole accept/reject decision for a result.
     ///
-    /// Exact replay is idempotent. A different decision is rejected.
+    /// Semantic replay is idempotent even when a caller generated a new
+    /// `DecisionId` after a lost response. A different verdict or reason is
+    /// rejected.
     ///
     /// # Errors
     ///
     /// Returns an error for missing results, digest/owner mismatches,
     /// conflicting decisions, invalid serialization, or database failure.
     pub fn record_decision(&self, decision: &Decision) -> Result<WriteOutcome, StoreError> {
-        validate_schema(&decision.schema)?;
-        let decision_json = serde_json::to_string(decision)?;
-        if let Some(stored_json) = self
-            .connection
-            .query_row(
-                "SELECT decision_json FROM decisions WHERE result_id = ?1",
-                [decision.result_id.to_string()],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()?
-        {
-            return if stored_json == decision_json {
-                Ok(WriteOutcome::AlreadyApplied)
-            } else {
-                Err(StoreError::DecisionConflict(decision.result_id))
-            };
-        }
+        let transaction = self.connection.unchecked_transaction()?;
+        let outcome = record_decision_in_transaction(&transaction, decision)?;
+        transaction.commit()?;
+        Ok(outcome)
+    }
 
-        let (stored_digest, owner_id, task_id, revision) = self
-            .connection
-            .query_row(
-                "SELECT r.result_digest, i.owner_id, r.task_id, r.revision
-                 FROM results r JOIN inbox_items i ON i.result_id = r.result_id
-                 WHERE r.result_id = ?1",
-                [decision.result_id.to_string()],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                        row.get::<_, u32>(3)?,
-                    ))
-                },
-            )
-            .optional()?
-            .ok_or(StoreError::ResultNotFound(decision.result_id))?;
-        if stored_digest != decision.result_digest {
-            return Err(StoreError::ResultDigestMismatch);
-        }
-        if owner_id != decision.owner_id.as_str() {
-            return Err(StoreError::DecisionOwnerMismatch);
-        }
-        if task_id != decision.task_id.to_string() || revision != decision.revision {
-            return Err(StoreError::DecisionResultMismatch);
-        }
-
-        self.connection.execute(
-            "INSERT INTO decisions (decision_id, result_id, decision_json)
-             VALUES (?1, ?2, ?3)",
-            params![
-                decision.decision_id.to_string(),
-                decision.result_id.to_string(),
-                decision_json,
-            ],
+    /// Records an accept/reject decision and acknowledges its owner's inbox
+    /// item in one transaction. A semantic retry remains idempotent.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a missing inbox item, mismatched owner or digest,
+    /// conflicting decision, or failed transaction.
+    pub fn record_decision_and_ack(&self, decision: &Decision) -> Result<WriteOutcome, StoreError> {
+        let transaction = self.connection.unchecked_transaction()?;
+        let outcome = record_decision_in_transaction(&transaction, decision)?;
+        let changed = transaction.execute(
+            "UPDATE inbox_items SET acknowledged = 1 WHERE owner_id = ?1 AND result_id = ?2",
+            params![decision.owner_id.as_str(), decision.result_id.to_string()],
         )?;
-        Ok(WriteOutcome::Inserted)
+        if changed != 1 {
+            return Err(StoreError::InboxItemNotFound);
+        }
+        transaction.commit()?;
+        Ok(outcome)
+    }
+
+    /// Reads a sealed artifact and verifies its reference, size, and digest.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a forged path, symlink, non-file, missing or
+    /// modified artifact, or data larger than `max_bytes`.
+    pub fn read_artifact(
+        &self,
+        reference: &ArtifactRef,
+        max_bytes: u64,
+    ) -> Result<Vec<u8>, StoreError> {
+        self.artifacts.read_verified(reference, max_bytes)
     }
 
     /// Returns the canonical SHA-256 digest used to bind a decision to a result.
@@ -623,6 +703,78 @@ impl Store {
     }
 }
 
+fn record_decision_in_transaction(
+    transaction: &Transaction<'_>,
+    decision: &Decision,
+) -> Result<WriteOutcome, StoreError> {
+    validate_schema(&decision.schema)?;
+    let decision_json = serde_json::to_string(decision)?;
+    if let Some(stored_json) = transaction
+        .query_row(
+            "SELECT decision_json FROM decisions WHERE result_id = ?1",
+            [decision.result_id.to_string()],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+    {
+        let stored: Decision = serde_json::from_str(&stored_json)?;
+        return if decisions_equal_except_id(&stored, decision) {
+            Ok(WriteOutcome::AlreadyApplied)
+        } else {
+            Err(StoreError::DecisionConflict(decision.result_id))
+        };
+    }
+
+    let (stored_digest, owner_id, task_id, revision) = transaction
+        .query_row(
+            "SELECT r.result_digest, i.owner_id, r.task_id, r.revision
+                 FROM results r JOIN inbox_items i ON i.result_id = r.result_id
+                 WHERE r.result_id = ?1",
+            [decision.result_id.to_string()],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, u32>(3)?,
+                ))
+            },
+        )
+        .optional()?
+        .ok_or(StoreError::ResultNotFound(decision.result_id))?;
+    if stored_digest != decision.result_digest {
+        return Err(StoreError::ResultDigestMismatch);
+    }
+    if owner_id != decision.owner_id.as_str() {
+        return Err(StoreError::DecisionOwnerMismatch);
+    }
+    if task_id != decision.task_id.to_string() || revision != decision.revision {
+        return Err(StoreError::DecisionResultMismatch);
+    }
+
+    transaction.execute(
+        "INSERT INTO decisions (decision_id, result_id, decision_json)
+             VALUES (?1, ?2, ?3)",
+        params![
+            decision.decision_id.to_string(),
+            decision.result_id.to_string(),
+            decision_json,
+        ],
+    )?;
+    Ok(WriteOutcome::Inserted)
+}
+
+fn decisions_equal_except_id(left: &Decision, right: &Decision) -> bool {
+    left.schema == right.schema
+        && left.owner_id == right.owner_id
+        && left.task_id == right.task_id
+        && left.revision == right.revision
+        && left.result_id == right.result_id
+        && left.result_digest == right.result_digest
+        && left.verdict == right.verdict
+        && left.reason == right.reason
+}
+
 fn record_idempotency(
     transaction: &Transaction<'_>,
     request_id: &str,
@@ -674,6 +826,28 @@ fn state_name(state: AttemptState) -> &'static str {
         AttemptState::Collecting => "collecting",
         AttemptState::CancelRequested => "cancel_requested",
         AttemptState::Terminal => "terminal",
+    }
+}
+
+fn allowed_attempt_transition(from: AttemptState, to: AttemptState) -> bool {
+    match from {
+        AttemptState::Queued => {
+            matches!(to, AttemptState::Starting | AttemptState::CancelRequested)
+        }
+        AttemptState::Starting => {
+            matches!(to, AttemptState::Running | AttemptState::CancelRequested)
+        }
+        AttemptState::Running | AttemptState::Blocked => {
+            matches!(
+                to,
+                AttemptState::Running
+                    | AttemptState::Blocked
+                    | AttemptState::Collecting
+                    | AttemptState::CancelRequested
+            ) && to != from
+        }
+        AttemptState::Collecting => to == AttemptState::CancelRequested,
+        AttemptState::CancelRequested | AttemptState::Terminal => false,
     }
 }
 
@@ -734,6 +908,18 @@ pub enum StoreError {
     InvalidRequestDigest,
     #[error("attempt {0} does not exist")]
     AttemptNotFound(AttemptId),
+    #[error("task {task_id} revision {revision} already has an active attempt")]
+    ActiveAttemptExists { task_id: TaskId, revision: u32 },
+    #[error("attempt state changed: expected {expected:?}, found {actual:?}")]
+    AttemptStateConflict {
+        expected: AttemptState,
+        actual: AttemptState,
+    },
+    #[error("invalid attempt transition from {from:?} to {to:?}")]
+    AttemptTransitionInvalid {
+        from: AttemptState,
+        to: AttemptState,
+    },
     #[error("task {0} does not exist")]
     TaskNotFound(TaskId),
     #[error("task list limit is invalid")]
@@ -782,6 +968,10 @@ pub enum StoreError {
     ArtifactDigestCollision(String),
     #[error("artifact path escaped the store root")]
     ArtifactPathOutsideStore,
+    #[error("artifact reference does not name its content-addressed path")]
+    InvalidArtifactReference,
+    #[error("artifact digest or size does not match its sealed reference")]
+    ArtifactIntegrityMismatch,
 }
 
 #[cfg(test)]
@@ -935,6 +1125,179 @@ mod tests {
             store.record_decision(&conflicting),
             Err(StoreError::DecisionConflict(_))
         ));
+    }
+
+    #[test]
+    fn stale_attempt_writer_cannot_overwrite_newer_or_terminal_state() {
+        let root = TempDir::new().unwrap();
+        let mut store = Store::open(root.path()).unwrap();
+        let task = task();
+        let attempt_id = AttemptId::new();
+        store.record_task(&task, "attempt-cas").unwrap();
+        store
+            .create_attempt(task.task_id, task.revision, attempt_id)
+            .unwrap();
+        store
+            .compare_and_set_attempt_state(attempt_id, AttemptState::Queued, AttemptState::Starting)
+            .unwrap();
+        assert!(matches!(
+            store.compare_and_set_attempt_state(
+                attempt_id,
+                AttemptState::Queued,
+                AttemptState::CancelRequested
+            ),
+            Err(StoreError::AttemptStateConflict {
+                actual: AttemptState::Starting,
+                ..
+            })
+        ));
+        assert!(matches!(
+            store.set_attempt_state(attempt_id, AttemptState::Queued),
+            Err(StoreError::AttemptTransitionInvalid { .. })
+        ));
+        store
+            .commit_terminal_result(&task.owner_id, &result(&task, attempt_id))
+            .unwrap();
+        assert!(matches!(
+            store.set_attempt_state(attempt_id, AttemptState::Running),
+            Err(StoreError::AttemptTransitionInvalid { .. })
+        ));
+        assert_eq!(
+            store.attempt_state_by_id(attempt_id).unwrap(),
+            AttemptState::Terminal
+        );
+    }
+
+    #[test]
+    fn two_store_connections_cannot_claim_overlapping_attempts() {
+        let root = TempDir::new().unwrap();
+        let mut first = Store::open(root.path()).unwrap();
+        let task = task();
+        first.record_task(&task, "claim-attempt").unwrap();
+        let second = Store::open(root.path()).unwrap();
+        let first_id = AttemptId::new();
+        first
+            .claim_attempt(task.task_id, task.revision, first_id)
+            .unwrap();
+        assert!(matches!(
+            second.claim_attempt(task.task_id, task.revision, AttemptId::new()),
+            Err(StoreError::ActiveAttemptExists { .. })
+        ));
+        first
+            .commit_terminal_result(&task.owner_id, &result(&task, first_id))
+            .unwrap();
+        second
+            .claim_attempt(task.task_id, task.revision, AttemptId::new())
+            .unwrap();
+    }
+
+    #[test]
+    fn decision_and_ack_are_atomic_and_semantic_retries_are_idempotent() {
+        let root = TempDir::new().unwrap();
+        let mut store = Store::open(root.path()).unwrap();
+        let task = task();
+        let attempt_id = AttemptId::new();
+        store.record_task(&task, "decision-atomic").unwrap();
+        store
+            .create_attempt(task.task_id, task.revision, attempt_id)
+            .unwrap();
+        let result = result(&task, attempt_id);
+        store
+            .commit_terminal_result(&task.owner_id, &result)
+            .unwrap();
+        let decision = Decision {
+            schema: SCHEMA_V1.to_owned(),
+            decision_id: DecisionId::new(),
+            owner_id: task.owner_id.clone(),
+            task_id: task.task_id,
+            revision: task.revision,
+            result_id: result.result_id,
+            result_digest: Store::result_digest(&result).unwrap(),
+            verdict: DecisionVerdict::Accepted,
+            reason: "verified".to_owned(),
+        };
+        let wrong = Decision {
+            result_digest: "wrong".to_owned(),
+            ..decision.clone()
+        };
+        assert!(matches!(
+            store.record_decision_and_ack(&wrong),
+            Err(StoreError::ResultDigestMismatch)
+        ));
+        assert_eq!(store.inbox(&task.owner_id, false).unwrap().len(), 1);
+        assert_eq!(
+            store.record_decision_and_ack(&decision).unwrap(),
+            WriteOutcome::Inserted
+        );
+        assert!(store.inbox(&task.owner_id, false).unwrap().is_empty());
+        let replay = Decision {
+            decision_id: DecisionId::new(),
+            ..decision.clone()
+        };
+        assert_eq!(
+            store.record_decision_and_ack(&replay).unwrap(),
+            WriteOutcome::AlreadyApplied
+        );
+        let conflict = Decision {
+            reason: "changed".to_owned(),
+            ..replay
+        };
+        assert!(matches!(
+            store.record_decision_and_ack(&conflict),
+            Err(StoreError::DecisionConflict(_))
+        ));
+        drop(store);
+        let store = Store::open(root.path()).unwrap();
+        assert!(store.inbox(&task.owner_id, false).unwrap().is_empty());
+        assert_eq!(store.inbox(&task.owner_id, true).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn failed_ack_rolls_back_decision_insert() {
+        let root = TempDir::new().unwrap();
+        let mut store = Store::open(root.path()).unwrap();
+        let task = task();
+        let attempt_id = AttemptId::new();
+        store.record_task(&task, "missing-inbox").unwrap();
+        store
+            .create_attempt(task.task_id, task.revision, attempt_id)
+            .unwrap();
+        let result = result(&task, attempt_id);
+        store
+            .commit_terminal_result(&task.owner_id, &result)
+            .unwrap();
+        store
+            .connection
+            .execute_batch(
+                "CREATE TRIGGER fail_ack BEFORE UPDATE ON inbox_items
+             BEGIN SELECT RAISE(ABORT, 'fixture ack failure'); END;",
+            )
+            .unwrap();
+        let decision = Decision {
+            schema: SCHEMA_V1.to_owned(),
+            decision_id: DecisionId::new(),
+            owner_id: task.owner_id.clone(),
+            task_id: task.task_id,
+            revision: task.revision,
+            result_id: result.result_id,
+            result_digest: Store::result_digest(&result).unwrap(),
+            verdict: DecisionVerdict::Accepted,
+            reason: "verified".to_owned(),
+        };
+        assert!(matches!(
+            store.record_decision_and_ack(&decision),
+            Err(StoreError::Database(_))
+        ));
+        let count: u32 = store
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM decisions WHERE result_id = ?1",
+                [result.result_id.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0);
+        assert_eq!(store.inbox(&task.owner_id, false).unwrap().len(), 1);
     }
 
     #[test]
