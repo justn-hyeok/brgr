@@ -18,6 +18,7 @@ use brgr_protocol::{
     ResultEnvelope, ResultId, SCHEMA_V1, TaskId, TaskSpec,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 const SCHEMA: &str = r"
@@ -37,6 +38,13 @@ CREATE TABLE IF NOT EXISTS attempts (
     revision INTEGER NOT NULL,
     state TEXT NOT NULL,
     FOREIGN KEY (task_id, revision) REFERENCES tasks(task_id, revision)
+);
+CREATE TABLE IF NOT EXISTS launch_intents (
+    attempt_id TEXT PRIMARY KEY,
+    launch_nonce TEXT NOT NULL UNIQUE,
+    supervisor_epoch INTEGER NOT NULL CHECK (supervisor_epoch > 0),
+    runner_identity_json TEXT,
+    FOREIGN KEY (attempt_id) REFERENCES attempts(attempt_id)
 );
 CREATE UNIQUE INDEX IF NOT EXISTS one_active_attempt_per_revision
 ON attempts (task_id, revision) WHERE state <> 'terminal';
@@ -88,6 +96,49 @@ CREATE TABLE IF NOT EXISTS owner_bindings (
 pub enum WriteOutcome {
     Inserted,
     AlreadyApplied,
+}
+
+/// Stable identity of a particular runner incarnation, not merely its PID.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct RunnerIdentity {
+    pub namespace: String,
+    pub handle: String,
+    pub birth_marker: String,
+}
+
+impl RunnerIdentity {
+    /// Rejects incomplete identities. The caller must verify the birth marker
+    /// against the native process/session before reporting it as alive.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any identity component is blank.
+    pub fn validate(&self) -> Result<(), StoreError> {
+        if self.namespace.trim().is_empty()
+            || self.handle.trim().is_empty()
+            || self.birth_marker.trim().is_empty()
+        {
+            return Err(StoreError::InvalidRunnerIdentity);
+        }
+        Ok(())
+    }
+}
+
+/// Durable pre-spawn receipt for one attempt.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LaunchIntent {
+    pub nonce: String,
+    pub supervisor_epoch: u64,
+    pub runner_identity: Option<RunnerIdentity>,
+}
+
+/// An unfinished attempt discovered after reopening the supervisor store.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UnfinishedAttempt {
+    pub task: TaskSpec,
+    pub attempt_id: AttemptId,
+    pub state: AttemptState,
+    pub launch: Option<LaunchIntent>,
 }
 
 /// A durable metadata and artifact store rooted at one private directory.
@@ -233,6 +284,151 @@ impl Store {
         self.claim_attempt(task_id, revision, attempt_id)
     }
 
+    /// Persists the launch intent before spawning a process. The nonce is a
+    /// fresh opaque value for this attempt and must not be reused on retry.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a missing/non-starting attempt, invalid receipt, or a second
+    /// launch claim, including one from another supervisor connection.
+    pub fn record_launch_intent(
+        &self,
+        attempt_id: AttemptId,
+        nonce: &str,
+        supervisor_epoch: u64,
+    ) -> Result<(), StoreError> {
+        if nonce.trim().is_empty() || supervisor_epoch == 0 {
+            return Err(StoreError::InvalidLaunchIntent);
+        }
+        let epoch = i64::try_from(supervisor_epoch).map_err(|_| StoreError::NumericOverflow)?;
+        let transaction = self.connection.unchecked_transaction()?;
+        let state = transaction
+            .query_row(
+                "SELECT state FROM attempts WHERE attempt_id = ?1",
+                [attempt_id.to_string()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .ok_or(StoreError::AttemptNotFound(attempt_id))?;
+        let state = parse_state(&state)?;
+        if state != AttemptState::Starting {
+            return Err(StoreError::AttemptStateConflict {
+                expected: AttemptState::Starting,
+                actual: state,
+            });
+        }
+        let inserted = transaction.execute(
+            "INSERT INTO launch_intents (attempt_id, launch_nonce, supervisor_epoch)
+             VALUES (?1, ?2, ?3)",
+            params![attempt_id.to_string(), nonce, epoch],
+        );
+        match inserted {
+            Ok(1) => transaction.commit().map_err(StoreError::from),
+            Ok(_) => Err(StoreError::InvalidLaunchIntent),
+            Err(rusqlite::Error::SqliteFailure(error, _))
+                if error.code == rusqlite::ErrorCode::ConstraintViolation =>
+            {
+                Err(StoreError::LaunchIntentConflict(attempt_id))
+            }
+            Err(error) => Err(StoreError::Database(error)),
+        }
+    }
+
+    /// Attaches a verified process/session incarnation to the original intent.
+    /// A changed incarnation cannot replace it.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a stale nonce, invalid identity, or conflicting observation.
+    pub fn record_runner_identity(
+        &self,
+        attempt_id: AttemptId,
+        nonce: &str,
+        identity: &RunnerIdentity,
+    ) -> Result<WriteOutcome, StoreError> {
+        identity.validate()?;
+        let transaction = self.connection.unchecked_transaction()?;
+        let stored = read_launch_intent(&transaction, attempt_id)?
+            .ok_or(StoreError::LaunchIntentNotFound(attempt_id))?;
+        if stored.nonce != nonce {
+            return Err(StoreError::LaunchIntentConflict(attempt_id));
+        }
+        if let Some(existing) = stored.runner_identity {
+            return if existing == *identity {
+                Ok(WriteOutcome::AlreadyApplied)
+            } else {
+                Err(StoreError::RunnerIdentityConflict(attempt_id))
+            };
+        }
+        let state = self.attempt_state_by_id(attempt_id)?;
+        if state == AttemptState::Terminal {
+            return Err(StoreError::AttemptStateConflict {
+                expected: AttemptState::Running,
+                actual: state,
+            });
+        }
+        transaction.execute(
+            "UPDATE launch_intents SET runner_identity_json = ?1
+             WHERE attempt_id = ?2 AND launch_nonce = ?3 AND runner_identity_json IS NULL",
+            params![
+                serde_json::to_string(identity)?,
+                attempt_id.to_string(),
+                nonce
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(WriteOutcome::Inserted)
+    }
+
+    /// Lists every attempt that has no terminal result, including legacy
+    /// attempts with no launch receipt. Recovery never silently retries them.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid stored data or database failure.
+    pub fn unfinished_attempts(&self) -> Result<Vec<UnfinishedAttempt>, StoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT a.attempt_id, a.state, t.spec_json, l.launch_nonce,
+                    l.supervisor_epoch, l.runner_identity_json
+             FROM attempts a JOIN tasks t
+               ON t.task_id = a.task_id AND t.revision = a.revision
+             LEFT JOIN launch_intents l ON l.attempt_id = a.attempt_id
+             WHERE a.state <> 'terminal' ORDER BY a.rowid",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<i64>>(4)?,
+                row.get::<_, Option<String>>(5)?,
+            ))
+        })?;
+        rows.map(|row| {
+            let (id, state, task, nonce, epoch, identity) = row?;
+            let launch = match (nonce, epoch) {
+                (Some(nonce), Some(epoch)) => Some(LaunchIntent {
+                    nonce,
+                    supervisor_epoch: u64::try_from(epoch)
+                        .map_err(|_| StoreError::NumericOverflow)?,
+                    runner_identity: identity
+                        .map(|json| serde_json::from_str(&json))
+                        .transpose()?,
+                }),
+                (None, None) => None,
+                _ => return Err(StoreError::InvalidLaunchIntent),
+            };
+            Ok(UnfinishedAttempt {
+                task: serde_json::from_str(&task)?,
+                attempt_id: id.parse().map_err(|_| StoreError::InvalidAttemptId(id))?,
+                state: parse_state(&state)?,
+                launch,
+            })
+        })
+        .collect()
+    }
+
     /// Updates the durable state for an attempt using the current state.
     ///
     /// Prefer `compare_and_set_attempt_state` when the caller has an observed
@@ -315,10 +511,42 @@ impl Store {
         owner_id: &OwnerId,
         result: &ResultEnvelope,
     ) -> Result<WriteOutcome, StoreError> {
+        self.commit_terminal_result_guarded(owner_id, result, None)
+    }
+
+    /// Publishes a lost result only if the observed unfinished state and
+    /// launch receipt are still current. A concurrent runner result wins or
+    /// loses atomically; it can never be overwritten by recovery.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a stale observation, non-lost outcome, or normal terminal
+    /// result conflict.
+    pub fn commit_recovered_lost(
+        &mut self,
+        observed: &UnfinishedAttempt,
+        result: &ResultEnvelope,
+    ) -> Result<WriteOutcome, StoreError> {
+        if result.outcome != brgr_protocol::TerminalOutcome::Lost {
+            return Err(StoreError::RecoveryRequiresLost);
+        }
+        self.commit_terminal_result_guarded(&observed.task.owner_id, result, Some(observed))
+    }
+
+    fn commit_terminal_result_guarded(
+        &mut self,
+        owner_id: &OwnerId,
+        result: &ResultEnvelope,
+        observed: Option<&UnfinishedAttempt>,
+    ) -> Result<WriteOutcome, StoreError> {
         validate_schema(&result.schema)?;
         let envelope_json = serde_json::to_string(result)?;
         let digest = sha256(envelope_json.as_bytes());
         let transaction = self.connection.transaction()?;
+
+        if let Some(observed) = observed {
+            validate_recovery_observation(&transaction, observed)?;
+        }
 
         if let Some((stored_id, stored_digest)) = transaction
             .query_row(
@@ -821,6 +1049,56 @@ fn record_idempotency(
     Ok(WriteOutcome::Inserted)
 }
 
+fn read_launch_intent(
+    transaction: &Transaction<'_>,
+    attempt_id: AttemptId,
+) -> Result<Option<LaunchIntent>, StoreError> {
+    let row = transaction
+        .query_row(
+            "SELECT launch_nonce, supervisor_epoch, runner_identity_json
+             FROM launch_intents WHERE attempt_id = ?1",
+            [attempt_id.to_string()],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            },
+        )
+        .optional()?;
+    row.map(|(nonce, epoch, identity)| {
+        Ok(LaunchIntent {
+            nonce,
+            supervisor_epoch: u64::try_from(epoch).map_err(|_| StoreError::NumericOverflow)?,
+            runner_identity: identity
+                .map(|json| serde_json::from_str(&json))
+                .transpose()?,
+        })
+    })
+    .transpose()
+}
+
+fn validate_recovery_observation(
+    transaction: &Transaction<'_>,
+    observed: &UnfinishedAttempt,
+) -> Result<(), StoreError> {
+    let current = transaction
+        .query_row(
+            "SELECT state FROM attempts WHERE attempt_id = ?1",
+            [observed.attempt_id.to_string()],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+        .ok_or(StoreError::AttemptNotFound(observed.attempt_id))?;
+    if parse_state(&current)? != observed.state
+        || read_launch_intent(transaction, observed.attempt_id)? != observed.launch
+    {
+        return Err(StoreError::RecoveryObservationStale(observed.attempt_id));
+    }
+    Ok(())
+}
+
 fn validate_digest(digest: &str) -> Result<(), StoreError> {
     if digest.trim().is_empty() {
         return Err(StoreError::InvalidRequestDigest);
@@ -928,6 +1206,22 @@ pub enum StoreError {
     InvalidRequestDigest,
     #[error("attempt {0} does not exist")]
     AttemptNotFound(AttemptId),
+    #[error("stored attempt ID is invalid: {0}")]
+    InvalidAttemptId(String),
+    #[error("launch nonce and supervisor epoch must be non-empty and positive")]
+    InvalidLaunchIntent,
+    #[error("attempt {0} has no durable launch intent")]
+    LaunchIntentNotFound(AttemptId),
+    #[error("attempt {0} already has a different launch intent")]
+    LaunchIntentConflict(AttemptId),
+    #[error("runner identity requires namespace, handle, and birth marker")]
+    InvalidRunnerIdentity,
+    #[error("attempt {0} already has a different runner incarnation")]
+    RunnerIdentityConflict(AttemptId),
+    #[error("recovery observation for attempt {0} is stale")]
+    RecoveryObservationStale(AttemptId),
+    #[error("recovery can publish only a lost result")]
+    RecoveryRequiresLost,
     #[error("task {task_id} revision {revision} already has an active attempt")]
     ActiveAttemptExists { task_id: TaskId, revision: u32 },
     #[error("attempt state changed: expected {expected:?}, found {actual:?}")]
@@ -1209,6 +1503,137 @@ mod tests {
         second
             .claim_attempt(task.task_id, task.revision, AttemptId::new())
             .unwrap();
+    }
+
+    #[test]
+    fn launch_intent_survives_reopen_and_cannot_be_replaced() {
+        let root = TempDir::new().unwrap();
+        let mut store = Store::open(root.path()).unwrap();
+        let task = task();
+        let attempt_id = AttemptId::new();
+        store.record_task(&task, "launch-intent").unwrap();
+        store
+            .claim_attempt(task.task_id, task.revision, attempt_id)
+            .unwrap();
+        store
+            .compare_and_set_attempt_state(attempt_id, AttemptState::Queued, AttemptState::Starting)
+            .unwrap();
+        store
+            .record_launch_intent(attempt_id, "nonce-a", 7)
+            .unwrap();
+        let identity = RunnerIdentity {
+            namespace: "process".to_owned(),
+            handle: "4242".to_owned(),
+            birth_marker: "kernel-start-123".to_owned(),
+        };
+        assert_eq!(
+            store
+                .record_runner_identity(attempt_id, "nonce-a", &identity)
+                .unwrap(),
+            WriteOutcome::Inserted
+        );
+        drop(store);
+
+        let reopened = Store::open(root.path()).unwrap();
+        let unfinished = reopened.unfinished_attempts().unwrap();
+        assert_eq!(unfinished.len(), 1);
+        assert_eq!(unfinished[0].launch.as_ref().unwrap().nonce, "nonce-a");
+        assert_eq!(
+            unfinished[0].launch.as_ref().unwrap().runner_identity,
+            Some(identity.clone())
+        );
+        assert!(matches!(
+            reopened.record_launch_intent(attempt_id, "nonce-b", 8),
+            Err(StoreError::LaunchIntentConflict(_))
+        ));
+        assert!(matches!(
+            reopened.record_runner_identity(
+                attempt_id,
+                "nonce-a",
+                &RunnerIdentity {
+                    birth_marker: "reused-pid".to_owned(),
+                    ..identity
+                }
+            ),
+            Err(StoreError::RunnerIdentityConflict(_))
+        ));
+    }
+
+    #[test]
+    fn recovery_observation_cannot_overwrite_concurrent_runner_result() {
+        let root = TempDir::new().unwrap();
+        let mut first = Store::open(root.path()).unwrap();
+        let task = task();
+        let attempt_id = AttemptId::new();
+        first.record_task(&task, "recovery-race").unwrap();
+        first
+            .claim_attempt(task.task_id, task.revision, attempt_id)
+            .unwrap();
+        first
+            .compare_and_set_attempt_state(attempt_id, AttemptState::Queued, AttemptState::Starting)
+            .unwrap();
+        first
+            .record_launch_intent(attempt_id, "nonce-race", 1)
+            .unwrap();
+        let observed = first.unfinished_attempts().unwrap().remove(0);
+        let mut second = Store::open(root.path()).unwrap();
+        let completed = result(&task, attempt_id);
+        second
+            .commit_terminal_result(&task.owner_id, &completed)
+            .unwrap();
+        let lost = ResultEnvelope {
+            result_id: ResultId::new(),
+            outcome: TerminalOutcome::Lost,
+            unresolved_effects: vec!["unknown".to_owned()],
+            ..completed.clone()
+        };
+        assert!(matches!(
+            first.commit_recovered_lost(&observed, &lost),
+            Err(StoreError::RecoveryObservationStale(_))
+        ));
+        assert_eq!(first.inbox(&task.owner_id, false).unwrap().len(), 1);
+        assert_eq!(first.latest_result(task.task_id).unwrap(), completed);
+    }
+
+    #[test]
+    fn recovery_observation_cannot_ignore_identity_recorded_after_snapshot() {
+        let root = TempDir::new().unwrap();
+        let mut store = Store::open(root.path()).unwrap();
+        let task = task();
+        let attempt_id = AttemptId::new();
+        store.record_task(&task, "identity-race").unwrap();
+        store
+            .claim_attempt(task.task_id, task.revision, attempt_id)
+            .unwrap();
+        store
+            .compare_and_set_attempt_state(attempt_id, AttemptState::Queued, AttemptState::Starting)
+            .unwrap();
+        store
+            .record_launch_intent(attempt_id, "nonce-identity", 1)
+            .unwrap();
+        let observed = store.unfinished_attempts().unwrap().remove(0);
+        let other = Store::open(root.path()).unwrap();
+        other
+            .record_runner_identity(
+                attempt_id,
+                "nonce-identity",
+                &RunnerIdentity {
+                    namespace: "process".to_owned(),
+                    handle: "55".to_owned(),
+                    birth_marker: "start-55".to_owned(),
+                },
+            )
+            .unwrap();
+        let lost = ResultEnvelope {
+            outcome: TerminalOutcome::Lost,
+            unresolved_effects: vec!["unknown".to_owned()],
+            ..result(&task, attempt_id)
+        };
+        assert!(matches!(
+            store.commit_recovered_lost(&observed, &lost),
+            Err(StoreError::RecoveryObservationStale(_))
+        ));
+        assert!(store.inbox(&task.owner_id, false).unwrap().is_empty());
     }
 
     #[test]

@@ -131,7 +131,9 @@ dependencies = [
  "brgr-store",
  "serde_json",
  "sha2",
+ "tempfile",
  "thiserror",
+ "uuid",
 ]
 
 [[package]]
@@ -176,6 +178,7 @@ version = "0.1.0"
 dependencies = [
  "brgr-protocol",
  "rusqlite",
+ "serde",
  "serde_json",
  "sha2",
  "tempfile",
