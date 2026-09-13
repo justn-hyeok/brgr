@@ -154,6 +154,7 @@ impl ProcessRunner {
         std::fs::write(&prompt_path, request.prompt.as_bytes())?;
         let substitutions = Substitutions {
             prompt_file: &prompt_path,
+            prompt: request.prompt,
             workspace: request.workspace,
             model: request.model,
             effort: request.effort,
@@ -323,6 +324,7 @@ impl HarnessManifest {
 
 struct Substitutions<'a> {
     prompt_file: &'a Path,
+    prompt: &'a str,
     workspace: &'a Path,
     model: Option<&'a str>,
     effort: Option<&'a str>,
@@ -391,6 +393,10 @@ async fn stop_process_group(child: &mut tokio::process::Child) -> Result<ExitSta
 }
 
 fn substitute(argument: &str, values: &Substitutions<'_>) -> Result<String, RunnerError> {
+    // A prompt is one opaque argv value, never a template or shell fragment.
+    if argument == "${input.prompt}" {
+        return Ok(values.prompt.to_owned());
+    }
     let mut output = argument
         .replace(
             "${input.prompt_file}",
@@ -594,6 +600,36 @@ mod tests {
             },
             capabilities: BTreeMap::new(),
         }
+    }
+
+    #[test]
+    fn literal_prompt_is_one_argv_value_even_with_template_like_text() {
+        let workspace = tempfile::tempdir().unwrap();
+        let prompt = "Do not expand ${route.model} or $(touch /tmp/never)";
+        let request = RunRequest {
+            workspace: workspace.path(),
+            prompt,
+            model: None,
+            effort: None,
+            deadline: Duration::from_secs(2),
+            cancel_path: None,
+            pid_path: None,
+        };
+        let mut manifest = echo_manifest(4_096);
+        manifest.launch.argv = vec!["--print".to_owned(), "${input.prompt}".to_owned()];
+        let prompt_path = workspace.path().join("unused-prompt.txt");
+        let substitutions = Substitutions {
+            prompt_file: &prompt_path,
+            prompt,
+            workspace: workspace.path(),
+            model: None,
+            effort: None,
+        };
+
+        assert_eq!(
+            render_argv(&manifest, &request, &substitutions).unwrap(),
+            ["--print", prompt]
+        );
     }
 
     #[tokio::test]

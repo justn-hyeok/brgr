@@ -149,6 +149,8 @@ enum HarnessCommand {
         workspace: PathBuf,
         #[arg(long)]
         prompt: String,
+        #[arg(long)]
+        model: Option<String>,
     },
     Status {
         #[arg(default_value = "local.gjc")]
@@ -632,10 +634,11 @@ async fn harness(paths: &Paths, command: HarnessCommand, json_output: bool) -> R
             executable,
             workspace,
             prompt,
+            model,
         } => {
             let manifest = registry.draft(&executable).await?;
             let receipt = registry
-                .activate_with_scratch(&manifest, &workspace, &prompt)
+                .activate_with_scratch(&manifest, &workspace, &prompt, model.as_deref())
                 .await?;
             print_value(&serde_json::to_value(receipt)?, json_output);
         }

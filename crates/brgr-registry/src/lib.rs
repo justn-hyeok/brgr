@@ -124,10 +124,14 @@ impl Registry {
         manifest: &HarnessManifest,
         workspace: &Path,
         prompt: &str,
+        model: Option<&str>,
     ) -> Result<ActivationReceipt, RegistryError> {
         self.contract_test(manifest).await?;
         if prompt.trim().is_empty() {
             return Err(RegistryError::EmptyScratchPrompt);
+        }
+        if model.is_some() && manifest.launch.model_argv.is_empty() {
+            return Err(RegistryError::UnsupportedScratchModel);
         }
         let before_digest = digest_file(&manifest.executable)?;
         let output = ProcessRunner::run(
@@ -135,7 +139,7 @@ impl Registry {
             brgr_runner::RunRequest {
                 workspace,
                 prompt,
-                model: None,
+                model,
                 effort: None,
                 deadline: Duration::from_mins(1),
                 cancel_path: None,
@@ -337,6 +341,8 @@ fn generate_manifest(
     match requested_name {
         "gjc" => generate_gjc_manifest(executable, help),
         "omp-role" => generate_omp_manifest(executable, help),
+        "cursor" | "cursor-agent" | "cursor-cli" => generate_cursor_manifest(executable, help),
+        "command-code" | "commandcode" | "cmdc" => generate_command_code_manifest(executable, help),
         _ => generate_generic_manifest(requested_name, executable, help),
     }
 }
@@ -451,6 +457,140 @@ fn generate_gjc_manifest(
             ("cancel".to_owned(), supported("local_process_only")),
             ("model_select".to_owned(), supported("--model")),
             ("effort_select".to_owned(), supported("--thinking")),
+        ]),
+    })
+}
+
+fn generate_cursor_manifest(
+    executable: PathBuf,
+    help: &str,
+) -> Result<HarnessManifest, RegistryError> {
+    if ![
+        "--print",
+        "--mode <mode>",
+        "--output-format <format>",
+        "--model <model>",
+    ]
+    .iter()
+    .all(|flag| help.contains(flag))
+    {
+        return Err(RegistryError::RequiredFlagsMissing);
+    }
+    Ok(HarnessManifest {
+        schema: MANIFEST_SCHEMA_V1.to_owned(),
+        id: "local.cursor-cli".to_owned(),
+        adapter: PROCESS_ADAPTER_V1.to_owned(),
+        executable,
+        probe: ProbeSpec {
+            version_argv: vec!["--version".to_owned()],
+            help_argv: vec!["--help".to_owned()],
+        },
+        launch: LaunchSpec {
+            argv: vec![
+                "--print".to_owned(),
+                "--mode".to_owned(),
+                "ask".to_owned(),
+                "--output-format".to_owned(),
+                "text".to_owned(),
+                "--trust".to_owned(),
+                "--workspace".to_owned(),
+                "${task.workspace}".to_owned(),
+                "${input.prompt}".to_owned(),
+            ],
+            model_argv: vec!["--model".to_owned(), "${route.model}".to_owned()],
+            effort_argv: vec![],
+            env_allow: vec![
+                "HOME".to_owned(),
+                "PATH".to_owned(),
+                "LANG".to_owned(),
+                "TMPDIR".to_owned(),
+            ],
+            mode: ExecutionMode::OneShot,
+        },
+        result: ResultSpec {
+            source: ResultSource::Stdout,
+            media_type: "text/plain".to_owned(),
+            max_bytes: 1_048_576,
+            success_exit_codes: vec![0],
+        },
+        capabilities: BTreeMap::from([
+            (
+                "completion".to_owned(),
+                supported("process_exit_with_nonempty_stdout"),
+            ),
+            ("cancel".to_owned(), supported("local_process_only")),
+            ("model_select".to_owned(), supported("--model")),
+            ("effort_select".to_owned(), unsupported("not_observed")),
+        ]),
+    })
+}
+
+fn generate_command_code_manifest(
+    executable: PathBuf,
+    help: &str,
+) -> Result<HarnessManifest, RegistryError> {
+    if ![
+        "--print [query]",
+        "--permission-mode <mode>",
+        "--no-session",
+        "--no-skills",
+        "--skip-onboarding",
+        "--no-auto-update",
+        "--max-turns <number>",
+        "--model <model>",
+    ]
+    .iter()
+    .all(|flag| help.contains(flag))
+    {
+        return Err(RegistryError::RequiredFlagsMissing);
+    }
+    Ok(HarnessManifest {
+        schema: MANIFEST_SCHEMA_V1.to_owned(),
+        id: "local.command-code".to_owned(),
+        adapter: PROCESS_ADAPTER_V1.to_owned(),
+        executable,
+        probe: ProbeSpec {
+            version_argv: vec!["--version".to_owned()],
+            help_argv: vec!["--help".to_owned()],
+        },
+        launch: LaunchSpec {
+            argv: vec![
+                "--no-session".to_owned(),
+                "--no-skills".to_owned(),
+                "--skip-onboarding".to_owned(),
+                "--no-auto-update".to_owned(),
+                "--max-turns".to_owned(),
+                "2".to_owned(),
+                "--permission-mode".to_owned(),
+                "plan".to_owned(),
+                "--print".to_owned(),
+                "${input.prompt}".to_owned(),
+            ],
+            model_argv: vec!["--model".to_owned(), "${route.model}".to_owned()],
+            effort_argv: vec![],
+            env_allow: vec![
+                "HOME".to_owned(),
+                "PATH".to_owned(),
+                "LANG".to_owned(),
+                "TMPDIR".to_owned(),
+                "COMMAND_CODE_API_KEY".to_owned(),
+            ],
+            mode: ExecutionMode::OneShot,
+        },
+        result: ResultSpec {
+            source: ResultSource::Stdout,
+            media_type: "text/plain".to_owned(),
+            max_bytes: 1_048_576,
+            success_exit_codes: vec![0],
+        },
+        capabilities: BTreeMap::from([
+            (
+                "completion".to_owned(),
+                supported("process_exit_with_nonempty_stdout"),
+            ),
+            ("cancel".to_owned(), supported("local_process_only")),
+            ("model_select".to_owned(), supported("--model")),
+            ("effort_select".to_owned(), unsupported("not_observed")),
         ]),
     })
 }
@@ -639,6 +779,8 @@ pub enum RegistryError {
     ScratchRunRequired(String),
     #[error("scratch prompt must be nonempty")]
     EmptyScratchPrompt,
+    #[error("this harness cannot select a model for its scratch run")]
+    UnsupportedScratchModel,
     #[error("scratch run did not produce a successful nonempty result")]
     ScratchRunFailed,
     #[error("manifest differs from the currently observed process/v1 recipe")]
@@ -687,6 +829,55 @@ mod tests {
     }
 
     #[test]
+    fn named_cursor_and_command_code_recipes_use_observed_read_only_flags() {
+        let cursor_help = "--print --mode <mode> --output-format <format> --model <model>";
+        let cursor =
+            generate_manifest("cursor-agent", PathBuf::from("/bin/echo"), cursor_help).unwrap();
+        assert_eq!(cursor.id, "local.cursor-cli");
+        assert!(cursor.launch.argv.contains(&"ask".to_owned()));
+        assert!(cursor.launch.argv.contains(&"${input.prompt}".to_owned()));
+        assert_eq!(
+            cursor.capabilities["model_select"].status,
+            CapabilityStatus::Supported
+        );
+        assert!(generate_manifest("cursor-agent", PathBuf::from("/bin/echo"), "--print").is_err());
+
+        let command_code_help = "--print [query] --permission-mode <mode> --no-session --no-skills --skip-onboarding --no-auto-update --max-turns <number> --model <model>";
+        let command_code = generate_manifest(
+            "command-code",
+            PathBuf::from("/bin/echo"),
+            command_code_help,
+        )
+        .unwrap();
+        assert_eq!(command_code.id, "local.command-code");
+        assert!(command_code.launch.argv.contains(&"plan".to_owned()));
+        assert!(
+            command_code
+                .launch
+                .argv
+                .contains(&"${input.prompt}".to_owned())
+        );
+        assert!(
+            command_code
+                .launch
+                .env_allow
+                .contains(&"COMMAND_CODE_API_KEY".to_owned())
+        );
+        assert_eq!(
+            command_code.capabilities["model_select"].status,
+            CapabilityStatus::Supported
+        );
+        assert!(
+            generate_manifest(
+                "command-code",
+                PathBuf::from("/bin/echo"),
+                "--print [query]"
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
     fn registry_rejects_path_escape_identifiers() {
         for id in ["local.../private", "../local.foo", "local.Foo", "local."] {
             assert!(matches!(
@@ -721,7 +912,7 @@ mod tests {
         ));
         registry.contract_test(&draft).await.unwrap();
         let receipt = registry
-            .activate_with_scratch(&draft, root.path(), "fixture request")
+            .activate_with_scratch(&draft, root.path(), "fixture request", None)
             .await
             .unwrap();
         assert!(receipt.scratch_result_digest.is_some());
@@ -752,7 +943,7 @@ mod tests {
         let registry = Registry::open(root.path().join("registry")).unwrap();
         let draft = registry.draft(&executable).await.unwrap();
         registry
-            .activate_with_scratch(&draft, root.path(), "fixture")
+            .activate_with_scratch(&draft, root.path(), "fixture", None)
             .await
             .unwrap();
         let path = registry.manifest_path(&draft.id);
@@ -786,7 +977,7 @@ mod tests {
         ));
         assert!(matches!(
             registry
-                .activate_with_scratch(&draft, root.path(), "fixture")
+                .activate_with_scratch(&draft, root.path(), "fixture", None)
                 .await,
             Err(RegistryError::ManifestNotObserved)
         ));
@@ -828,7 +1019,7 @@ mod tests {
         let registry = Registry::open(root.path().join("registry")).unwrap();
         let draft = registry.draft(&executable).await.unwrap();
         registry
-            .activate_with_scratch(&draft, root.path(), "test")
+            .activate_with_scratch(&draft, root.path(), "test", None)
             .await
             .unwrap();
         assert_eq!(
