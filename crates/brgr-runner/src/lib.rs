@@ -72,6 +72,7 @@ pub struct ResultSpec {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ResultSource {
     Stdout,
+    JsonlAssistantFinal,
     File { path: String },
 }
 
@@ -413,6 +414,7 @@ fn collect_result(
 ) -> Result<Vec<u8>, RunnerError> {
     match &manifest.result.source {
         ResultSource::Stdout => Ok(stdout.to_vec()),
+        ResultSource::JsonlAssistantFinal => extract_jsonl_assistant_final(stdout),
         ResultSource::File { path } => {
             let rendered = substitute(path, values)?;
             let relative = Path::new(&rendered);
@@ -437,6 +439,50 @@ fn collect_result(
             Ok(std::fs::read(result_path)?)
         }
     }
+}
+
+fn extract_jsonl_assistant_final(stdout: &[u8]) -> Result<Vec<u8>, RunnerError> {
+    let mut final_text = None;
+    let mut completed = false;
+    for line in stdout
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+    {
+        let event: serde_json::Value = serde_json::from_slice(line)?;
+        match event.get("type").and_then(serde_json::Value::as_str) {
+            Some("message_end")
+                if event
+                    .pointer("/message/role")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("assistant") =>
+            {
+                let parts = event
+                    .pointer("/message/content")
+                    .and_then(serde_json::Value::as_array)
+                    .ok_or(RunnerError::MissingAssistantText)?;
+                let text = parts
+                    .iter()
+                    .filter(|part| {
+                        part.get("type").and_then(serde_json::Value::as_str) == Some("text")
+                    })
+                    .filter_map(|part| part.get("text").and_then(serde_json::Value::as_str))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                if !text.trim().is_empty() {
+                    final_text = Some(text.into_bytes());
+                }
+            }
+            Some("agent_end") => {
+                completed = event.get("stopReason").and_then(serde_json::Value::as_str)
+                    == Some("completed");
+            }
+            _ => {}
+        }
+    }
+    if !completed {
+        return Err(RunnerError::MissingTerminalEvent);
+    }
+    final_text.ok_or(RunnerError::MissingAssistantText)
 }
 
 async fn read_bounded<R>(reader: R, limit: u64) -> Result<(Vec<u8>, bool), std::io::Error>
@@ -493,6 +539,12 @@ pub enum RunnerError {
     ResultNotRegularFile(PathBuf),
     #[error("result exceeds {max_bytes} bytes (observed {observed_bytes})")]
     ResultTooLarge { max_bytes: u64, observed_bytes: u64 },
+    #[error("JSONL output has no completed agent_end event")]
+    MissingTerminalEvent,
+    #[error("JSONL output has no final assistant text")]
+    MissingAssistantText,
+    #[error("JSONL output is malformed: {0}")]
+    MalformedJsonl(#[from] serde_json::Error),
     #[error("child process did not expose its {0} pipe")]
     MissingPipe(&'static str),
     #[error("child process did not expose a process id")]
@@ -625,6 +677,28 @@ mod tests {
         assert!(matches!(
             manifest.validate(),
             Err(RunnerError::InvalidExecutable(_))
+        ));
+    }
+
+    #[test]
+    fn jsonl_result_keeps_only_final_assistant_text() {
+        let events = concat!(
+            "{\"type\":\"message_end\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"secret prompt\"}]}}\n",
+            "{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"answer\"}]}}\n",
+            "{\"type\":\"agent_end\",\"stopReason\":\"completed\"}\n",
+        );
+        assert_eq!(
+            extract_jsonl_assistant_final(events.as_bytes()).unwrap(),
+            b"answer"
+        );
+    }
+
+    #[test]
+    fn jsonl_without_terminal_event_fails_closed() {
+        let events = b"{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"answer\"}]}}\n";
+        assert!(matches!(
+            extract_jsonl_assistant_final(events),
+            Err(RunnerError::MissingTerminalEvent)
         ));
     }
 }

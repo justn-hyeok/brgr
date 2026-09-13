@@ -22,4 +22,5 @@ done
 if [ -n "$prompt_file" ] && /usr/bin/grep -q 'SLOW' "$prompt_file"; then
   /bin/sleep 30
 fi
-printf '%s\n' '{"type":"agent_end","message":"BRGR_FIXTURE_OK"}'
+printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"BRGR_FIXTURE_OK"}]}}'
+printf '%s\n' '{"type":"agent_end","stopReason":"completed"}'
