@@ -1,4 +1,5 @@
 mod codex_integration;
+mod pane_cleanup;
 
 use std::{
     collections::BTreeMap,
@@ -73,6 +74,10 @@ enum Command {
         command: IntegrateCommand,
     },
     Doctor,
+    Cleanup {
+        #[command(subcommand)]
+        command: CleanupCommand,
+    },
     #[command(name = "__supervise", hide = true)]
     Supervise {
         launch: PathBuf,
@@ -95,6 +100,8 @@ enum Command {
         model: Option<String>,
         #[arg(long)]
         effort: Option<String>,
+        #[arg(long)]
+        keep_pane: bool,
     },
 }
 
@@ -115,6 +122,14 @@ struct RunArgs {
     allow_clean_head_snapshot: bool,
     #[arg(long, hide = true)]
     foreground: bool,
+    #[arg(long)]
+    keep_pane: bool,
+}
+
+#[derive(Clone, Copy, Subcommand)]
+enum CleanupCommand {
+    Status { task: TaskId },
+    Run { task: TaskId },
 }
 
 #[derive(Subcommand)]
@@ -213,6 +228,7 @@ struct LaunchEnvelope {
     spec: TaskSpec,
     harness_id: String,
     protocol_generation: String,
+    keep_pane: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -238,6 +254,7 @@ async fn main() -> Result<()> {
         Command::Harness { command } => harness(&paths, command, cli.json).await,
         Command::Integrate { command } => integrate(&paths, command, cli.json),
         Command::Doctor => doctor(&paths, cli.json),
+        Command::Cleanup { command } => cleanup(&paths, command, cli.json),
         Command::Supervise { launch } => supervise(&paths, &launch, cli.json).await,
         Command::Hook { event } => {
             if hook(&paths, event).is_err() {
@@ -253,14 +270,18 @@ async fn main() -> Result<()> {
             launcher,
             model,
             effort,
+            keep_pane,
         } => run_omp_adapter(
             &paths,
             &prompt_file,
             &workspace,
             task,
             &launcher,
-            model.as_deref(),
-            effort.as_deref(),
+            OmpOptions {
+                model: model.as_deref(),
+                effort: effort.as_deref(),
+                keep_pane,
+            },
         ),
     }
 }
@@ -314,6 +335,7 @@ async fn run_task(paths: &Paths, args: RunArgs, json_output: bool) -> Result<()>
         spec,
         harness_id: args.harness,
         protocol_generation: "brgr-v1".to_owned(),
+        keep_pane: args.keep_pane,
     };
     let launch_path = paths.launches.join(format!("{task_id}.json"));
     write_json_atomic(&launch_path, &launch)?;
@@ -421,6 +443,9 @@ fn result(paths: &Paths, task: TaskId, ack: bool, json_output: bool) -> Result<(
         .collect::<Result<Vec<_>>>()?;
     if ack {
         store.acknowledge(&spec.owner_id, result.result_id)?;
+        if let Err(error) = pane_cleanup::mark_pending(&paths.runs, task, &result) {
+            eprintln!("brgr pane cleanup queue could not be updated: {error}");
+        }
     }
     print_value(
         &json!({"result": result, "artifacts": artifacts}),
@@ -482,6 +507,9 @@ fn decide(
         reason,
     };
     store.record_decision_and_ack(&decision)?;
+    if let Err(error) = pane_cleanup::mark_pending(&paths.runs, task, &result) {
+        eprintln!("brgr pane cleanup queue could not be updated: {error}");
+    }
     print_value(&serde_json::to_value(decision)?, json_output);
     Ok(())
 }
@@ -558,6 +586,21 @@ fn doctor(paths: &Paths, json_output: bool) -> Result<()> {
         "codex_integration": integration,
     });
     print_value(&value, json_output);
+    Ok(())
+}
+
+fn cleanup(paths: &Paths, command: CleanupCommand, json_output: bool) -> Result<()> {
+    let task = match command {
+        CleanupCommand::Status { task } | CleanupCommand::Run { task } => task,
+    };
+    let store = Store::open(&paths.store)?;
+    let spec = store.task(task)?;
+    require_owner(&spec.owner_id)?;
+    let status = pane_cleanup::status(&paths.runs, task)?;
+    if matches!(command, CleanupCommand::Run { .. }) {
+        bail!("conditional Herdr pane.close is unavailable; cleanup remains queued: {status}");
+    }
+    print_value(&json!({"task_id": task, "cleanup": status}), json_output);
     Ok(())
 }
 
@@ -638,6 +681,9 @@ fn omp_process_manifest(
     if launch.spec.route.requested_effort.is_some() {
         argv.extend(["--effort".to_owned(), "${route.effort}".to_owned()]);
     }
+    if launch.keep_pane {
+        argv.push("--keep-pane".to_owned());
+    }
     Ok(HarnessManifest {
         schema: MANIFEST_SCHEMA_V1.to_owned(),
         id: "internal.omp-runner".to_owned(),
@@ -670,14 +716,20 @@ fn omp_process_manifest(
     })
 }
 
+#[derive(Clone, Copy)]
+struct OmpOptions<'a> {
+    model: Option<&'a str>,
+    effort: Option<&'a str>,
+    keep_pane: bool,
+}
+
 fn run_omp_adapter(
     paths: &Paths,
     prompt_file: &Path,
     workspace: &Path,
     task: TaskId,
     launcher: &Path,
-    model: Option<&str>,
-    effort: Option<&str>,
+    options: OmpOptions<'_>,
 ) -> Result<()> {
     if env::var("HERDR_ENV").as_deref() != Ok("1") || env::var_os("HERDR_PANE_ID").is_none() {
         bail!("OMP adapter requires a verified Herdr parent session");
@@ -688,8 +740,21 @@ fn run_omp_adapter(
     let report = paths.runs.join(format!("{task}.omp-report.md"));
     let prompt = fs::read_to_string(prompt_file)?;
 
-    launch_omp(
-        launcher, workspace, &agent, &task_slug, &report, model, effort,
+    let launcher_receipt = launch_omp(
+        launcher,
+        workspace,
+        &agent,
+        &task_slug,
+        &report,
+        options.model,
+        options.effort,
+    )?;
+    pane_cleanup::record_spawn(
+        &paths.runs,
+        task,
+        &agent,
+        &launcher_receipt,
+        options.keep_pane,
     )?;
 
     let instruction = format!(
@@ -745,7 +810,7 @@ fn launch_omp(
     report: &Path,
     model: Option<&str>,
     effort: Option<&str>,
-) -> Result<()> {
+) -> Result<PathBuf> {
     let mut launch = ProcessCommand::new("python");
     launch
         .arg(launcher)
@@ -790,7 +855,7 @@ fn launch_omp(
             );
         }
     };
-    let launcher_receipt: serde_json::Value = serde_json::from_slice(&fs::read(receipt_path)?)?;
+    let launcher_receipt: serde_json::Value = serde_json::from_slice(&fs::read(&receipt_path)?)?;
     if launcher_receipt
         .get("codex_prompt_marked")
         .and_then(serde_json::Value::as_bool)
@@ -798,7 +863,7 @@ fn launch_omp(
     {
         bail!("new OMP run could also activate the legacy parent callback");
     }
-    Ok(())
+    Ok(PathBuf::from(receipt_path))
 }
 
 fn recover_omp_contract(
