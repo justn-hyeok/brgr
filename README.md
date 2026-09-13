@@ -12,8 +12,9 @@ unsigned and not notarized. Read [the unsigned distribution guide](docs/unsigned
 before sharing or running a downloaded binary.
 
 The current release candidate is still in verification. GJC supports bounded
-fresh runs; OMP uses an installed `omp-role` and Herdr. Automatic pane closing
-is disabled until Herdr offers identity-checked conditional close.
+fresh runs; OMP uses an installed `omp-role` and Herdr. After Codex accepts or
+rejects a result, brgr closes only the OMP pane it recorded as its own; use
+`--keep-pane` to retain it. See the cleanup safety limit below.
 
 ## Quick start
 
@@ -39,6 +40,17 @@ install`, then start a new Codex session. It merges brgr hooks beside existing
 hooks; `brgr integrate codex status|uninstall` checks or removes only brgr's
 entries. Registration of an unknown CLI requires `brgr harness draft`,
 `brgr harness test`, then an authorized scratch run with `brgr harness activate`.
+
+`brgr cleanup status TASK` shows whether an owned OMP pane was closed or
+retained. `brgr cleanup run TASK` retries a pending close. Neither command
+removes a task worktree.
+
+Herdr 0.9.0 accepts `pane.close(pane_id)` without conditional identity fields.
+Brgr rechecks owner decision, inbox acknowledgment, pane ID, terminal ID,
+immutable agent session, idle state, and protected-tab status immediately
+before closing. Another actor could still change the pane between that check
+and Herdr's close call. This is a best-effort cooperative-local guarantee, not
+an atomic compare-and-close guarantee; use `--keep-pane` for shared sessions.
 
 ## Development
 

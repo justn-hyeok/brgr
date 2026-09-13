@@ -33,7 +33,15 @@ live process. An uncertain run becomes `lost` with unresolved effects and is
 never retried automatically. Only a transient failure before process spawn may
 use the one remaining attempt in the two-attempt budget.
 
-Brgr records owned OMP pane identity and queues cleanup after owner decision
-and inbox acknowledgment. Herdr 0.9.0 exposes only `pane.close(pane_id)`, so
-the queue reports eligibility but does not close panes automatically. This
-avoids claiming an atomic identity check that Herdr cannot currently perform.
+Brgr records its OMP pane and terminal IDs, immutable agent session, task and
+attempt IDs, and parent pane. After the owner decision and inbox acknowledgment,
+it rechecks those fields plus idle state and protected-tab status, then calls
+Herdr's official `pane.close(pane_id)` route. It targets only panes with a
+brgr launcher receipt and does not close a working, blocked, mismatched, or
+`--keep-pane` pane. It never deletes the worktree. A failed close remains
+pending for a bounded retry; shared use should select `--keep-pane`.
+
+Herdr 0.9.0 has no atomic conditional close. The fresh check and close are
+separate operations, so another actor changing the pane in that small
+interval remains a documented race. Brgr does not claim adversarial or
+atomic safety for pane cleanup.
