@@ -398,7 +398,8 @@ impl Supervisor {
         spec: TaskSpec,
         manifest: &HarnessManifest,
     ) -> Result<ResultEnvelope, SupervisorError> {
-        self.run_fresh_controlled(spec, manifest, None, None).await
+        self.run_fresh_controlled(spec, manifest, None, None, None)
+            .await
     }
 
     /// Executes a fresh attempt with optional cancellation and PID receipt
@@ -414,6 +415,7 @@ impl Supervisor {
         manifest: &HarnessManifest,
         cancel_path: Option<&Path>,
         pid_path: Option<&Path>,
+        runner_identity: Option<&RunnerIdentity>,
     ) -> Result<ResultEnvelope, SupervisorError> {
         let revision = TaskRevision::new(spec.clone())?;
         let request_bytes = serde_json::to_vec(&spec)?;
@@ -430,11 +432,13 @@ impl Supervisor {
             AttemptState::Starting,
             &mut producer_seq,
         )?;
-        self.store.record_launch_intent(
-            attempt_id,
-            &uuid::Uuid::new_v4().to_string(),
-            self.epoch,
-        )?;
+        let launch_nonce = uuid::Uuid::new_v4().to_string();
+        self.store
+            .record_launch_intent(attempt_id, &launch_nonce, self.epoch)?;
+        if let Some(identity) = runner_identity {
+            self.store
+                .record_runner_identity(attempt_id, &launch_nonce, identity)?;
+        }
         transition(
             &self.store,
             &mut attempt,

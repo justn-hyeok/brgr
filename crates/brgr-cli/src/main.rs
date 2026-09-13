@@ -14,7 +14,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use brgr_core::Supervisor;
+use brgr_core::{ExecutionObservation, Supervisor};
 use brgr_protocol::{
     ArtifactContract, AttemptBudget, Decision, DecisionId, DecisionVerdict, OwnerId, Route,
     SCHEMA_V1, TaskId, TaskSpec, TerminalOutcome,
@@ -24,7 +24,7 @@ use brgr_runner::{
     ExecutionMode, HarnessManifest, LaunchSpec, MANIFEST_SCHEMA_V1, PROCESS_ADAPTER_V1, ProbeSpec,
     ResultSource, ResultSpec,
 };
-use brgr_store::Store;
+use brgr_store::{RunnerIdentity, Store, UnfinishedAttempt};
 use clap::{Args, Parser, Subcommand};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -221,6 +221,10 @@ impl Paths {
     fn pid(&self, task: TaskId) -> PathBuf {
         self.runs.join(format!("{task}.pid"))
     }
+
+    fn supervisor(&self, task: TaskId) -> PathBuf {
+        self.runs.join(format!("{task}.supervisor.json"))
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -229,6 +233,13 @@ struct LaunchEnvelope {
     harness_id: String,
     protocol_generation: String,
     keep_pane: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ProcessReceipt {
+    task_id: TaskId,
+    launch_path: PathBuf,
+    identity: RunnerIdentity,
 }
 
 #[derive(Debug, Deserialize)]
@@ -359,6 +370,12 @@ async fn supervise(paths: &Paths, launch_path: &Path, json_output: bool) -> Resu
     if launch.protocol_generation != "brgr-v1" {
         bail!("unsupported task protocol generation");
     }
+    let receipt = ProcessReceipt {
+        task_id: launch.spec.task_id,
+        launch_path: launch_path.to_path_buf(),
+        identity: process_identity(std::process::id())?,
+    };
+    write_json_atomic(&paths.supervisor(launch.spec.task_id), &receipt)?;
     let manifest = Registry::open(&paths.registry)?.load_healthy(&launch.harness_id)?;
     let manifest = if manifest.adapter == brgr_runner::OMP_ROLE_ADAPTER_V1 {
         omp_process_manifest(paths, &launch, &manifest)?
@@ -368,10 +385,18 @@ async fn supervise(paths: &Paths, launch_path: &Path, json_output: bool) -> Resu
     let cancel_path = paths.cancel(launch.spec.task_id);
     let pid_path = paths.pid(launch.spec.task_id);
     let mut supervisor = Supervisor::open(&paths.store)?;
+    supervisor.reconcile_after_restart(|attempt| observe_attempt(paths, attempt))?;
     let result = supervisor
-        .run_fresh_controlled(launch.spec, &manifest, Some(&cancel_path), Some(&pid_path))
+        .run_fresh_controlled(
+            launch.spec,
+            &manifest,
+            Some(&cancel_path),
+            Some(&pid_path),
+            Some(&receipt.identity),
+        )
         .await?;
     let _ = fs::remove_file(cancel_path);
+    let _ = fs::remove_file(paths.supervisor(result.task_id));
     print_value(&serde_json::to_value(result)?, json_output);
     Ok(())
 }
@@ -402,7 +427,73 @@ fn spawn_supervisor(paths: &Paths, launch_path: &Path) -> Result<()> {
     Ok(())
 }
 
+fn reconcile_pending(paths: &Paths) -> Result<()> {
+    let mut supervisor = Supervisor::open(&paths.store)?;
+    supervisor.reconcile_after_restart(|attempt| observe_attempt(paths, attempt))?;
+    Ok(())
+}
+
+fn observe_attempt(paths: &Paths, attempt: &UnfinishedAttempt) -> ExecutionObservation {
+    let Some(launch) = &attempt.launch else {
+        return ExecutionObservation::Unknown;
+    };
+    let Some(expected) = &launch.runner_identity else {
+        return ExecutionObservation::Unknown;
+    };
+    let receipt: ProcessReceipt = match fs::read(paths.supervisor(attempt.task.task_id))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+    {
+        Some(receipt) => receipt,
+        None => return ExecutionObservation::Unknown,
+    };
+    if receipt.task_id != attempt.task.task_id || receipt.identity != *expected {
+        return ExecutionObservation::Unknown;
+    }
+    let Ok(pid) = receipt.identity.handle.parse::<u32>() else {
+        return ExecutionObservation::Unknown;
+    };
+    match process_identity(pid) {
+        Ok(actual) if actual == *expected => ExecutionObservation::Alive(actual),
+        Ok(_) => ExecutionObservation::NotObserved,
+        Err(_) => ExecutionObservation::Unknown,
+    }
+}
+
+fn process_identity(pid: u32) -> Result<RunnerIdentity> {
+    let pid_text = pid.to_string();
+    let start = ps_field(&pid_text, "lstart")?;
+    let executable = ps_field(&pid_text, "comm")?;
+    if Path::new(&executable)
+        .file_name()
+        .is_none_or(|name| name != "brgr")
+    {
+        bail!("process {pid} is not brgr");
+    }
+    Ok(RunnerIdentity {
+        namespace: "brgr.supervisor".to_owned(),
+        handle: pid_text,
+        birth_marker: start,
+    })
+}
+
+fn ps_field(pid: &str, field: &str) -> Result<String> {
+    let output = ProcessCommand::new("/bin/ps")
+        .args(["-ww", "-p", pid, "-o"])
+        .arg(format!("{field}="))
+        .output()?;
+    if !output.status.success() {
+        bail!("process {pid} is not observable");
+    }
+    let text = String::from_utf8(output.stdout)?.trim().to_owned();
+    if text.is_empty() {
+        bail!("process {pid} has no {field} identity");
+    }
+    Ok(text)
+}
+
 fn status(paths: &Paths, task: Option<TaskId>, json_output: bool) -> Result<()> {
+    reconcile_pending(paths)?;
     let store = Store::open(&paths.store)?;
     if let Some(task_id) = task {
         let spec = store.task(task_id)?;
@@ -576,6 +667,7 @@ fn integrate(paths: &Paths, command: IntegrateCommand, json_output: bool) -> Res
 }
 
 fn doctor(paths: &Paths, json_output: bool) -> Result<()> {
+    reconcile_pending(paths)?;
     let store_ok = Store::open(&paths.store).is_ok();
     let registry_ok = Registry::open(&paths.registry).is_ok();
     let integration = codex_integration::status(&paths.home)?;
@@ -613,6 +705,7 @@ fn hook(paths: &Paths, event: HookEvent) -> Result<()> {
         return Ok(());
     };
     let owner = OwnerId::new(format!("codex:{session_id}"))?;
+    reconcile_pending(paths)?;
     let store = Store::open(&paths.store)?;
     if event == HookEvent::SessionStart {
         let epoch = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();

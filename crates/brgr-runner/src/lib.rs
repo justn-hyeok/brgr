@@ -200,7 +200,15 @@ impl ProcessRunner {
         }
         let (stdout, stdout_truncated) = join_capture(stdout_task.await)?;
         let (stderr, stderr_truncated) = join_capture(stderr_task.await)?;
-        let result = collect_result(manifest, request.workspace, &substitutions, &stdout)?;
+        let successful_exit = status
+            .as_ref()
+            .and_then(std::process::ExitStatus::code)
+            .is_some_and(|code| manifest.result.success_exit_codes.contains(&code));
+        let result = if !cancelled && !timed_out && !stdout_truncated && successful_exit {
+            collect_result(manifest, request.workspace, &substitutions, &stdout)?
+        } else {
+            Vec::new()
+        };
 
         Ok(ExecutionOutput {
             exit_code: status.and_then(|value| value.code()),
@@ -643,6 +651,7 @@ mod tests {
             .unwrap();
         let mut manifest = echo_manifest(4_096);
         manifest.executable = fixture;
+        manifest.result.source = ResultSource::JsonlAssistantFinal;
         manifest.launch.argv = vec![
             "-p".to_owned(),
             "--mode=json".to_owned(),
