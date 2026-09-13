@@ -223,7 +223,13 @@ async fn main() -> Result<()> {
         Command::Integrate { command } => integrate(&paths, command, cli.json),
         Command::Doctor => doctor(&paths, cli.json),
         Command::Supervise { launch } => supervise(&paths, &launch, cli.json).await,
-        Command::Hook { event } => hook(&paths, event),
+        Command::Hook { event } => {
+            if hook(&paths, event).is_err() {
+                eprintln!("brgr hook could not read the inbox; run `brgr doctor`");
+                println!("{{}}");
+            }
+            Ok(())
+        }
         Command::OmpRun {
             prompt_file,
             workspace,
@@ -371,6 +377,7 @@ fn result(paths: &Paths, task: TaskId, ack: bool, json_output: bool) -> Result<(
     let spec = store.task(task)?;
     let result = store.latest_result(task)?;
     if ack {
+        require_owner(&spec.owner_id)?;
         store.acknowledge(&spec.owner_id, result.result_id)?;
     }
     print_value(&serde_json::to_value(result)?, json_output);
@@ -378,15 +385,14 @@ fn result(paths: &Paths, task: TaskId, ack: bool, json_output: bool) -> Result<(
 }
 
 fn cancel(paths: &Paths, task: TaskId, json_output: bool) -> Result<()> {
-    if let Ok(store) = Store::open(&paths.store) {
-        if let Ok(spec) = store.task(task)
-            && spec.route.harness_id == "local.omp"
-        {
-            bail!("OMP cancellation is not certified in v1");
-        }
-        if store.attempt_state(task).ok() == Some(brgr_protocol::AttemptState::Terminal) {
-            bail!("task {task} is already terminal");
-        }
+    let store = Store::open(&paths.store)?;
+    let spec = store.task(task)?;
+    require_owner(&spec.owner_id)?;
+    if spec.route.harness_id == "local.omp" {
+        bail!("OMP cancellation is not certified in v1");
+    }
+    if store.attempt_state(task)? == brgr_protocol::AttemptState::Terminal {
+        bail!("task {task} is already terminal");
     }
     fs::write(paths.cancel(task), b"cancel\n")?;
     print_value(
@@ -408,6 +414,7 @@ fn decide(
     }
     let store = Store::open(&paths.store)?;
     let spec = store.task(task)?;
+    require_owner(&spec.owner_id)?;
     let result = store.latest_result(task)?;
     if result.outcome != TerminalOutcome::Candidate {
         bail!("only candidate results can be accepted or rejected");
@@ -500,7 +507,13 @@ fn hook(paths: &Paths, event: HookEvent) -> Result<()> {
         println!("{{}}");
         return Ok(());
     }
-    let summary = serde_json::to_string(&pending)?;
+    let handles = pending
+        .iter()
+        .take(10)
+        .map(|item| format!("{}:{:?}", item.result.task_id, item.result.outcome))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let summary = format!("{} pending result(s): {handles}", pending.len());
     match event {
         HookEvent::Stop => println!(
             "{}",
@@ -510,7 +523,7 @@ fn hook(paths: &Paths, event: HookEvent) -> Result<()> {
                 "hookSpecificOutput": {
                     "hookEventName": "Stop",
                     "decision": "block",
-                    "reason": format!("Pending brgr inbox: {summary}"),
+                    "reason": format!("Pending brgr inbox: {summary}. Use brgr result TASK, then accept/reject or ack."),
                 }
             })
         ),
@@ -855,6 +868,14 @@ fn owner_from_environment() -> Result<OwnerId> {
         })
         .unwrap_or_else(|| "codex:manual".to_owned());
     Ok(OwnerId::new(owner)?)
+}
+
+fn require_owner(expected: &OwnerId) -> Result<()> {
+    let caller = owner_from_environment()?;
+    if &caller != expected {
+        bail!("task belongs to {expected}; current caller is {caller}");
+    }
+    Ok(())
 }
 
 fn write_json_atomic(path: &Path, value: &impl Serialize) -> Result<()> {

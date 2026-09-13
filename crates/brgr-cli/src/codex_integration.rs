@@ -48,10 +48,19 @@ pub fn install(brgr_home: &Path) -> Result<Value> {
     let codex_home = codex_home()?;
     let hooks_path = codex_home.join("hooks.json");
     let skill_path = codex_home.join("skills/brgr/SKILL.md");
+    if skill_path.exists() && fs::read_to_string(&skill_path)? != SKILL_TEXT {
+        bail!("refusing to overwrite a modified ~/.codex/skills/brgr/SKILL.md");
+    }
+    let original_skill_exists = skill_path.exists();
+    let original_hooks = if hooks_path.exists() {
+        Some(fs::read(&hooks_path)?)
+    } else {
+        None
+    };
     let executable = env::current_exe()?;
     let commands = hook_commands(&executable, brgr_home);
-    let mut document = if hooks_path.exists() {
-        serde_json::from_slice::<Value>(&fs::read(&hooks_path)?)?
+    let mut document = if let Some(bytes) = &original_hooks {
+        serde_json::from_slice::<Value>(bytes)?
     } else {
         json!({"hooks": {}})
     };
@@ -87,31 +96,40 @@ pub fn install(brgr_home: &Path) -> Result<Value> {
 
     fs::create_dir_all(&codex_home)?;
     let backup = if hooks_path.exists() && added > 0 {
-        let stamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+        let stamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
         let path = hooks_path.with_file_name(format!("hooks.json.brgr-backup-{stamp}"));
         fs::copy(&hooks_path, &path)?;
         Some(path)
     } else {
         None
     };
-    write_json_atomic(&hooks_path, &document)?;
-
     let skill_dir = skill_path.parent().context("skill path has no parent")?;
     fs::create_dir_all(skill_dir)?;
     fs::set_permissions(skill_dir, fs::Permissions::from_mode(0o700))?;
-    if skill_path.exists() && fs::read_to_string(&skill_path)? != SKILL_TEXT {
-        bail!("refusing to overwrite a modified ~/.codex/skills/brgr/SKILL.md");
-    }
-    write_bytes_atomic(&skill_path, SKILL_TEXT.as_bytes())?;
-
     let receipt = Receipt {
-        hooks_path,
-        skill_path,
+        hooks_path: hooks_path.clone(),
+        skill_path: skill_path.clone(),
         commands,
         skill_text: SKILL_TEXT.to_owned(),
     };
     let receipt_path = brgr_home.join("codex-integration.json");
-    write_json_atomic(&receipt_path, &serde_json::to_value(&receipt)?)?;
+    let changed = (|| -> Result<()> {
+        write_bytes_atomic(&skill_path, SKILL_TEXT.as_bytes())?;
+        write_json_atomic(&hooks_path, &document)?;
+        write_json_atomic(&receipt_path, &serde_json::to_value(&receipt)?)?;
+        Ok(())
+    })();
+    if let Err(error) = changed {
+        if let Some(bytes) = original_hooks {
+            write_bytes_atomic(&hooks_path, &bytes)?;
+        } else if hooks_path.exists() {
+            fs::remove_file(&hooks_path)?;
+        }
+        if !original_skill_exists && skill_path.exists() {
+            fs::remove_file(&skill_path)?;
+        }
+        return Err(error);
+    }
     Ok(json!({
         "status": "installed",
         "hooks_added": added,
