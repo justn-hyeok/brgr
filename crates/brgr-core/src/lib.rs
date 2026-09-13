@@ -420,58 +420,27 @@ impl Supervisor {
         let revision = TaskRevision::new(spec.clone())?;
         let request_bytes = serde_json::to_vec(&spec)?;
         self.store.record_task(&spec, &sha256(&request_bytes))?;
+        let control = AttemptControl {
+            cancel_path,
+            pid_path,
+            runner_identity,
+        };
 
-        let attempt_id = AttemptId::new();
-        let mut attempt = Attempt::new(revision, attempt_id, 1)?;
-        let mut producer_seq = 0_u64;
-        self.store
-            .claim_attempt(spec.task_id, spec.revision, attempt_id)?;
-        transition(
-            &self.store,
-            &mut attempt,
-            AttemptState::Starting,
-            &mut producer_seq,
-        )?;
-        let launch_nonce = uuid::Uuid::new_v4().to_string();
-        self.store
-            .record_launch_intent(attempt_id, &launch_nonce, self.epoch)?;
-        if let Some(identity) = runner_identity {
-            self.store
-                .record_runner_identity(attempt_id, &launch_nonce, identity)?;
+        for number in 1..=spec.budget.max_attempts {
+            let (result, retryable) = run_single_attempt(
+                &mut self.store,
+                self.epoch,
+                &revision,
+                manifest,
+                number,
+                control,
+            )
+            .await?;
+            if !retryable || number == spec.budget.max_attempts {
+                return Ok(result);
+            }
         }
-        transition(
-            &self.store,
-            &mut attempt,
-            AttemptState::Running,
-            &mut producer_seq,
-        )?;
-
-        let execution = ProcessRunner::run(
-            manifest,
-            RunRequest {
-                workspace: Path::new(&spec.workspace),
-                prompt: &spec.objective,
-                model: spec.route.requested_model.as_deref(),
-                effort: spec.route.requested_effort.as_deref(),
-                deadline: Duration::from_secs(spec.budget.deadline_seconds),
-                cancel_path,
-                pid_path,
-            },
-        )
-        .await;
-
-        let result = finish_execution(
-            &self.store,
-            &spec,
-            manifest,
-            &mut attempt,
-            &mut producer_seq,
-            execution,
-        )?;
-
-        attempt.record_terminal(result.clone())?;
-        self.store.commit_terminal_result(&spec.owner_id, &result)?;
-        Ok(result)
+        Err(SupervisorError::NoAttempt)
     }
 
     #[must_use]
@@ -483,6 +452,90 @@ impl Supervisor {
     pub fn store_mut(&mut self) -> &mut Store {
         &mut self.store
     }
+}
+
+#[derive(Clone, Copy)]
+struct AttemptControl<'a> {
+    cancel_path: Option<&'a Path>,
+    pid_path: Option<&'a Path>,
+    runner_identity: Option<&'a RunnerIdentity>,
+}
+
+async fn run_single_attempt(
+    store: &mut Store,
+    epoch: u64,
+    revision: &TaskRevision,
+    manifest: &HarnessManifest,
+    number: u8,
+    control: AttemptControl<'_>,
+) -> Result<(ResultEnvelope, bool), SupervisorError> {
+    let spec = revision.spec();
+
+    let attempt_id = AttemptId::new();
+    let mut attempt = Attempt::new(revision.clone(), attempt_id, number)?;
+    let mut producer_seq = 0_u64;
+    store.claim_attempt(spec.task_id, spec.revision, attempt_id)?;
+    transition(
+        store,
+        &mut attempt,
+        AttemptState::Starting,
+        &mut producer_seq,
+    )?;
+    let launch_nonce = uuid::Uuid::new_v4().to_string();
+    store.record_launch_intent(attempt_id, &launch_nonce, epoch)?;
+    if let Some(identity) = control.runner_identity {
+        store.record_runner_identity(attempt_id, &launch_nonce, identity)?;
+    }
+    transition(
+        store,
+        &mut attempt,
+        AttemptState::Running,
+        &mut producer_seq,
+    )?;
+
+    let execution = ProcessRunner::run(
+        manifest,
+        RunRequest {
+            workspace: Path::new(&spec.workspace),
+            prompt: &spec.objective,
+            model: spec.route.requested_model.as_deref(),
+            effort: spec.route.requested_effort.as_deref(),
+            deadline: Duration::from_secs(spec.budget.deadline_seconds),
+            cancel_path: control.cancel_path,
+            pid_path: control.pid_path,
+        },
+    )
+    .await;
+
+    let retryable = is_retryable_spawn_failure(&execution);
+
+    let result = finish_execution(
+        store,
+        spec,
+        manifest,
+        &mut attempt,
+        &mut producer_seq,
+        execution,
+    )?;
+
+    attempt.record_terminal(result.clone())?;
+    store.commit_terminal_result(&spec.owner_id, &result)?;
+    Ok((result, retryable))
+}
+
+fn is_retryable_spawn_failure(
+    execution: &Result<brgr_runner::ExecutionOutput, RunnerError>,
+) -> bool {
+    matches!(
+        execution,
+        Err(RunnerError::SpawnIo(error))
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::Interrupted
+                    | std::io::ErrorKind::WouldBlock
+                    | std::io::ErrorKind::TimedOut
+            )
+    )
 }
 
 fn finish_execution(
@@ -615,6 +668,8 @@ fn sha256(bytes: &[u8]) -> String {
 
 #[derive(Debug, thiserror::Error)]
 pub enum SupervisorError {
+    #[error("task budget contained no attempt")]
+    NoAttempt,
     #[error(transparent)]
     Core(#[from] CoreError),
     #[error(transparent)]
@@ -655,6 +710,22 @@ mod tests {
                 max_attempts: 2,
             },
         }
+    }
+
+    #[test]
+    fn only_pre_spawn_transient_errors_are_retryable() {
+        let transient = Err(RunnerError::SpawnIo(std::io::Error::from(
+            std::io::ErrorKind::WouldBlock,
+        )));
+        assert!(is_retryable_spawn_failure(&transient));
+        let denied = Err(RunnerError::SpawnIo(std::io::Error::from(
+            std::io::ErrorKind::PermissionDenied,
+        )));
+        assert!(!is_retryable_spawn_failure(&denied));
+        let after_spawn = Err(RunnerError::Io(std::io::Error::from(
+            std::io::ErrorKind::WouldBlock,
+        )));
+        assert!(!is_retryable_spawn_failure(&after_spawn));
     }
 
     fn result_for(attempt: &Attempt, outcome: TerminalOutcome) -> ResultEnvelope {

@@ -238,6 +238,24 @@ impl Store {
         revision: u32,
         attempt_id: AttemptId,
     ) -> Result<(), StoreError> {
+        let spec_json = self
+            .connection
+            .query_row(
+                "SELECT spec_json FROM tasks WHERE task_id = ?1 AND revision = ?2",
+                params![task_id.to_string(), revision],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .ok_or(StoreError::TaskNotFound(task_id))?;
+        let task: TaskSpec = serde_json::from_str(&spec_json)?;
+        let count: i64 = self.connection.query_row(
+            "SELECT COUNT(*) FROM attempts WHERE task_id = ?1 AND revision = ?2",
+            params![task_id.to_string(), revision],
+            |row| row.get(0),
+        )?;
+        if count >= i64::from(task.budget.max_attempts) {
+            return Err(StoreError::AttemptBudgetExhausted { task_id, revision });
+        }
         let inserted = self.connection.execute(
             "INSERT INTO attempts (attempt_id, task_id, revision, state)
              VALUES (?1, ?2, ?3, ?4)",
@@ -1236,6 +1254,8 @@ pub enum StoreError {
     },
     #[error("task {0} does not exist")]
     TaskNotFound(TaskId),
+    #[error("task {task_id} revision {revision} exhausted its attempt budget")]
+    AttemptBudgetExhausted { task_id: TaskId, revision: u32 },
     #[error("task list limit is invalid")]
     InvalidTaskLimit,
     #[error("numeric value exceeds SQLite integer range")]
@@ -1762,6 +1782,36 @@ mod tests {
         assert!(matches!(
             store.record_task(&task, "changed"),
             Err(StoreError::IdempotencyConflict(_))
+        ));
+    }
+
+    #[test]
+    fn task_cannot_exceed_its_total_attempt_budget() {
+        let root = TempDir::new().unwrap();
+        let mut store = Store::open(root.path()).unwrap();
+        let task = task();
+        store.record_task(&task, "bounded-attempts").unwrap();
+        for _ in 0..2 {
+            let attempt_id = AttemptId::new();
+            store
+                .claim_attempt(task.task_id, task.revision, attempt_id)
+                .unwrap();
+            for (from, to) in [
+                (AttemptState::Queued, AttemptState::Starting),
+                (AttemptState::Starting, AttemptState::Running),
+                (AttemptState::Running, AttemptState::Collecting),
+            ] {
+                store
+                    .compare_and_set_attempt_state(attempt_id, from, to)
+                    .unwrap();
+            }
+            store
+                .commit_terminal_result(&task.owner_id, &result(&task, attempt_id))
+                .unwrap();
+        }
+        assert!(matches!(
+            store.claim_attempt(task.task_id, task.revision, AttemptId::new()),
+            Err(StoreError::AttemptBudgetExhausted { .. })
         ));
     }
 

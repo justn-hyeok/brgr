@@ -177,7 +177,7 @@ impl ProcessRunner {
             }
         }
 
-        let mut child = command.spawn()?;
+        let mut child = command.spawn().map_err(RunnerError::SpawnIo)?;
         if let Some(path) = request.pid_path {
             std::fs::write(path, format!("{}\n", child.id().unwrap_or_default()))?;
         }
@@ -519,6 +519,8 @@ fn join_capture(
 
 #[derive(Debug, Error)]
 pub enum RunnerError {
+    #[error("child process could not start: {0}")]
+    SpawnIo(std::io::Error),
     #[error("unsupported manifest schema: {0}")]
     UnsupportedSchema(String),
     #[error("unsupported adapter: {0}")]
