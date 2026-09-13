@@ -749,6 +749,24 @@ impl Store {
         Ok(outcome)
     }
 
+    /// Returns the stored decision for one terminal result, if any.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the stored decision is invalid or storage fails.
+    pub fn decision_for_result(&self, result_id: ResultId) -> Result<Option<Decision>, StoreError> {
+        let json = self
+            .connection
+            .query_row(
+                "SELECT decision_json FROM decisions WHERE result_id = ?1",
+                [result_id.to_string()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        json.map(|value| serde_json::from_str(&value).map_err(StoreError::from))
+            .transpose()
+    }
+
     /// Reads a sealed artifact and verifies its reference, size, and digest.
     ///
     /// # Errors

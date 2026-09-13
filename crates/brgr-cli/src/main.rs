@@ -536,6 +536,8 @@ fn result(paths: &Paths, task: TaskId, ack: bool, json_output: bool) -> Result<(
         store.acknowledge(&spec.owner_id, result.result_id)?;
         if let Err(error) = pane_cleanup::mark_pending(&paths.runs, task, &result) {
             eprintln!("brgr pane cleanup queue could not be updated: {error}");
+        } else if let Err(error) = pane_cleanup::close_if_eligible(&store, &paths.runs, task) {
+            eprintln!("brgr pane cleanup remains pending: {error}");
         }
     }
     print_value(
@@ -600,6 +602,8 @@ fn decide(
     store.record_decision_and_ack(&decision)?;
     if let Err(error) = pane_cleanup::mark_pending(&paths.runs, task, &result) {
         eprintln!("brgr pane cleanup queue could not be updated: {error}");
+    } else if let Err(error) = pane_cleanup::close_if_eligible(&store, &paths.runs, task) {
+        eprintln!("brgr pane cleanup remains pending: {error}");
     }
     print_value(&serde_json::to_value(decision)?, json_output);
     Ok(())
@@ -688,10 +692,10 @@ fn cleanup(paths: &Paths, command: CleanupCommand, json_output: bool) -> Result<
     let store = Store::open(&paths.store)?;
     let spec = store.task(task)?;
     require_owner(&spec.owner_id)?;
-    let status = pane_cleanup::status(&paths.runs, task)?;
-    if matches!(command, CleanupCommand::Run { .. }) {
-        bail!("conditional Herdr pane.close is unavailable; cleanup remains queued: {status}");
-    }
+    let status = match command {
+        CleanupCommand::Status { .. } => pane_cleanup::status(&store, &paths.runs, task)?,
+        CleanupCommand::Run { .. } => pane_cleanup::close_if_eligible(&store, &paths.runs, task)?,
+    };
     print_value(&json!({"task_id": task, "cleanup": status}), json_output);
     Ok(())
 }
@@ -843,6 +847,7 @@ fn run_omp_adapter(
         options.effort,
     )?;
     pane_cleanup::record_spawn(
+        &Store::open(&paths.store)?,
         &paths.runs,
         task,
         &agent,
