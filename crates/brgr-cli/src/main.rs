@@ -111,6 +111,8 @@ struct RunArgs {
     deadline_seconds: u64,
     #[arg(long)]
     workspace: Option<PathBuf>,
+    #[arg(long)]
+    allow_clean_head_snapshot: bool,
     #[arg(long, hide = true)]
     foreground: bool,
 }
@@ -256,16 +258,15 @@ async fn run_task(paths: &Paths, args: RunArgs, json_output: bool) -> Result<()>
         .with_context(|| format!("harness {} is not active and healthy", args.harness))?;
     let task_id = TaskId::new();
     let source_workspace = args.workspace.unwrap_or(env::current_dir()?);
-    let workspace = prepare_workspace(paths, &source_workspace, task_id, &args.harness)?;
     let owner_id = owner_from_environment()?;
-    let spec = TaskSpec {
+    let mut spec = TaskSpec {
         schema: SCHEMA_V1.to_owned(),
         task_id,
         revision: 1,
         create_request_id: format!("run-{task_id}"),
         owner_id,
         objective: args.objective,
-        workspace: workspace.to_string_lossy().into_owned(),
+        workspace: source_workspace.to_string_lossy().into_owned(),
         route: Route {
             harness_id: args.harness.clone(),
             requested_model: args.model,
@@ -283,6 +284,14 @@ async fn run_task(paths: &Paths, args: RunArgs, json_output: bool) -> Result<()>
         },
     };
     spec.validate()?;
+    let workspace = prepare_workspace(
+        paths,
+        &source_workspace,
+        task_id,
+        &args.harness,
+        args.allow_clean_head_snapshot,
+    )?;
+    spec.workspace = workspace.to_string_lossy().into_owned();
     let launch = LaunchEnvelope {
         spec,
         harness_id: args.harness,
@@ -778,6 +787,7 @@ fn prepare_workspace(
     source: &Path,
     task_id: TaskId,
     harness_id: &str,
+    allow_clean_head_snapshot: bool,
 ) -> Result<PathBuf> {
     let source = source.canonicalize()?;
     let root_output = ProcessCommand::new("git")
@@ -792,6 +802,15 @@ fn prepare_workspace(
         return Ok(source);
     }
     let root = PathBuf::from(String::from_utf8(root_output.stdout)?.trim());
+    let dirty = command_output(
+        "git",
+        &["-C", &root.to_string_lossy(), "status", "--porcelain"],
+    )?;
+    if !dirty.trim().is_empty() && !allow_clean_head_snapshot {
+        bail!(
+            "source worktree contains uncommitted changes; commit or capture them first, or pass --allow-clean-head-snapshot to explicitly exclude them"
+        );
+    }
     let revision = command_output("git", &["-C", &root.to_string_lossy(), "rev-parse", "HEAD"])?;
     let worktree_list = command_output(
         "git",

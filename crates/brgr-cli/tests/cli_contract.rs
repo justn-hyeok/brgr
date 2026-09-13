@@ -120,3 +120,41 @@ fn real_cli_run_binds_candidate_to_its_owner() {
     ));
     assert_eq!(accepted["verdict"], "accepted");
 }
+
+#[test]
+fn dirty_source_is_rejected_before_creating_a_task_worktree() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("brgr");
+    let repository = temp.path().join("repo");
+    fs::create_dir_all(&repository).unwrap();
+    let initialized = Command::new("git")
+        .arg("-C")
+        .arg(&repository)
+        .args(["init", "-b", "main"])
+        .output()
+        .unwrap();
+    assert!(initialized.status.success());
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../testdata/fixtures/gjc")
+        .canonicalize()
+        .unwrap();
+    json_output(&run(
+        &home,
+        &["harness", "add", fixture.to_str().unwrap()],
+        &[],
+    ));
+    fs::write(repository.join("user-note.txt"), b"uncommitted work\n").unwrap();
+
+    let rejected = run(
+        &home,
+        &["run", "check", "--workspace", repository.to_str().unwrap()],
+        &[("BRGR_OWNER_ID", "codex:dirty-test")],
+    );
+    assert!(!rejected.status.success());
+    assert!(
+        String::from_utf8_lossy(&rejected.stderr).contains("uncommitted changes"),
+        "{}",
+        String::from_utf8_lossy(&rejected.stderr)
+    );
+    assert!(!home.join("worktrees/repo").exists());
+}
