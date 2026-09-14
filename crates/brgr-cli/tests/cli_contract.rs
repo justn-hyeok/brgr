@@ -267,6 +267,12 @@ fn real_cli_run_binds_candidate_to_its_owner() {
         &[("BRGR_OWNER_ID", "codex:owner-a")],
     ));
     assert_eq!(accepted["verdict"], "accepted");
+    let replay = json_output(&run(
+        &home,
+        &["accept", task, "--reason", "sealed fixture result checked"],
+        &[("BRGR_OWNER_ID", "codex:owner-a")],
+    ));
+    assert_eq!(replay["decision_id"], accepted["decision_id"]);
 }
 
 #[test]
@@ -988,6 +994,82 @@ fn omp_process_can_cancel_without_a_herdr_pane() {
     assert_eq!(final_result.unwrap()["result"]["outcome"], "cancelled");
     let acknowledged = json_output(&run(&home, &["result", task, "--ack"], &owner));
     assert_eq!(acknowledged["result"]["outcome"], "cancelled");
+}
+
+#[test]
+fn omp_fallback_model_cannot_be_sealed_as_requested_model() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("brgr");
+    let workspace = temp.path().join("work");
+    let scratch = temp.path().join("scratch");
+    fs::create_dir_all(&workspace).unwrap();
+    fs::create_dir_all(&scratch).unwrap();
+    let executable = temp.path().join("omp");
+    fs::write(
+        &executable,
+        "#!/bin/sh\ncase \"$1\" in\n --version) echo 'omp fixture 1'; exit 0;;\n --help) printf '%s\\n' '-p, --print' '--mode=<value>' '--no-session' '--no-prewalk' '--no-extensions' '--no-title' '--model=<value>' '--thinking=<value>'; exit 0;;\nesac\nprintf '%s\\n' '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"provider\":\"other\",\"model\":\"fallback\",\"content\":[{\"type\":\"text\",\"text\":\"SHOULD_NOT_ACCEPT\"}]}}' '{\"type\":\"agent_end\",\"stopReason\":\"completed\"}'\n",
+    )
+    .unwrap();
+    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+    json_output(&run(
+        &home,
+        &[
+            "harness",
+            "add",
+            executable.to_str().unwrap(),
+            "--workspace",
+            scratch.to_str().unwrap(),
+            "--prompt",
+            "fixture",
+        ],
+        &[],
+    ));
+    let owner = [("BRGR_OWNER_ID", "codex:wrong-model")];
+    let result = json_output(&run(
+        &home,
+        &[
+            "run",
+            "must use WorkBuddy",
+            "--harness",
+            "local.omp",
+            "--workspace",
+            workspace.to_str().unwrap(),
+            "--model",
+            "workbuddy/deepseek-v4.1-flash",
+            "--foreground",
+        ],
+        &owner,
+    ));
+    assert_eq!(result["outcome"], "failed");
+    assert!(result["artifacts"].as_array().unwrap().is_empty());
+    assert!(result["error"].as_str().unwrap().contains("other/fallback"));
+    let task = result["task_id"].as_str().unwrap();
+    assert!(!run(&home, &["accept", task], &owner).status.success());
+
+    let matched = json_output(&run(
+        &home,
+        &[
+            "run",
+            "record native route",
+            "--harness",
+            "local.omp",
+            "--workspace",
+            workspace.to_str().unwrap(),
+            "--model",
+            "other/fallback",
+            "--foreground",
+        ],
+        &owner,
+    ));
+    assert_eq!(matched["outcome"], "candidate");
+    let detail = json_output(&run(
+        &home,
+        &["result", matched["task_id"].as_str().unwrap()],
+        &owner,
+    ));
+    assert_eq!(detail["route_observation"]["model"], "other/fallback");
+    assert_eq!(detail["route_observation"]["model_source"], "harness_jsonl");
+    assert_eq!(detail["route_observation"]["effort_source"], "unavailable");
 }
 
 #[test]

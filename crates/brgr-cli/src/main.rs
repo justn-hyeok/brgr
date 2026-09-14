@@ -793,6 +793,8 @@ fn record_unstarted_terminal(
         outcome,
         artifacts: vec![],
         error: Some(reason),
+        legacy_embedded_route_observation: None,
+        route_observation: Some(brgr_protocol::RouteObservation::unavailable()),
         unresolved_effects: if outcome == TerminalOutcome::Lost {
             vec!["execution identity was not established".to_owned()]
         } else {
@@ -898,6 +900,9 @@ fn result(paths: &Paths, task: TaskId, ack: bool, json_output: bool) -> Result<(
     let spec = store.task(task)?;
     let (session_id, binding_epoch) = require_owner(&store, &spec.owner_id)?;
     let result = store.latest_result(task)?;
+    let route_observation = store
+        .route_observation(result.result_id)?
+        .or_else(|| result.legacy_embedded_route_observation.clone());
     let artifacts = result
         .artifacts
         .iter()
@@ -918,7 +923,7 @@ fn result(paths: &Paths, task: TaskId, ack: bool, json_output: bool) -> Result<(
         }
     }
     print_value(
-        &json!({"result": result, "artifacts": artifacts}),
+        &json!({"result": result, "artifacts": artifacts, "route_observation": route_observation}),
         json_output,
     );
     Ok(())
@@ -1016,12 +1021,15 @@ fn decide(
         reason,
     };
     store.record_decision_and_ack(&decision)?;
+    let persisted = store
+        .decision_for_result(result.result_id)?
+        .context("decision was not readable after commit")?;
     if let Err(error) = pane_cleanup::mark_pending(&paths.runs, task, &result) {
         eprintln!("brgr pane cleanup queue could not be updated: {error}");
     } else if let Err(error) = pane_cleanup::close_if_eligible(&store, &paths.runs, task) {
         eprintln!("brgr pane cleanup remains pending: {error}");
     }
-    print_value(&serde_json::to_value(decision)?, json_output);
+    print_value(&serde_json::to_value(persisted)?, json_output);
     Ok(())
 }
 

@@ -29,4 +29,3 @@
     "unresolved_effects": { "type": "array", "items": { "type": "string" } }
   }
 }
-
