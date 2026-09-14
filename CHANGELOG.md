@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.0.3 — 2026-09-14
+
+Bind each owner to a Codex session epoch. Unbound or stale sessions can no
+longer read, acknowledge, cancel, revise, or decide a task through the CLI.
+`brgr bind TASK` explicitly transfers ownership without rewriting pending
+results or decisions. Decision and acknowledgment transactions verify the
+current epoch; a late old SessionStart hook cannot take it back. Existing
+manual tasks require one explicit bind before follow-up. The unsigned,
+cooperative-local platform and optional best-effort Herdr cleanup are unchanged.
+
 ## 1.0.2 — 2026-09-14
 
 Approved agents can activate an authored declarative process manifest after
