@@ -238,6 +238,14 @@ pub struct ResultEnvelope {
     pub outcome: TerminalOutcome,
     pub artifacts: Vec<ArtifactRef>,
     pub error: Option<String>,
+    /// Preserves bytes written by an unreleased intermediate v1 build.
+    /// New results never populate this field.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "route_observation"
+    )]
+    pub legacy_embedded_route_observation: Option<RouteObservation>,
     /// Transient native evidence; the store commits it separately from the
     /// versioned result envelope so older binaries retain its decision digest.
     #[serde(skip)]
@@ -398,6 +406,7 @@ mod tests {
             outcome: TerminalOutcome::Failed,
             artifacts: vec![],
             error: Some("old result".to_owned()),
+            legacy_embedded_route_observation: None,
             route_observation: None,
             unresolved_effects: vec![],
         };
@@ -413,5 +422,12 @@ mod tests {
             effort_source: ObservationSource::Unavailable,
         });
         assert_eq!(serde_json::to_vec(&observed).unwrap(), bytes);
+        observed.legacy_embedded_route_observation = observed.route_observation.clone();
+        let intermediate_bytes = serde_json::to_vec(&observed).unwrap();
+        let intermediate: ResultEnvelope = serde_json::from_slice(&intermediate_bytes).unwrap();
+        assert_eq!(
+            serde_json::to_vec(&intermediate).unwrap(),
+            intermediate_bytes
+        );
     }
 }

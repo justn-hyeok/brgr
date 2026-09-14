@@ -2278,6 +2278,7 @@ mod tests {
         let lost = ResultEnvelope {
             result_id: ResultId::new(),
             outcome: TerminalOutcome::Lost,
+            legacy_embedded_route_observation: None,
             route_observation: None,
             unresolved_effects: vec!["unknown".to_owned()],
             ..completed.clone()
@@ -2321,6 +2322,7 @@ mod tests {
             .unwrap();
         let lost = ResultEnvelope {
             outcome: TerminalOutcome::Lost,
+            legacy_embedded_route_observation: None,
             route_observation: None,
             unresolved_effects: vec!["unknown".to_owned()],
             ..result(&task, attempt_id)
@@ -2586,6 +2588,7 @@ mod tests {
         let lost = ResultEnvelope {
             outcome: TerminalOutcome::Lost,
             error: Some("supervisor disappeared".to_owned()),
+            legacy_embedded_route_observation: None,
             route_observation: None,
             unresolved_effects: vec!["execution identity unknown".to_owned()],
             ..result(&task, attempt_id)
@@ -2635,6 +2638,7 @@ mod tests {
             outcome: TerminalOutcome::Candidate,
             artifacts: vec![],
             error: None,
+            legacy_embedded_route_observation: None,
             route_observation: None,
             unresolved_effects: vec![],
         }
@@ -2702,5 +2706,52 @@ mod tests {
             store.route_observation(result.result_id),
             Err(StoreError::RouteObservationIntegrityMismatch)
         ));
+    }
+
+    #[test]
+    fn unreleased_embedded_route_result_retains_its_original_decision_digest() {
+        let root = TempDir::new().unwrap();
+        let mut store = Store::open(root.path()).unwrap();
+        let task = task();
+        store.record_task(&task, "intermediate-result").unwrap();
+        let attempt_id = AttemptId::new();
+        store
+            .claim_attempt(task.task_id, task.revision, attempt_id)
+            .unwrap();
+        let mut result = sealed_result(&store, &task, attempt_id);
+        result.legacy_embedded_route_observation = Some(RouteObservation {
+            model: Some("workbuddy/deepseek-v4.1-flash".to_owned()),
+            model_source: ObservationSource::HarnessJsonl,
+            effort: None,
+            effort_source: ObservationSource::Unavailable,
+        });
+        let original_digest = Store::result_digest(&result).unwrap();
+        store
+            .commit_terminal_result(&task.owner_id, &result)
+            .unwrap();
+        assert!(store.route_observation(result.result_id).unwrap().is_none());
+        let reopened = store.latest_result(task.task_id).unwrap();
+        assert_eq!(Store::result_digest(&reopened).unwrap(), original_digest);
+        assert_eq!(
+            reopened.legacy_embedded_route_observation,
+            result.legacy_embedded_route_observation
+        );
+        store.bind_owner(&task.owner_id, "session-a", 1).unwrap();
+        store
+            .record_decision_and_ack(&Decision {
+                schema: SCHEMA_V1.to_owned(),
+                decision_id: DecisionId::new(),
+                owner_id: task.owner_id.clone(),
+                task_id: task.task_id,
+                revision: task.revision,
+                result_id: result.result_id,
+                result_digest: original_digest,
+                session_id: Some("session-a".to_owned()),
+                binding_epoch: Some(1),
+                verdict: DecisionVerdict::Accepted,
+                reason: "legacy observation verified".to_owned(),
+            })
+            .unwrap();
+        assert!(store.inbox(&task.owner_id, false).unwrap().is_empty());
     }
 }

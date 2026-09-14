@@ -19,6 +19,8 @@ evidence to match an explicitly requested model; missing, mixed, or changed
 models fail before artifact sealing. A separate atomic receipt records the
 observed model and explicitly marks effort evidence unavailable; the v1
 result envelope and decision digest remain compatible with older binaries.
+Results written by an unreleased intermediate embedded-field build remain
+readable without rewriting their stored bytes or decisions.
 Replayed decisions return the persisted
 decision ID, not a newly generated uncommitted one.
 

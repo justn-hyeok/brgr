@@ -364,6 +364,7 @@ mod tests {
             outcome: TerminalOutcome::Candidate,
             artifacts: vec![],
             error: None,
+            legacy_embedded_route_observation: None,
             route_observation: None,
             unresolved_effects: vec![],
         };
@@ -407,6 +408,7 @@ mod tests {
             outcome: TerminalOutcome::Candidate,
             artifacts: vec![],
             error: None,
+            legacy_embedded_route_observation: None,
             route_observation: None,
             unresolved_effects: vec![],
         };
@@ -513,6 +515,7 @@ mod tests {
                     .unwrap(),
             ],
             error: None,
+            legacy_embedded_route_observation: None,
             route_observation: None,
             unresolved_effects: vec![],
         };

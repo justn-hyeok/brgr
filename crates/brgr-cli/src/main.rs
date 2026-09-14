@@ -793,6 +793,7 @@ fn record_unstarted_terminal(
         outcome,
         artifacts: vec![],
         error: Some(reason),
+        legacy_embedded_route_observation: None,
         route_observation: Some(brgr_protocol::RouteObservation::unavailable()),
         unresolved_effects: if outcome == TerminalOutcome::Lost {
             vec!["execution identity was not established".to_owned()]
@@ -899,7 +900,9 @@ fn result(paths: &Paths, task: TaskId, ack: bool, json_output: bool) -> Result<(
     let spec = store.task(task)?;
     let (session_id, binding_epoch) = require_owner(&store, &spec.owner_id)?;
     let result = store.latest_result(task)?;
-    let route_observation = store.route_observation(result.result_id)?;
+    let route_observation = store
+        .route_observation(result.result_id)?
+        .or_else(|| result.legacy_embedded_route_observation.clone());
     let artifacts = result
         .artifacts
         .iter()

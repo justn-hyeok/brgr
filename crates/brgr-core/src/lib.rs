@@ -740,6 +740,7 @@ fn result_for(
         outcome,
         artifacts,
         error,
+        legacy_embedded_route_observation: None,
         route_observation: Some(RouteObservation::unavailable()),
         unresolved_effects: vec![],
     }
@@ -924,6 +925,7 @@ mod tests {
             outcome,
             artifacts: vec![],
             error: None,
+            legacy_embedded_route_observation: None,
             route_observation: None,
             unresolved_effects: vec![],
         }
