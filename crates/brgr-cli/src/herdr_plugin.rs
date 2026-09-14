@@ -3,10 +3,11 @@
 use std::{
     env,
     fmt::Write as _,
+    fs,
     io::{self, IsTerminal as _, Write as _},
-    os::unix::process::CommandExt as _,
+    os::unix::fs::PermissionsExt as _,
     path::{Path, PathBuf},
-    process::Command as ProcessCommand,
+    process::Stdio,
     time::Duration,
 };
 
@@ -14,12 +15,13 @@ use anyhow::{Context as _, Result, bail};
 use brgr_protocol::AttemptState;
 use brgr_store::{Store, StoreError};
 use serde::Deserialize;
+use tempfile::Builder;
 use tokio::{
     process::Command,
     time::{sleep, timeout},
 };
 
-use crate::{Paths, codex_integration};
+use crate::{Paths, codex_integration, plugin_bridge};
 
 const PLUGIN_ID: &str = "brgr";
 const WORKSPACE_PATH_ENV: &str = "BRGR_PLUGIN_WORKSPACE_CWD";
@@ -222,8 +224,8 @@ pub async fn board(paths: &Paths, once: bool) -> Result<()> {
     }
 }
 
-pub fn codex(paths: &Paths) -> Result<()> {
-    let result = launch_codex(paths);
+pub async fn codex(paths: &Paths) -> Result<()> {
+    let result = launch_codex(paths).await;
     if let Err(error) = &result
         && io::stdin().is_terminal()
     {
@@ -234,30 +236,84 @@ pub fn codex(paths: &Paths) -> Result<()> {
     result
 }
 
-fn launch_codex(paths: &Paths) -> Result<()> {
+async fn launch_codex(paths: &Paths) -> Result<()> {
     require_host()?;
     let context = context()?;
     let workspace = launched_workspace_path(&context)?;
     codex_integration::install(&paths.home)
         .context("brgr could not install its Codex integration")?;
-    let binary_dir = env::current_exe()?
+    let executable = env::current_exe()?;
+    let binary_dir = executable
         .parent()
         .context("brgr executable has no parent directory")?
         .to_path_buf();
-    let mut paths = vec![binary_dir];
+    let mut binary_paths = vec![binary_dir];
     if let Some(previous) = env::var_os("PATH") {
-        paths.extend(env::split_paths(&previous));
+        binary_paths.extend(env::split_paths(&previous));
     }
-    let path = env::join_paths(paths).context("could not add brgr to Codex PATH")?;
-    let error = ProcessCommand::new("codex")
+    let path = env::join_paths(binary_paths).context("could not add brgr to Codex PATH")?;
+    let path_text = path.to_str().context("Codex PATH is not UTF-8")?;
+    let bridge_dir = Builder::new()
+        .prefix("plugin-bridge-")
+        .tempdir_in(&paths.home)
+        .context("brgr could not create its private Codex bridge")?;
+    fs::set_permissions(bridge_dir.path(), fs::Permissions::from_mode(0o700))?;
+    let mut child = Command::new("codex")
         .arg("-C")
         .arg(&workspace)
+        .arg("--add-dir")
+        .arg(&paths.home)
+        .arg("-c")
+        .arg(codex_env_config("PATH", path_text)?)
+        .arg("-c")
+        .arg(codex_env_config(
+            plugin_bridge::BRIDGE_DIR_ENV,
+            bridge_dir
+                .path()
+                .to_str()
+                .context("bridge path is not UTF-8")?,
+        )?)
+        .arg("-c")
+        .arg(codex_env_config(
+            "BRGR_HOME",
+            paths.home.to_str().context("brgr home is not UTF-8")?,
+        )?)
         .env("PATH", path)
+        .env(plugin_bridge::BRIDGE_DIR_ENV, bridge_dir.path())
         .env_remove("CODEX_THREAD_ID")
         .env_remove("BRGR_SESSION_ID")
         .env_remove("BRGR_OWNER_ID")
-        .exec();
-    Err(error).context("brgr could not start Codex")
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .kill_on_drop(true)
+        .spawn()
+        .context("brgr could not start Codex")?;
+    let mut bridge = tokio::spawn(plugin_bridge::serve(
+        bridge_dir.path().to_path_buf(),
+        executable,
+        paths.home.clone(),
+    ));
+    let status = tokio::select! {
+        status = child.wait() => status.context("brgr could not wait for Codex")?,
+        stopped = &mut bridge => {
+            let _ = child.kill().await;
+            bail!("brgr Herdr bridge stopped while Codex was running: {stopped:?}");
+        }
+    };
+    bridge.abort();
+    let _ = bridge.await;
+    if !status.success() {
+        bail!("Codex exited with {status}");
+    }
+    Ok(())
+}
+
+fn codex_env_config(name: &str, value: &str) -> Result<String> {
+    Ok(format!(
+        "shell_environment_policy.set.{name}={}",
+        serde_json::to_string(value)?
+    ))
 }
 
 #[cfg(test)]

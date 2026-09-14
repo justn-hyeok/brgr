@@ -5,8 +5,9 @@
 Package brgr as a Herdr 0.9+ plugin on macOS. Workspace actions open a
 read-only task board, launch a worktree-bound Codex pane, and run the existing
 health check. The Codex pane installs the brgr-owned integration and uses the
-plugin-built binary. Herdr supplies execution and status presentation;
-Codex retains the explicit final accept/reject decision.
+plugin-built binary. A private, pane-lifetime bridge runs brgr commands in the
+Herdr host while Codex keeps its command sandbox. Herdr supplies execution and
+status presentation; Codex retains the explicit final accept/reject decision.
 
 The v1 managed-run CLI, store, result envelope, and decision contract remain
 available without Herdr. This release adds no implicit harness or model

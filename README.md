@@ -38,7 +38,10 @@ read-only board of the latest 20 tasks; **Open Codex for brgr** starts a new
 Codex pane in the selected worktree or workspace; **Check brgr** reports
 integration and harness health. Opening the Codex pane installs or updates only
 brgr-owned Codex hooks and its skill, then launches Codex with the plugin's
-built binary on `PATH`. Plugin installation itself does not run a paid model or
+built binary on `PATH`. A private bridge tied to that pane executes brgr CLI
+commands in the Herdr host, where supervisor process inspection is available;
+Codex keeps its ordinary command sandbox and receives access only to the brgr
+control home. Plugin installation itself does not run a paid model or
 activate a harness. Ask Codex to register an approved executable with a small
 authorized scratch run before using it for a task. The board shows task status,
 route, and decision state without revealing prompts or artifact contents.

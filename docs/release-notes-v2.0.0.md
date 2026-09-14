@@ -4,7 +4,8 @@ brgr is now installable as a Herdr plugin on macOS with Herdr 0.9 or newer.
 Use **Open brgr status** for a live, read-only task board, **Open Codex for
 brgr** to start Codex in the selected workspace or linked worktree, and
 **Check brgr** to inspect the local integration and harnesses. Source installs
-build the locked Rust binary.
+build the locked Rust binary. The Codex pane keeps its command sandbox while a
+private Herdr-host bridge handles brgr execution and process recovery.
 
 The v1 managed-run contract remains intact: bounded execution, sealed result,
 durable owner inbox, and a final accept/reject decision made by Codex. Herdr

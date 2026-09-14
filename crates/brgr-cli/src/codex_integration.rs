@@ -27,6 +27,10 @@ Inside the brgr Herdr plugin, Herdr's board is a read-only task view. Codex
 still owns the acceptance criteria and final accept/reject decision. A pane
 becoming idle, a plugin action exiting successfully, or a transport hint is
 never task acceptance.
+The plugin Codex pane sends brgr CLI commands through a private, pane-lifetime
+host bridge so bounded execution and process recovery run outside Codex's
+command sandbox. Keep Codex's ordinary sandbox enabled; if the bridge fails,
+report that failure instead of requesting a generic sandbox bypass.
 
 Use `brgr run "<objective>" --harness <id> --criterion "<observable check>"`
 for a fresh managed task. Keep the user conversation in Codex and report a

@@ -1,6 +1,7 @@
 mod codex_integration;
 mod herdr_plugin;
 mod pane_cleanup;
+mod plugin_bridge;
 
 use std::{
     env,
@@ -357,7 +358,24 @@ struct HookInput {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    let paths = Paths::new(cli.home)?;
+    let paths = Paths::new(cli.home.clone())?;
+    if !matches!(
+        &cli.command,
+        Command::Plugin { .. } | Command::Supervise { .. } | Command::Hook { .. }
+    ) && let Some(dir) = env::var_os(plugin_bridge::BRIDGE_DIR_ENV)
+    {
+        let budget_seconds = match &cli.command {
+            Command::Run(args) if args.foreground => args.deadline_seconds,
+            Command::Revise(args) if args.foreground => {
+                Store::open(&paths.store)?
+                    .task(args.task)?
+                    .budget
+                    .deadline_seconds
+            }
+            _ => 3_600,
+        };
+        return plugin_bridge::client(Path::new(&dir), budget_seconds.saturating_add(120)).await;
+    }
     match cli.command {
         Command::Run(args) => run_task(&paths, args, cli.json).await,
         Command::Revise(args) => revise_task(&paths, args, cli.json).await,
@@ -377,7 +395,7 @@ async fn main() -> Result<()> {
         Command::Plugin { command } => match command {
             PluginCommand::Open { no_focus, codex } => herdr_plugin::open(no_focus, codex).await,
             PluginCommand::Board { once } => herdr_plugin::board(&paths, once).await,
-            PluginCommand::Codex => herdr_plugin::codex(&paths),
+            PluginCommand::Codex => herdr_plugin::codex(&paths).await,
         },
         Command::Cleanup { command } => cleanup(&paths, command, cli.json),
         Command::Supervise { launch } => supervise(&paths, &launch, cli.json).await,

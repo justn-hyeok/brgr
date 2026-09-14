@@ -15,7 +15,7 @@ identity or the completion oracle.
 | `brgr.codex` | Opens a Codex tab for that workspace's linked worktree or cwd. |
 | `brgr.doctor` | Checks the brgr store, registered harnesses, and Codex integration. |
 | `board` pane | Refreshes the latest 20 task states and decisions every two seconds; never reads prompt or artifact bytes. |
-| `codex` pane | Installs only brgr-owned Codex hooks/skill, places the plugin binary on `PATH`, and starts a fresh Codex session. |
+| `codex` pane | Installs only brgr-owned Codex hooks/skill, places the plugin binary on `PATH`, starts a fresh Codex session, and hosts its private brgr command bridge. |
 
 Herdr supplies the workspace and worktree context. The Codex pane chooses the
 linked worktree checkout first, then the workspace cwd, then the focused pane
@@ -26,6 +26,17 @@ It clears inherited Codex/brgr session variables so the new Codex
 session establishes its own owner binding. All commands use argv arrays
 without a shell. The `board` is read-only task metadata for the same OS user;
 only the bound Codex owner can read sealed result contents or decide them.
+
+Codex keeps its normal command sandbox. Its plugin pane adds the brgr control
+home as a writable root and passes brgr CLI calls through a private file bridge
+served by that pane's host process. The host executes only the submitted brgr
+binary argv, with the requesting Codex session identity, a finite deadline,
+and bounded request and response sizes. Foreground budgets that exceed the
+bridge's seven-day command limit (including its completion margin) fail before
+admission. The bridge disappears when the Codex pane exits. A missing bridge
+fails visibly; it does not trigger a generic sandbox bypass. This is a
+cooperative same-user boundary, not protection from
+a hostile local process with the user's permissions.
 
 ## Installation and migration
 
@@ -60,11 +71,25 @@ unknown executable drift are not certified by this plugin package.
   unsupported model/effort fails visibly without silently switching routes or
   accepting a candidate.
 
-The first three gates have isolated local fixture evidence on Herdr 0.9.0.
-An installed v1.0.9 binary produced a sealed fixture candidate in an isolated
-store; v2.0.0 read the unchanged `brgr/v1` result, recorded an explicit owner
-decision, and showed that decision on the board. A separate isolated install
-upgraded the v1 Codex hooks and skill to v2 using its ownership receipt.
-These fixture checks do not count as a real Codex-in-plugin request.
-The real Codex-in-plugin request and public v2 package remain unverified until
-their respective receipts are recorded.
+On 2026-09-15, Herdr 0.9.0 linked the plugin and a real Codex 0.154.0 pane
+ran the cost-free `local.gjc` fixture through the host bridge. Task
+`df628b4a-c9a1-4ef9-8cbb-eb3bf84b5fd0` produced a sealed 15-byte artifact
+whose text was exactly `BRGR_FIXTURE_OK` and whose SHA-256 was
+`770fc6713b7be966375c363b51c1fe2ccab11612c89fb9e987089fd013f57504`.
+Codex checked those bytes and recorded decision
+`ca873c24-cfba-404d-8bc3-adc093dbea7e` as `accepted` against the persisted
+result digest. The owner inbox was acknowledged, and the board showed
+`accepted` separately. This is a real Codex flow over a fixture harness, not
+a paid GJC/OMP run or human observation.
+
+Before the bridge, direct `brgr` execution inside Codex's macOS command
+sandbox could not inspect the supervisor process (`Operation not permitted`)
+and correctly produced `lost` results without acceptance. The host bridge
+addresses that observed failure. An installed v1.0.9 binary also produced a
+sealed fixture candidate in an isolated store; v2.0.0 read the unchanged
+`brgr/v1` result and recorded an explicit owner decision. A separate isolated
+install upgraded v1 Codex hooks and skill to v2 using its ownership receipt.
+
+A clean Herdr GitHub source install succeeded from the PR branch before the
+host-bridge change. The final tagged GitHub package and post-merge release
+artifacts remain to be verified at their exact commits.
