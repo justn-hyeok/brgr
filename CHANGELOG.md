@@ -10,8 +10,10 @@ same pane, terminal, and immutable agent session bound to the spawn receipt
 before publishing a
 candidate. Tests and an actual WorkBuddy/DeepSeek R1→R2→R3 run cover the
 negative replay and corrected positive path. A detached successful run also
-has a durable offline-owner inbox regression test. All previous unsigned and
-best-effort Herdr cleanup limits remain.
+has a durable offline-owner inbox regression test. Recovery now defers to a
+live task-bound supervisor during the brief identity-recording window and
+ignores a stale observation when a concurrent runner advances first. All
+previous unsigned and best-effort Herdr cleanup limits remain.
 
 ## 1.0.4 — 2026-09-14
 

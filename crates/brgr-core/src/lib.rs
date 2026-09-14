@@ -314,6 +314,9 @@ pub struct Supervisor {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ExecutionObservation {
     Alive(RunnerIdentity),
+    /// A live, task-bound detached supervisor whose identity has not yet been
+    /// persisted to the attempt launch intent.
+    SupervisorAlive(RunnerIdentity),
     NotObserved,
     Unknown,
 }
@@ -355,12 +358,19 @@ impl Supervisor {
                 (ExecutionObservation::Alive(actual), Some(launch))
                     if launch.runner_identity.as_ref() == Some(actual)
                         && actual.validate().is_ok()
+            ) || matches!(
+                (&observation, &attempt.launch),
+                (ExecutionObservation::SupervisorAlive(actual), launch)
+                    if actual.validate().is_ok()
+                        && launch.as_ref().is_none_or(|intent| {
+                            intent.runner_identity.as_ref().is_none_or(|expected| expected == actual)
+                        })
             );
             if exactly_alive {
                 continue;
             }
             let reason = match observation {
-                ExecutionObservation::Alive(_) => {
+                ExecutionObservation::Alive(_) | ExecutionObservation::SupervisorAlive(_) => {
                     "runner identity did not match the durable launch receipt"
                 }
                 ExecutionObservation::NotObserved => {
@@ -381,8 +391,13 @@ impl Supervisor {
                 "External side effects of the original run are unresolved; do not retry automatically"
                     .to_owned(),
             );
-            self.store.commit_recovered_lost(&attempt, &result)?;
-            recovered.push(result);
+            match self.store.commit_recovered_lost(&attempt, &result) {
+                Ok(_) => recovered.push(result),
+                // A live writer changed the attempt after our read. Its newer
+                // state/result wins; the next read observes that state.
+                Err(StoreError::RecoveryObservationStale(_)) => {}
+                Err(error) => return Err(error.into()),
+            }
         }
         Ok(recovered)
     }
@@ -1006,6 +1021,95 @@ mod tests {
                 .record_runner_identity(attempt_id, "launch-2", &reused_pid),
             Err(StoreError::RunnerIdentityConflict(_))
         ));
+    }
+
+    #[test]
+    fn task_bound_supervisor_receipt_preserves_attempt_before_identity_is_written() {
+        let root = tempfile::TempDir::new().unwrap();
+        let task = task_spec(TaskId::new(), 1);
+        let attempt_id = AttemptId::new();
+        let identity = RunnerIdentity {
+            namespace: "brgr.supervisor".to_owned(),
+            handle: "4242".to_owned(),
+            birth_marker: "start-1".to_owned(),
+        };
+        {
+            let mut store = Store::open(root.path()).unwrap();
+            store.record_task(&task, "startup-race").unwrap();
+            store
+                .claim_attempt(task.task_id, task.revision, attempt_id)
+                .unwrap();
+            store
+                .compare_and_set_attempt_state(
+                    attempt_id,
+                    AttemptState::Queued,
+                    AttemptState::Starting,
+                )
+                .unwrap();
+        }
+        let mut restarted = Supervisor::open(root.path()).unwrap();
+        assert!(
+            restarted
+                .reconcile_after_restart(|_| ExecutionObservation::SupervisorAlive(
+                    identity.clone()
+                ))
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            restarted.store().attempt_state_by_id(attempt_id).unwrap(),
+            AttemptState::Starting
+        );
+        assert!(
+            restarted
+                .store()
+                .inbox(&task.owner_id, false)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn stale_recovery_snapshot_yields_to_concurrent_runner_progress() {
+        let root = tempfile::TempDir::new().unwrap();
+        let task = task_spec(TaskId::new(), 1);
+        let attempt_id = AttemptId::new();
+        {
+            let mut store = Store::open(root.path()).unwrap();
+            store.record_task(&task, "recovery-race").unwrap();
+            store
+                .claim_attempt(task.task_id, task.revision, attempt_id)
+                .unwrap();
+            store
+                .compare_and_set_attempt_state(
+                    attempt_id,
+                    AttemptState::Queued,
+                    AttemptState::Starting,
+                )
+                .unwrap();
+        }
+        let mut restarted = Supervisor::open(root.path()).unwrap();
+        let recovered = restarted
+            .reconcile_after_restart(|_| {
+                let writer = Store::open(root.path()).unwrap();
+                writer
+                    .record_launch_intent(attempt_id, "new-launch", 1)
+                    .unwrap();
+                ExecutionObservation::Unknown
+            })
+            .unwrap();
+        assert!(recovered.is_empty());
+        assert_eq!(
+            restarted.store().attempt_state_by_id(attempt_id).unwrap(),
+            AttemptState::Starting
+        );
+        assert!(
+            restarted
+                .store()
+                .inbox(&task.owner_id, false)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

@@ -788,12 +788,6 @@ fn record_unstarted_terminal(
 }
 
 fn observe_attempt(paths: &Paths, attempt: &UnfinishedAttempt) -> ExecutionObservation {
-    let Some(launch) = &attempt.launch else {
-        return ExecutionObservation::Unknown;
-    };
-    let Some(expected) = &launch.runner_identity else {
-        return ExecutionObservation::Unknown;
-    };
     let receipt: ProcessReceipt = match fs::read(paths.supervisor(attempt.task.task_id))
         .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
@@ -801,14 +795,16 @@ fn observe_attempt(paths: &Paths, attempt: &UnfinishedAttempt) -> ExecutionObser
         Some(receipt) => receipt,
         None => return ExecutionObservation::Unknown,
     };
-    if receipt.task_id != attempt.task.task_id || receipt.identity != *expected {
+    if receipt.task_id != attempt.task.task_id
+        || receipt.launch_path != paths.launch(attempt.task.task_id, attempt.task.revision)
+    {
         return ExecutionObservation::Unknown;
     }
     let Ok(pid) = receipt.identity.handle.parse::<u32>() else {
         return ExecutionObservation::Unknown;
     };
     match process_identity(pid) {
-        Ok(actual) if actual == *expected => ExecutionObservation::Alive(actual),
+        Ok(actual) if actual == receipt.identity => ExecutionObservation::SupervisorAlive(actual),
         Ok(_) => ExecutionObservation::NotObserved,
         Err(_) => ExecutionObservation::Unknown,
     }
