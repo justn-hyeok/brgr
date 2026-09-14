@@ -12,6 +12,13 @@ transitions. The runner executes declarative argv recipes without a shell. The
 store seals artifact bytes before committing result and inbox metadata. The
 registry activates only recipes supported by bounded help/version evidence.
 
+In v2, Herdr hosts the plugin actions and panes. Its board reads task metadata
+without result contents, and its Codex pane launches a fresh session in the
+selected workspace or linked worktree. The plugin does not replace any of the
+managed contract above: Codex still reads the sealed owner inbox and makes the
+final explicit accept/reject decision. The binary and store also run without
+Herdr. See `docs/v2-herdr-plugin.md` for the host contract.
+
 Execution and presentation are separate. GJC, Cursor CLI, Command Code, and OMP
 use one-shot process recipes for the managed baseline. OMP's process recipe
 collects an assistant final turn and observed process exit without Herdr. The

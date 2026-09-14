@@ -1,4 +1,5 @@
 mod codex_integration;
+mod herdr_plugin;
 mod pane_cleanup;
 
 use std::{
@@ -85,6 +86,10 @@ enum Command {
         command: IntegrateCommand,
     },
     Doctor,
+    Plugin {
+        #[command(subcommand)]
+        command: PluginCommand,
+    },
     Cleanup {
         #[command(subcommand)]
         command: CleanupCommand,
@@ -116,6 +121,21 @@ enum Command {
         #[arg(long)]
         keep_pane: bool,
     },
+}
+
+#[derive(Subcommand)]
+enum PluginCommand {
+    Open {
+        #[arg(long)]
+        no_focus: bool,
+        #[arg(long)]
+        codex: bool,
+    },
+    Board {
+        #[arg(long)]
+        once: bool,
+    },
+    Codex,
 }
 
 #[derive(Args)]
@@ -354,6 +374,11 @@ async fn main() -> Result<()> {
         Command::Harness { command } => harness(&paths, command, cli.json).await,
         Command::Integrate { command } => integrate(&paths, command, cli.json),
         Command::Doctor => doctor(&paths, cli.json).await,
+        Command::Plugin { command } => match command {
+            PluginCommand::Open { no_focus, codex } => herdr_plugin::open(no_focus, codex).await,
+            PluginCommand::Board { once } => herdr_plugin::board(&paths, once).await,
+            PluginCommand::Codex => herdr_plugin::codex(&paths),
+        },
         Command::Cleanup { command } => cleanup(&paths, command, cli.json),
         Command::Supervise { launch } => supervise(&paths, &launch, cli.json).await,
         Command::Hook { event } => {

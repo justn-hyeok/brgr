@@ -1,5 +1,19 @@
 # Changelog
 
+## 2.0.0 — 2026-09-15
+
+Package brgr as a Herdr 0.9+ plugin on macOS. Workspace actions open a
+read-only task board, launch a worktree-bound Codex pane, and run the existing
+health check. The Codex pane installs the brgr-owned integration and uses the
+plugin-built binary. Herdr supplies execution and status presentation;
+Codex retains the explicit final accept/reject decision.
+
+The v1 managed-run CLI, store, result envelope, and decision contract remain
+available without Herdr. This release adds no implicit harness or model
+fallback, automatic acceptance, store migration, or worker cancellation claim.
+The optional legacy OMP-through-Herdr adapter keeps its documented cleanup
+limit. See `docs/v2-herdr-plugin.md` for the plugin contract and evidence gates.
+
 ## 1.0.9 — 2026-09-14
 
 Harden the local managed-run path for personal use. `brgr doctor` now checks

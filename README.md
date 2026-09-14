@@ -7,14 +7,44 @@ does not own task identity or completion.
 
 ## Status
 
-The v1 target is Apple Silicon on macOS 15 or newer. Release archives are
+v2 packages brgr as a Herdr 0.9+ plugin for Apple Silicon macOS 15 or newer.
+Herdr hosts a read-only task board and a Codex pane; brgr still owns task
+identity, sealed results, and the durable inbox, while Codex alone decides
+accept or reject. The v1 CLI and stored results remain usable without Herdr.
+Release archives are
 unsigned and not notarized. Read [the unsigned distribution guide](docs/unsigned-distribution.md)
 before sharing or running a downloaded binary.
 
-The public release is usable for the bounded managed-run contract, but the
-full natural-language v1 acceptance gates remain open. The
+The v1 managed-run contract is retained, but the broader public v1 acceptance
+gates were never declared complete. The
 [current checklist](docs/v1-readiness-checklist-2026-09-14.md) separates
 personal-use reliability work from public-release gates.
+
+## Herdr plugin
+
+Install the public v2 plugin from GitHub after the `v2.0.0` release:
+
+```bash
+herdr plugin install justn-hyeok/brgr --ref v2.0.0
+```
+
+The plugin builds `brgr` from the pinned Cargo lockfile, so a Rust toolchain is
+required for installation. For local development, build with `cargo build
+--release --locked -p brgr-cli` and run `herdr plugin link .` from this checkout.
+The manifest is [herdr-plugin.toml](herdr-plugin.toml).
+
+Herdr exposes three workspace actions: **Open brgr status** opens a live,
+read-only board of the latest 20 tasks; **Open Codex for brgr** starts a new
+Codex pane in the selected worktree or workspace; **Check brgr** reports
+integration and harness health. Opening the Codex pane installs or updates only
+brgr-owned Codex hooks and its skill, then launches Codex with the plugin's
+built binary on `PATH`. Plugin installation itself does not run a paid model or
+activate a harness. Ask Codex to register an approved executable with a small
+authorized scratch run before using it for a task. The board shows task status,
+route, and decision state without revealing prompts or artifact contents.
+
+See [the v2 plugin contract](docs/v2-herdr-plugin.md) for ownership, context,
+recovery, and verification boundaries.
 
 GJC, Cursor CLI, Command Code, and OMP have bounded one-shot process recipes.
 Herdr is optional:
@@ -48,7 +78,7 @@ model with `--effort minimal`, Cursor CLI uses the exact model variant
 after upgrading it. These are route requests; only OMP and GJC expose a
 native model observation, and none expose a verified effort observation.
 
-## Start from Codex
+## Standalone Codex and CLI
 
 Install the local binary and Codex integration, then start a new Codex session:
 

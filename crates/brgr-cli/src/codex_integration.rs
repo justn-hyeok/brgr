@@ -23,6 +23,11 @@ Translate the user's natural-language request into the smallest matching `brgr`
 CLI operation. Preserve an explicitly named harness, model, and effort. Never
 silently substitute one of those dimensions.
 
+Inside the brgr Herdr plugin, Herdr's board is a read-only task view. Codex
+still owns the acceptance criteria and final accept/reject decision. A pane
+becoming idle, a plugin action exiting successfully, or a transport hint is
+never task acceptance.
+
 Use `brgr run "<objective>" --harness <id> --criterion "<observable check>"`
 for a fresh managed task. Keep the user conversation in Codex and report a
 short handle. Use `brgr status`, `brgr result`, and `brgr cancel` for follow-up.

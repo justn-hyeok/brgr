@@ -49,6 +49,56 @@ fn add_fixture(home: &Path, fixture: &Path, scratch: &Path) {
 }
 
 #[test]
+fn plugin_board_shows_candidate_then_explicit_decision_without_prompt_text() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("brgr");
+    let workspace = temp.path().join("work");
+    fs::create_dir_all(&workspace).unwrap();
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../testdata/fixtures/gjc")
+        .canonicalize()
+        .unwrap();
+    add_fixture(&home, &fixture, &temp.path().join("scratch"));
+    let envs = [
+        ("BRGR_OWNER_ID", "codex:board-test"),
+        ("HERDR_ENV", "1"),
+        ("HERDR_PLUGIN_ID", "brgr"),
+    ];
+    let created = json_output(&run(
+        &home,
+        &[
+            "run",
+            "BRGR_FIXTURE_OK",
+            "--workspace",
+            workspace.to_str().unwrap(),
+            "--foreground",
+        ],
+        &envs,
+    ));
+    let task_id = created["task_id"].as_str().unwrap();
+    let board = run(&home, &["plugin", "board", "--once"], &envs);
+    assert!(board.status.success());
+    let board_text = String::from_utf8(board.stdout).unwrap();
+    assert!(board_text.contains(&task_id[..8]));
+    assert!(board_text.contains(" work "));
+    assert!(board_text.contains("candidate"));
+    assert!(!board_text.contains("BRGR_FIXTURE_OK"));
+
+    json_output(&run(
+        &home,
+        &["accept", task_id, "--reason", "fixture verified"],
+        &envs,
+    ));
+    let decided = run(&home, &["plugin", "board", "--once"], &envs);
+    assert!(decided.status.success());
+    assert!(
+        String::from_utf8(decided.stdout)
+            .unwrap()
+            .contains("accepted")
+    );
+}
+
+#[test]
 fn doctor_reports_changed_harness_instead_of_ok() {
     let temp = TempDir::new().unwrap();
     let home = temp.path().join("brgr");
