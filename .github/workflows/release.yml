@@ -47,11 +47,11 @@ jobs:
           mkdir "$scratch/work"
           binary="${RUNNER_TEMP}/$archive/brgr"
           "$binary" --home "$scratch/home" harness add "$GITHUB_WORKSPACE/testdata/fixtures/gjc"
-          result="$(PATH=/bin:/usr/sbin:/sbin BRGR_OWNER_ID=codex:release-smoke "$binary" --home "$scratch/home" --json run BRGR_FIXTURE_OK --workspace "$scratch/work" --foreground)"
+          result="$(PATH=/bin:/usr/sbin:/sbin BRGR_OWNER_ID=codex:release-smoke BRGR_SESSION_ID=release-smoke "$binary" --home "$scratch/home" --json run BRGR_FIXTURE_OK --workspace "$scratch/work" --foreground)"
           task="$(printf '%s' "$result" | jq -er 'select(.outcome == "candidate" and .revision == 1) | .task_id')"
-          detail="$(BRGR_OWNER_ID=codex:release-smoke "$binary" --home "$scratch/home" --json result "$task")"
+          detail="$(BRGR_OWNER_ID=codex:release-smoke BRGR_SESSION_ID=release-smoke "$binary" --home "$scratch/home" --json result "$task")"
           printf '%s' "$detail" | jq -e '.artifacts[0].text == "BRGR_FIXTURE_OK"'
-          decision="$(BRGR_OWNER_ID=codex:release-smoke "$binary" --home "$scratch/home" --json accept "$task" --reason 'release fixture result verified')"
+          decision="$(BRGR_OWNER_ID=codex:release-smoke BRGR_SESSION_ID=release-smoke "$binary" --home "$scratch/home" --json accept "$task" --reason 'release fixture result verified')"
           printf '%s' "$decision" | jq -e '.verdict == "accepted"'
       - name: Generate SPDX SBOM
         uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610

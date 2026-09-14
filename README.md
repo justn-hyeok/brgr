@@ -48,6 +48,14 @@ Git source gets a dedicated task worktree. Dirty changes are rejected unless
 `--allow-clean-head-snapshot` explicitly excludes them.
 Git is needed for Git-backed tasks; a non-Git workspace can run without Git.
 
+Codex sessions bind their owner automatically at first task or SessionStart.
+A bare CLI run without a session can finish but cannot expose, acknowledge, or
+decide its result until `brgr bind TASK --session SESSION` explicitly claims it.
+When the owning Codex session changes, run `brgr bind TASK` in the new session
+before reading or deciding; the old session's epoch is then stale. For a CLI
+fixture, set both `BRGR_OWNER_ID=codex:example` and
+`BRGR_SESSION_ID=example-session` on run and follow-up commands.
+
 `brgr integrate codex status|uninstall` checks or removes only brgr-owned
 entries. For OMP, Cursor CLI, Command Code, or an approved unfamiliar CLI, use
 `brgr harness draft`, `brgr harness test`, then an authorized scratch run with

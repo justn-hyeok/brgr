@@ -223,6 +223,10 @@ pub struct Decision {
     pub revision: u32,
     pub result_id: ResultId,
     pub result_digest: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binding_epoch: Option<u64>,
     pub verdict: DecisionVerdict,
     pub reason: String,
 }
