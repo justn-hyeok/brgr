@@ -743,6 +743,34 @@ impl Store {
         .collect()
     }
 
+    /// Reads pending inbox items for every owner explicitly bound to one
+    /// session, including owners transferred from earlier sessions.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for malformed stored data or a DB failure.
+    pub fn pending_for_session(&self, session_id: &str) -> Result<Vec<InboxItem>, StoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT i.owner_id, r.envelope_json FROM inbox_items i
+             JOIN results r ON r.result_id = i.result_id
+             JOIN owner_bindings b ON b.owner_id = i.owner_id
+             WHERE b.session_id = ?1 AND i.acknowledged = 0
+             ORDER BY r.rowid LIMIT 100",
+        )?;
+        let rows = statement.query_map([session_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        rows.map(|row| {
+            let (owner_id, envelope_json) = row?;
+            Ok(InboxItem {
+                owner_id: OwnerId::new(owner_id)?,
+                result: serde_json::from_str(&envelope_json)?,
+                acknowledged: false,
+            })
+        })
+        .collect()
+    }
+
     /// Acknowledges one result in the named owner's inbox.
     ///
     /// # Errors
@@ -1877,6 +1905,56 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn transferred_owner_pending_inbox_reappears_in_new_session() {
+        let root = TempDir::new().unwrap();
+        let mut store = Store::open(root.path()).unwrap();
+        let first = task();
+        let mut second = task();
+        second.owner_id = OwnerId::new("codex:transferred").unwrap();
+        second.create_request_id = "transferred-task".to_owned();
+        for (index, spec) in [first.clone(), second.clone()].iter().enumerate() {
+            store
+                .record_task(spec, &format!("pending-{index}"))
+                .unwrap();
+            let attempt_id = AttemptId::new();
+            store
+                .claim_attempt(spec.task_id, spec.revision, attempt_id)
+                .unwrap();
+            store
+                .commit_terminal_result(
+                    &spec.owner_id,
+                    &ResultEnvelope {
+                        outcome: TerminalOutcome::Failed,
+                        error: Some("fixture".to_owned()),
+                        ..result(spec, attempt_id)
+                    },
+                )
+                .unwrap();
+        }
+        store.bind_owner(&first.owner_id, "session-a", 1).unwrap();
+        store.bind_owner(&second.owner_id, "session-b", 1).unwrap();
+        assert_eq!(store.pending_for_session("session-a").unwrap().len(), 1);
+        store.rebind_owner(&second.owner_id, "session-a").unwrap();
+        let pending = store.pending_for_session("session-a").unwrap();
+        assert_eq!(pending.len(), 2);
+        assert!(pending.iter().any(|item| item.owner_id == second.owner_id));
+        store
+            .acknowledge_bound(
+                &first.owner_id,
+                pending
+                    .iter()
+                    .find(|item| item.owner_id == first.owner_id)
+                    .unwrap()
+                    .result
+                    .result_id,
+                "session-a",
+                1,
+            )
+            .unwrap();
+        assert_eq!(store.pending_for_session("session-a").unwrap().len(), 1);
     }
 
     #[test]

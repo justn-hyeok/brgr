@@ -5,7 +5,8 @@ cannot be read, acknowledged, or decided through the CLI. Explicit
 `brgr bind TASK` transfers a task to the current session while preserving its
 task ID, sealed results, inbox entries, and earlier decisions. Old-session
 decisions and acknowledgments fail after the transfer. A late SessionStart
-hook cannot silently reverse it.
+hook cannot silently reverse it. Pending inbox items from the transferred
+owner appear in the new session's hook hints.
 
 **Migration:** Existing tasks and database files remain in place. If a task was
 created from a bare shell without a Codex session, run

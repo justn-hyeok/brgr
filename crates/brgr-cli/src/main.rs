@@ -1168,7 +1168,7 @@ fn hook(paths: &Paths, event: HookEvent) -> Result<()> {
         let epoch = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
         store.bind_owner(&owner, &session_id, epoch.max(1))?;
     }
-    let pending = store.inbox(&owner, false)?;
+    let pending = store.pending_for_session(&session_id)?;
     if pending.is_empty() {
         println!("{{}}");
         return Ok(());

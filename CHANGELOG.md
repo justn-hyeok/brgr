@@ -7,7 +7,8 @@ longer read, acknowledge, cancel, revise, or decide a task through the CLI.
 `brgr bind TASK` explicitly transfers ownership without rewriting pending
 results or decisions. Decision and acknowledgment transactions verify the
 current epoch; a late old SessionStart hook cannot take it back. Existing
-manual tasks require one explicit bind before follow-up. The unsigned,
+manual tasks require one explicit bind before follow-up. Hook inbox hints also
+include pending items from owners transferred into the current session. The unsigned,
 cooperative-local platform and optional best-effort Herdr cleanup are unchanged.
 
 ## 1.0.2 — 2026-09-14
