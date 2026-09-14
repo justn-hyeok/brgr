@@ -27,7 +27,9 @@ cleanup safety limit below.
 
 For JSONL OMP process results, brgr checks every assistant event's native
 `provider/model` against an explicitly requested selector before publishing a
-candidate. The result records that observed model. OMP does not expose a
+candidate. `brgr result TASK` exposes that model in a separately committed
+`route_observation` receipt; the sealed v1 result JSON and its decision digest
+remain unchanged for older binaries. OMP does not expose a
 verified effort value in this event stream, so `effort_source` remains
 `unavailable`; other process recipes likewise report unavailable native route
 identity unless their adapter supplies evidence. A missing or different OMP

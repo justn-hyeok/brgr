@@ -16,9 +16,10 @@ license is unasserted.
 
 OMP JSONL process candidates now require native assistant `provider/model`
 evidence to match an explicitly requested model; missing, mixed, or changed
-models fail before artifact sealing. New results record observed model and
-explicitly mark effort evidence unavailable. Older result serialization and
-decision digests remain stable. Replayed decisions return the persisted
+models fail before artifact sealing. A separate atomic receipt records the
+observed model and explicitly marks effort evidence unavailable; the v1
+result envelope and decision digest remain compatible with older binaries.
+Replayed decisions return the persisted
 decision ID, not a newly generated uncommitted one.
 
 ## 1.0.5 — 2026-09-14

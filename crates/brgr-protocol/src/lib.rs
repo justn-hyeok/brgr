@@ -238,7 +238,9 @@ pub struct ResultEnvelope {
     pub outcome: TerminalOutcome,
     pub artifacts: Vec<ArtifactRef>,
     pub error: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Transient native evidence; the store commits it separately from the
+    /// versioned result envelope so older binaries retain its decision digest.
+    #[serde(skip)]
     pub route_observation: Option<RouteObservation>,
     pub unresolved_effects: Vec<String>,
 }
@@ -410,10 +412,6 @@ mod tests {
             effort: None,
             effort_source: ObservationSource::Unavailable,
         });
-        assert!(
-            serde_json::to_string(&observed)
-                .unwrap()
-                .contains("route_observation")
-        );
+        assert_eq!(serde_json::to_vec(&observed).unwrap(), bytes);
     }
 }

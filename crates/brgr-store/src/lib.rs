@@ -15,7 +15,7 @@ use std::os::unix::fs::PermissionsExt;
 use artifact::ArtifactStore;
 use brgr_protocol::{
     ArtifactRef, AttemptId, AttemptState, Decision, Event, EventId, EventKind, InboxItem, OwnerId,
-    ResultEnvelope, ResultId, SCHEMA_V1, TaskId, TaskSpec,
+    ResultEnvelope, ResultId, RouteObservation, SCHEMA_V1, TaskId, TaskSpec,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
@@ -57,6 +57,12 @@ CREATE TABLE IF NOT EXISTS results (
     envelope_json TEXT NOT NULL,
     FOREIGN KEY (attempt_id) REFERENCES attempts(attempt_id),
     FOREIGN KEY (task_id, revision) REFERENCES tasks(task_id, revision)
+);
+CREATE TABLE IF NOT EXISTS route_observations (
+    result_id TEXT PRIMARY KEY,
+    observation_digest TEXT NOT NULL,
+    observation_json TEXT NOT NULL,
+    FOREIGN KEY (result_id) REFERENCES results(result_id)
 );
 CREATE TABLE IF NOT EXISTS pre_spawn_retry_grants (
     attempt_id TEXT PRIMARY KEY,
@@ -597,6 +603,34 @@ impl Store {
         self.commit_terminal_result_guarded(owner_id, result, None)
     }
 
+    /// Reads separately committed native route evidence for one result.
+    /// Older results without a receipt return `None`.
+    ///
+    /// # Errors
+    ///
+    /// Rejects altered receipt bytes or malformed persisted JSON.
+    pub fn route_observation(
+        &self,
+        result_id: ResultId,
+    ) -> Result<Option<RouteObservation>, StoreError> {
+        let stored: Option<(String, String)> = self
+            .connection
+            .query_row(
+                "SELECT observation_digest, observation_json FROM route_observations WHERE result_id = ?1",
+                [result_id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        stored
+            .map(|(digest, json)| {
+                if sha256(json.as_bytes()) != digest {
+                    return Err(StoreError::RouteObservationIntegrityMismatch);
+                }
+                Ok(serde_json::from_str(&json)?)
+            })
+            .transpose()
+    }
+
     /// Publishes a lost result only if the observed unfinished state and
     /// launch receipt are still current. A concurrent runner result wins or
     /// loses atomically; it can never be overwritten by recovery.
@@ -625,6 +659,7 @@ impl Store {
         validate_terminal_result(result)?;
         let envelope_json = serde_json::to_string(result)?;
         let digest = sha256(envelope_json.as_bytes());
+        let observation = serialize_route_observation(result.route_observation.as_ref())?;
         let transaction = self.connection.transaction()?;
 
         if let Some(observed) = observed {
@@ -640,6 +675,11 @@ impl Store {
             .optional()?
         {
             if stored_id == result.result_id.to_string() && stored_digest == digest {
+                verify_replayed_route_observation(
+                    &transaction,
+                    result.result_id,
+                    observation.as_ref(),
+                )?;
                 transaction.commit()?;
                 return Ok(WriteOutcome::AlreadyApplied);
             }
@@ -675,6 +715,7 @@ impl Store {
                 envelope_json,
             ],
         )?;
+        insert_route_observation(&transaction, result.result_id, observation.as_ref())?;
         transaction.execute(
             "INSERT INTO inbox_items (owner_id, result_id) VALUES (?1, ?2)",
             params![owner_id.as_str(), result.result_id.to_string()],
@@ -1419,6 +1460,52 @@ fn validate_schema(schema: &str) -> Result<(), StoreError> {
     Ok(())
 }
 
+fn serialize_route_observation(
+    observation: Option<&RouteObservation>,
+) -> Result<Option<(String, String)>, StoreError> {
+    observation
+        .map(|value| {
+            let json = serde_json::to_string(value)?;
+            Ok((sha256(json.as_bytes()), json))
+        })
+        .transpose()
+}
+
+fn verify_replayed_route_observation(
+    transaction: &Transaction<'_>,
+    result_id: ResultId,
+    observation: Option<&(String, String)>,
+) -> Result<(), StoreError> {
+    if let Some((expected, _)) = observation {
+        let stored: Option<String> = transaction
+            .query_row(
+                "SELECT observation_digest FROM route_observations WHERE result_id = ?1",
+                [result_id.to_string()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if stored.as_ref() != Some(expected) {
+            return Err(StoreError::RouteObservationConflict(result_id));
+        }
+    }
+    Ok(())
+}
+
+fn insert_route_observation(
+    transaction: &Transaction<'_>,
+    result_id: ResultId,
+    observation: Option<&(String, String)>,
+) -> Result<(), StoreError> {
+    if let Some((digest, json)) = observation {
+        transaction.execute(
+            "INSERT INTO route_observations (result_id, observation_digest, observation_json)
+             VALUES (?1, ?2, ?3)",
+            params![result_id.to_string(), digest, json],
+        )?;
+    }
+    Ok(())
+}
+
 fn validate_terminal_result(result: &ResultEnvelope) -> Result<(), StoreError> {
     validate_schema(&result.schema)?;
     if result.outcome == brgr_protocol::TerminalOutcome::Candidate && result.artifacts.is_empty() {
@@ -1601,6 +1688,10 @@ pub enum StoreError {
     ResultOwnerMismatch,
     #[error("attempt {0} already has a different terminal result")]
     TerminalResultConflict(AttemptId),
+    #[error("result {0} has conflicting native route observation")]
+    RouteObservationConflict(ResultId),
+    #[error("stored native route observation has a digest mismatch")]
+    RouteObservationIntegrityMismatch,
     #[error("task {task_id} revision {revision} has an unresolved lost attempt")]
     UnresolvedPriorAttempt { task_id: TaskId, revision: u32 },
     #[error("task {task_id} revision {revision} already has a non-retryable terminal result")]
@@ -1658,8 +1749,8 @@ pub enum StoreError {
 #[cfg(test)]
 mod tests {
     use brgr_protocol::{
-        ArtifactContract, AttemptBudget, DecisionId, DecisionVerdict, EventId, EventKind, Route,
-        SCHEMA_V1, TerminalOutcome,
+        ArtifactContract, AttemptBudget, DecisionId, DecisionVerdict, EventId, EventKind,
+        ObservationSource, Route, SCHEMA_V1, TerminalOutcome,
     };
     use tempfile::TempDir;
 
@@ -2561,5 +2652,55 @@ mod tests {
                 .unwrap(),
         );
         envelope
+    }
+
+    #[test]
+    fn native_route_receipt_commits_atomically_without_changing_result_digest() {
+        let root = TempDir::new().unwrap();
+        let mut store = Store::open(root.path()).unwrap();
+        let task = task();
+        store.record_task(&task, "native-route").unwrap();
+        let attempt_id = AttemptId::new();
+        store
+            .claim_attempt(task.task_id, task.revision, attempt_id)
+            .unwrap();
+        let mut result = sealed_result(&store, &task, attempt_id);
+        let legacy_digest = Store::result_digest(&result).unwrap();
+        let observation = RouteObservation {
+            model: Some("workbuddy/deepseek-v4.1-flash".to_owned()),
+            model_source: ObservationSource::HarnessJsonl,
+            effort: None,
+            effort_source: ObservationSource::Unavailable,
+        };
+        result.route_observation = Some(observation.clone());
+        assert_eq!(Store::result_digest(&result).unwrap(), legacy_digest);
+        store
+            .commit_terminal_result(&task.owner_id, &result)
+            .unwrap();
+        assert_eq!(
+            store.route_observation(result.result_id).unwrap(),
+            Some(observation)
+        );
+        let reopened = store.latest_result(task.task_id).unwrap();
+        assert!(reopened.route_observation.is_none());
+        assert_eq!(Store::result_digest(&reopened).unwrap(), legacy_digest);
+        assert_eq!(store.inbox(&task.owner_id, false).unwrap().len(), 1);
+
+        result.route_observation.as_mut().unwrap().model = Some("other/fallback".to_owned());
+        assert!(matches!(
+            store.commit_terminal_result(&task.owner_id, &result),
+            Err(StoreError::RouteObservationConflict(_))
+        ));
+        store
+            .connection
+            .execute(
+                "UPDATE route_observations SET observation_json = '{}' WHERE result_id = ?1",
+                [result.result_id.to_string()],
+            )
+            .unwrap();
+        assert!(matches!(
+            store.route_observation(result.result_id),
+            Err(StoreError::RouteObservationIntegrityMismatch)
+        ));
     }
 }

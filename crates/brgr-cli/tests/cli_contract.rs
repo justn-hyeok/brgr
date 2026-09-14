@@ -1062,12 +1062,14 @@ fn omp_fallback_model_cannot_be_sealed_as_requested_model() {
         &owner,
     ));
     assert_eq!(matched["outcome"], "candidate");
-    assert_eq!(matched["route_observation"]["model"], "other/fallback");
-    assert_eq!(
-        matched["route_observation"]["model_source"],
-        "harness_jsonl"
-    );
-    assert_eq!(matched["route_observation"]["effort_source"], "unavailable");
+    let detail = json_output(&run(
+        &home,
+        &["result", matched["task_id"].as_str().unwrap()],
+        &owner,
+    ));
+    assert_eq!(detail["route_observation"]["model"], "other/fallback");
+    assert_eq!(detail["route_observation"]["model_source"], "harness_jsonl");
+    assert_eq!(detail["route_observation"]["effort_source"], "unavailable");
 }
 
 #[test]

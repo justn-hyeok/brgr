@@ -899,6 +899,7 @@ fn result(paths: &Paths, task: TaskId, ack: bool, json_output: bool) -> Result<(
     let spec = store.task(task)?;
     let (session_id, binding_epoch) = require_owner(&store, &spec.owner_id)?;
     let result = store.latest_result(task)?;
+    let route_observation = store.route_observation(result.result_id)?;
     let artifacts = result
         .artifacts
         .iter()
@@ -919,7 +920,7 @@ fn result(paths: &Paths, task: TaskId, ack: bool, json_output: bool) -> Result<(
         }
     }
     print_value(
-        &json!({"result": result, "artifacts": artifacts}),
+        &json!({"result": result, "artifacts": artifacts, "route_observation": route_observation}),
         json_output,
     );
     Ok(())
