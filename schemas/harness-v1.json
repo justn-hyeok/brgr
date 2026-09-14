@@ -7,12 +7,63 @@
   "required": ["schema", "id", "adapter", "executable", "probe", "launch", "result", "capabilities"],
   "properties": {
     "schema": { "const": "brgr.harness/v1" },
-    "id": { "type": "string", "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)+$" },
+    "id": { "type": "string", "pattern": "^local\\.[a-z0-9][a-z0-9._-]*$" },
     "adapter": { "enum": ["process/v1", "omp-role/v1"] },
     "executable": { "type": "string", "pattern": "^/" },
-    "probe": { "type": "object" },
-    "launch": { "type": "object" },
-    "result": { "type": "object" },
-    "capabilities": { "type": "object" }
+    "probe": {
+      "type": "object", "additionalProperties": false,
+      "required": ["version_argv", "help_argv"],
+      "properties": {
+        "version_argv": { "$ref": "#/$defs/argv" },
+        "help_argv": { "$ref": "#/$defs/argv" }
+      }
+    },
+    "launch": {
+      "type": "object", "additionalProperties": false,
+      "required": ["argv", "mode"],
+      "properties": {
+        "argv": { "$ref": "#/$defs/argv" },
+        "model_argv": { "$ref": "#/$defs/argv" },
+        "effort_argv": { "$ref": "#/$defs/argv" },
+        "env_allow": {
+          "type": "array", "uniqueItems": true, "maxItems": 32,
+          "items": { "type": "string", "pattern": "^[A-Z_][A-Z0-9_]*$" }
+        },
+        "mode": { "const": "one_shot" }
+      }
+    },
+    "result": {
+      "type": "object", "additionalProperties": false,
+      "required": ["source", "media_type", "max_bytes", "success_exit_codes"],
+      "properties": {
+        "source": {
+          "oneOf": [
+            { "type": "object", "additionalProperties": false, "required": ["kind"], "properties": { "kind": { "const": "stdout" } } },
+            { "type": "object", "additionalProperties": false, "required": ["kind"], "properties": { "kind": { "const": "jsonl_assistant_final" } } },
+            { "type": "object", "additionalProperties": false, "required": ["kind", "path"], "properties": { "kind": { "const": "file" }, "path": { "type": "string", "minLength": 1 } } }
+          ]
+        },
+        "media_type": { "type": "string", "minLength": 1 },
+        "max_bytes": { "type": "integer", "minimum": 1, "maximum": 20971520 },
+        "success_exit_codes": { "type": "array", "minItems": 1, "items": { "type": "integer" } }
+      }
+    },
+    "capabilities": {
+      "type": "object", "required": ["completion"],
+      "additionalProperties": { "$ref": "#/$defs/capability" }
+    }
+  },
+  "$defs": {
+    "argv": { "type": "array", "maxItems": 64, "items": { "type": "string" } },
+    "capability": {
+      "type": "object", "additionalProperties": false,
+      "required": ["status", "semantics"],
+      "properties": {
+        "status": { "enum": ["supported", "unsupported", "unknown"] },
+        "semantics": { "type": "string", "minLength": 1 },
+        "evidence_ref": { "type": ["string", "null"] },
+        "tested_identity": { "type": ["string", "null"] }
+      }
+    }
   }
 }

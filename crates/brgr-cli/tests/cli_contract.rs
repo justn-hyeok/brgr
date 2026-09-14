@@ -297,6 +297,92 @@ fn unsupported_model_fails_before_task_admission() {
 }
 
 #[test]
+fn authored_manifest_runs_unknown_positional_cli_to_owner_acceptance() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("brgr");
+    let workspace = temp.path().join("work");
+    fs::create_dir_all(&workspace).unwrap();
+    let executable = temp.path().join("positional-agent");
+    fs::write(
+        &executable,
+        "#!/bin/sh\ncase \"$1\" in\n --version) echo 'positional 1';;\n --help) echo '  -p, --print prompt';;\n -p) printf '%s' \"$2\";;\n *) exit 2;;\nesac\n",
+    )
+    .unwrap();
+    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+    let manifest_path = temp.path().join("positional-manifest.json");
+    let manifest = json!({
+        "schema": "brgr.harness/v1",
+        "id": "local.positional-agent",
+        "adapter": "process/v1",
+        "executable": executable.canonicalize().unwrap(),
+        "probe": {"version_argv": ["--version"], "help_argv": ["--help"]},
+        "launch": {
+            "argv": ["-p", "${input.prompt}"],
+            "model_argv": [], "effort_argv": [],
+            "env_allow": ["HOME", "PATH"], "mode": "one_shot"
+        },
+        "result": {
+            "source": {"kind": "stdout"}, "media_type": "text/plain",
+            "max_bytes": 1024, "success_exit_codes": [0]
+        },
+        "capabilities": {
+            "completion": {
+                "status": "supported", "semantics": "process_exit",
+                "evidence_ref": "help", "tested_identity": null
+            }
+        }
+    });
+    fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+    let path = manifest_path.to_str().unwrap();
+    let tested = json_output(&run(&home, &["harness", "test", "--manifest", path], &[]));
+    assert_eq!(tested["contract"], "passed");
+    json_output(&run(
+        &home,
+        &[
+            "harness",
+            "activate",
+            "--manifest",
+            path,
+            "--workspace",
+            workspace.to_str().unwrap(),
+            "--prompt",
+            "scratch",
+        ],
+        &[],
+    ));
+    let health = json_output(&run(
+        &home,
+        &["harness", "status", "local.positional-agent"],
+        &[],
+    ));
+    assert_eq!(health["health"], "healthy");
+    let owner = [("BRGR_OWNER_ID", "codex:custom-manifest")];
+    let result = json_output(&run(
+        &home,
+        &[
+            "run",
+            "CUSTOM_MANIFEST_OK",
+            "--harness",
+            "local.positional-agent",
+            "--workspace",
+            workspace.to_str().unwrap(),
+            "--foreground",
+        ],
+        &owner,
+    ));
+    assert_eq!(result["outcome"], "candidate");
+    let task = result["task_id"].as_str().unwrap();
+    let sealed = json_output(&run(&home, &["result", task], &owner));
+    assert_eq!(sealed["artifacts"][0]["text"], "CUSTOM_MANIFEST_OK");
+    let accepted = json_output(&run(
+        &home,
+        &["accept", task, "--reason", "custom result checked"],
+        &owner,
+    ));
+    assert_eq!(accepted["verdict"], "accepted");
+}
+
+#[test]
 fn rejected_result_can_be_revised_without_rewriting_its_decision() {
     let temp = TempDir::new().unwrap();
     let home = temp.path().join("brgr");
