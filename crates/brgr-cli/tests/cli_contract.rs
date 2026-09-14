@@ -49,6 +49,147 @@ fn add_fixture(home: &Path, fixture: &Path, scratch: &Path) {
 }
 
 #[test]
+fn plugin_board_shows_candidate_then_explicit_decision_without_prompt_text() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("brgr");
+    let workspace = temp.path().join("work");
+    fs::create_dir_all(&workspace).unwrap();
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../testdata/fixtures/gjc")
+        .canonicalize()
+        .unwrap();
+    add_fixture(&home, &fixture, &temp.path().join("scratch"));
+    let envs = [
+        ("BRGR_OWNER_ID", "codex:board-test"),
+        ("HERDR_ENV", "1"),
+        ("HERDR_PLUGIN_ID", "brgr"),
+    ];
+    let created = json_output(&run(
+        &home,
+        &[
+            "run",
+            "BRGR_FIXTURE_OK",
+            "--workspace",
+            workspace.to_str().unwrap(),
+            "--foreground",
+        ],
+        &envs,
+    ));
+    let task_id = created["task_id"].as_str().unwrap();
+    let board = run(&home, &["plugin", "board", "--once"], &envs);
+    assert!(board.status.success());
+    let board_text = String::from_utf8(board.stdout).unwrap();
+    assert!(board_text.contains(&task_id[..8]));
+    assert!(board_text.contains(" work "));
+    assert!(board_text.contains("candidate"));
+    assert!(!board_text.contains("BRGR_FIXTURE_OK"));
+
+    json_output(&run(
+        &home,
+        &["accept", task_id, "--reason", "fixture verified"],
+        &envs,
+    ));
+    let decided = run(&home, &["plugin", "board", "--once"], &envs);
+    assert!(decided.status.success());
+    assert!(
+        String::from_utf8(decided.stdout)
+            .unwrap()
+            .contains("accepted")
+    );
+}
+
+#[test]
+fn plugin_codex_bridge_runs_a_fixture_outside_the_codex_process() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("brgr");
+    let codex_home = temp.path().join("codex-home");
+    let workspace = temp.path().join("work");
+    let fake_bin = temp.path().join("bin");
+    let output_path = temp.path().join("candidate.json");
+    let codex_args_path = temp.path().join("codex-args.txt");
+    fs::create_dir_all(&workspace).unwrap();
+    fs::create_dir_all(&fake_bin).unwrap();
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../testdata/fixtures/gjc")
+        .canonicalize()
+        .unwrap();
+    add_fixture(&home, &fixture, &temp.path().join("scratch"));
+
+    let fake_codex = fake_bin.join("codex");
+    fs::write(
+        &fake_codex,
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$BRGR_TEST_CODEX_ARGS\"\nexport CODEX_THREAD_ID=bridge-test\nexec \"$BRGR_BIN\" --json run BRGR_FIXTURE_OK --harness local.gjc --criterion 'artifact text equals BRGR_FIXTURE_OK' --workspace \"$BRGR_TEST_WORKSPACE\" --foreground > \"$BRGR_TEST_OUTPUT\"\n",
+    )
+    .unwrap();
+    fs::set_permissions(&fake_codex, fs::Permissions::from_mode(0o700)).unwrap();
+    let path = std::env::join_paths(
+        std::iter::once(fake_bin.clone())
+            .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+    )
+    .unwrap();
+    let context = json!({"workspace_id": "w1", "workspace_cwd": workspace});
+    let launched = Command::new(brgr())
+        .args(["plugin", "codex"])
+        .env("HERDR_ENV", "1")
+        .env("HERDR_PLUGIN_ID", "brgr")
+        .env("HERDR_PLUGIN_CONTEXT_JSON", context.to_string())
+        .env("BRGR_HOME", &home)
+        .env("CODEX_HOME", &codex_home)
+        .env("BRGR_BIN", brgr())
+        .env("BRGR_TEST_WORKSPACE", &workspace)
+        .env("BRGR_TEST_OUTPUT", &output_path)
+        .env("BRGR_TEST_CODEX_ARGS", &codex_args_path)
+        .env("PATH", path)
+        .env_remove("CODEX_THREAD_ID")
+        .env_remove("BRGR_SESSION_ID")
+        .output()
+        .unwrap();
+    assert!(
+        launched.status.success(),
+        "plugin Codex bridge failed: {}",
+        String::from_utf8_lossy(&launched.stderr)
+    );
+    let codex_args = fs::read_to_string(codex_args_path).unwrap();
+    assert!(codex_args.contains("shell_environment_policy.set.PATH="));
+    assert!(codex_args.contains("shell_environment_policy.set.BRGR_PLUGIN_BRIDGE_DIR="));
+    let candidate: Value = serde_json::from_slice(&fs::read(&output_path).unwrap()).unwrap();
+    assert_eq!(candidate["outcome"], "candidate");
+    let task = candidate["task_id"].as_str().unwrap();
+    let result = json_output(&run(
+        &home,
+        &["result", task],
+        &[
+            ("CODEX_THREAD_ID", "bridge-test"),
+            ("BRGR_SESSION_ID", "bridge-test"),
+        ],
+    ));
+    assert_eq!(result["artifacts"][0]["text"], "BRGR_FIXTURE_OK");
+    assert!(!fs::read_dir(&home).unwrap().any(|entry| {
+        entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with("plugin-bridge-")
+    }));
+}
+
+#[test]
+fn missing_plugin_bridge_fails_before_task_admission() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("brgr");
+    let output = Command::new(brgr())
+        .arg("--home")
+        .arg(&home)
+        .args(["run", "BRGR_FIXTURE_OK"])
+        .env("BRGR_PLUGIN_BRIDGE_DIR", temp.path().join("missing"))
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("bridge directory is unavailable"));
+    assert!(!home.join("store/brgr.sqlite3").exists());
+}
+
+#[test]
 fn doctor_reports_changed_harness_instead_of_ok() {
     let temp = TempDir::new().unwrap();
     let home = temp.path().join("brgr");

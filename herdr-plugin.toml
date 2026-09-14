@@ -1,0 +1,39 @@
+id = "brgr"
+name = "brgr"
+version = "2.0.0"
+min_herdr_version = "0.9.0"
+description = "Managed coding-agent runs with sealed results and explicit decisions"
+platforms = ["macos"]
+
+[[build]]
+command = ["cargo", "build", "--release", "--locked", "-p", "brgr-cli"]
+
+[[actions]]
+id = "open"
+title = "Open brgr status"
+contexts = ["workspace"]
+command = ["target/release/brgr", "plugin", "open"]
+
+[[actions]]
+id = "codex"
+title = "Open Codex for brgr"
+contexts = ["workspace"]
+command = ["target/release/brgr", "plugin", "open", "--codex"]
+
+[[actions]]
+id = "doctor"
+title = "Check brgr"
+contexts = ["workspace"]
+command = ["target/release/brgr", "doctor"]
+
+[[panes]]
+id = "board"
+title = "brgr status"
+placement = "tab"
+command = ["target/release/brgr", "plugin", "board"]
+
+[[panes]]
+id = "codex"
+title = "brgr Codex"
+placement = "tab"
+command = ["target/release/brgr", "plugin", "codex"]
