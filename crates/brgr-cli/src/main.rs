@@ -430,6 +430,10 @@ async fn run_task(paths: &Paths, args: RunArgs, json_output: bool) -> Result<()>
         },
     };
     spec.validate()?;
+    activated.validate_task_route(&spec)?;
+    registry
+        .preflight_model(&activated, spec.route.requested_model.as_deref())
+        .await?;
     start_task(
         paths,
         spec,
@@ -505,6 +509,10 @@ async fn revise_task(paths: &Paths, args: ReviseArgs, json_output: bool) -> Resu
     }
     let (activated, activation) =
         registry.load_healthy_with_receipt(&replacement.route.harness_id)?;
+    activated.validate_task_route(&replacement)?;
+    registry
+        .preflight_model(&activated, replacement.route.requested_model.as_deref())
+        .await?;
     start_task(
         paths,
         replacement,
@@ -1306,6 +1314,7 @@ fn omp_process_manifest(
         probe: ProbeSpec {
             version_argv: vec!["--version".to_owned()],
             help_argv: vec!["--help".to_owned()],
+            model_catalog: None,
         },
         launch: LaunchSpec {
             argv,

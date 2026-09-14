@@ -1007,7 +1007,7 @@ fn omp_fallback_model_cannot_be_sealed_as_requested_model() {
     let executable = temp.path().join("omp");
     fs::write(
         &executable,
-        "#!/bin/sh\ncase \"$1\" in\n --version) echo 'omp fixture 1'; exit 0;;\n --help) printf '%s\\n' '-p, --print' '--mode=<value>' '--no-session' '--no-prewalk' '--no-extensions' '--no-title' '--model=<value>' '--thinking=<value>'; exit 0;;\nesac\nprintf '%s\\n' '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"provider\":\"other\",\"model\":\"fallback\",\"content\":[{\"type\":\"text\",\"text\":\"SHOULD_NOT_ACCEPT\"}]}}' '{\"type\":\"agent_end\",\"stopReason\":\"completed\"}'\n",
+        "#!/bin/sh\ncase \"$1\" in\n --version) echo 'omp fixture 1'; exit 0;;\n --help) printf '%s\\n' '-p, --print' '--mode=<value>' '--no-session' '--no-prewalk' '--no-extensions' '--no-title' '--model=<value>' '--thinking=<value>'; exit 0;;\n models) echo '{\"models\":[{\"selector\":\"other/fallback\"},{\"selector\":\"workbuddy/deepseek-v4.1-flash\"}]}'; exit 0;;\nesac\nprintf '%s\\n' '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"provider\":\"other\",\"model\":\"fallback\",\"content\":[{\"type\":\"text\",\"text\":\"SHOULD_NOT_ACCEPT\"}]}}' '{\"type\":\"agent_end\",\"stopReason\":\"completed\"}'\n",
     )
     .unwrap();
     fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
@@ -1025,6 +1025,24 @@ fn omp_fallback_model_cannot_be_sealed_as_requested_model() {
         &[],
     ));
     let owner = [("BRGR_OWNER_ID", "codex:wrong-model")];
+    let unknown = run(
+        &home,
+        &[
+            "run",
+            "unknown model must not start",
+            "--harness",
+            "local.omp",
+            "--workspace",
+            workspace.to_str().unwrap(),
+            "--model",
+            "unknown/model",
+        ],
+        &owner,
+    );
+    assert!(!unknown.status.success());
+    assert!(String::from_utf8_lossy(&unknown.stderr).contains("absent from the current catalog"));
+    assert_eq!(fs::read_dir(home.join("launches")).unwrap().count(), 0);
+    assert_eq!(fs::read_dir(home.join("worktrees")).unwrap().count(), 0);
     let result = json_output(&run(
         &home,
         &[

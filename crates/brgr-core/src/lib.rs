@@ -845,6 +845,7 @@ mod tests {
             probe: ProbeSpec {
                 version_argv: vec!["--version".to_owned()],
                 help_argv: vec!["--help".to_owned()],
+                model_catalog: None,
             },
             launch: LaunchSpec {
                 argv: vec![],

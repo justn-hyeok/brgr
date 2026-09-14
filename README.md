@@ -89,6 +89,10 @@ registers the optional Herdr adapter without claiming a managed scratch run.
 Process activations created before this scratch requirement remain on disk but
 cannot start a new task; re-add each approved executable with an authorized
 scratch workspace and prompt. Existing sealed results and decisions are kept.
+An exact `--model` additionally requires an activation with a bounded native
+model-catalog recipe. Older activations lacking it must be re-certified; an
+unknown selector fails before a task worktree or model request is started.
+Presentation-only Herdr model resolution remains delegated to `omp-role`.
 
 `brgr cleanup status TASK` shows whether an owned OMP pane was closed or
 retained. `brgr cleanup run TASK` retries a pending close. Neither command
@@ -112,5 +116,11 @@ cargo run -p brgr-cli -- --help
 
 The local store defaults to `~/Library/Application Support/brgr`. Harness
 output, help text, manifests, and reports are treated as untrusted data.
+Before upgrading, retain a recoverable copy of the private registry and store.
+An older `v1.0.5` binary cannot load a newly activated manifest containing
+`model_catalog`; this fails closed without deleting results. Restore a matching
+registry snapshot only after stopping new admissions and confirming no active
+task depends on the newer activation. Never overwrite a newer live store with
+an old snapshot.
 
 See [Architecture](docs/architecture.md) for the managed-run contract.

@@ -24,6 +24,15 @@ readable without rewriting their stored bytes or decisions.
 Replayed decisions return the persisted
 decision ID, not a newly generated uncommitted one.
 
+Exact model requests now run a bounded, declarative native catalog preflight
+before task worktree creation and before paid scratch. OMP, GJC, Cursor CLI,
+and Command Code packages supply their respective catalog shapes; agent-authored
+packages may declare the same generic formats. Missing or unknown selectors
+fail closed. New activation manifests contain `model_catalog`; `v1.0.5`
+binaries reject those manifests on downgrade, so retain and restore a matching
+registry snapshot only at an idle boundary. Result and decision bytes remain
+compatible and must not be overwritten by an old store snapshot.
+
 ## 1.0.5 — 2026-09-14
 
 Fix a Herdr-backed OMP revision replay: a new task revision could reuse the

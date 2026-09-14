@@ -44,6 +44,24 @@ pub struct HarnessManifest {
 pub struct ProbeSpec {
     pub version_argv: Vec<String>,
     pub help_argv: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_catalog: Option<ModelCatalogSpec>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelCatalogSpec {
+    pub argv: Vec<String>,
+    pub format: ModelCatalogFormat,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ModelCatalogFormat {
+    JsonSelectors { pointer: String, field: String },
+    CanonicalProviderTable,
+    DashSeparated,
+    FirstColumn,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -266,45 +284,75 @@ impl ProcessRunner {
         argv: &[String],
         deadline: Duration,
     ) -> Result<ExecutionOutput, RunnerError> {
-        let manifest = HarnessManifest {
-            schema: MANIFEST_SCHEMA_V1.to_owned(),
-            id: "internal.probe".to_owned(),
-            adapter: PROCESS_ADAPTER_V1.to_owned(),
-            executable: executable.to_path_buf(),
-            probe: ProbeSpec {
-                version_argv: argv.to_vec(),
-                help_argv: argv.to_vec(),
-            },
-            launch: LaunchSpec {
-                argv: argv.to_vec(),
-                model_argv: vec![],
-                effort_argv: vec![],
-                env_allow: vec!["HOME".to_owned(), "PATH".to_owned(), "LANG".to_owned()],
-                mode: ExecutionMode::OneShot,
-            },
-            result: ResultSpec {
-                source: ResultSource::Stdout,
-                media_type: "text/plain".to_owned(),
-                max_bytes: 65_536,
-                success_exit_codes: vec![0],
-            },
-            capabilities: BTreeMap::new(),
-        };
+        if !executable.is_absolute() || !executable.is_file() {
+            return Err(RunnerError::InvalidExecutable(executable.to_path_buf()));
+        }
+        if argv.len() > 64 || argv.iter().any(|argument| argument.contains('\0')) {
+            return Err(RunnerError::InvalidArgument);
+        }
         let scratch = TempDir::new()?;
-        Self::run(
-            &manifest,
-            RunRequest {
-                workspace: scratch.path(),
-                prompt: "",
-                model: None,
-                effort: None,
-                deadline,
-                cancel_path: None,
-                pid_path: None,
-            },
-        )
-        .await
+        let stdout_path = scratch.path().join("stdout");
+        let stderr_path = scratch.path().join("stderr");
+        let stdout_file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&stdout_path)?;
+        let stderr_file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&stderr_path)?;
+        let mut command = Command::new(executable);
+        command
+            .args(argv)
+            .current_dir(scratch.path())
+            .env_clear()
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(stdout_file))
+            .stderr(Stdio::from(stderr_file))
+            .kill_on_drop(true);
+        command.as_std_mut().process_group(0);
+        for name in ["HOME", "PATH", "LANG"] {
+            if let Some(value) = std::env::var_os(name) {
+                command.env(name, value);
+            }
+        }
+        let started = Instant::now();
+        let mut child = command.spawn().map_err(RunnerError::SpawnIo)?;
+        let (status, timed_out, cancelled) =
+            wait_for_exit(&mut child, started, deadline, None).await?;
+        let (stdout, stdout_truncated) = read_probe_file(&stdout_path, 65_536)?;
+        let (stderr, stderr_truncated) = read_probe_file(&stderr_path, 65_536)?;
+        let exit_code = status.and_then(|value| value.code());
+        let output_truncated = stdout_truncated || stderr_truncated;
+        let result = if exit_code == Some(0) && !timed_out && !output_truncated {
+            stdout.clone()
+        } else {
+            Vec::new()
+        };
+        Ok(ExecutionOutput {
+            exit_code,
+            stdout,
+            stderr,
+            result,
+            observed_model: None,
+            timed_out,
+            cancelled,
+            output_truncated,
+            elapsed: started.elapsed(),
+        })
     }
+}
+
+fn read_probe_file(path: &Path, limit: u64) -> Result<(Vec<u8>, bool), RunnerError> {
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)?
+        .take(limit.saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    let truncated = u64::try_from(bytes.len()).unwrap_or(u64::MAX) > limit;
+    if truncated {
+        bytes.truncate(usize::try_from(limit).expect("probe limit fits usize"));
+    }
+    Ok((bytes, truncated))
 }
 
 #[cfg(debug_assertions)]
@@ -410,6 +458,24 @@ impl HarnessManifest {
         }
         if self.launch.argv.iter().any(|value| value.contains('\0')) {
             return Err(RunnerError::InvalidArgument);
+        }
+        if let Some(catalog) = &self.probe.model_catalog
+            && (catalog.argv.is_empty()
+                || catalog.argv.len() > 64
+                || catalog.argv.iter().any(|arg| {
+                    arg.contains('\0')
+                        || arg
+                            .replace("${model.query}", "")
+                            .replace("${model.id}", "")
+                            .contains("${")
+                })
+                || matches!(
+                    &catalog.format,
+                    ModelCatalogFormat::JsonSelectors { pointer, field }
+                        if !pointer.starts_with('/') || field.is_empty()
+                ))
+        {
+            return Err(RunnerError::InvalidModelCatalog);
         }
         if self.result.max_bytes == 0 || self.result.max_bytes > 20 * 1024 * 1024 {
             return Err(RunnerError::InvalidOutputLimit);
@@ -772,6 +838,8 @@ pub enum RunnerError {
     MissingSuccessExitCode,
     #[error("invalid or duplicate environment name: {0}")]
     InvalidEnvironmentName(String),
+    #[error("model catalog manifest is malformed")]
+    InvalidModelCatalog,
     #[error("required substitution is missing: {0}")]
     MissingSubstitution(String),
     #[error("unknown substitution in argument: {0}")]
@@ -821,6 +889,7 @@ mod tests {
             probe: ProbeSpec {
                 version_argv: vec!["--version".to_owned()],
                 help_argv: vec!["--help".to_owned()],
+                model_catalog: None,
             },
             launch: LaunchSpec {
                 argv: vec!["@${input.prompt_file}".to_owned()],
@@ -1097,6 +1166,51 @@ mod tests {
             manifest.validate(),
             Err(RunnerError::InvalidExecutable(_))
         ));
+    }
+
+    #[test]
+    fn optional_catalog_preserves_old_manifest_shape_and_rejects_unknown_templates() {
+        let mut manifest = echo_manifest(4_096);
+        let old = serde_json::to_vec(&manifest).unwrap();
+        assert!(!String::from_utf8_lossy(&old).contains("model_catalog"));
+        let decoded: HarnessManifest = serde_json::from_slice(&old).unwrap();
+        assert_eq!(serde_json::to_vec(&decoded).unwrap(), old);
+        manifest.probe.model_catalog = Some(ModelCatalogSpec {
+            argv: vec!["--list-models=${unknown}".to_owned()],
+            format: ModelCatalogFormat::FirstColumn,
+        });
+        assert!(matches!(
+            manifest.validate(),
+            Err(RunnerError::InvalidModelCatalog)
+        ));
+    }
+
+    #[tokio::test]
+    async fn file_backed_probe_captures_full_help_and_flags_oversize() {
+        let root = tempfile::tempdir().unwrap();
+        let executable = root.path().join("probe");
+        std::fs::write(
+            &executable,
+            "#!/bin/sh\ni=0\nwhile [ \"$i\" -lt 100 ]; do printf 'model-catalog-line-12345678901234567890123456789012345678901234567890\\n'; i=$((i+1)); done\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let output = ProcessRunner::probe(&executable, &[], Duration::from_secs(2))
+            .await
+            .unwrap();
+        assert_eq!(output.exit_code, Some(0));
+        assert!(output.stdout.len() > 512);
+        assert!(!output.output_truncated);
+        std::fs::write(
+            &executable,
+            "#!/bin/sh\ni=0\nwhile [ \"$i\" -lt 1200 ]; do printf 'model-catalog-line-12345678901234567890123456789012345678901234567890\\n'; i=$((i+1)); done\n",
+        )
+        .unwrap();
+        let oversized = ProcessRunner::probe(&executable, &[], Duration::from_secs(2))
+            .await
+            .unwrap();
+        assert!(oversized.output_truncated);
+        assert_eq!(oversized.stdout.len(), 65_536);
     }
 
     #[test]

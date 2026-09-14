@@ -1,7 +1,7 @@
 //! Evidence-backed harness registration and health checking.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fmt::Write as FmtWrite,
     fs,
     io::Write as IoWrite,
@@ -12,8 +12,8 @@ use std::{
 
 use brgr_runner::{
     Capability, CapabilityStatus, ExecutionMode, HarnessManifest, LaunchSpec, MANIFEST_SCHEMA_V1,
-    OMP_ROLE_ADAPTER_V1, PROCESS_ADAPTER_V1, ProbeSpec, ProcessRunner, ResultSource, ResultSpec,
-    RunnerError,
+    ModelCatalogFormat, ModelCatalogSpec, OMP_ROLE_ADAPTER_V1, PROCESS_ADAPTER_V1, ProbeSpec,
+    ProcessRunner, ResultSource, ResultSpec, RunnerError,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -244,6 +244,7 @@ impl Registry {
         if effort.is_some() && manifest.launch.effort_argv.is_empty() {
             return Err(RegistryError::UnsupportedScratchEffort);
         }
+        self.preflight_model(manifest, model).await?;
         let output = ProcessRunner::run(
             manifest,
             brgr_runner::RunRequest {
@@ -385,6 +386,62 @@ impl Registry {
             }
         }
         Ok(Health::Healthy)
+    }
+
+    /// Resolves an exact requested model through a bounded native catalog
+    /// before task admission or a paid scratch run.
+    ///
+    /// # Errors
+    ///
+    /// Fails closed when no catalog exists, probing fails, or the exact
+    /// selector is absent. The Herdr presentation adapter uses its own OMP
+    /// launcher preflight instead of a process manifest catalog.
+    pub async fn preflight_model(
+        &self,
+        manifest: &HarnessManifest,
+        requested: Option<&str>,
+    ) -> Result<(), RegistryError> {
+        let Some(requested) = requested else {
+            return Ok(());
+        };
+        if requested.is_empty() || requested == "auto" {
+            return Err(RegistryError::ModelNotExact(requested.to_owned()));
+        }
+        if manifest.adapter == OMP_ROLE_ADAPTER_V1 {
+            return Ok(());
+        }
+        let catalog = manifest
+            .probe
+            .model_catalog
+            .as_ref()
+            .ok_or_else(|| RegistryError::ModelCatalogMissing(manifest.id.clone()))?;
+        if catalog.argv.is_empty() || catalog.argv.len() > 64 {
+            return Err(RegistryError::InvalidModelCatalog);
+        }
+        let argv = catalog
+            .argv
+            .iter()
+            .map(|arg| {
+                let model_id = requested.rsplit('/').next().unwrap_or(requested);
+                let rendered = arg
+                    .replace("${model.query}", requested)
+                    .replace("${model.id}", model_id);
+                if rendered.contains("${") || rendered.contains('\0') {
+                    Err(RegistryError::InvalidModelCatalog)
+                } else {
+                    Ok(rendered)
+                }
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let output = ProcessRunner::probe(&manifest.executable, &argv, PROBE_DEADLINE).await?;
+        if output.exit_code != Some(0) || output.timed_out || output.output_truncated {
+            return Err(RegistryError::ModelCatalogProbeFailed);
+        }
+        let selectors = parse_model_catalog(&catalog.format, &output.stdout)?;
+        if !selectors.contains(requested) {
+            return Err(RegistryError::ModelNotInCatalog(requested.to_owned()));
+        }
+        Ok(())
     }
 
     fn persist_activation(
@@ -538,12 +595,33 @@ async fn probe_custom_contract(manifest: &HarnessManifest) -> Result<ProbeEviden
 }
 
 fn validate_custom_argv(manifest: &HarnessManifest, help: &str) -> Result<(), RegistryError> {
+    let catalog_argv = manifest
+        .probe
+        .model_catalog
+        .as_ref()
+        .map_or(&[][..], |catalog| catalog.argv.as_slice());
+    if let Some(forbidden) = catalog_argv.iter().find(|argument| {
+        [
+            "delete", "remove", "update", "set", "install", "login", "logout", "clear", "reset",
+            "purge", "rm",
+        ]
+        .contains(&argument.as_str())
+    }) {
+        return Err(RegistryError::UnsafeCustomPermission(forbidden.clone()));
+    }
+    if let Some(first) = catalog_argv.first()
+        && !first.starts_with('-')
+        && !help.split_whitespace().any(|word| word == first)
+    {
+        return Err(RegistryError::UndocumentedCustomFlag(first.clone()));
+    }
     for argument in manifest
         .launch
         .argv
         .iter()
         .chain(&manifest.launch.model_argv)
         .chain(&manifest.launch.effort_argv)
+        .chain(catalog_argv)
     {
         if [
             "--yolo",
@@ -579,6 +657,8 @@ fn validate_custom_argv(manifest: &HarnessManifest, help: &str) -> Result<(), Re
                     | "task.workspace"
                     | "route.model"
                     | "route.effort"
+                    | "model.query"
+                    | "model.id"
             ) {
                 return Err(RegistryError::UnsafeCustomPlaceholder(argument.clone()));
             }
@@ -700,6 +780,7 @@ fn generate_generic_manifest(
         probe: ProbeSpec {
             version_argv: vec!["--version".to_owned()],
             help_argv: vec!["--help".to_owned()],
+            model_catalog: None,
         },
         launch: LaunchSpec {
             argv: vec![
@@ -747,6 +828,10 @@ fn generate_gjc_manifest(
         probe: ProbeSpec {
             version_argv: vec!["--version".to_owned()],
             help_argv: vec!["--help".to_owned()],
+            model_catalog: Some(ModelCatalogSpec {
+                argv: vec!["--list-models=${model.id}".to_owned()],
+                format: ModelCatalogFormat::CanonicalProviderTable,
+            }),
         },
         launch: LaunchSpec {
             argv: vec![
@@ -811,6 +896,18 @@ fn generate_omp_process_manifest(
         probe: ProbeSpec {
             version_argv: vec!["--version".to_owned()],
             help_argv: vec!["--help".to_owned()],
+            model_catalog: Some(ModelCatalogSpec {
+                argv: vec![
+                    "models".to_owned(),
+                    "find".to_owned(),
+                    "${model.query}".to_owned(),
+                    "--json".to_owned(),
+                ],
+                format: ModelCatalogFormat::JsonSelectors {
+                    pointer: "/models".to_owned(),
+                    field: "selector".to_owned(),
+                },
+            }),
         },
         launch: LaunchSpec {
             argv: vec![
@@ -873,6 +970,10 @@ fn generate_cursor_manifest(
         probe: ProbeSpec {
             version_argv: vec!["--version".to_owned()],
             help_argv: vec!["--help".to_owned()],
+            model_catalog: Some(ModelCatalogSpec {
+                argv: vec!["models".to_owned()],
+                format: ModelCatalogFormat::DashSeparated,
+            }),
         },
         launch: LaunchSpec {
             argv: vec![
@@ -941,6 +1042,10 @@ fn generate_command_code_manifest(
         probe: ProbeSpec {
             version_argv: vec!["--version".to_owned()],
             help_argv: vec!["--help".to_owned()],
+            model_catalog: Some(ModelCatalogSpec {
+                argv: vec!["--list-models".to_owned()],
+                format: ModelCatalogFormat::FirstColumn,
+            }),
         },
         launch: LaunchSpec {
             argv: vec![
@@ -1008,6 +1113,7 @@ fn generate_omp_manifest(
         probe: ProbeSpec {
             version_argv: vec!["--help".to_owned()],
             help_argv: vec!["--help".to_owned()],
+            model_catalog: None,
         },
         launch: LaunchSpec {
             argv: vec![],
@@ -1050,6 +1156,79 @@ fn generate_omp_manifest(
             ),
         ]),
     })
+}
+
+fn parse_model_catalog(
+    format: &ModelCatalogFormat,
+    bytes: &[u8],
+) -> Result<BTreeSet<String>, RegistryError> {
+    let mut selectors = BTreeSet::new();
+    match format {
+        ModelCatalogFormat::JsonSelectors { pointer, field } => {
+            let document: serde_json::Value = serde_json::from_slice(bytes)?;
+            let items = document
+                .pointer(pointer)
+                .and_then(serde_json::Value::as_array)
+                .ok_or(RegistryError::InvalidModelCatalog)?;
+            for item in items {
+                let selector = item
+                    .as_str()
+                    .or_else(|| item.get(field).and_then(serde_json::Value::as_str))
+                    .filter(|value| !value.is_empty())
+                    .ok_or(RegistryError::InvalidModelCatalog)?;
+                selectors.insert(selector.to_owned());
+            }
+        }
+        ModelCatalogFormat::CanonicalProviderTable => {
+            let text =
+                std::str::from_utf8(bytes).map_err(|_| RegistryError::InvalidModelCatalog)?;
+            let mut section = 0_u8;
+            for line in text.lines().map(str::trim) {
+                match line {
+                    "Canonical models" => section = 1,
+                    "Provider models" => section = 2,
+                    _ => {
+                        let columns = line.split_whitespace().collect::<Vec<_>>();
+                        if columns.len() >= 2 && section == 1 && columns[0] != "canonical" {
+                            selectors.insert(columns[0].to_owned());
+                            selectors.insert(columns[1].to_owned());
+                        } else if columns.len() >= 2 && section == 2 && columns[0] != "provider" {
+                            selectors.insert(format!("{}/{}", columns[0], columns[1]));
+                        }
+                    }
+                }
+            }
+        }
+        ModelCatalogFormat::DashSeparated => {
+            let text =
+                std::str::from_utf8(bytes).map_err(|_| RegistryError::InvalidModelCatalog)?;
+            for line in text.lines() {
+                if let Some((selector, _)) = line.split_once(" - ") {
+                    let selector = selector.trim();
+                    if selector != "auto" && !selector.is_empty() {
+                        selectors.insert(selector.to_owned());
+                    }
+                }
+            }
+        }
+        ModelCatalogFormat::FirstColumn => {
+            let text =
+                std::str::from_utf8(bytes).map_err(|_| RegistryError::InvalidModelCatalog)?;
+            for line in text.lines() {
+                if let Some(selector) = line.split_whitespace().next()
+                    && selector
+                        .bytes()
+                        .any(|byte| byte == b'/' || byte == b'-' || byte.is_ascii_digit())
+                {
+                    selectors.insert(selector.to_owned());
+                }
+            }
+        }
+    }
+    if selectors.is_empty() && !matches!(format, ModelCatalogFormat::JsonSelectors { .. }) {
+        return Err(RegistryError::InvalidModelCatalog);
+    }
+    Ok(selectors)
 }
 
 fn supported(semantics: &str) -> Capability {
@@ -1208,6 +1387,16 @@ pub enum RegistryError {
     EmptyScratchPrompt,
     #[error("scratch workspace overlaps the brgr control directory")]
     ScratchOverlapsControlHome,
+    #[error("requested model is not an exact selector: {0}")]
+    ModelNotExact(String),
+    #[error("harness {0} has no model catalog; re-certify it before selecting a model")]
+    ModelCatalogMissing(String),
+    #[error("model catalog recipe or output is malformed")]
+    InvalidModelCatalog,
+    #[error("bounded model catalog probe failed")]
+    ModelCatalogProbeFailed,
+    #[error("requested model is absent from the current catalog: {0}")]
+    ModelNotInCatalog(String),
     #[error("registry root is outside its declared control home")]
     InvalidControlHome,
     #[error("this harness cannot select a model for its scratch run")]
@@ -1245,6 +1434,180 @@ mod tests {
         let workspace = root.path().join("scratch");
         fs::create_dir_all(&workspace).unwrap();
         workspace
+    }
+
+    #[test]
+    fn model_catalog_formats_keep_only_exact_selectors() {
+        let json = br#"{"models":[{"selector":"workbuddy/deepseek-v4.1-flash"}]}"#;
+        let parsed = parse_model_catalog(
+            &ModelCatalogFormat::JsonSelectors {
+                pointer: "/models".to_owned(),
+                field: "selector".to_owned(),
+            },
+            json,
+        )
+        .unwrap();
+        assert!(parsed.contains("workbuddy/deepseek-v4.1-flash"));
+        assert!(!parsed.contains("workbuddy/deepseek-v4.1"));
+        assert!(
+            parse_model_catalog(
+                &ModelCatalogFormat::JsonSelectors {
+                    pointer: "/models".to_owned(),
+                    field: "selector".to_owned(),
+                },
+                br#"{"models":[]}"#,
+            )
+            .unwrap()
+            .is_empty()
+        );
+        let gjc = b"Canonical models\ncanonical selected variants\ngpt-5.6-luna openai-codex/gpt-5.6-luna 8\nProvider models\nprovider model context\nopencode-zen gpt-5.6-luna 1M\n";
+        let parsed = parse_model_catalog(&ModelCatalogFormat::CanonicalProviderTable, gjc).unwrap();
+        for selector in [
+            "gpt-5.6-luna",
+            "openai-codex/gpt-5.6-luna",
+            "opencode-zen/gpt-5.6-luna",
+        ] {
+            assert!(parsed.contains(selector));
+        }
+        let cursor = b"Available models\nauto - Auto (default)\ngpt-5.6-luna-low-fast - Luna\n";
+        let parsed = parse_model_catalog(&ModelCatalogFormat::DashSeparated, cursor).unwrap();
+        assert!(parsed.contains("gpt-5.6-luna-low-fast"));
+        assert!(!parsed.contains("auto"));
+        let command = b"Available models\nOpen Source\ndeepseek/deepseek-v4-flash   fast\ngpt-5.6-luna   low cost\n";
+        let parsed = parse_model_catalog(&ModelCatalogFormat::FirstColumn, command).unwrap();
+        assert!(parsed.contains("deepseek/deepseek-v4-flash"));
+        assert!(parsed.contains("gpt-5.6-luna"));
+        assert!(!parsed.contains("Available"));
+        assert!(
+            parse_model_catalog(
+                &ModelCatalogFormat::JsonSelectors {
+                    pointer: "/models".to_owned(),
+                    field: "selector".to_owned()
+                },
+                b"not json",
+            )
+            .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_catalog_blocks_requested_model_without_a_probe() {
+        let root = tempfile::tempdir().unwrap();
+        let executable = root.path().join("mystery-agent");
+        fixture_executable(&executable);
+        let registry = Registry::open(root.path().join("registry")).unwrap();
+        let manifest = registry.draft(&executable).await.unwrap();
+        assert!(manifest.probe.model_catalog.is_none());
+        registry.preflight_model(&manifest, None).await.unwrap();
+        assert!(matches!(
+            registry
+                .preflight_model(&manifest, Some("provider/model"))
+                .await,
+            Err(RegistryError::ModelCatalogMissing(_))
+        ));
+        assert!(matches!(
+            registry.preflight_model(&manifest, Some("auto")).await,
+            Err(RegistryError::ModelNotExact(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn authored_catalog_certifies_a_future_model_selecting_harness() {
+        let root = tempfile::tempdir().unwrap();
+        let executable = root.path().join("future-agent");
+        fs::write(
+            &executable,
+            "#!/bin/sh\ncase \"$1\" in\n --version) echo 'future 1';;\n --help) echo '--prompt-file <path> --model <name> --list-models';;\n --list-models) echo 'future-model - supported';;\n --prompt-file) /bin/cat \"$2\";;\n *) exit 2;;\nesac\n",
+        )
+        .unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+        let manifest = HarnessManifest {
+            schema: MANIFEST_SCHEMA_V1.to_owned(),
+            id: "local.future-agent".to_owned(),
+            adapter: PROCESS_ADAPTER_V1.to_owned(),
+            executable: executable.canonicalize().unwrap(),
+            probe: ProbeSpec {
+                version_argv: vec!["--version".to_owned()],
+                help_argv: vec!["--help".to_owned()],
+                model_catalog: Some(ModelCatalogSpec {
+                    argv: vec!["--list-models".to_owned()],
+                    format: ModelCatalogFormat::DashSeparated,
+                }),
+            },
+            launch: LaunchSpec {
+                argv: vec![
+                    "--prompt-file".to_owned(),
+                    "${input.prompt_file}".to_owned(),
+                ],
+                model_argv: vec!["--model".to_owned(), "${route.model}".to_owned()],
+                effort_argv: vec![],
+                env_allow: vec!["HOME".to_owned(), "PATH".to_owned()],
+                mode: ExecutionMode::OneShot,
+            },
+            result: ResultSpec {
+                source: ResultSource::Stdout,
+                media_type: "text/plain".to_owned(),
+                max_bytes: 1_024,
+                success_exit_codes: vec![0],
+            },
+            capabilities: BTreeMap::from([
+                ("completion".to_owned(), supported("process_exit")),
+                ("model_select".to_owned(), supported("--model")),
+            ]),
+        };
+        let registry = Registry::open(root.path().join("registry")).unwrap();
+        registry.contract_test_custom(&manifest).await.unwrap();
+        let receipt = registry
+            .activate_custom_with_scratch(
+                &manifest,
+                &scratch_workspace(&root),
+                "future fixture",
+                Some("future-model"),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(receipt.scratch_result_digest.is_some());
+        assert!(matches!(
+            registry
+                .preflight_model(&manifest, Some("missing-model"))
+                .await,
+            Err(RegistryError::ModelNotInCatalog(_))
+        ));
+        let mut unsafe_catalog = manifest.clone();
+        unsafe_catalog
+            .probe
+            .model_catalog
+            .as_mut()
+            .unwrap()
+            .argv
+            .push("delete".to_owned());
+        assert!(matches!(
+            registry.contract_test_custom(&unsafe_catalog).await,
+            Err(RegistryError::UnsafeCustomPermission(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn gjc_catalog_filters_by_model_id_but_matches_full_provider_selector() {
+        let root = tempfile::tempdir().unwrap();
+        let executable = root.path().join("gjc");
+        fs::write(
+            &executable,
+            "#!/bin/sh\ncase \"$1\" in\n --version) echo 'gjc 1';;\n --help) echo '--mode=<value> --no-session --no-mcp -p, --print --model=<value>';;\n --list-models=gpt-5.6-luna) printf '%s\\n' 'Canonical models' 'canonical selected' 'gpt-5.6-luna openai-codex/gpt-5.6-luna' 'Provider models' 'provider model' 'opencode-zen gpt-5.6-luna';;\n *) exit 2;;\nesac\n",
+        )
+        .unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+        let registry = Registry::open(root.path().join("registry")).unwrap();
+        let manifest = registry.draft(&executable).await.unwrap();
+        registry
+            .preflight_model(&manifest, Some("opencode-zen/gpt-5.6-luna"))
+            .await
+            .unwrap();
+        registry
+            .preflight_model(&manifest, Some("gpt-5.6-luna"))
+            .await
+            .unwrap();
     }
 
     #[test]
@@ -1442,6 +1805,7 @@ mod tests {
             probe: ProbeSpec {
                 version_argv: vec!["--version".to_owned()],
                 help_argv: vec!["--help".to_owned()],
+                model_catalog: None,
             },
             launch: LaunchSpec {
                 argv: vec!["-p".to_owned(), "${input.prompt}".to_owned()],
