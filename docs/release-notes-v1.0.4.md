@@ -1,5 +1,12 @@
 # brgr v1.0.4
 
+> **Known issue (2026-09-14):** The optional `local.omp-herdr` route can reuse
+> an earlier report when a rejected task is revised, falsely presenting old
+> bytes as a new candidate. Do not accept a revised Herdr-backed OMP result
+> without independent freshness evidence. The Herdr-free `local.omp` process
+> route is unaffected. A corrective patch is being verified; existing tags
+> and assets have not been changed.
+
 This patch hardens the managed-run failure boundary. Debug-only process
 failpoints and deterministic fixtures cover task claim, launch intent,
 process spawn, artifact seal, and terminal commit. Reconciliation retains one

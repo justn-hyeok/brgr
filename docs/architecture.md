@@ -23,6 +23,10 @@ one-shot process. If that wrapper times out, exits without a valid result, or
 is otherwise interrupted, brgr records `lost` with unresolved external effects
 instead of claiming the separately launched OMP worker stopped. Agent-authored
 manifests cannot claim this internal mode.
+Interactive OMP reports are revision-scoped and must not pre-exist a fresh
+run. The wrapper accepts a report only after the exact OMP agent keeps the
+same pane, terminal, and immutable session through a new working-to-terminal
+lifecycle transition; startup idle alone is never completion evidence.
 
 Candidate output is never accepted because a process exits successfully. Codex
 checks the task's acceptance criteria and records an accept or reject decision

@@ -106,6 +106,8 @@ enum Command {
         #[arg(long)]
         task: TaskId,
         #[arg(long)]
+        revision: u32,
+        #[arg(long)]
         launcher: PathBuf,
         #[arg(long)]
         model: Option<String>,
@@ -352,6 +354,7 @@ async fn main() -> Result<()> {
             prompt_file,
             workspace,
             task,
+            revision,
             launcher,
             model,
             effort,
@@ -363,6 +366,7 @@ async fn main() -> Result<()> {
             task,
             &launcher,
             OmpOptions {
+                revision,
                 model: model.as_deref(),
                 effort: effort.as_deref(),
                 keep_pane,
@@ -1225,6 +1229,8 @@ fn omp_process_manifest(
         "${task.workspace}".to_owned(),
         "--task".to_owned(),
         launch.spec.task_id.to_string(),
+        "--revision".to_owned(),
+        launch.spec.revision.to_string(),
         "--launcher".to_owned(),
         activated.executable.to_string_lossy().into_owned(),
     ];
@@ -1271,6 +1277,7 @@ fn omp_process_manifest(
 
 #[derive(Clone, Copy)]
 struct OmpOptions<'a> {
+    revision: u32,
     model: Option<&'a str>,
     effort: Option<&'a str>,
     keep_pane: bool,
@@ -1287,10 +1294,19 @@ fn run_omp_adapter(
     if env::var("HERDR_ENV").as_deref() != Ok("1") || env::var_os("HERDR_PANE_ID").is_none() {
         bail!("OMP adapter requires a verified Herdr parent session");
     }
+    let spec = Store::open(&paths.store)?.task(task)?;
+    if spec.revision != options.revision {
+        bail!("OMP wrapper revision differs from the admitted task revision");
+    }
+    let report_limit = spec.artifact_contract.max_bytes;
     let short = &task.to_string()[..8];
-    let agent = format!("brgr-{short}");
-    let task_slug = format!("brgr-{short}");
-    let report = paths.runs.join(format!("{task}.omp-report.md"));
+    let task_slug = if options.revision == 1 {
+        format!("brgr-{short}")
+    } else {
+        format!("brgr-{short}-r{}", options.revision)
+    };
+    let agent = task_slug.clone();
+    let report = fresh_omp_report_path(paths, task, options.revision)?;
     let prompt = fs::read_to_string(prompt_file)?;
 
     let launcher_receipt = launch_omp(
@@ -1302,7 +1318,7 @@ fn run_omp_adapter(
         options.model,
         options.effort,
     )?;
-    pane_cleanup::record_spawn(
+    let spawn_identity = pane_cleanup::record_spawn(
         &Store::open(&paths.store)?,
         &paths.runs,
         task,
@@ -1310,15 +1326,13 @@ fn run_omp_adapter(
         &launcher_receipt,
         options.keep_pane,
     )?;
+    let initial = get_omp_agent(&agent)?;
+    omp_spawn_matches_initial(&spawn_identity, &initial)?;
 
     let instruction = format!(
         "{prompt}\n\nWrite the final result as Markdown to {} before finishing.",
         report.display()
     );
-    let report_limit = Store::open(&paths.store)?
-        .task(task)?
-        .artifact_contract
-        .max_bytes;
     let prompted = ProcessCommand::new("omp-prompt")
         .arg("--expected-report")
         .arg(&report)
@@ -1332,28 +1346,126 @@ fn run_omp_adapter(
             String::from_utf8_lossy(&prompted.stderr)
         );
     }
+    let prompt_receipt: serde_json::Value = serde_json::from_slice(&prompted.stdout)?;
+    if prompt_receipt
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+        != Some("prompted")
+        || prompt_receipt
+            .get("target")
+            .and_then(serde_json::Value::as_str)
+            != Some(agent.as_str())
+    {
+        bail!("OMP prompt did not confirm the exact agent target");
+    }
 
     loop {
-        let observed = ProcessCommand::new("herdr")
-            .args(["agent", "get", &agent])
-            .output()?;
-        if !observed.status.success() {
-            bail!("Herdr lost the managed OMP agent {agent}");
-        }
-        let document: serde_json::Value = serde_json::from_slice(&observed.stdout)?;
-        let status = document
-            .pointer("/result/agent/agent_status")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("unknown");
-        if status == "blocked" {
-            bail!("OMP agent {agent} is blocked on external input");
-        }
-        if matches!(status, "idle" | "done") && report.is_file() {
+        let observed = get_omp_agent(&agent)?;
+        if omp_completion_ready(&initial, &observed, &agent)? && report.is_file() {
             io::stdout().write_all(&read_bounded_regular_report(&report, report_limit)?)?;
             return Ok(());
         }
         thread::sleep(Duration::from_millis(200));
     }
+}
+
+fn fresh_omp_report_path(paths: &Paths, task: TaskId, revision: u32) -> Result<PathBuf> {
+    let report = paths.runs.join(format!("{task}-r{revision}.omp-report.md"));
+    match fs::symlink_metadata(&report) {
+        Ok(_) => bail!("fresh OMP report path already exists for this task revision"),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(report),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn get_omp_agent(agent: &str) -> Result<serde_json::Value> {
+    let observed = ProcessCommand::new("herdr")
+        .args(["agent", "get", agent])
+        .output()?;
+    if !observed.status.success() {
+        bail!("Herdr lost the managed OMP agent {agent}");
+    }
+    Ok(serde_json::from_slice(&observed.stdout)?)
+}
+
+fn omp_spawn_matches_initial(
+    spawned: &pane_cleanup::SpawnIdentity,
+    initial: &serde_json::Value,
+) -> Result<()> {
+    let agent = initial
+        .pointer("/result/agent")
+        .context("OMP launch has no agent receipt")?;
+    if agent.get("pane_id").and_then(serde_json::Value::as_str) != Some(spawned.pane_id.as_str())
+        || agent.get("terminal_id").and_then(serde_json::Value::as_str)
+            != Some(spawned.terminal_id.as_str())
+        || agent
+            .pointer("/agent_session/value")
+            .and_then(serde_json::Value::as_str)
+            != Some(spawned.session_value.as_str())
+    {
+        bail!("OMP agent identity changed after its brgr ownership receipt");
+    }
+    Ok(())
+}
+
+fn omp_completion_ready(
+    initial: &serde_json::Value,
+    observed: &serde_json::Value,
+    agent: &str,
+) -> Result<bool> {
+    let first = initial
+        .pointer("/result/agent")
+        .context("OMP launch has no agent receipt")?;
+    let current = observed
+        .pointer("/result/agent")
+        .context("OMP observation has no agent receipt")?;
+    if first.get("name").and_then(serde_json::Value::as_str) != Some(agent)
+        || current.get("name").and_then(serde_json::Value::as_str) != Some(agent)
+        || first.get("agent").and_then(serde_json::Value::as_str) != Some("omp")
+        || current.get("agent").and_then(serde_json::Value::as_str) != Some("omp")
+    {
+        bail!("OMP agent name or kind changed");
+    }
+    for field in ["pane_id", "terminal_id"] {
+        if first
+            .get(field)
+            .and_then(serde_json::Value::as_str)
+            .is_none()
+            || first.get(field) != current.get(field)
+        {
+            bail!("OMP pane or terminal identity changed");
+        }
+    }
+    for field in ["kind", "value"] {
+        if first
+            .pointer(&format!("/agent_session/{field}"))
+            .and_then(serde_json::Value::as_str)
+            .is_none()
+            || first.pointer(&format!("/agent_session/{field}"))
+                != current.pointer(&format!("/agent_session/{field}"))
+        {
+            bail!("OMP session identity changed");
+        }
+    }
+    let initial_seq = first
+        .get("state_change_seq")
+        .and_then(serde_json::Value::as_u64)
+        .context("OMP launch lacks a lifecycle sequence")?;
+    let current_seq = current
+        .get("state_change_seq")
+        .and_then(serde_json::Value::as_u64)
+        .context("OMP observation lacks a lifecycle sequence")?;
+    if current_seq < initial_seq {
+        bail!("OMP lifecycle sequence regressed");
+    }
+    let status = current
+        .get("agent_status")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown");
+    if status == "blocked" {
+        bail!("OMP agent {agent} is blocked on external input");
+    }
+    Ok(current_seq > initial_seq && matches!(status, "idle" | "done"))
 }
 
 fn read_bounded_regular_report(path: &Path, max_bytes: u64) -> Result<Vec<u8>> {
@@ -1747,5 +1859,64 @@ mod tests {
         assert!(read_bounded_regular_report(&link, 100).is_err());
         fs::write(&report, b"").unwrap();
         assert!(read_bounded_regular_report(&report, 100).is_err());
+    }
+
+    #[test]
+    fn omp_completion_needs_a_new_lifecycle_turn_with_unchanged_identity() {
+        let initial = json!({"result": {"agent": {
+            "name": "brgr-fixture", "agent": "omp", "pane_id": "w1:p2",
+            "terminal_id": "term-fixture",
+            "agent_session": {"kind": "path", "value": "/tmp/fixture-session"},
+            "state_change_seq": 7, "agent_status": "idle"
+        }}});
+        let mut observed = initial.clone();
+        assert!(!omp_completion_ready(&initial, &observed, "brgr-fixture").unwrap());
+        observed["result"]["agent"]["state_change_seq"] = json!(8);
+        observed["result"]["agent"]["agent_status"] = json!("working");
+        assert!(!omp_completion_ready(&initial, &observed, "brgr-fixture").unwrap());
+        observed["result"]["agent"]["agent_status"] = json!("done");
+        assert!(omp_completion_ready(&initial, &observed, "brgr-fixture").unwrap());
+        observed["result"]["agent"]["agent_session"]["value"] = json!("/tmp/other-session");
+        assert!(omp_completion_ready(&initial, &observed, "brgr-fixture").is_err());
+        observed["result"]["agent"]["agent_session"]["value"] = json!("/tmp/fixture-session");
+        observed["result"]["agent"]["pane_id"] = json!("w1:p3");
+        assert!(omp_completion_ready(&initial, &observed, "brgr-fixture").is_err());
+        observed["result"]["agent"]["pane_id"] = json!("w1:p2");
+        observed["result"]["agent"]["agent_status"] = json!("blocked");
+        assert!(omp_completion_ready(&initial, &observed, "brgr-fixture").is_err());
+    }
+
+    #[test]
+    fn omp_report_path_is_revision_scoped_and_never_reuses_existing_bytes() {
+        let root = TempDir::new().unwrap();
+        let paths = Paths::new(Some(root.path().join("brgr"))).unwrap();
+        let task = TaskId::new();
+        let first = fresh_omp_report_path(&paths, task, 1).unwrap();
+        let second = fresh_omp_report_path(&paths, task, 2).unwrap();
+        assert_ne!(first, second);
+        fs::write(&first, b"stale revision one").unwrap();
+        assert_eq!(fresh_omp_report_path(&paths, task, 2).unwrap(), second);
+        assert!(fresh_omp_report_path(&paths, task, 1).is_err());
+        fs::write(&second, b"stale revision two").unwrap();
+        assert!(fresh_omp_report_path(&paths, task, 2).is_err());
+    }
+
+    #[test]
+    fn omp_initial_agent_must_match_the_recorded_spawn_identity() {
+        let spawned = pane_cleanup::SpawnIdentity {
+            pane_id: "w1:p2".to_owned(),
+            terminal_id: "term-owned".to_owned(),
+            session_value: "/tmp/session-owned".to_owned(),
+        };
+        let mut initial = json!({"result": {"agent": {
+            "pane_id": "w1:p2", "terminal_id": "term-owned",
+            "agent_session": {"kind": "path", "value": "/tmp/session-owned"}
+        }}});
+        omp_spawn_matches_initial(&spawned, &initial).unwrap();
+        initial["result"]["agent"]["agent_session"]["value"] = json!("/tmp/session-replaced");
+        assert!(omp_spawn_matches_initial(&spawned, &initial).is_err());
+        initial["result"]["agent"]["agent_session"]["value"] = json!("/tmp/session-owned");
+        initial["result"]["agent"]["terminal_id"] = json!("term-replaced");
+        assert!(omp_spawn_matches_initial(&spawned, &initial).is_err());
     }
 }

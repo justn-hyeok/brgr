@@ -834,6 +834,99 @@ fn omp_process_can_cancel_without_a_herdr_pane() {
 }
 
 #[test]
+fn detached_success_reopens_for_an_offline_owner_then_accepts_once() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("brgr");
+    let workspace = temp.path().join("work");
+    fs::create_dir_all(&workspace).unwrap();
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../testdata/fixtures/gjc")
+        .canonicalize()
+        .unwrap();
+    json_output(&run(
+        &home,
+        &["harness", "add", fixture.to_str().unwrap()],
+        &[],
+    ));
+    let owner = [("BRGR_OWNER_ID", "codex:offline-owner")];
+
+    let launch = json_output(&run(
+        &home,
+        &[
+            "run",
+            "DETACHED_OWNER_OFFLINE_OK",
+            "--workspace",
+            workspace.to_str().unwrap(),
+        ],
+        &owner,
+    ));
+    let task = launch["task_id"].as_str().unwrap().to_owned();
+    assert_eq!(launch["state"], "starting");
+
+    let mut terminal = None;
+    for _ in 0..120 {
+        let status = json_output(&run(&home, &["status", &task], &owner));
+        if status["state"] == "terminal" {
+            terminal = Some(json_output(&run(&home, &["result", &task], &owner)));
+            break;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    let terminal = terminal.expect("detached fixture run did not settle for its offline owner");
+    assert_eq!(terminal["result"]["outcome"], "candidate");
+    assert_eq!(terminal["artifacts"][0]["text"], "BRGR_FIXTURE_OK");
+    let result_id = terminal["result"]["result_id"].as_str().unwrap().to_owned();
+
+    let owner_id = brgr_protocol::OwnerId::new("codex:offline-owner").unwrap();
+    let pending = brgr_store::Store::open(home.join("store"))
+        .unwrap()
+        .inbox(&owner_id, false)
+        .unwrap();
+    assert_eq!(pending.len(), 1);
+    assert!(!pending[0].acknowledged);
+    assert_eq!(pending[0].result.result_id.to_string(), result_id);
+
+    let replay = json_output(&run(&home, &["result", &task], &owner));
+    assert_eq!(replay["result"]["result_id"], result_id);
+    let still_pending = brgr_store::Store::open(home.join("store"))
+        .unwrap()
+        .inbox(&owner_id, false)
+        .unwrap();
+    assert_eq!(still_pending.len(), 1);
+    assert_eq!(still_pending[0].result.result_id.to_string(), result_id);
+
+    let accepted = json_output(&run(
+        &home,
+        &[
+            "accept",
+            &task,
+            "--reason",
+            "detached fixture output verified",
+        ],
+        &owner,
+    ));
+    assert_eq!(accepted["verdict"], "accepted");
+    assert_eq!(accepted["result_id"], result_id);
+
+    let store = brgr_store::Store::open(home.join("store")).unwrap();
+    let decision = store
+        .decision_for_result(result_id.parse().unwrap())
+        .unwrap()
+        .expect("accepted result has no recorded decision");
+    assert_eq!(decision.verdict, brgr_protocol::DecisionVerdict::Accepted);
+    assert_eq!(decision.result_id.to_string(), result_id);
+    assert_eq!(
+        serde_json::to_value(&decision).unwrap()["decision_id"],
+        accepted["decision_id"]
+    );
+    assert!(store.inbox(&owner_id, false).unwrap().is_empty());
+    let acknowledged = store.inbox(&owner_id, true).unwrap();
+    assert_eq!(acknowledged.len(), 1);
+    assert!(acknowledged[0].acknowledged);
+    assert_eq!(acknowledged[0].result.result_id.to_string(), result_id);
+}
+
+#[test]
 fn dirty_source_is_rejected_before_creating_a_task_worktree() {
     let temp = TempDir::new().unwrap();
     let home = temp.path().join("brgr");

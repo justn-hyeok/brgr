@@ -43,6 +43,13 @@ enum CleanupState {
     Closed,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct SpawnIdentity {
+    pub(crate) pane_id: String,
+    pub(crate) terminal_id: String,
+    pub(crate) session_value: String,
+}
+
 pub fn record_spawn(
     store: &Store,
     runs: &Path,
@@ -50,7 +57,7 @@ pub fn record_spawn(
     agent: &str,
     launcher_receipt: &Path,
     keep_pane: bool,
-) -> Result<()> {
+) -> Result<SpawnIdentity> {
     let launcher: Value = serde_json::from_slice(&fs::read(launcher_receipt)?)?;
     if launcher.get("agent").and_then(Value::as_str) != Some(agent)
         || launcher.get("codex_prompt_marked").and_then(Value::as_bool) != Some(false)
@@ -94,7 +101,13 @@ pub fn record_spawn(
     if env::var("HERDR_PANE_ID").as_deref() != Ok(receipt.parent_pane_id.as_str()) {
         bail!("OMP launcher parent pane differs from the current Herdr caller");
     }
-    write_json_atomic(&receipt_path(runs, task_id), &receipt)
+    let identity = SpawnIdentity {
+        pane_id: receipt.pane_id.clone(),
+        terminal_id: receipt.terminal_id.clone(),
+        session_value: receipt.session_value.clone(),
+    };
+    write_json_atomic(&receipt_path(runs, task_id), &receipt)?;
+    Ok(identity)
 }
 
 pub fn mark_pending(runs: &Path, task_id: TaskId, result: &ResultEnvelope) -> Result<()> {
