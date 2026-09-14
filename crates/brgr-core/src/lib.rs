@@ -10,7 +10,7 @@ use brgr_protocol::{
     AttemptId, AttemptState, Event, EventId, EventKind, ProtocolError, ResultEnvelope, ResultId,
     TaskId, TaskSpec, TerminalOutcome,
 };
-use brgr_runner::{HarnessManifest, ProcessRunner, RunRequest, RunnerError};
+use brgr_runner::{ExecutionMode, HarnessManifest, ProcessRunner, RunRequest, RunnerError};
 use brgr_store::{RunnerIdentity, Store, StoreError, UnfinishedAttempt};
 use sha2::{Digest, Sha256};
 
@@ -476,6 +476,8 @@ async fn run_single_attempt(
     let mut attempt = Attempt::new(revision.clone(), attempt_id, number)?;
     let mut producer_seq = 0_u64;
     store.claim_attempt(spec.task_id, spec.revision, attempt_id)?;
+    #[cfg(debug_assertions)]
+    crash_at("after_claim");
     transition(
         store,
         &mut attempt,
@@ -505,6 +507,8 @@ async fn run_single_attempt(
     if let Some(identity) = control.runner_identity {
         store.record_runner_identity(attempt_id, &launch_nonce, identity)?;
     }
+    #[cfg(debug_assertions)]
+    crash_at("after_launch_intent");
     transition(
         store,
         &mut attempt,
@@ -526,7 +530,8 @@ async fn run_single_attempt(
     )
     .await;
 
-    let retryable = is_retryable_spawn_failure(&execution);
+    let retryable =
+        manifest.launch.mode == ExecutionMode::OneShot && is_retryable_spawn_failure(&execution);
 
     let result = finish_execution(
         store,
@@ -536,13 +541,24 @@ async fn run_single_attempt(
         &mut producer_seq,
         execution,
     )?;
+    #[cfg(debug_assertions)]
+    crash_at("after_seal_before_commit");
 
     attempt.record_terminal(result.clone())?;
     store.commit_terminal_result(&spec.owner_id, &result)?;
+    #[cfg(debug_assertions)]
+    crash_at("after_terminal_commit");
     if retryable {
         store.grant_pre_spawn_retry(attempt_id)?;
     }
     Ok((result, retryable))
+}
+
+#[cfg(debug_assertions)]
+fn crash_at(stage: &str) {
+    if std::env::var("BRGR_TEST_CRASH_STAGE").as_deref() == Ok(stage) {
+        std::process::exit(79);
+    }
 }
 
 fn is_retryable_spawn_failure(
@@ -569,6 +585,22 @@ fn finish_execution(
     execution: Result<brgr_runner::ExecutionOutput, RunnerError>,
 ) -> Result<ResultEnvelope, SupervisorError> {
     let attempt_id = attempt.id();
+    if manifest.launch.mode == ExecutionMode::DelegatedExternal
+        && !matches!(&execution, Ok(output) if !output.cancelled && output.succeeded(manifest) && !output.result.is_empty())
+    {
+        let mut result = result_for(
+            spec,
+            attempt_id,
+            TerminalOutcome::Lost,
+            vec![],
+            Some("Herdr-backed OMP wrapper did not provide a valid final result".to_owned()),
+        );
+        result.unresolved_effects.push(
+            "The separately launched OMP worker may still be running or may have caused external effects"
+                .to_owned(),
+        );
+        return Ok(result);
+    }
     match execution {
         Ok(output) if output.cancelled => {
             transition(store, attempt, AttemptState::CancelRequested, producer_seq)?;
@@ -706,6 +738,11 @@ pub enum SupervisorError {
 mod tests {
     use super::*;
     use brgr_protocol::{ArtifactContract, AttemptBudget, OwnerId, Route, SCHEMA_V1};
+    use brgr_runner::{
+        ExecutionOutput, LaunchSpec, MANIFEST_SCHEMA_V1, PROCESS_ADAPTER_V1, ProbeSpec,
+        ResultSource, ResultSpec,
+    };
+    use std::{collections::BTreeMap, path::PathBuf};
 
     fn task_spec(task_id: TaskId, revision: u32) -> TaskSpec {
         TaskSpec {
@@ -748,6 +785,98 @@ mod tests {
             std::io::ErrorKind::WouldBlock,
         )));
         assert!(!is_retryable_spawn_failure(&after_spawn));
+    }
+
+    #[test]
+    fn delegated_external_failure_is_lost_with_unresolved_effects() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = Store::open(root.path()).unwrap();
+        let spec = task_spec(TaskId::new(), 1);
+        store.record_task(&spec, "delegated-failure").unwrap();
+        let attempt_id = AttemptId::new();
+        let mut attempt =
+            Attempt::new(TaskRevision::new(spec.clone()).unwrap(), attempt_id, 1).unwrap();
+        store
+            .claim_attempt(spec.task_id, spec.revision, attempt_id)
+            .unwrap();
+        let mut sequence = 0;
+        transition(&store, &mut attempt, AttemptState::Starting, &mut sequence).unwrap();
+        transition(&store, &mut attempt, AttemptState::Running, &mut sequence).unwrap();
+        let mut manifest = HarnessManifest {
+            schema: MANIFEST_SCHEMA_V1.to_owned(),
+            id: "internal.fixture-delegated".to_owned(),
+            adapter: PROCESS_ADAPTER_V1.to_owned(),
+            executable: PathBuf::from("/bin/echo"),
+            probe: ProbeSpec {
+                version_argv: vec!["--version".to_owned()],
+                help_argv: vec!["--help".to_owned()],
+            },
+            launch: LaunchSpec {
+                argv: vec![],
+                model_argv: vec![],
+                effort_argv: vec![],
+                env_allow: vec![],
+                mode: ExecutionMode::DelegatedExternal,
+            },
+            result: ResultSpec {
+                source: ResultSource::Stdout,
+                media_type: "text/plain".to_owned(),
+                max_bytes: 1_024,
+                success_exit_codes: vec![0],
+            },
+            capabilities: BTreeMap::new(),
+        };
+        let failed = ExecutionOutput {
+            exit_code: Some(1),
+            stdout: vec![],
+            stderr: vec![],
+            result: vec![],
+            timed_out: false,
+            cancelled: false,
+            output_truncated: false,
+            elapsed: Duration::from_millis(1),
+        };
+        let result = finish_execution(
+            &store,
+            &spec,
+            &manifest,
+            &mut attempt,
+            &mut sequence,
+            Ok(failed.clone()),
+        )
+        .unwrap();
+        assert_eq!(result.outcome, TerminalOutcome::Lost);
+        assert!(!result.unresolved_effects.is_empty());
+        for (cancelled, timed_out) in [(true, false), (false, true)] {
+            let interrupted = ExecutionOutput {
+                exit_code: Some(0),
+                result: b"partial report".to_vec(),
+                cancelled,
+                timed_out,
+                ..failed.clone()
+            };
+            let result = finish_execution(
+                &store,
+                &spec,
+                &manifest,
+                &mut attempt,
+                &mut sequence,
+                Ok(interrupted),
+            )
+            .unwrap();
+            assert_eq!(result.outcome, TerminalOutcome::Lost);
+        }
+        manifest.launch.mode = ExecutionMode::OneShot;
+        let ordinary = finish_execution(
+            &store,
+            &spec,
+            &manifest,
+            &mut attempt,
+            &mut sequence,
+            Ok(failed),
+        )
+        .unwrap();
+        assert_eq!(ordinary.outcome, TerminalOutcome::Failed);
     }
 
     fn result_for(attempt: &Attempt, outcome: TerminalOutcome) -> ResultEnvelope {

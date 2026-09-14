@@ -451,6 +451,9 @@ async fn probe_custom_contract(manifest: &HarnessManifest) -> Result<ProbeEviden
     if manifest.probe.version_argv != ["--version"] || manifest.probe.help_argv != ["--help"] {
         return Err(RegistryError::UnsafeCustomProbe);
     }
+    if manifest.launch.mode != ExecutionMode::OneShot {
+        return Err(RegistryError::UnsupportedCustomMode);
+    }
     if manifest
         .launch
         .env_allow
@@ -1138,6 +1141,8 @@ pub enum RegistryError {
     ReservedCustomHarness,
     #[error("custom manifest probes must be exactly --version and --help")]
     UnsafeCustomProbe,
+    #[error("custom manifests support only the one-shot execution mode")]
+    UnsupportedCustomMode,
     #[error("custom manifest requested a privileged environment variable")]
     CustomEnvironmentDenied,
     #[error("custom manifest capability and argv disagree: {0}")]
@@ -1419,6 +1424,12 @@ mod tests {
         assert!(matches!(
             registry.contract_test_custom(&altered).await,
             Err(RegistryError::CustomEnvironmentDenied)
+        ));
+        altered = manifest.clone();
+        altered.launch.mode = ExecutionMode::DelegatedExternal;
+        assert!(matches!(
+            registry.contract_test_custom(&altered).await,
+            Err(RegistryError::UnsupportedCustomMode)
         ));
         altered = manifest.clone();
         altered.launch.argv.insert(0, "--yolo".to_owned());

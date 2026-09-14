@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.0.4 — 2026-09-14
+
+Process-level crash fixtures now cover five detached supervisor windows,
+including an interrupted artifact seal and a committed result before its CLI
+hint. Store tests cover inbox-insert rollback and concurrent SQLite writer
+contention. File-based results and optional OMP reports have bounded,
+descriptor-checked reads; intermediate symlink escape is rejected. A failed
+or interrupted separately launched Herdr-backed OMP worker is reported as
+`lost` with unresolved effects, not falsely as a stopped one-shot process.
+The unsigned cooperative-local platform boundary remains unchanged.
+
 ## 1.0.3 — 2026-09-14
 
 Bind each owner to a Codex session epoch. Unbound or stale sessions can no
