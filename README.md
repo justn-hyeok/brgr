@@ -11,6 +11,11 @@ The v1 target is Apple Silicon on macOS 15 or newer. Release archives are
 unsigned and not notarized. Read [the unsigned distribution guide](docs/unsigned-distribution.md)
 before sharing or running a downloaded binary.
 
+The public release is usable for the bounded managed-run contract, but the
+full natural-language v1 acceptance gates remain open. See the
+[current readiness checklist](docs/v1-readiness-checklist-2026-09-14.md)
+before treating it as complete production automation.
+
 GJC, Cursor CLI, Command Code, and OMP have bounded one-shot process recipes.
 Herdr is optional:
 the separate `local.omp-herdr` adapter uses `omp-role` when an interactive pane
