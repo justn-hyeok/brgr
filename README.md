@@ -25,6 +25,14 @@ cleanup safety limit below.
 | `local.omp-herdr` presentation | Optional best effort; external worker stop is not certified and uncertain failure is `lost` |
 | Resume, in-flight steering, provider-side undo | Deferred; unsupported requests must fail rather than silently fall back |
 
+For JSONL OMP process results, brgr checks every assistant event's native
+`provider/model` against an explicitly requested selector before publishing a
+candidate. The result records that observed model. OMP does not expose a
+verified effort value in this event stream, so `effort_source` remains
+`unavailable`; other process recipes likewise report unavailable native route
+identity unless their adapter supplies evidence. A missing or different OMP
+model fails closed rather than becoming an accepted candidate.
+
 ## Start from Codex
 
 Install the local binary and Codex integration, then start a new Codex session:

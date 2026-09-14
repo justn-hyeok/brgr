@@ -14,6 +14,13 @@ Release SBOM generation now targets the `brgr-cli` Cargo package, records
 metadata-derived dependency license declarations, and fails if any package
 license is unasserted.
 
+OMP JSONL process candidates now require native assistant `provider/model`
+evidence to match an explicitly requested model; missing, mixed, or changed
+models fail before artifact sealing. New results record observed model and
+explicitly mark effort evidence unavailable. Older result serialization and
+decision digests remain stable. Replayed decisions return the persisted
+decision ID, not a newly generated uncommitted one.
+
 ## 1.0.5 — 2026-09-14
 
 Fix a Herdr-backed OMP revision replay: a new task revision could reuse the

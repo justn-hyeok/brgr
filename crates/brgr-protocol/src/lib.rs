@@ -202,6 +202,33 @@ pub struct ArtifactRef {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ObservationSource {
+    HarnessJsonl,
+    Unavailable,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct RouteObservation {
+    pub model: Option<String>,
+    pub model_source: ObservationSource,
+    pub effort: Option<String>,
+    pub effort_source: ObservationSource,
+}
+
+impl RouteObservation {
+    #[must_use]
+    pub fn unavailable() -> Self {
+        Self {
+            model: None,
+            model_source: ObservationSource::Unavailable,
+            effort: None,
+            effort_source: ObservationSource::Unavailable,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ResultEnvelope {
     pub schema: String,
     pub task_id: TaskId,
@@ -211,6 +238,8 @@ pub struct ResultEnvelope {
     pub outcome: TerminalOutcome,
     pub artifacts: Vec<ArtifactRef>,
     pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route_observation: Option<RouteObservation>,
     pub unresolved_effects: Vec<String>,
 }
 
@@ -353,6 +382,38 @@ mod tests {
         assert_eq!(
             task.validate(),
             Err(ProtocolError::InvalidAcceptanceCriteria)
+        );
+    }
+
+    #[test]
+    fn old_result_without_route_observation_keeps_its_serialized_digest_shape() {
+        let old = ResultEnvelope {
+            schema: SCHEMA_V1.to_owned(),
+            task_id: TaskId::new(),
+            revision: 1,
+            attempt_id: AttemptId::new(),
+            result_id: ResultId::new(),
+            outcome: TerminalOutcome::Failed,
+            artifacts: vec![],
+            error: Some("old result".to_owned()),
+            route_observation: None,
+            unresolved_effects: vec![],
+        };
+        let bytes = serde_json::to_vec(&old).unwrap();
+        assert!(!String::from_utf8_lossy(&bytes).contains("route_observation"));
+        let decoded: ResultEnvelope = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(serde_json::to_vec(&decoded).unwrap(), bytes);
+        let mut observed = decoded;
+        observed.route_observation = Some(RouteObservation {
+            model: Some("workbuddy/deepseek-v4.1-flash".to_owned()),
+            model_source: ObservationSource::HarnessJsonl,
+            effort: None,
+            effort_source: ObservationSource::Unavailable,
+        });
+        assert!(
+            serde_json::to_string(&observed)
+                .unwrap()
+                .contains("route_observation")
         );
     }
 }

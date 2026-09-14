@@ -2187,6 +2187,7 @@ mod tests {
         let lost = ResultEnvelope {
             result_id: ResultId::new(),
             outcome: TerminalOutcome::Lost,
+            route_observation: None,
             unresolved_effects: vec!["unknown".to_owned()],
             ..completed.clone()
         };
@@ -2229,6 +2230,7 @@ mod tests {
             .unwrap();
         let lost = ResultEnvelope {
             outcome: TerminalOutcome::Lost,
+            route_observation: None,
             unresolved_effects: vec!["unknown".to_owned()],
             ..result(&task, attempt_id)
         };
@@ -2493,6 +2495,7 @@ mod tests {
         let lost = ResultEnvelope {
             outcome: TerminalOutcome::Lost,
             error: Some("supervisor disappeared".to_owned()),
+            route_observation: None,
             unresolved_effects: vec!["execution identity unknown".to_owned()],
             ..result(&task, attempt_id)
         };
@@ -2541,6 +2544,7 @@ mod tests {
             outcome: TerminalOutcome::Candidate,
             artifacts: vec![],
             error: None,
+            route_observation: None,
             unresolved_effects: vec![],
         }
     }

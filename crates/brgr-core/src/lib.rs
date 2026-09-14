@@ -7,8 +7,8 @@
 use std::{fmt::Write as _, io::Cursor, path::Path, time::Duration};
 
 use brgr_protocol::{
-    AttemptId, AttemptState, Event, EventId, EventKind, ProtocolError, ResultEnvelope, ResultId,
-    TaskId, TaskSpec, TerminalOutcome,
+    AttemptId, AttemptState, Event, EventId, EventKind, ObservationSource, ProtocolError,
+    ResultEnvelope, ResultId, RouteObservation, TaskId, TaskSpec, TerminalOutcome,
 };
 use brgr_runner::{ExecutionMode, HarnessManifest, ProcessRunner, RunRequest, RunnerError};
 use brgr_store::{RunnerIdentity, Store, StoreError, UnfinishedAttempt};
@@ -637,18 +637,28 @@ fn finish_execution(
         }
         Ok(output) if output.succeeded(manifest) && !output.result.is_empty() => {
             transition(store, attempt, AttemptState::Collecting, producer_seq)?;
+            let observed_model = output.observed_model.clone();
             let artifact = store.seal_artifact_reader(
                 Cursor::new(output.result),
                 &spec.artifact_contract.media_type,
                 spec.artifact_contract.max_bytes,
             )?;
-            Ok(result_for(
+            let mut result = result_for(
                 spec,
                 attempt_id,
                 TerminalOutcome::Candidate,
                 vec![artifact],
                 None,
-            ))
+            );
+            if let Some(model) = observed_model {
+                result.route_observation = Some(RouteObservation {
+                    model: Some(model),
+                    model_source: ObservationSource::HarnessJsonl,
+                    effort: None,
+                    effort_source: ObservationSource::Unavailable,
+                });
+            }
+            Ok(result)
         }
         Ok(output) => {
             let reason = if output.timed_out {
@@ -730,6 +740,7 @@ fn result_for(
         outcome,
         artifacts,
         error,
+        route_observation: Some(RouteObservation::unavailable()),
         unresolved_effects: vec![],
     }
 }
@@ -854,6 +865,7 @@ mod tests {
             stdout: vec![],
             stderr: vec![],
             result: vec![],
+            observed_model: None,
             timed_out: false,
             cancelled: false,
             output_truncated: false,
@@ -912,6 +924,7 @@ mod tests {
             outcome,
             artifacts: vec![],
             error: None,
+            route_observation: None,
             unresolved_effects: vec![],
         }
     }

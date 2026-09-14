@@ -118,6 +118,8 @@ pub struct ExecutionOutput {
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
     pub result: Vec<u8>,
+    /// Native model identity from a completed JSONL assistant event, when available.
+    pub observed_model: Option<String>,
     pub timed_out: bool,
     pub cancelled: bool,
     pub output_truncated: bool,
@@ -233,17 +235,19 @@ impl ProcessRunner {
             .as_ref()
             .and_then(std::process::ExitStatus::code)
             .is_some_and(|code| manifest.result.success_exit_codes.contains(&code));
-        let result = if !cancelled && !timed_out && !stdout_truncated && successful_exit {
-            collect_result(manifest, request.workspace, &substitutions, &stdout)?
-        } else {
-            Vec::new()
-        };
+        let (result, observed_model) =
+            if !cancelled && !timed_out && !stdout_truncated && successful_exit {
+                collect_result_with_model(manifest, &request, &substitutions, &stdout)?
+            } else {
+                (Vec::new(), None)
+            };
 
         Ok(ExecutionOutput {
             exit_code: status.and_then(|value| value.code()),
             stdout,
             stderr,
             result,
+            observed_model,
             timed_out,
             cancelled,
             output_truncated: stdout_truncated || stderr_truncated,
@@ -585,6 +589,22 @@ fn collect_result(
     }
 }
 
+fn collect_result_with_model(
+    manifest: &HarnessManifest,
+    request: &RunRequest<'_>,
+    values: &Substitutions<'_>,
+    stdout: &[u8],
+) -> Result<(Vec<u8>, Option<String>), RunnerError> {
+    let result = collect_result(manifest, request.workspace, values, stdout)?;
+    let observed_model =
+        if !result.is_empty() && manifest.result.source == ResultSource::JsonlAssistantFinal {
+            observe_jsonl_model(stdout, request.model)?
+        } else {
+            None
+        };
+    Ok((result, observed_model))
+}
+
 fn extract_jsonl_assistant_final(stdout: &[u8]) -> Result<Vec<u8>, RunnerError> {
     let mut final_text = None;
     let mut completed = false;
@@ -640,6 +660,66 @@ fn extract_jsonl_assistant_final(stdout: &[u8]) -> Result<Vec<u8>, RunnerError> 
         return Err(RunnerError::MissingTerminalEvent);
     }
     final_text.ok_or(RunnerError::MissingAssistantText)
+}
+
+fn observe_jsonl_model(
+    stdout: &[u8],
+    requested: Option<&str>,
+) -> Result<Option<String>, RunnerError> {
+    let mut observed: Option<String> = None;
+    let mut missing_identity = false;
+    for line in stdout
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+    {
+        let event: serde_json::Value = serde_json::from_slice(line)?;
+        if event.get("type").and_then(serde_json::Value::as_str) != Some("message_end")
+            || event
+                .pointer("/message/role")
+                .and_then(serde_json::Value::as_str)
+                != Some("assistant")
+        {
+            continue;
+        }
+        let identity = event
+            .pointer("/message/provider")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.is_empty())
+            .zip(
+                event
+                    .pointer("/message/model")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|value| !value.is_empty()),
+            )
+            .map(|(provider, model)| format!("{provider}/{model}"));
+        match (&observed, identity) {
+            (Some(previous), Some(current)) if previous != &current => {
+                return Err(RunnerError::MixedObservedModels);
+            }
+            (None, Some(current)) => observed = Some(current),
+            (_, None) => missing_identity = true,
+            _ => {}
+        }
+    }
+    if missing_identity {
+        return if requested.is_some() || observed.is_some() {
+            Err(RunnerError::ObservedModelUnavailable)
+        } else {
+            Ok(None)
+        };
+    }
+    if let Some(requested) = requested {
+        let actual = observed
+            .as_deref()
+            .ok_or(RunnerError::ObservedModelUnavailable)?;
+        if actual != requested {
+            return Err(RunnerError::ObservedModelMismatch {
+                requested: requested.to_owned(),
+                observed: actual.to_owned(),
+            });
+        }
+    }
+    Ok(observed)
 }
 
 async fn read_bounded<R>(reader: R, limit: u64) -> Result<(Vec<u8>, bool), std::io::Error>
@@ -706,6 +786,12 @@ pub enum RunnerError {
     MissingTerminalEvent,
     #[error("JSONL output has no final assistant text")]
     MissingAssistantText,
+    #[error("JSONL assistant model identity is unavailable")]
+    ObservedModelUnavailable,
+    #[error("JSONL assistant model changed during one run")]
+    MixedObservedModels,
+    #[error("JSONL assistant used {observed}, not requested model {requested}")]
+    ObservedModelMismatch { requested: String, observed: String },
     #[error("JSONL output is malformed: {0}")]
     MalformedJsonl(#[from] serde_json::Error),
     #[error("child process did not expose its {0} pipe")]
@@ -1024,6 +1110,43 @@ mod tests {
             extract_jsonl_assistant_final(events.as_bytes()).unwrap(),
             b"answer"
         );
+    }
+
+    #[test]
+    fn jsonl_model_identity_rejects_missing_mismatch_and_fallback() {
+        let event = |provider: Option<&str>, model: Option<&str>| {
+            serde_json::json!({
+                "type": "message_end",
+                "message": {
+                    "role": "assistant",
+                    "provider": provider,
+                    "model": model,
+                    "content": [{"type": "text", "text": "answer"}],
+                }
+            })
+            .to_string()
+        };
+        let exact = event(Some("workbuddy"), Some("deepseek-v4.1-flash"));
+        assert_eq!(
+            observe_jsonl_model(exact.as_bytes(), Some("workbuddy/deepseek-v4.1-flash"))
+                .unwrap()
+                .as_deref(),
+            Some("workbuddy/deepseek-v4.1-flash")
+        );
+        assert!(matches!(
+            observe_jsonl_model(exact.as_bytes(), Some("other/model")),
+            Err(RunnerError::ObservedModelMismatch { .. })
+        ));
+        let missing = event(None, None);
+        assert!(matches!(
+            observe_jsonl_model(missing.as_bytes(), Some("workbuddy/deepseek-v4.1-flash")),
+            Err(RunnerError::ObservedModelUnavailable)
+        ));
+        let mixed = format!("{exact}\n{}", event(Some("other"), Some("model")));
+        assert!(matches!(
+            observe_jsonl_model(mixed.as_bytes(), None),
+            Err(RunnerError::MixedObservedModels)
+        ));
     }
 
     #[test]
