@@ -3,7 +3,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     io::Read as _,
-    os::unix::process::CommandExt,
+    os::unix::{fs::MetadataExt, process::CommandExt},
     path::{Path, PathBuf},
     process::{ExitStatus, Stdio},
     time::{Duration, Instant},
@@ -63,6 +63,8 @@ pub struct LaunchSpec {
 #[serde(rename_all = "snake_case")]
 pub enum ExecutionMode {
     OneShot,
+    /// The wrapper may leave a separately managed worker alive after it exits.
+    DelegatedExternal,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -186,6 +188,8 @@ impl ProcessRunner {
         }
 
         let mut child = command.spawn().map_err(RunnerError::SpawnIo)?;
+        #[cfg(debug_assertions)]
+        crash_after_spawn_before_pid(&request);
         if let Some(path) = request.pid_path {
             std::fs::write(path, format!("{}\n", child.id().unwrap_or_default()))?;
         }
@@ -296,6 +300,15 @@ impl ProcessRunner {
             },
         )
         .await
+    }
+}
+
+#[cfg(debug_assertions)]
+fn crash_after_spawn_before_pid(request: &RunRequest<'_>) {
+    if request.pid_path.is_some()
+        && std::env::var("BRGR_TEST_CRASH_STAGE").as_deref() == Ok("after_spawn_before_pid")
+    {
+        std::process::exit(79);
     }
 }
 
@@ -533,6 +546,12 @@ fn collect_result(
                 return Err(RunnerError::ResultPathOutsideWorkspace(rendered));
             }
             let result_path = workspace.join(relative);
+            if !result_path
+                .canonicalize()?
+                .starts_with(workspace.canonicalize()?)
+            {
+                return Err(RunnerError::ResultPathOutsideWorkspace(rendered));
+            }
             let metadata = std::fs::symlink_metadata(&result_path)?;
             if !metadata.file_type().is_file() {
                 return Err(RunnerError::ResultNotRegularFile(result_path));
@@ -544,7 +563,11 @@ fn collect_result(
                 });
             }
             let mut file = std::fs::File::open(&result_path)?;
-            if !file.metadata()?.is_file() {
+            let opened = file.metadata()?;
+            if !opened.is_file()
+                || (metadata.dev(), metadata.ino(), metadata.len())
+                    != (opened.dev(), opened.ino(), opened.len())
+            {
                 return Err(RunnerError::ResultNotRegularFile(result_path));
             }
             let mut bytes = Vec::new();
@@ -735,6 +758,54 @@ mod tests {
         let mut value = serde_json::to_value(echo_manifest(4_096)).unwrap();
         value["unrecognized"] = serde_json::json!(true);
         assert!(serde_json::from_value::<HarnessManifest>(value).is_err());
+    }
+
+    #[test]
+    fn file_result_is_bounded_and_cannot_follow_a_symlink() {
+        let workspace = tempfile::tempdir().unwrap();
+        let report = workspace.path().join("report.md");
+        std::fs::write(&report, b"sealed fixture").unwrap();
+        let mut manifest = echo_manifest(100);
+        manifest.result.source = ResultSource::File {
+            path: "report.md".to_owned(),
+        };
+        let prompt_file = workspace.path().join("prompt.txt");
+        let values = Substitutions {
+            prompt_file: &prompt_file,
+            prompt: "fixture",
+            workspace: workspace.path(),
+            model: None,
+            effort: None,
+        };
+        assert_eq!(
+            collect_result(&manifest, workspace.path(), &values, b"").unwrap(),
+            b"sealed fixture"
+        );
+        manifest.result.max_bytes = 3;
+        assert!(matches!(
+            collect_result(&manifest, workspace.path(), &values, b""),
+            Err(RunnerError::ResultTooLarge { .. })
+        ));
+        let link = workspace.path().join("linked.md");
+        std::os::unix::fs::symlink(&report, &link).unwrap();
+        manifest.result.max_bytes = 100;
+        manifest.result.source = ResultSource::File {
+            path: "linked.md".to_owned(),
+        };
+        assert!(matches!(
+            collect_result(&manifest, workspace.path(), &values, b""),
+            Err(RunnerError::ResultNotRegularFile(_))
+        ));
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("secret.md"), b"outside").unwrap();
+        std::os::unix::fs::symlink(outside.path(), workspace.path().join("escape")).unwrap();
+        manifest.result.source = ResultSource::File {
+            path: "escape/secret.md".to_owned(),
+        };
+        assert!(matches!(
+            collect_result(&manifest, workspace.path(), &values, b""),
+            Err(RunnerError::ResultPathOutsideWorkspace(_))
+        ));
     }
 
     #[test]

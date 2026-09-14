@@ -18,6 +18,11 @@ collects an assistant final turn and observed process exit without Herdr. The
 separate `local.omp-herdr` adapter preserves interactive presentation for an
 explicitly chosen pane; pane and session identifiers remain metadata. A missing
 pane must not erase an already sealed result.
+Its internal wrapper is marked `delegated_external`, unlike a directly owned
+one-shot process. If that wrapper times out, exits without a valid result, or
+is otherwise interrupted, brgr records `lost` with unresolved external effects
+instead of claiming the separately launched OMP worker stopped. Agent-authored
+manifests cannot claim this internal mode.
 
 Candidate output is never accepted because a process exits successfully. Codex
 checks the task's acceptance criteria and records an accept or reject decision
@@ -49,6 +54,8 @@ The brgr control home cannot overlap the source workspace. Artifact imports
 compare the checked file's device, inode, and size with the opened descriptor
 before reading and still enforce a byte limit and final digest. These checks
 guard cooperative local workflows, not hostile same-user filesystem mutation.
+File-based harness results must remain within the workspace after canonical
+path resolution; optional OMP report imports are bounded before stdout capture.
 
 For `local.omp-herdr` only, brgr records its OMP pane and terminal IDs,
 immutable agent session, task and

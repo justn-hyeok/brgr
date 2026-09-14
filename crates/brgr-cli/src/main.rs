@@ -6,7 +6,10 @@ use std::{
     fmt::Write as _,
     fs::{self, OpenOptions},
     io::{self, Read, Write},
-    os::unix::{fs::PermissionsExt, process::CommandExt},
+    os::unix::{
+        fs::{MetadataExt, PermissionsExt},
+        process::CommandExt,
+    },
     path::{Path, PathBuf},
     process::{Command as ProcessCommand, Stdio},
     thread,
@@ -1254,7 +1257,7 @@ fn omp_process_manifest(
                 "HERDR_ENV".to_owned(),
                 "HERDR_PANE_ID".to_owned(),
             ],
-            mode: ExecutionMode::OneShot,
+            mode: ExecutionMode::DelegatedExternal,
         },
         result: ResultSpec {
             source: ResultSource::Stdout,
@@ -1312,6 +1315,10 @@ fn run_omp_adapter(
         "{prompt}\n\nWrite the final result as Markdown to {} before finishing.",
         report.display()
     );
+    let report_limit = Store::open(&paths.store)?
+        .task(task)?
+        .artifact_contract
+        .max_bytes;
     let prompted = ProcessCommand::new("omp-prompt")
         .arg("--expected-report")
         .arg(&report)
@@ -1342,15 +1349,37 @@ fn run_omp_adapter(
             bail!("OMP agent {agent} is blocked on external input");
         }
         if matches!(status, "idle" | "done") && report.is_file() {
-            let metadata = fs::symlink_metadata(&report)?;
-            if !metadata.file_type().is_file() || metadata.len() == 0 {
-                bail!("OMP report is missing or invalid");
-            }
-            io::stdout().write_all(&fs::read(report)?)?;
+            io::stdout().write_all(&read_bounded_regular_report(&report, report_limit)?)?;
             return Ok(());
         }
         thread::sleep(Duration::from_millis(200));
     }
+}
+
+fn read_bounded_regular_report(path: &Path, max_bytes: u64) -> Result<Vec<u8>> {
+    let checked = fs::symlink_metadata(path)?;
+    if !checked.file_type().is_file() || checked.len() == 0 {
+        bail!("OMP report is missing or not a regular nonempty file");
+    }
+    if checked.len() > max_bytes {
+        bail!("OMP report exceeds the task artifact limit");
+    }
+    let mut file = fs::File::open(path)?;
+    let opened = file.metadata()?;
+    if !opened.is_file()
+        || (checked.dev(), checked.ino(), checked.len())
+            != (opened.dev(), opened.ino(), opened.len())
+    {
+        bail!("OMP report changed before its descriptor was read");
+    }
+    let mut bytes = Vec::new();
+    Read::by_ref(&mut file)
+        .take(max_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    if bytes.is_empty() || u64::try_from(bytes.len())? > max_bytes {
+        bail!("OMP report is empty or exceeds the task artifact limit");
+    }
+    Ok(bytes)
 }
 
 fn launch_omp(
@@ -1693,6 +1722,7 @@ fn print_value(value: &serde_json::Value, json_output: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::TempDir;
 
     #[test]
     fn legacy_launch_without_pinned_manifest_cannot_replay() {
@@ -1700,5 +1730,22 @@ mod tests {
         assert!(error.to_string().contains("unsafe replay is disabled"));
         let error = pinned_manifest_for_launch(None, Some("digest"), "local.gjc").unwrap_err();
         assert!(error.to_string().contains("unsafe replay is disabled"));
+    }
+
+    #[test]
+    fn omp_report_import_is_bounded_and_rejects_symlinks() {
+        let root = TempDir::new().unwrap();
+        let report = root.path().join("report.md");
+        fs::write(&report, b"sealed fixture").unwrap();
+        assert_eq!(
+            read_bounded_regular_report(&report, 100).unwrap(),
+            b"sealed fixture"
+        );
+        assert!(read_bounded_regular_report(&report, 3).is_err());
+        let link = root.path().join("linked.md");
+        std::os::unix::fs::symlink(&report, &link).unwrap();
+        assert!(read_bounded_regular_report(&link, 100).is_err());
+        fs::write(&report, b"").unwrap();
+        assert!(read_bounded_regular_report(&report, 100).is_err());
     }
 }

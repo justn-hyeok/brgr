@@ -2355,6 +2355,68 @@ mod tests {
     }
 
     #[test]
+    fn terminal_result_rolls_back_if_inbox_insert_fails() {
+        let root = TempDir::new().unwrap();
+        let mut store = Store::open(root.path()).unwrap();
+        let task = task();
+        store.record_task(&task, "terminal-rollback").unwrap();
+        let attempt_id = AttemptId::new();
+        store
+            .claim_attempt(task.task_id, task.revision, attempt_id)
+            .unwrap();
+        let result = sealed_result(&store, &task, attempt_id);
+        store
+            .connection
+            .execute_batch(
+                "CREATE TRIGGER fail_inbox BEFORE INSERT ON inbox_items
+                 BEGIN SELECT RAISE(ABORT, 'fixture inbox failure'); END;",
+            )
+            .unwrap();
+        assert!(matches!(
+            store.commit_terminal_result(&task.owner_id, &result),
+            Err(StoreError::Database(_))
+        ));
+        assert!(store.inbox(&task.owner_id, false).unwrap().is_empty());
+        assert_eq!(
+            store.attempt_state_by_id(attempt_id).unwrap(),
+            AttemptState::Queued
+        );
+        store
+            .connection
+            .execute_batch("DROP TRIGGER fail_inbox")
+            .unwrap();
+        store
+            .commit_terminal_result(&task.owner_id, &result)
+            .unwrap();
+        assert_eq!(store.inbox(&task.owner_id, false).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn database_busy_keeps_terminal_result_retriable_without_partial_inbox() {
+        let root = TempDir::new().unwrap();
+        let mut store = Store::open(root.path()).unwrap();
+        let task = task();
+        store.record_task(&task, "busy-terminal").unwrap();
+        let attempt_id = AttemptId::new();
+        store
+            .claim_attempt(task.task_id, task.revision, attempt_id)
+            .unwrap();
+        let result = sealed_result(&store, &task, attempt_id);
+        let blocker = Connection::open(root.path().join("brgr.sqlite3")).unwrap();
+        blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
+        assert!(matches!(
+            store.commit_terminal_result(&task.owner_id, &result),
+            Err(StoreError::Database(_))
+        ));
+        assert!(store.inbox(&task.owner_id, false).unwrap().is_empty());
+        blocker.execute_batch("ROLLBACK").unwrap();
+        store
+            .commit_terminal_result(&task.owner_id, &result)
+            .unwrap();
+        assert_eq!(store.inbox(&task.owner_id, false).unwrap().len(), 1);
+    }
+
+    #[test]
     fn request_id_rejects_a_changed_digest() {
         let root = TempDir::new().unwrap();
         let mut store = Store::open(root.path()).unwrap();

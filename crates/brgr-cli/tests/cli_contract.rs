@@ -551,6 +551,81 @@ fn detached_supervisor_exit_before_claim_becomes_one_durable_lost_inbox_item() {
 }
 
 #[test]
+fn detached_crash_windows_reconcile_without_duplicate_or_overlapping_attempts() {
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../testdata/fixtures/gjc")
+        .canonicalize()
+        .unwrap();
+    for (stage, expected) in [
+        ("after_claim", "lost"),
+        ("after_launch_intent", "lost"),
+        ("after_spawn_before_pid", "lost"),
+        ("after_seal_before_commit", "lost"),
+        ("after_terminal_commit", "candidate"),
+    ] {
+        let temp = TempDir::new().unwrap();
+        let home = temp.path().join("brgr");
+        let workspace = temp.path().join("work");
+        fs::create_dir_all(&workspace).unwrap();
+        json_output(&run(
+            &home,
+            &["harness", "add", fixture.to_str().unwrap()],
+            &[],
+        ));
+        let owner = [("BRGR_OWNER_ID", "codex:crash-window")];
+        let launch = json_output(&run(
+            &home,
+            &[
+                "run",
+                "BRGR_FIXTURE_OK",
+                "--workspace",
+                workspace.to_str().unwrap(),
+            ],
+            &[owner[0], ("BRGR_TEST_CRASH_STAGE", stage)],
+        ));
+        let task = launch["task_id"].as_str().unwrap();
+        let mut terminal = None;
+        for _ in 0..120 {
+            let status = json_output(&run(&home, &["status", task], &owner));
+            if status["state"] == "terminal" {
+                terminal = Some(json_output(&run(&home, &["result", task], &owner)));
+                break;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        let terminal = terminal.unwrap_or_else(|| panic!("crash stage {stage} did not settle"));
+        assert_eq!(terminal["result"]["outcome"], expected, "stage {stage}");
+        if expected == "lost" {
+            assert!(terminal["artifacts"].as_array().unwrap().is_empty());
+            assert!(
+                !terminal["result"]["unresolved_effects"]
+                    .as_array()
+                    .unwrap()
+                    .is_empty()
+            );
+        } else {
+            assert_eq!(terminal["artifacts"][0]["text"], "BRGR_FIXTURE_OK");
+        }
+        let result_id = terminal["result"]["result_id"].as_str().unwrap();
+        let store = brgr_store::Store::open(home.join("store")).unwrap();
+        let owner_id = brgr_protocol::OwnerId::new("codex:crash-window").unwrap();
+        assert_eq!(
+            store.inbox(&owner_id, false).unwrap().len(),
+            1,
+            "stage {stage}"
+        );
+        assert!(
+            store
+                .claim_attempt(task.parse().unwrap(), 1, brgr_protocol::AttemptId::new())
+                .is_err()
+        );
+        json_output(&run(&home, &["status", task], &owner));
+        let replay = json_output(&run(&home, &["result", task], &owner));
+        assert_eq!(replay["result"]["result_id"], result_id, "stage {stage}");
+    }
+}
+
+#[test]
 fn queued_cancel_settles_without_starting_the_harness() {
     let temp = TempDir::new().unwrap();
     let home = temp.path().join("brgr");
