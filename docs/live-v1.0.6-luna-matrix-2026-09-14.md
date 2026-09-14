@@ -1,0 +1,15 @@
+# v1.0.6 candidate: live Luna process-harness matrix
+
+On 2026-09-14, local source based on main `8e01dc4c52bee721435ddaa65828410d4c67b045`, with the v1.0.6 version change and CI probe-test correction, built a debug `brgr 1.0.6` binary with SHA-256 `0bfd835593ebcd3f3ee4ba5bfa18b5f2967b00a4fd8cc922f32fe0924d435cec`. The live runs below used that binary, not the public v1.0.5 download. The correction only changes a scheduler-dependent test assertion; it does not change the process-run implementation. Isolated homes and non-Git workspaces are retained under `/private/tmp/brgr-v106-luna.4tAeIg/`.
+
+Each executable passed authorized paid scratch activation and health verification with a non-null scratch result digest. Each task then requested the listed exact model, ran a fresh bounded attempt, produced a sealed candidate, and delivered one pending owner inbox item. The owner independently rehashed the artifact file, checked the exact marker, and explicitly accepted. A read-only SQLite join confirmed one matching result and decision digest and `acknowledged=1` per home, binding epoch 1.
+
+| Harness | Requested model / effort | Task / result / decision IDs | Sealed text | Artifact SHA-256 | Native model observation |
+|---|---|---|---|---|---|
+| GJC | `openai-codex/gpt-5.6-luna` / `low` | `fdbe2289-9256-4a34-b311-2fd4c6221d99` / `ea35f746-a019-42f1-80cc-898a342cf8c5` / `f55a5d09-c56b-461f-b309-5279abdd3e05` | `BRGR_GJC_V106_LUNA_9A3C` | `6bd4a13272105f7d0b52ad546a431144c4987edeedfffd34ab491497495257ed` | `openai-codex/gpt-5.6-luna`, harness JSONL; effort unavailable |
+| Cursor CLI | `gpt-5.6-luna-low-fast` / unavailable | `eae50903-0395-4292-9611-25b7821b2050` / `fb22b20e-3c2d-4876-81bc-5dee001dc669` / `5bce6cd9-9f2e-425b-8586-f4be0b5044c0` | `BRGR_CURSOR_V106_LUNA_6E21` plus newline | `a536e1c668596b7b68edfaf682f687c23a1762442937ec714a9b7623f02615db` | unavailable |
+| Command Code | `gpt-5.6-luna` / unavailable | `e38951bc-cec2-46fb-bd9d-6b49c2f39603` / `8f110bdb-e8c2-4738-8b28-161e6dee04b3` / `577901f6-28b9-45e9-9bc2-017bb13606b2` | `BRGR_COMMAND_V106_LUNA_8B64` plus newline | `c54f8f2abe20739af2b68ce75897a5f622496d70172f05db75b4ce4325a5a177` | unavailable |
+
+The GJC observed model matched the requested selector. Cursor CLI and Command Code expose only a catalog/route request here; these receipts do **not** prove provider-side model identity or absence of an undocumented fallback. OMP's separate real WorkBuddy run at PR #13 source `c53419015f18c8d244d1f57f1b85585c1b9f2f82` sealed `sha256:22bb41b486142ff588a422de0ce16112b590f0024d5a5c96fc3388807ed0c229`, observed `workbuddy/deepseek-v4.1-flash` in native JSONL, delivered the result, and accepted it as decision `e77d3f1c-71da-4cda-b9d0-a70394c94e11`; this was a different pre-version-bump binary. The older public v1.0.4 four-harness Luna matrix remains in `docs/live-four-harness-luna-v1.0.4-evidence-2026-09-14.md`.
+
+This matrix proves the narrow happy path, not v1-wide completion, native effort, cancellation/undo, a natural-language new-session correction journey, or atomic Herdr pane cleanup.

@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.0.6 — 2026-09-14
 
 Named process harnesses no longer activate through help/version probes alone.
 `harness add` requires an explicitly authorized scratch workspace and prompt,
@@ -20,9 +20,8 @@ models fail before artifact sealing. A separate atomic receipt records the
 observed model and explicitly marks effort evidence unavailable; the v1
 result envelope and decision digest remain compatible with older binaries.
 Results written by an unreleased intermediate embedded-field build remain
-readable without rewriting their stored bytes or decisions.
-Replayed decisions return the persisted
-decision ID, not a newly generated uncommitted one.
+readable without rewriting their stored bytes or decisions. Replayed decisions
+return the persisted decision ID, not a newly generated uncommitted one.
 
 Exact model requests now run a bounded, declarative native catalog preflight
 before task worktree creation and before paid scratch. OMP, GJC, Cursor CLI,
