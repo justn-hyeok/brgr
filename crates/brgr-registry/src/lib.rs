@@ -394,8 +394,8 @@ impl Registry {
     /// # Errors
     ///
     /// Fails closed when no catalog exists, probing fails, or the exact
-    /// selector is absent. The Herdr presentation adapter uses its own OMP
-    /// launcher preflight instead of a process manifest catalog.
+    /// selector is absent. The Herdr presentation adapter probes the local OMP
+    /// catalog before brgr admission; its launcher rechecks at dispatch.
     pub async fn preflight_model(
         &self,
         manifest: &HarnessManifest,
@@ -406,9 +406,6 @@ impl Registry {
         };
         if requested.is_empty() || requested == "auto" {
             return Err(RegistryError::ModelNotExact(requested.to_owned()));
-        }
-        if manifest.adapter == OMP_ROLE_ADAPTER_V1 {
-            return Ok(());
         }
         let catalog = manifest
             .probe
@@ -433,7 +430,12 @@ impl Registry {
                 }
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let output = ProcessRunner::probe(&manifest.executable, &argv, PROBE_DEADLINE).await?;
+        let catalog_executable = if manifest.adapter == OMP_ROLE_ADAPTER_V1 {
+            executable_on_path("omp")?
+        } else {
+            manifest.executable.clone()
+        };
+        let output = ProcessRunner::probe(&catalog_executable, &argv, PROBE_DEADLINE).await?;
         if output.exit_code != Some(0) || output.timed_out || output.output_truncated {
             return Err(RegistryError::ModelCatalogProbeFailed);
         }
@@ -469,7 +471,12 @@ impl Registry {
             tested_arch: std::env::consts::ARCH.to_owned(),
             scratch_result_digest,
             registration_mode: authority.as_str().to_owned(),
-            contract_suite: "process-contract/v1".to_owned(),
+            contract_suite: if manifest.adapter == OMP_ROLE_ADAPTER_V1 {
+                "presentation-probe/v1"
+            } else {
+                "process-contract/v1"
+            }
+            .to_owned(),
         };
         write_json_atomic(&self.manifest_path(&manifest.id), &manifest_bytes)?;
         write_json_atomic(
@@ -1113,7 +1120,18 @@ fn generate_omp_manifest(
         probe: ProbeSpec {
             version_argv: vec!["--help".to_owned()],
             help_argv: vec!["--help".to_owned()],
-            model_catalog: None,
+            model_catalog: Some(ModelCatalogSpec {
+                argv: vec![
+                    "models".to_owned(),
+                    "find".to_owned(),
+                    "${model.query}".to_owned(),
+                    "--json".to_owned(),
+                ],
+                format: ModelCatalogFormat::JsonSelectors {
+                    pointer: "/models".to_owned(),
+                    field: "selector".to_owned(),
+                },
+            }),
         },
         launch: LaunchSpec {
             argv: vec![],
@@ -1156,6 +1174,20 @@ fn generate_omp_manifest(
             ),
         ]),
     })
+}
+
+fn executable_on_path(name: &str) -> Result<PathBuf, RegistryError> {
+    let path = std::env::var_os("PATH")
+        .ok_or_else(|| RegistryError::ModelCatalogExecutableMissing(name.to_owned()))?;
+    for directory in std::env::split_paths(&path).filter(|part| part.is_absolute()) {
+        let candidate = directory.join(name);
+        if candidate.is_file() && candidate.metadata()?.permissions().mode() & 0o111 != 0 {
+            return Ok(candidate.canonicalize()?);
+        }
+    }
+    Err(RegistryError::ModelCatalogExecutableMissing(
+        name.to_owned(),
+    ))
 }
 
 fn parse_model_catalog(
@@ -1215,7 +1247,9 @@ fn parse_model_catalog(
             let text =
                 std::str::from_utf8(bytes).map_err(|_| RegistryError::InvalidModelCatalog)?;
             for line in text.lines() {
+                let line = line.trim_start();
                 if let Some(selector) = line.split_whitespace().next()
+                    && line[selector.len()..].starts_with("  ")
                     && selector
                         .bytes()
                         .any(|byte| byte == b'/' || byte == b'-' || byte.is_ascii_digit())
@@ -1391,6 +1425,8 @@ pub enum RegistryError {
     ModelNotExact(String),
     #[error("harness {0} has no model catalog; re-certify it before selecting a model")]
     ModelCatalogMissing(String),
+    #[error("model catalog executable is unavailable: {0}")]
+    ModelCatalogExecutableMissing(String),
     #[error("model catalog recipe or output is malformed")]
     InvalidModelCatalog,
     #[error("bounded model catalog probe failed")]
@@ -1473,11 +1509,12 @@ mod tests {
         let parsed = parse_model_catalog(&ModelCatalogFormat::DashSeparated, cursor).unwrap();
         assert!(parsed.contains("gpt-5.6-luna-low-fast"));
         assert!(!parsed.contains("auto"));
-        let command = b"Available models\nOpen Source\ndeepseek/deepseek-v4-flash   fast\ngpt-5.6-luna   low cost\n";
+        let command = b"Available models\nOpen-Source Group\ndeepseek/deepseek-v4-flash   fast\ngpt-5.6-luna   low cost\n";
         let parsed = parse_model_catalog(&ModelCatalogFormat::FirstColumn, command).unwrap();
         assert!(parsed.contains("deepseek/deepseek-v4-flash"));
         assert!(parsed.contains("gpt-5.6-luna"));
         assert!(!parsed.contains("Available"));
+        assert!(!parsed.contains("Open-Source"));
         assert!(
             parse_model_catalog(
                 &ModelCatalogFormat::JsonSelectors {
@@ -1994,9 +2031,19 @@ mod tests {
         let registry = Registry::open(root.path().join("registry")).unwrap();
         let receipt = registry.add(&alias).await.unwrap();
         assert_eq!(receipt.harness_id, "local.omp-herdr");
+        assert_eq!(receipt.contract_suite, "presentation-probe/v1");
+        assert!(receipt.scratch_result_digest.is_none());
         assert_eq!(
             registry.load_healthy("local.omp-herdr").unwrap().adapter,
             OMP_ROLE_ADAPTER_V1
+        );
+        assert!(
+            registry
+                .load_healthy("local.omp-herdr")
+                .unwrap()
+                .probe
+                .model_catalog
+                .is_some()
         );
     }
 

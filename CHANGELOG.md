@@ -28,7 +28,11 @@ Exact model requests now run a bounded, declarative native catalog preflight
 before task worktree creation and before paid scratch. OMP, GJC, Cursor CLI,
 and Command Code packages supply their respective catalog shapes; agent-authored
 packages may declare the same generic formats. Missing or unknown selectors
-fail closed. New activation manifests contain `model_catalog`; `v1.0.5`
+fail closed. The optional Herdr adapter also checks OMP's catalog before brgr
+admission. Native probes retain original file descriptors and stop their
+process group after a 64 KiB output threshold (sampled every 5 ms) or a
+finite deadline; trusted executables can briefly overshoot that disk threshold
+between samples. New activation manifests contain `model_catalog`; `v1.0.5`
 binaries reject those manifests on downgrade, so retain and restore a matching
 registry snapshot only at an idle boundary. Result and decision bytes remain
 compatible and must not be overwritten by an old store snapshot.

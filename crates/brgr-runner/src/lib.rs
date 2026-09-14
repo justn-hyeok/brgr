@@ -2,7 +2,7 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
-    io::Read as _,
+    io::{Read as _, Seek as _, SeekFrom},
     os::unix::{fs::MetadataExt, process::CommandExt},
     path::{Path, PathBuf},
     process::{ExitStatus, Stdio},
@@ -293,11 +293,13 @@ impl ProcessRunner {
         let scratch = TempDir::new()?;
         let stdout_path = scratch.path().join("stdout");
         let stderr_path = scratch.path().join("stderr");
-        let stdout_file = std::fs::OpenOptions::new()
+        let mut stdout_file = std::fs::OpenOptions::new()
+            .read(true)
             .write(true)
             .create_new(true)
             .open(&stdout_path)?;
-        let stderr_file = std::fs::OpenOptions::new()
+        let mut stderr_file = std::fs::OpenOptions::new()
+            .read(true)
             .write(true)
             .create_new(true)
             .open(&stderr_path)?;
@@ -307,8 +309,8 @@ impl ProcessRunner {
             .current_dir(scratch.path())
             .env_clear()
             .stdin(Stdio::null())
-            .stdout(Stdio::from(stdout_file))
-            .stderr(Stdio::from(stderr_file))
+            .stdout(Stdio::from(stdout_file.try_clone()?))
+            .stderr(Stdio::from(stderr_file.try_clone()?))
             .kill_on_drop(true);
         command.as_std_mut().process_group(0);
         for name in ["HOME", "PATH", "LANG"] {
@@ -318,12 +320,19 @@ impl ProcessRunner {
         }
         let started = Instant::now();
         let mut child = command.spawn().map_err(RunnerError::SpawnIo)?;
-        let (status, timed_out, cancelled) =
-            wait_for_exit(&mut child, started, deadline, None).await?;
-        let (stdout, stdout_truncated) = read_probe_file(&stdout_path, 65_536)?;
-        let (stderr, stderr_truncated) = read_probe_file(&stderr_path, 65_536)?;
+        let (status, timed_out, quota_exceeded) = wait_for_probe_exit(
+            &mut child,
+            started,
+            deadline,
+            &stdout_file,
+            &stderr_file,
+            65_536,
+        )
+        .await?;
+        let (stdout, stdout_truncated) = read_probe_file(&mut stdout_file, 65_536)?;
+        let (stderr, stderr_truncated) = read_probe_file(&mut stderr_file, 65_536)?;
         let exit_code = status.and_then(|value| value.code());
-        let output_truncated = stdout_truncated || stderr_truncated;
+        let output_truncated = quota_exceeded || stdout_truncated || stderr_truncated;
         let result = if exit_code == Some(0) && !timed_out && !output_truncated {
             stdout.clone()
         } else {
@@ -336,23 +345,44 @@ impl ProcessRunner {
             result,
             observed_model: None,
             timed_out,
-            cancelled,
+            cancelled: false,
             output_truncated,
             elapsed: started.elapsed(),
         })
     }
 }
 
-fn read_probe_file(path: &Path, limit: u64) -> Result<(Vec<u8>, bool), RunnerError> {
+fn read_probe_file(file: &mut std::fs::File, limit: u64) -> Result<(Vec<u8>, bool), RunnerError> {
     let mut bytes = Vec::new();
-    std::fs::File::open(path)?
-        .take(limit.saturating_add(1))
-        .read_to_end(&mut bytes)?;
+    file.seek(SeekFrom::Start(0))?;
+    file.take(limit.saturating_add(1)).read_to_end(&mut bytes)?;
     let truncated = u64::try_from(bytes.len()).unwrap_or(u64::MAX) > limit;
     if truncated {
         bytes.truncate(usize::try_from(limit).expect("probe limit fits usize"));
     }
     Ok((bytes, truncated))
+}
+
+async fn wait_for_probe_exit(
+    child: &mut tokio::process::Child,
+    started: Instant,
+    deadline: Duration,
+    stdout: &std::fs::File,
+    stderr: &std::fs::File,
+    limit: u64,
+) -> Result<(Option<ExitStatus>, bool, bool), RunnerError> {
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok((Some(status), false, false));
+        }
+        if stdout.metadata()?.len() > limit || stderr.metadata()?.len() > limit {
+            return Ok((Some(stop_process_group(child).await?), false, true));
+        }
+        if started.elapsed() >= deadline {
+            return Ok((Some(stop_process_group(child).await?), true, false));
+        }
+        sleep(Duration::from_millis(5)).await;
+    }
 }
 
 #[cfg(debug_assertions)]
@@ -549,8 +579,11 @@ async fn stop_process_group(child: &mut tokio::process::Child) -> Result<ExitSta
     let term = std::process::Command::new("/bin/kill")
         .arg("-TERM")
         .arg(format!("-{pid}"))
-        .status()?;
-    if !term.success() {
+        .output()?;
+    if !term.status.success() {
+        if let Some(status) = child.try_wait()? {
+            return Ok(status);
+        }
         child.start_kill()?;
         return Ok(child.wait().await?);
     }
@@ -1211,6 +1244,35 @@ mod tests {
             .unwrap();
         assert!(oversized.output_truncated);
         assert_eq!(oversized.stdout.len(), 65_536);
+    }
+
+    #[tokio::test]
+    async fn probe_stops_a_flood_before_its_deadline_and_reads_the_original_descriptor() {
+        let root = tempfile::tempdir().unwrap();
+        let executable = root.path().join("probe");
+        std::fs::write(
+            &executable,
+            "#!/bin/sh\nwhile :; do printf 'model-catalog-line-12345678901234567890123456789012345678901234567890\\n'; done\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let flooded = ProcessRunner::probe(&executable, &[], Duration::from_secs(2))
+            .await
+            .unwrap();
+        assert!(flooded.output_truncated);
+        assert!(!flooded.timed_out);
+        assert!(flooded.elapsed < Duration::from_secs(2));
+
+        std::fs::write(
+            &executable,
+            "#!/bin/sh\n/bin/mv stdout moved\n/bin/ln -s /etc/passwd stdout\nprintf 'SAFE_PROBE'\n",
+        )
+        .unwrap();
+        let replaced = ProcessRunner::probe(&executable, &[], Duration::from_secs(2))
+            .await
+            .unwrap();
+        assert_eq!(replaced.stdout, b"SAFE_PROBE");
+        assert!(!replaced.output_truncated);
     }
 
     #[test]

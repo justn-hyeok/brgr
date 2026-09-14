@@ -92,7 +92,8 @@ scratch workspace and prompt. Existing sealed results and decisions are kept.
 An exact `--model` additionally requires an activation with a bounded native
 model-catalog recipe. Older activations lacking it must be re-certified; an
 unknown selector fails before a task worktree or model request is started.
-Presentation-only Herdr model resolution remains delegated to `omp-role`.
+Presentation-only Herdr model requests are checked against OMP's native
+catalog before brgr admission and checked again by `omp-role` at dispatch.
 
 `brgr cleanup status TASK` shows whether an owned OMP pane was closed or
 retained. `brgr cleanup run TASK` retries a pending close. Neither command
