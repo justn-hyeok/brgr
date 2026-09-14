@@ -42,6 +42,17 @@ only when the exact manifest supports it. Do not probe untrusted downloaded
 executables, guess vendor flags, grant new secrets, or switch the requested
 harness/model. Unsupported capabilities stay disabled.
 
+For an approved named process harness, `brgr harness add EXECUTABLE --workspace
+SCRATCH --prompt "<small authorized probe>"` combines the same probe, contract
+test, scratch run, activation, and health check. Use a disposable scratch
+directory outside the source worktree and brgr control home. The scratch run
+may call a paid model; preserve an exact requested model/effort or fail closed.
+`--presentation-only` is limited to the optional Herdr adapter and does not
+certify a managed process scratch run.
+An older process activation without a scratch receipt must be recertified by
+the same approved add flow before a new task; do not infer old approval or
+silently switch harnesses. Existing results and decisions remain intact.
+
 When a hook surfaces a terminal inbox item, inspect the sealed result and its
 acceptance criteria. Run `brgr accept TASK` only after relevant evidence passes;
 otherwise run `brgr reject TASK --reason "..."`. A failed, cancelled, or lost

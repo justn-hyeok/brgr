@@ -46,7 +46,8 @@ jobs:
           scratch="$(mktemp -d "${RUNNER_TEMP}/brgr-release-smoke.XXXXXX")"
           mkdir "$scratch/work"
           binary="${RUNNER_TEMP}/$archive/brgr"
-          "$binary" --home "$scratch/home" harness add "$GITHUB_WORKSPACE/testdata/fixtures/gjc"
+          "$binary" --home "$scratch/home" harness add "$GITHUB_WORKSPACE/testdata/fixtures/gjc" \
+            --workspace "$scratch/work" --prompt BRGR_FIXTURE_OK
           result="$(PATH=/bin:/usr/sbin:/sbin BRGR_OWNER_ID=codex:release-smoke BRGR_SESSION_ID=release-smoke "$binary" --home "$scratch/home" --json run BRGR_FIXTURE_OK --workspace "$scratch/work" --foreground)"
           task="$(printf '%s' "$result" | jq -er 'select(.outcome == "candidate" and .revision == 1) | .task_id')"
           detail="$(BRGR_OWNER_ID=codex:release-smoke BRGR_SESSION_ID=release-smoke "$binary" --home "$scratch/home" --json result "$task")"

@@ -27,6 +27,65 @@ fn json_output(output: &std::process::Output) -> Value {
     serde_json::from_slice(&output.stdout).unwrap()
 }
 
+fn add_fixture(home: &Path, fixture: &Path, scratch: &Path) {
+    fs::create_dir_all(scratch).unwrap();
+    let receipt = json_output(&run(
+        home,
+        &[
+            "harness",
+            "add",
+            fixture.to_str().unwrap(),
+            "--workspace",
+            scratch.to_str().unwrap(),
+            "--prompt",
+            "BRGR_FIXTURE_OK",
+        ],
+        &[],
+    ));
+    assert!(receipt["scratch_result_digest"].as_str().is_some());
+}
+
+#[test]
+fn named_process_harness_cannot_activate_without_authorized_scratch() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("brgr");
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../testdata/fixtures/gjc")
+        .canonicalize()
+        .unwrap();
+    let denied = run(&home, &["harness", "add", fixture.to_str().unwrap()], &[]);
+    assert!(!denied.status.success());
+    assert!(!home.join("registry/activations/local.gjc.json").exists());
+
+    add_fixture(&home, &fixture, &temp.path().join("scratch"));
+    let health = json_output(&run(&home, &["harness", "status", "local.gjc"], &[]));
+    assert_eq!(health["health"], "healthy");
+
+    let activation_path = home.join("registry/activations/local.gjc.json");
+    let mut old_receipt: Value =
+        serde_json::from_slice(&fs::read(&activation_path).unwrap()).unwrap();
+    old_receipt["scratch_result_digest"] = Value::Null;
+    fs::write(&activation_path, serde_json::to_vec(&old_receipt).unwrap()).unwrap();
+    let workspace = temp.path().join("work");
+    fs::create_dir_all(&workspace).unwrap();
+    let blocked = run(
+        &home,
+        &[
+            "run",
+            "must not start",
+            "--workspace",
+            workspace.to_str().unwrap(),
+        ],
+        &[("BRGR_OWNER_ID", "codex:old-activation")],
+    );
+    assert!(!blocked.status.success());
+    assert!(String::from_utf8_lossy(&blocked.stderr).contains("scratch certification"));
+    assert_eq!(
+        fs::read_dir(home.join("launches")).map_or(0, Iterator::count),
+        0
+    );
+}
+
 #[test]
 fn installed_hooks_preserve_foreign_entries_and_uninstall_exact_ownership() {
     let temp = TempDir::new().unwrap();
@@ -138,11 +197,7 @@ fn real_cli_run_binds_candidate_to_its_owner() {
         .join("../../testdata/fixtures/gjc")
         .canonicalize()
         .unwrap();
-    json_output(&run(
-        &home,
-        &["harness", "add", fixture.to_str().unwrap()],
-        &[],
-    ));
+    add_fixture(&home, &fixture, &temp.path().join("scratch"));
     let result = json_output(&run(
         &home,
         &[
@@ -205,11 +260,7 @@ fn control_home_inside_worker_workspace_is_rejected_before_task_admission() {
         .join("../../testdata/fixtures/gjc")
         .canonicalize()
         .unwrap();
-    json_output(&run(
-        &home,
-        &["harness", "add", fixture.to_str().unwrap()],
-        &[],
-    ));
+    add_fixture(&home, &fixture, &temp.path().join("scratch"));
     let output = run(
         &home,
         &[
@@ -245,11 +296,7 @@ fn unbound_task_needs_explicit_session_and_stale_session_cannot_decide() {
         .join("../../testdata/fixtures/gjc")
         .canonicalize()
         .unwrap();
-    json_output(&run(
-        &home,
-        &["harness", "add", fixture.to_str().unwrap()],
-        &[],
-    ));
+    add_fixture(&home, &fixture, &temp.path().join("scratch"));
     let unbound = [("BRGR_OWNER_ID", "codex:unbound"), ("BRGR_SESSION_ID", "")];
     let first = json_output(&run(
         &home,
@@ -305,11 +352,7 @@ fn non_git_workspace_runs_without_a_git_executable() {
         .join("../../testdata/fixtures/gjc")
         .canonicalize()
         .unwrap();
-    json_output(&run(
-        &home,
-        &["harness", "add", fixture.to_str().unwrap()],
-        &[],
-    ));
+    add_fixture(&home, &fixture, &temp.path().join("scratch"));
     let result = json_output(&run(
         &home,
         &[
@@ -498,11 +541,7 @@ fn detached_supervisor_exit_before_claim_becomes_one_durable_lost_inbox_item() {
         .join("../../testdata/fixtures/gjc")
         .canonicalize()
         .unwrap();
-    json_output(&run(
-        &home,
-        &["harness", "add", fixture.to_str().unwrap()],
-        &[],
-    ));
+    add_fixture(&home, &fixture, &temp.path().join("scratch"));
     let owner = [("BRGR_OWNER_ID", "codex:admission-crash")];
     let launch = json_output(&run(
         &home,
@@ -567,11 +606,7 @@ fn detached_crash_windows_reconcile_without_duplicate_or_overlapping_attempts() 
         let home = temp.path().join("brgr");
         let workspace = temp.path().join("work");
         fs::create_dir_all(&workspace).unwrap();
-        json_output(&run(
-            &home,
-            &["harness", "add", fixture.to_str().unwrap()],
-            &[],
-        ));
+        add_fixture(&home, &fixture, &temp.path().join("scratch"));
         let owner = [("BRGR_OWNER_ID", "codex:crash-window")];
         let launch = json_output(&run(
             &home,
@@ -635,11 +670,7 @@ fn restarted_supervisor_cannot_adopt_its_predecessors_unfinished_attempt() {
         .join("../../testdata/fixtures/gjc")
         .canonicalize()
         .unwrap();
-    json_output(&run(
-        &home,
-        &["harness", "add", fixture.to_str().unwrap()],
-        &[],
-    ));
+    add_fixture(&home, &fixture, &temp.path().join("scratch"));
     let owner = ("BRGR_OWNER_ID", "codex:restarted-supervisor");
     let crashed = run(
         &home,
@@ -690,11 +721,7 @@ fn status_during_live_pre_identity_window_does_not_publish_lost() {
         .join("../../testdata/fixtures/gjc")
         .canonicalize()
         .unwrap();
-    json_output(&run(
-        &home,
-        &["harness", "add", fixture.to_str().unwrap()],
-        &[],
-    ));
+    add_fixture(&home, &fixture, &temp.path().join("scratch"));
     let owner = ("BRGR_OWNER_ID", "codex:pre-identity");
     let launch = json_output(&run(
         &home,
@@ -750,11 +777,7 @@ fn queued_cancel_settles_without_starting_the_harness() {
         .join("../../testdata/fixtures/gjc")
         .canonicalize()
         .unwrap();
-    json_output(&run(
-        &home,
-        &["harness", "add", fixture.to_str().unwrap()],
-        &[],
-    ));
+    add_fixture(&home, &fixture, &temp.path().join("scratch"));
     let owner = [("BRGR_OWNER_ID", "codex:queued-cancel")];
     let launch = json_output(&run(
         &home,
@@ -794,11 +817,7 @@ fn rejected_result_can_be_revised_without_rewriting_its_decision() {
         .join("../../testdata/fixtures/gjc")
         .canonicalize()
         .unwrap();
-    json_output(&run(
-        &home,
-        &["harness", "add", fixture.to_str().unwrap()],
-        &[],
-    ));
+    add_fixture(&home, &fixture, &temp.path().join("scratch"));
     let owner = [("BRGR_OWNER_ID", "codex:revision-owner")];
     let first = json_output(&run(
         &home,
@@ -958,11 +977,7 @@ fn detached_success_reopens_for_an_offline_owner_then_accepts_once() {
         .join("../../testdata/fixtures/gjc")
         .canonicalize()
         .unwrap();
-    json_output(&run(
-        &home,
-        &["harness", "add", fixture.to_str().unwrap()],
-        &[],
-    ));
+    add_fixture(&home, &fixture, &temp.path().join("scratch"));
     let owner = [("BRGR_OWNER_ID", "codex:offline-owner")];
 
     let launch = json_output(&run(
@@ -1058,11 +1073,7 @@ fn dirty_source_is_rejected_before_creating_a_task_worktree() {
         .join("../../testdata/fixtures/gjc")
         .canonicalize()
         .unwrap();
-    json_output(&run(
-        &home,
-        &["harness", "add", fixture.to_str().unwrap()],
-        &[],
-    ));
+    add_fixture(&home, &fixture, &temp.path().join("scratch"));
     fs::write(repository.join("user-note.txt"), b"uncommitted work\n").unwrap();
 
     let rejected = run(

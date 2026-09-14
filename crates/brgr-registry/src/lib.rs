@@ -69,7 +69,8 @@ impl Registry {
         Ok(Self { root })
     }
 
-    /// Probes and activates a supported installed harness.
+    /// Probes and activates only the explicitly presentation-only Herdr adapter.
+    /// Process harnesses require a successful authorized scratch run.
     ///
     /// # Errors
     ///
@@ -77,9 +78,7 @@ impl Registry {
     /// are absent, or activation data cannot be persisted.
     pub async fn add(&self, executable: &Path) -> Result<ActivationReceipt, RegistryError> {
         let (manifest, probe) = draft_manifest(executable).await?;
-        if !matches!(manifest.id.as_str(), "local.gjc" | "local.omp-herdr")
-            || (manifest.id == "local.omp-herdr" && manifest.adapter != OMP_ROLE_ADAPTER_V1)
-        {
+        if manifest.id != "local.omp-herdr" || manifest.adapter != OMP_ROLE_ADAPTER_V1 {
             return Err(RegistryError::ScratchRunRequired(manifest.id));
         }
         self.persist_activation(&manifest, &probe, None, RecipeAuthority::Generated)
@@ -198,6 +197,11 @@ impl Registry {
         effort: Option<&str>,
         authority: RecipeAuthority,
     ) -> Result<ActivationReceipt, RegistryError> {
+        let workspace = workspace.canonicalize()?;
+        let control = self.root.canonicalize()?;
+        if workspace.starts_with(&control) || control.starts_with(&workspace) {
+            return Err(RegistryError::ScratchOverlapsControlHome);
+        }
         let before = match authority {
             RecipeAuthority::Generated => {
                 self.contract_test(manifest).await?;
@@ -220,7 +224,7 @@ impl Registry {
         let output = ProcessRunner::run(
             manifest,
             brgr_runner::RunRequest {
-                workspace,
+                workspace: &workspace,
                 prompt,
                 model,
                 effort,
@@ -1079,6 +1083,16 @@ fn validate_package(
     {
         return Err(RegistryError::ActivationMismatch);
     }
+    if manifest.adapter == PROCESS_ADAPTER_V1
+        && receipt
+            .scratch_result_digest
+            .as_deref()
+            .is_none_or(str::is_empty)
+    {
+        return Err(RegistryError::ScratchCertificationMissing(
+            harness_id.to_owned(),
+        ));
+    }
     let canonical_bytes = manifest_bytes.strip_suffix(b"\n").unwrap_or(manifest_bytes);
     let actual = digest_bytes(canonical_bytes);
     if actual != receipt.manifest_digest {
@@ -1163,8 +1177,14 @@ pub enum RegistryError {
     InvalidHarnessId(String),
     #[error("harness {0} needs an explicitly authorized scratch run before activation")]
     ScratchRunRequired(String),
+    #[error(
+        "process harness {0} has no scratch certification; re-add it with --workspace and --prompt"
+    )]
+    ScratchCertificationMissing(String),
     #[error("scratch prompt must be nonempty")]
     EmptyScratchPrompt,
+    #[error("scratch workspace overlaps the brgr control directory")]
+    ScratchOverlapsControlHome,
     #[error("this harness cannot select a model for its scratch run")]
     UnsupportedScratchModel,
     #[error("this harness cannot select effort for its scratch run")]
@@ -1195,6 +1215,12 @@ pub enum RegistryError {
 mod tests {
     use super::*;
     use std::os::unix::fs::symlink;
+
+    fn scratch_workspace(root: &tempfile::TempDir) -> PathBuf {
+        let workspace = root.path().join("scratch");
+        fs::create_dir_all(&workspace).unwrap();
+        workspace
+    }
 
     #[test]
     fn registry_directories_are_private() {
@@ -1312,9 +1338,22 @@ mod tests {
             registry.add(&executable).await,
             Err(RegistryError::ScratchRunRequired(_))
         ));
+        assert!(matches!(
+            registry
+                .activate_with_scratch(&draft, root.path(), "fixture request", None, None)
+                .await,
+            Err(RegistryError::ScratchOverlapsControlHome)
+        ));
+        assert!(!registry.activation_path(&draft.id).exists());
         registry.contract_test(&draft).await.unwrap();
         let receipt = registry
-            .activate_with_scratch(&draft, root.path(), "fixture request", None, None)
+            .activate_with_scratch(
+                &draft,
+                &scratch_workspace(&root),
+                "fixture request",
+                None,
+                None,
+            )
             .await
             .unwrap();
         assert!(receipt.scratch_result_digest.is_some());
@@ -1377,7 +1416,7 @@ mod tests {
         let registry = Registry::open(root.path().join("registry")).unwrap();
         registry.contract_test_custom(&manifest).await.unwrap();
         let receipt = registry
-            .activate_custom_with_scratch(&manifest, root.path(), "first", None, None)
+            .activate_custom_with_scratch(&manifest, &scratch_workspace(&root), "first", None, None)
             .await
             .unwrap();
         assert!(receipt.scratch_result_digest.is_some());
@@ -1400,13 +1439,28 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(output.result, b"second");
+        assert_custom_manifest_rejections(&registry, &root, &manifest, &executable).await;
+    }
+
+    async fn assert_custom_manifest_rejections(
+        registry: &Registry,
+        root: &tempfile::TempDir,
+        manifest: &HarnessManifest,
+        executable: &Path,
+    ) {
         let other_executable = root.path().join("other-agent");
-        fs::copy(&executable, &other_executable).unwrap();
+        fs::copy(executable, &other_executable).unwrap();
         let mut collision = manifest.clone();
         collision.executable = other_executable.canonicalize().unwrap();
         assert!(matches!(
             registry
-                .activate_custom_with_scratch(&collision, root.path(), "third", None, None)
+                .activate_custom_with_scratch(
+                    &collision,
+                    &scratch_workspace(root),
+                    "third",
+                    None,
+                    None
+                )
                 .await,
             Err(RegistryError::HarnessAliasCollision(_))
         ));
@@ -1447,7 +1501,7 @@ mod tests {
         let registry = Registry::open(root.path().join("registry")).unwrap();
         let draft = registry.draft(&executable).await.unwrap();
         let activation = registry
-            .activate_with_scratch(&draft, root.path(), "fixture", None, None)
+            .activate_with_scratch(&draft, &scratch_workspace(&root), "fixture", None, None)
             .await
             .unwrap();
         let pinned = registry.load_healthy(&draft.id).unwrap();
@@ -1474,6 +1528,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn old_process_activation_without_scratch_cannot_run() {
+        let root = tempfile::tempdir().unwrap();
+        let executable = root.path().join("mystery-agent");
+        fixture_executable(&executable);
+        let registry = Registry::open(root.path().join("registry")).unwrap();
+        let draft = registry.draft(&executable).await.unwrap();
+        let mut receipt = registry
+            .activate_with_scratch(&draft, &scratch_workspace(&root), "fixture", None, None)
+            .await
+            .unwrap();
+        receipt.scratch_result_digest = None;
+        fs::write(
+            registry.activation_path(&draft.id),
+            serde_json::to_vec_pretty(&receipt).unwrap(),
+        )
+        .unwrap();
+        assert!(matches!(
+            registry.load_healthy(&draft.id),
+            Err(RegistryError::ScratchCertificationMissing(_))
+        ));
+    }
+
+    #[tokio::test]
     async fn changed_recipe_cannot_be_activated() {
         let root = tempfile::tempdir().unwrap();
         let executable = root.path().join("mystery-agent");
@@ -1487,7 +1564,7 @@ mod tests {
         ));
         assert!(matches!(
             registry
-                .activate_with_scratch(&draft, root.path(), "fixture", None, None)
+                .activate_with_scratch(&draft, &scratch_workspace(&root), "fixture", None, None)
                 .await,
             Err(RegistryError::ManifestNotObserved)
         ));
@@ -1529,7 +1606,7 @@ mod tests {
         let registry = Registry::open(root.path().join("registry")).unwrap();
         let draft = registry.draft(&executable).await.unwrap();
         registry
-            .activate_with_scratch(&draft, root.path(), "test", None, None)
+            .activate_with_scratch(&draft, &scratch_workspace(&root), "test", None, None)
             .await
             .unwrap();
         assert_eq!(

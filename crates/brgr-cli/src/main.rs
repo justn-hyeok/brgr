@@ -188,9 +188,7 @@ enum CleanupCommand {
 
 #[derive(Subcommand)]
 enum HarnessCommand {
-    Add {
-        executable: PathBuf,
-    },
+    Add(AddHarnessArgs),
     Draft {
         executable: PathBuf,
     },
@@ -216,6 +214,21 @@ enum HarnessCommand {
         #[arg(default_value = "local.gjc")]
         harness: String,
     },
+}
+
+#[derive(Args)]
+struct AddHarnessArgs {
+    executable: PathBuf,
+    #[arg(long)]
+    workspace: Option<PathBuf>,
+    #[arg(long)]
+    prompt: Option<String>,
+    #[arg(long)]
+    model: Option<String>,
+    #[arg(long)]
+    effort: Option<String>,
+    #[arg(long)]
+    presentation_only: bool,
 }
 
 #[derive(Subcommand)]
@@ -1015,8 +1028,8 @@ fn decide(
 async fn harness(paths: &Paths, command: HarnessCommand, json_output: bool) -> Result<()> {
     let registry = Registry::open(&paths.registry)?;
     match command {
-        HarnessCommand::Add { executable } => {
-            let receipt = registry.add(&executable).await?;
+        HarnessCommand::Add(args) => {
+            let receipt = add_harness(&registry, args).await?;
             print_value(&serde_json::to_value(receipt)?, json_output);
         }
         HarnessCommand::Draft { executable } => {
@@ -1087,6 +1100,41 @@ async fn harness(paths: &Paths, command: HarnessCommand, json_output: bool) -> R
         }
     }
     Ok(())
+}
+
+async fn add_harness(registry: &Registry, args: AddHarnessArgs) -> Result<ActivationReceipt> {
+    let receipt = if args.presentation_only {
+        if args.workspace.is_some()
+            || args.prompt.is_some()
+            || args.model.is_some()
+            || args.effort.is_some()
+        {
+            bail!("presentation-only registration cannot claim a scratch run or model route");
+        }
+        registry.add(&args.executable).await?
+    } else {
+        let workspace = args
+            .workspace
+            .context("harness add needs --workspace for an authorized scratch run")?;
+        let prompt = args
+            .prompt
+            .context("harness add needs --prompt for an authorized scratch run")?;
+        let manifest = registry.draft(&args.executable).await?;
+        registry.contract_test(&manifest).await?;
+        registry
+            .activate_with_scratch(
+                &manifest,
+                &workspace,
+                &prompt,
+                args.model.as_deref(),
+                args.effort.as_deref(),
+            )
+            .await?
+    };
+    match registry.health_probed(&receipt.harness_id).await? {
+        Health::Healthy => Ok(receipt),
+        Health::Drifted { .. } => bail!("harness changed during activation health check"),
+    }
 }
 
 async fn harness_manifest_input(
