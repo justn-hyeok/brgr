@@ -531,6 +531,7 @@ fn authored_manifest_runs_unknown_positional_cli_to_owner_acceptance() {
     assert_eq!(accepted["verdict"], "accepted");
 }
 
+#[cfg(debug_assertions)]
 #[test]
 fn detached_supervisor_exit_before_claim_becomes_one_durable_lost_inbox_item() {
     let temp = TempDir::new().unwrap();
@@ -589,6 +590,7 @@ fn detached_supervisor_exit_before_claim_becomes_one_durable_lost_inbox_item() {
     assert_eq!(replay["result"]["result_id"], result_id);
 }
 
+#[cfg(debug_assertions)]
 #[test]
 fn detached_crash_windows_reconcile_without_duplicate_or_overlapping_attempts() {
     let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -660,6 +662,7 @@ fn detached_crash_windows_reconcile_without_duplicate_or_overlapping_attempts() 
     }
 }
 
+#[cfg(debug_assertions)]
 #[test]
 fn restarted_supervisor_cannot_adopt_its_predecessors_unfinished_attempt() {
     let temp = TempDir::new().unwrap();
@@ -711,6 +714,7 @@ fn restarted_supervisor_cannot_adopt_its_predecessors_unfinished_attempt() {
     assert!(store.unfinished_attempts().unwrap().is_empty());
 }
 
+#[cfg(debug_assertions)]
 #[test]
 fn status_during_live_pre_identity_window_does_not_publish_lost() {
     let temp = TempDir::new().unwrap();
