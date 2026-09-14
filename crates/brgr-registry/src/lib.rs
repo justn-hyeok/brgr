@@ -73,8 +73,8 @@ impl Registry {
     /// are absent, or activation data cannot be persisted.
     pub async fn add(&self, executable: &Path) -> Result<ActivationReceipt, RegistryError> {
         let (manifest, probe) = draft_manifest(executable).await?;
-        if !matches!(manifest.id.as_str(), "local.gjc" | "local.omp")
-            || (manifest.id == "local.omp" && manifest.adapter != OMP_ROLE_ADAPTER_V1)
+        if !matches!(manifest.id.as_str(), "local.gjc" | "local.omp-herdr")
+            || (manifest.id == "local.omp-herdr" && manifest.adapter != OMP_ROLE_ADAPTER_V1)
         {
             return Err(RegistryError::ScratchRunRequired(manifest.id));
         }
@@ -103,7 +103,7 @@ impl Registry {
     ///
     /// Rejects changed, unsupported, or unobserved recipes.
     pub async fn contract_test(&self, manifest: &HarnessManifest) -> Result<(), RegistryError> {
-        let requested_name = name_from_id(&manifest.id)?;
+        let requested_name = name_from_id(&manifest.id, &manifest.adapter)?;
         let (observed, _) = draft_manifest_as(&manifest.executable, requested_name).await?;
         if &observed != manifest || manifest.adapter != PROCESS_ADAPTER_V1 {
             return Err(RegistryError::ManifestNotObserved);
@@ -125,6 +125,7 @@ impl Registry {
         workspace: &Path,
         prompt: &str,
         model: Option<&str>,
+        effort: Option<&str>,
     ) -> Result<ActivationReceipt, RegistryError> {
         self.contract_test(manifest).await?;
         if prompt.trim().is_empty() {
@@ -133,6 +134,9 @@ impl Registry {
         if model.is_some() && manifest.launch.model_argv.is_empty() {
             return Err(RegistryError::UnsupportedScratchModel);
         }
+        if effort.is_some() && manifest.launch.effort_argv.is_empty() {
+            return Err(RegistryError::UnsupportedScratchEffort);
+        }
         let before_digest = digest_file(&manifest.executable)?;
         let output = ProcessRunner::run(
             manifest,
@@ -140,7 +144,7 @@ impl Registry {
                 workspace,
                 prompt,
                 model,
-                effort: None,
+                effort,
                 deadline: Duration::from_mins(1),
                 cancel_path: None,
                 pid_path: None,
@@ -150,7 +154,7 @@ impl Registry {
         if !output.succeeded(manifest) || output.result.is_empty() {
             return Err(RegistryError::ScratchRunFailed);
         }
-        let requested_name = name_from_id(&manifest.id)?;
+        let requested_name = name_from_id(&manifest.id, &manifest.adapter)?;
         let (after_manifest, probe) =
             draft_manifest_as(&manifest.executable, requested_name).await?;
         if after_manifest != *manifest || digest_file(&manifest.executable)? != before_digest {
@@ -166,6 +170,20 @@ impl Registry {
     /// Returns [`RegistryError`] when the package is missing, malformed, or has
     /// drifted since activation.
     pub fn load_healthy(&self, harness_id: &str) -> Result<HarnessManifest, RegistryError> {
+        self.load_healthy_with_receipt(harness_id)
+            .map(|(manifest, _)| manifest)
+    }
+
+    /// Loads one validated activation snapshot for task admission.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a malformed package or changed executable before returning the
+    /// manifest and the digest that the task will pin.
+    pub fn load_healthy_with_receipt(
+        &self,
+        harness_id: &str,
+    ) -> Result<(HarnessManifest, ActivationReceipt), RegistryError> {
         validate_harness_id(harness_id)?;
         let manifest_bytes = fs::read(self.manifest_path(harness_id))?;
         let manifest: HarnessManifest = serde_json::from_slice(&manifest_bytes)?;
@@ -175,12 +193,31 @@ impl Registry {
         match health_for(&receipt)? {
             Health::Healthy => {
                 manifest.validate()?;
-                Ok(manifest)
+                Ok((manifest, receipt))
             }
             Health::Drifted { expected, observed } => {
                 Err(RegistryError::ExecutableDrift { expected, observed })
             }
         }
+    }
+
+    /// Rechecks a task-pinned executable without consulting a newer activation.
+    ///
+    /// # Errors
+    ///
+    /// Rejects any change to the executable bytes before process spawn.
+    pub fn verify_pinned_executable(
+        manifest: &HarnessManifest,
+        expected_digest: &str,
+    ) -> Result<(), RegistryError> {
+        let actual = digest_file(&manifest.executable)?;
+        if actual != expected_digest {
+            return Err(RegistryError::ExecutableDrift {
+                expected: expected_digest.to_owned(),
+                observed: actual,
+            });
+        }
+        Ok(())
     }
 
     /// Checks the activated executable digest without performing a paid model
@@ -340,6 +377,7 @@ fn generate_manifest(
 ) -> Result<HarnessManifest, RegistryError> {
     match requested_name {
         "gjc" => generate_gjc_manifest(executable, help),
+        "omp" => generate_omp_process_manifest(executable, help),
         "omp-role" => generate_omp_manifest(executable, help),
         "cursor" | "cursor-agent" | "cursor-cli" => generate_cursor_manifest(executable, help),
         "command-code" | "commandcode" | "cmdc" => generate_command_code_manifest(executable, help),
@@ -366,7 +404,7 @@ fn generate_generic_manifest(
     let name = requested_name.to_ascii_lowercase();
     let id = format!("local.{name}");
     validate_harness_id(&id)?;
-    if matches!(id.as_str(), "local.gjc" | "local.omp") {
+    if matches!(id.as_str(), "local.gjc" | "local.omp" | "local.omp-herdr") {
         return Err(RegistryError::UnsupportedHarness);
     }
     Ok(HarnessManifest {
@@ -431,6 +469,72 @@ fn generate_gjc_manifest(
                 "--mode=json".to_owned(),
                 "--no-session".to_owned(),
                 "--no-mcp".to_owned(),
+                "@${input.prompt_file}".to_owned(),
+            ],
+            model_argv: vec!["--model".to_owned(), "${route.model}".to_owned()],
+            effort_argv: vec!["--thinking".to_owned(), "${route.effort}".to_owned()],
+            env_allow: vec![
+                "HOME".to_owned(),
+                "PATH".to_owned(),
+                "LANG".to_owned(),
+                "TMPDIR".to_owned(),
+            ],
+            mode: ExecutionMode::OneShot,
+        },
+        result: ResultSpec {
+            source: ResultSource::JsonlAssistantFinal,
+            media_type: "text/plain".to_owned(),
+            max_bytes: 1_048_576,
+            success_exit_codes: vec![0],
+        },
+        capabilities: BTreeMap::from([
+            (
+                "completion".to_owned(),
+                supported("process_exit_with_json_capture"),
+            ),
+            ("cancel".to_owned(), supported("local_process_only")),
+            ("model_select".to_owned(), supported("--model")),
+            ("effort_select".to_owned(), supported("--thinking")),
+        ]),
+    })
+}
+
+fn generate_omp_process_manifest(
+    executable: PathBuf,
+    help: &str,
+) -> Result<HarnessManifest, RegistryError> {
+    if ![
+        "-p, --print",
+        "--mode=<value>",
+        "--no-session",
+        "--no-prewalk",
+        "--no-extensions",
+        "--no-title",
+        "--model=<value>",
+        "--thinking=<value>",
+    ]
+    .iter()
+    .all(|flag| help.contains(flag))
+    {
+        return Err(RegistryError::RequiredFlagsMissing);
+    }
+    Ok(HarnessManifest {
+        schema: MANIFEST_SCHEMA_V1.to_owned(),
+        id: "local.omp".to_owned(),
+        adapter: PROCESS_ADAPTER_V1.to_owned(),
+        executable,
+        probe: ProbeSpec {
+            version_argv: vec!["--version".to_owned()],
+            help_argv: vec!["--help".to_owned()],
+        },
+        launch: LaunchSpec {
+            argv: vec![
+                "-p".to_owned(),
+                "--mode=json".to_owned(),
+                "--no-session".to_owned(),
+                "--no-prewalk".to_owned(),
+                "--no-extensions".to_owned(),
+                "--no-title".to_owned(),
                 "@${input.prompt_file}".to_owned(),
             ],
             model_argv: vec!["--model".to_owned(), "${route.model}".to_owned()],
@@ -613,7 +717,7 @@ fn generate_omp_manifest(
     }
     Ok(HarnessManifest {
         schema: MANIFEST_SCHEMA_V1.to_owned(),
-        id: "local.omp".to_owned(),
+        id: "local.omp-herdr".to_owned(),
         adapter: OMP_ROLE_ADAPTER_V1.to_owned(),
         executable,
         probe: ProbeSpec {
@@ -694,9 +798,9 @@ fn validate_harness_id(id: &str) -> Result<(), RegistryError> {
     Ok(())
 }
 
-fn name_from_id(id: &str) -> Result<&str, RegistryError> {
+fn name_from_id<'a>(id: &'a str, adapter: &str) -> Result<&'a str, RegistryError> {
     validate_harness_id(id)?;
-    if id == "local.omp" {
+    if matches!(id, "local.omp" | "local.omp-herdr") && adapter == OMP_ROLE_ADAPTER_V1 {
         Ok("omp-role")
     } else {
         Ok(&id["local.".len()..])
@@ -785,6 +889,8 @@ pub enum RegistryError {
     EmptyScratchPrompt,
     #[error("this harness cannot select a model for its scratch run")]
     UnsupportedScratchModel,
+    #[error("this harness cannot select effort for its scratch run")]
+    UnsupportedScratchEffort,
     #[error("scratch run did not produce a successful nonempty result")]
     ScratchRunFailed,
     #[error("manifest differs from the currently observed process/v1 recipe")]
@@ -829,7 +935,21 @@ mod tests {
         assert!(matches!(error, RegistryError::RequiredFlagsMissing));
         let error = generate_manifest("omp", PathBuf::from("/bin/echo"), "--prompt-file <path>")
             .unwrap_err();
-        assert!(matches!(error, RegistryError::UnsupportedHarness));
+        assert!(matches!(error, RegistryError::RequiredFlagsMissing));
+    }
+
+    #[test]
+    fn omp_process_recipe_is_separate_from_herdr_presentation() {
+        let help = "-p, --print --mode=<value> --no-session --no-prewalk --no-extensions --no-title --model=<value> --thinking=<value>";
+        let process = generate_manifest("omp", PathBuf::from("/bin/echo"), help).unwrap();
+        assert_eq!(process.id, "local.omp");
+        assert_eq!(process.adapter, PROCESS_ADAPTER_V1);
+        assert_eq!(process.result.source, ResultSource::JsonlAssistantFinal);
+        assert!(!process.launch.env_allow.contains(&"HERDR_ENV".to_owned()));
+        assert_eq!(
+            process.capabilities["cancel"].status,
+            CapabilityStatus::Supported
+        );
     }
 
     #[test]
@@ -916,7 +1036,7 @@ mod tests {
         ));
         registry.contract_test(&draft).await.unwrap();
         let receipt = registry
-            .activate_with_scratch(&draft, root.path(), "fixture request", None)
+            .activate_with_scratch(&draft, root.path(), "fixture request", None, None)
             .await
             .unwrap();
         assert!(receipt.scratch_result_digest.is_some());
@@ -946,10 +1066,12 @@ mod tests {
         fixture_executable(&executable);
         let registry = Registry::open(root.path().join("registry")).unwrap();
         let draft = registry.draft(&executable).await.unwrap();
-        registry
-            .activate_with_scratch(&draft, root.path(), "fixture", None)
+        let activation = registry
+            .activate_with_scratch(&draft, root.path(), "fixture", None, None)
             .await
             .unwrap();
+        let pinned = registry.load_healthy(&draft.id).unwrap();
+        Registry::verify_pinned_executable(&pinned, &activation.executable_digest).unwrap();
         let path = registry.manifest_path(&draft.id);
         let original = fs::read(&path).unwrap();
         let mut changed = original.clone();
@@ -963,6 +1085,10 @@ mod tests {
         fs::write(&executable, "#!/bin/sh\necho changed\n").unwrap();
         assert!(matches!(
             registry.load_healthy(&draft.id),
+            Err(RegistryError::ExecutableDrift { .. })
+        ));
+        assert!(matches!(
+            Registry::verify_pinned_executable(&pinned, &activation.executable_digest),
             Err(RegistryError::ExecutableDrift { .. })
         ));
     }
@@ -981,7 +1107,7 @@ mod tests {
         ));
         assert!(matches!(
             registry
-                .activate_with_scratch(&draft, root.path(), "fixture", None)
+                .activate_with_scratch(&draft, root.path(), "fixture", None, None)
                 .await,
             Err(RegistryError::ManifestNotObserved)
         ));
@@ -998,9 +1124,9 @@ mod tests {
         symlink(&target, &alias).unwrap();
         let registry = Registry::open(root.path().join("registry")).unwrap();
         let receipt = registry.add(&alias).await.unwrap();
-        assert_eq!(receipt.harness_id, "local.omp");
+        assert_eq!(receipt.harness_id, "local.omp-herdr");
         assert_eq!(
-            registry.load_healthy("local.omp").unwrap().adapter,
+            registry.load_healthy("local.omp-herdr").unwrap().adapter,
             OMP_ROLE_ADAPTER_V1
         );
     }
@@ -1023,7 +1149,7 @@ mod tests {
         let registry = Registry::open(root.path().join("registry")).unwrap();
         let draft = registry.draft(&executable).await.unwrap();
         registry
-            .activate_with_scratch(&draft, root.path(), "test", None)
+            .activate_with_scratch(&draft, root.path(), "test", None, None)
             .await
             .unwrap();
         assert_eq!(

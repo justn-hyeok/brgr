@@ -11,11 +11,12 @@ The v1 target is Apple Silicon on macOS 15 or newer. Release archives are
 unsigned and not notarized. Read [the unsigned distribution guide](docs/unsigned-distribution.md)
 before sharing or running a downloaded binary.
 
-The current release candidate is still in verification. GJC, Cursor CLI, and
-Command Code have bounded one-shot process recipes; OMP currently uses an
-installed `omp-role` and Herdr. After Codex accepts or
-rejects a result, brgr closes only the OMP pane it recorded as its own; use
-`--keep-pane` to retain it. See the cleanup safety limit below.
+The current release candidate is still in verification. GJC, Cursor CLI,
+Command Code, and OMP have bounded one-shot process recipes. Herdr is optional:
+the separate `local.omp-herdr` adapter uses `omp-role` when an interactive pane
+is explicitly wanted. After Codex accepts or rejects that adapter's result,
+brgr closes only its recorded pane; use `--keep-pane` to retain it. See the
+cleanup safety limit below.
 
 ## Start from Codex
 
@@ -47,7 +48,7 @@ Git source gets a dedicated task worktree. Dirty changes are rejected unless
 `--allow-clean-head-snapshot` explicitly excludes them.
 
 `brgr integrate codex status|uninstall` checks or removes only brgr-owned
-entries. For Cursor CLI, Command Code, or an approved unfamiliar CLI, use
+entries. For OMP, Cursor CLI, Command Code, or an approved unfamiliar CLI, use
 `brgr harness draft`, `brgr harness test`, then an authorized scratch run with
 `brgr harness activate` and `brgr harness status`. Pass `--model MODEL` when
 that exact manifest supports model selection. Do not infer support for flags

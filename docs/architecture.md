@@ -12,11 +12,12 @@ transitions. The runner executes declarative argv recipes without a shell. The
 store seals artifact bytes before committing result and inbox metadata. The
 registry activates only recipes supported by bounded help/version evidence.
 
-Execution and presentation are separate. GJC, Cursor CLI, and Command Code use
-one-shot process recipes. The current OMP adapter requires Herdr for launch and
-lifecycle evidence; Herdr is not a requirement of the core contract, and
-pane and session identifiers remain metadata. A missing pane must not erase an
-already sealed result.
+Execution and presentation are separate. GJC, Cursor CLI, Command Code, and OMP
+use one-shot process recipes for the managed baseline. OMP's process recipe
+collects an assistant final turn and observed process exit without Herdr. The
+separate `local.omp-herdr` adapter preserves interactive presentation for an
+explicitly chosen pane; pane and session identifiers remain metadata. A missing
+pane must not erase an already sealed result.
 
 Candidate output is never accepted because a process exits successfully. Codex
 checks the task's acceptance criteria and records an accept or reject decision
@@ -34,7 +35,8 @@ live process. An uncertain run becomes `lost` with unresolved effects and is
 never retried automatically. Only a transient failure before process spawn may
 use the one remaining attempt in the two-attempt budget.
 
-Brgr records its OMP pane and terminal IDs, immutable agent session, task and
+For `local.omp-herdr` only, brgr records its OMP pane and terminal IDs,
+immutable agent session, task and
 attempt IDs, and parent pane. After the owner decision and inbox acknowledgment,
 it rechecks those fields plus idle state and protected-tab status, then calls
 Herdr's official `pane.close(pane_id)` route. It targets only panes with a

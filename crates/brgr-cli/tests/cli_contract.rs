@@ -1,4 +1,4 @@
-use std::{fs, os::unix::fs::PermissionsExt, path::Path, process::Command};
+use std::{fs, os::unix::fs::PermissionsExt, path::Path, process::Command, thread, time::Duration};
 
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -338,6 +338,70 @@ fn rejected_result_can_be_revised_without_rewriting_its_decision() {
             .join(format!("{task}-r3.json"))
             .exists()
     );
+}
+
+#[test]
+fn omp_process_can_cancel_without_a_herdr_pane() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("brgr");
+    let workspace = temp.path().join("work");
+    fs::create_dir_all(&workspace).unwrap();
+    let executable = temp.path().join("omp");
+    fs::write(
+        &executable,
+        "#!/bin/sh\ncase \"$1\" in\n --version) echo 'omp fixture 1'; exit 0;;\n --help) printf '%s\\n' '-p, --print' '--mode=<value>' '--no-session' '--no-prewalk' '--no-extensions' '--no-title' '--model=<value>' '--thinking=<value>'; exit 0;;\nesac\nfor argument in \"$@\"; do case \"$argument\" in @*) prompt_file=${argument#@};; esac; done\nif /usr/bin/grep -q SLOW \"$prompt_file\"; then /bin/sleep 30; fi\nprintf '%s\\n' '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"OMP_FIXTURE_OK\"}]}}' '{\"type\":\"turn_end\",\"message\":{\"role\":\"assistant\"}}' '{\"type\":\"agent_end\"}'\n",
+    )
+    .unwrap();
+    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+    json_output(&run(
+        &home,
+        &[
+            "harness",
+            "activate",
+            executable.to_str().unwrap(),
+            "--workspace",
+            workspace.to_str().unwrap(),
+            "--prompt",
+            "scratch",
+        ],
+        &[],
+    ));
+    let owner = [("BRGR_OWNER_ID", "codex:omp-cancel-test")];
+    let launch = json_output(&run(
+        &home,
+        &[
+            "run",
+            "SLOW",
+            "--harness",
+            "local.omp",
+            "--workspace",
+            workspace.to_str().unwrap(),
+            "--deadline-seconds",
+            "10",
+        ],
+        &owner,
+    ));
+    let task = launch["task_id"].as_str().unwrap();
+    for _ in 0..100 {
+        if run(&home, &["status", task], &owner).status.success() {
+            break;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    let requested = json_output(&run(&home, &["cancel", task], &owner));
+    assert_eq!(requested["state"], "cancel_requested");
+    let mut final_result = None;
+    for _ in 0..100 {
+        let output = run(&home, &["result", task], &owner);
+        if output.status.success() {
+            final_result = Some(json_output(&output));
+            break;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(final_result.unwrap()["result"]["outcome"], "cancelled");
+    let acknowledged = json_output(&run(&home, &["result", task, "--ack"], &owner));
+    assert_eq!(acknowledged["result"]["outcome"], "cancelled");
 }
 
 #[test]

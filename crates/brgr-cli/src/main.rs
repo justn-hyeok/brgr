@@ -18,7 +18,7 @@ use brgr_protocol::{
     ArtifactContract, AttemptBudget, Decision, DecisionId, DecisionVerdict, OwnerId, Route,
     SCHEMA_V1, TaskId, TaskSpec, TerminalOutcome,
 };
-use brgr_registry::{Health, Registry};
+use brgr_registry::{ActivationReceipt, Health, Registry};
 use brgr_runner::{
     ExecutionMode, HarnessManifest, LaunchSpec, MANIFEST_SCHEMA_V1, PROCESS_ADAPTER_V1, ProbeSpec,
     ResultSource, ResultSpec,
@@ -192,6 +192,8 @@ enum HarnessCommand {
         prompt: String,
         #[arg(long)]
         model: Option<String>,
+        #[arg(long)]
+        effort: Option<String>,
     },
     Status {
         #[arg(default_value = "local.gjc")]
@@ -268,6 +270,14 @@ impl Paths {
     fn supervisor(&self, task: TaskId) -> PathBuf {
         self.runs.join(format!("{task}.supervisor.json"))
     }
+
+    fn launch(&self, task: TaskId, revision: u32) -> PathBuf {
+        if revision == 1 {
+            self.launches.join(format!("{task}.json"))
+        } else {
+            self.launches.join(format!("{task}-r{revision}.json"))
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -276,6 +286,10 @@ struct LaunchEnvelope {
     harness_id: String,
     protocol_generation: String,
     keep_pane: bool,
+    #[serde(default)]
+    manifest: Option<HarnessManifest>,
+    #[serde(default)]
+    executable_digest: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -347,8 +361,8 @@ async fn run_task(paths: &Paths, args: RunArgs, json_output: bool) -> Result<()>
         Health::Healthy => {}
         Health::Drifted { .. } => bail!("harness {} probe identity changed", args.harness),
     }
-    let activated = registry
-        .load_healthy(&args.harness)
+    let (activated, activation) = registry
+        .load_healthy_with_receipt(&args.harness)
         .with_context(|| format!("harness {} is not active and healthy", args.harness))?;
     let task_id = TaskId::new();
     let source_workspace = args.workspace.unwrap_or(env::current_dir()?);
@@ -387,6 +401,7 @@ async fn run_task(paths: &Paths, args: RunArgs, json_output: bool) -> Result<()>
         paths,
         spec,
         &activated,
+        &activation,
         StartOptions {
             source_workspace: &source_workspace,
             snapshot: if args.allow_clean_head_snapshot {
@@ -455,11 +470,13 @@ async fn revise_task(paths: &Paths, args: ReviseArgs, json_output: bool) -> Resu
         Health::Healthy => {}
         Health::Drifted { .. } => bail!("harness probe identity changed"),
     }
-    let activated = registry.load_healthy(&replacement.route.harness_id)?;
+    let (activated, activation) =
+        registry.load_healthy_with_receipt(&replacement.route.harness_id)?;
     start_task(
         paths,
         replacement,
         &activated,
+        &activation,
         StartOptions {
             source_workspace: &source_workspace,
             snapshot: if args.allow_clean_head_snapshot {
@@ -487,6 +504,7 @@ async fn start_task(
     paths: &Paths,
     mut spec: TaskSpec,
     activated: &HarnessManifest,
+    activation: &ActivationReceipt,
     options: StartOptions<'_>,
 ) -> Result<()> {
     spec.validate()?;
@@ -498,7 +516,7 @@ async fn start_task(
         options.source_workspace,
         task_id,
         spec.revision,
-        &harness_id,
+        &activated.adapter,
         matches!(options.snapshot, WorkspaceSnapshot::AllowCleanHead),
     )?;
     spec.workspace = workspace.to_string_lossy().into_owned();
@@ -507,14 +525,10 @@ async fn start_task(
         harness_id,
         protocol_generation: "brgr-v1".to_owned(),
         keep_pane: matches!(options.pane, PaneDisposition::Keep),
+        manifest: Some(activated.clone()),
+        executable_digest: Some(activation.executable_digest.clone()),
     };
-    let launch_path = if launch.spec.revision == 1 {
-        paths.launches.join(format!("{task_id}.json"))
-    } else {
-        paths
-            .launches
-            .join(format!("{task_id}-r{}.json", launch.spec.revision))
-    };
+    let launch_path = paths.launch(task_id, launch.spec.revision);
     write_json_new(&launch_path, &launch)?;
 
     if matches!(options.execution, ExecutionDisposition::Foreground) {
@@ -539,13 +553,24 @@ async fn supervise(paths: &Paths, launch_path: &Path, json_output: bool) -> Resu
     if launch.protocol_generation != "brgr-v1" {
         bail!("unsupported task protocol generation");
     }
+    let manifest = match (&launch.manifest, &launch.executable_digest) {
+        (Some(manifest), Some(digest)) => {
+            if manifest.id != launch.harness_id {
+                bail!("task-pinned harness id differs from its manifest");
+            }
+            Registry::verify_pinned_executable(manifest, digest)?;
+            manifest.clone()
+        }
+        (None, None) => Registry::open(&paths.registry)?.load_healthy(&launch.harness_id)?,
+        _ => bail!("task has an incomplete pinned manifest"),
+    };
+    manifest.validate_task_route(&launch.spec)?;
     let receipt = ProcessReceipt {
         task_id: launch.spec.task_id,
         launch_path: launch_path.to_path_buf(),
         identity: process_identity(std::process::id())?,
     };
     write_json_atomic(&paths.supervisor(launch.spec.task_id), &receipt)?;
-    let manifest = Registry::open(&paths.registry)?.load_healthy(&launch.harness_id)?;
     let manifest = if manifest.adapter == brgr_runner::OMP_ROLE_ADAPTER_V1 {
         omp_process_manifest(paths, &launch, &manifest)?
     } else {
@@ -720,11 +745,20 @@ fn cancel(paths: &Paths, task: TaskId, json_output: bool) -> Result<()> {
     let store = Store::open(&paths.store)?;
     let spec = store.task(task)?;
     require_owner(&spec.owner_id)?;
-    if spec.route.harness_id == "local.omp" {
-        bail!("OMP cancellation is not certified in v1");
-    }
     if store.attempt_state(task)? == brgr_protocol::AttemptState::Terminal {
         bail!("task {task} is already terminal");
+    }
+    let launch: LaunchEnvelope =
+        serde_json::from_slice(&fs::read(paths.launch(task, spec.revision))?)?;
+    let legacy_omp = launch.manifest.as_ref().map_or(
+        matches!(
+            spec.route.harness_id.as_str(),
+            "local.omp" | "local.omp-herdr"
+        ),
+        |manifest| manifest.adapter == brgr_runner::OMP_ROLE_ADAPTER_V1,
+    );
+    if legacy_omp {
+        bail!("Herdr-backed OMP cancellation is not certified; use the process adapter");
     }
     fs::write(paths.cancel(task), b"cancel\n")?;
     print_value(
@@ -802,10 +836,17 @@ async fn harness(paths: &Paths, command: HarnessCommand, json_output: bool) -> R
             workspace,
             prompt,
             model,
+            effort,
         } => {
             let manifest = registry.draft(&executable).await?;
             let receipt = registry
-                .activate_with_scratch(&manifest, &workspace, &prompt, model.as_deref())
+                .activate_with_scratch(
+                    &manifest,
+                    &workspace,
+                    &prompt,
+                    model.as_deref(),
+                    effort.as_deref(),
+                )
                 .await?;
             print_value(&serde_json::to_value(receipt)?, json_output);
         }
@@ -1219,7 +1260,7 @@ fn prepare_workspace(
     source: &Path,
     task_id: TaskId,
     revision: u32,
-    harness_id: &str,
+    adapter: &str,
     allow_clean_head_snapshot: bool,
 ) -> Result<PathBuf> {
     let source = source.canonicalize()?;
@@ -1275,7 +1316,7 @@ fn prepare_workspace(
     fs::create_dir_all(&target_parent)?;
     let target = target_parent.join(&task_slug);
     let branch = format!("brgr/task-{task_slug}");
-    let status = if harness_id == "local.omp"
+    let status = if adapter == brgr_runner::OMP_ROLE_ADAPTER_V1
         && env::var("HERDR_ENV").as_deref() == Ok("1")
         && env::var_os("HERDR_PANE_ID").is_some()
     {

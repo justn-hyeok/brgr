@@ -305,7 +305,11 @@ impl HarnessManifest {
     pub fn validate_task_route(&self, task: &TaskSpec) -> Result<(), RunnerError> {
         self.validate()?;
         if self.id != task.route.harness_id
-            && !(self.id == "internal.omp-runner" && task.route.harness_id == "local.omp")
+            && !(self.id == "internal.omp-runner"
+                && matches!(
+                    task.route.harness_id.as_str(),
+                    "local.omp" | "local.omp-herdr"
+                ))
         {
             return Err(RunnerError::HarnessRouteMismatch {
                 requested: task.route.harness_id.clone(),
@@ -556,6 +560,8 @@ fn collect_result(
 fn extract_jsonl_assistant_final(stdout: &[u8]) -> Result<Vec<u8>, RunnerError> {
     let mut final_text = None;
     let mut completed = false;
+    let mut assistant_turn_ended = false;
+    let mut unqualified_agent_end = false;
     for line in stdout
         .split(|byte| *byte == b'\n')
         .filter(|line| !line.is_empty())
@@ -585,13 +591,24 @@ fn extract_jsonl_assistant_final(stdout: &[u8]) -> Result<Vec<u8>, RunnerError> 
                 }
             }
             Some("agent_end") => {
-                completed = event.get("stopReason").and_then(serde_json::Value::as_str)
-                    == Some("completed");
+                match event.get("stopReason").and_then(serde_json::Value::as_str) {
+                    Some("completed") => completed = true,
+                    None => unqualified_agent_end = true,
+                    _ => {}
+                }
+            }
+            Some("turn_end")
+                if event
+                    .pointer("/message/role")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("assistant") =>
+            {
+                assistant_turn_ended = true;
             }
             _ => {}
         }
     }
-    if !completed {
+    if !(completed || (unqualified_agent_end && assistant_turn_ended)) {
         return Err(RunnerError::MissingTerminalEvent);
     }
     final_text.ok_or(RunnerError::MissingAssistantText)
@@ -931,6 +948,27 @@ mod tests {
         let events = b"{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"answer\"}]}}\n";
         assert!(matches!(
             extract_jsonl_assistant_final(events),
+            Err(RunnerError::MissingTerminalEvent)
+        ));
+    }
+
+    #[test]
+    fn omp_jsonl_requires_final_turn_and_agent_end_when_stop_reason_is_absent() {
+        let events = concat!(
+            "{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"answer\"}]}}\n",
+            "{\"type\":\"turn_end\",\"message\":{\"role\":\"assistant\"}}\n",
+            "{\"type\":\"agent_end\"}\n",
+        );
+        assert_eq!(
+            extract_jsonl_assistant_final(events.as_bytes()).unwrap(),
+            b"answer"
+        );
+        let missing_turn = events.replace(
+            "{\"type\":\"turn_end\",\"message\":{\"role\":\"assistant\"}}\n",
+            "",
+        );
+        assert!(matches!(
+            extract_jsonl_assistant_final(missing_turn.as_bytes()),
             Err(RunnerError::MissingTerminalEvent)
         ));
     }
