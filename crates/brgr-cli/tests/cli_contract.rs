@@ -190,6 +190,38 @@ fn real_cli_run_binds_candidate_to_its_owner() {
 }
 
 #[test]
+fn non_git_workspace_runs_without_a_git_executable() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("brgr");
+    let workspace = temp.path().join("non-git");
+    fs::create_dir_all(&workspace).unwrap();
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../testdata/fixtures/gjc")
+        .canonicalize()
+        .unwrap();
+    json_output(&run(
+        &home,
+        &["harness", "add", fixture.to_str().unwrap()],
+        &[],
+    ));
+    let result = json_output(&run(
+        &home,
+        &[
+            "run",
+            "BRGR_FIXTURE_OK",
+            "--workspace",
+            workspace.to_str().unwrap(),
+            "--foreground",
+        ],
+        &[
+            ("BRGR_OWNER_ID", "codex:no-git"),
+            ("PATH", "/bin:/usr/sbin:/sbin"),
+        ],
+    ));
+    assert_eq!(result["outcome"], "candidate");
+}
+
+#[test]
 fn unsupported_model_fails_before_task_admission() {
     let temp = TempDir::new().unwrap();
     let home = temp.path().join("brgr");

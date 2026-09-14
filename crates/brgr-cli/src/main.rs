@@ -1271,7 +1271,12 @@ fn prepare_workspace(
             "rev-parse",
             "--show-toplevel",
         ])
-        .output()?;
+        .output();
+    let root_output = match root_output {
+        Ok(output) => output,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(source),
+        Err(error) => return Err(error.into()),
+    };
     if !root_output.status.success() {
         return Ok(source);
     }

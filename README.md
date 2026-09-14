@@ -46,6 +46,7 @@ The old result and decision remain intact. `brgr result TASK --ack` acknowledges
 a failed, cancelled, or lost result; acknowledgment is not acceptance. A clean
 Git source gets a dedicated task worktree. Dirty changes are rejected unless
 `--allow-clean-head-snapshot` explicitly excludes them.
+Git is needed for Git-backed tasks; a non-Git workspace can run without Git.
 
 `brgr integrate codex status|uninstall` checks or removes only brgr-owned
 entries. For OMP, Cursor CLI, Command Code, or an approved unfamiliar CLI, use
