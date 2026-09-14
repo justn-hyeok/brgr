@@ -92,6 +92,30 @@ impl Registry {
         Ok(registry)
     }
 
+    /// Lists every package name present in either registry directory so an
+    /// incomplete activation is visible to diagnostics.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RegistryError`] when a registry entry cannot be read or has
+    /// an invalid harness identifier.
+    pub fn registered_harness_ids(&self) -> Result<Vec<String>, RegistryError> {
+        let mut ids = BTreeSet::new();
+        for directory in ["manifests", "activations"] {
+            for entry in fs::read_dir(self.root.join(directory))? {
+                let entry = entry?;
+                let path = entry.path();
+                if path.extension().is_none_or(|extension| extension != "json") {
+                    continue;
+                }
+                let stem = path.file_stem().unwrap_or_default().to_string_lossy();
+                validate_harness_id(&stem)?;
+                ids.insert(stem.into_owned());
+            }
+        }
+        Ok(ids.into_iter().collect())
+    }
+
     /// Probes and activates only the explicitly presentation-only Herdr adapter.
     /// Process harnesses require a successful authorized scratch run.
     ///

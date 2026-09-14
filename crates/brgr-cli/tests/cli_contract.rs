@@ -1,4 +1,7 @@
-use std::{fs, os::unix::fs::PermissionsExt, path::Path, process::Command, thread, time::Duration};
+use std::{
+    fs, io::Write as _, os::unix::fs::PermissionsExt, path::Path, process::Command, thread,
+    time::Duration,
+};
 
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -43,6 +46,40 @@ fn add_fixture(home: &Path, fixture: &Path, scratch: &Path) {
         &[],
     ));
     assert!(receipt["scratch_result_digest"].as_str().is_some());
+}
+
+#[test]
+fn doctor_reports_changed_harness_instead_of_ok() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("brgr");
+    let codex_home = temp.path().join("codex");
+    let executable = temp.path().join("gjc");
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata/fixtures/gjc");
+    fs::copy(fixture, &executable).unwrap();
+    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+    add_fixture(&home, &executable, &temp.path().join("scratch"));
+    let envs = [("CODEX_HOME", codex_home.to_str().unwrap())];
+    json_output(&run(&home, &["integrate", "codex", "install"], &envs));
+
+    let healthy = json_output(&run(&home, &["doctor"], &envs));
+    assert_eq!(healthy["status"], "ok");
+    assert_eq!(healthy["harnesses"][0]["health"], "healthy");
+
+    writeln!(
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&executable)
+            .unwrap(),
+        "# drift"
+    )
+    .unwrap();
+    let changed = run(&home, &["doctor"], &envs);
+    assert!(!changed.status.success());
+    let report: Value = serde_json::from_slice(&changed.stdout).unwrap();
+    assert_eq!(report["status"], "needs_attention");
+    assert_eq!(report["harnesses"][0]["id"], "local.gjc");
+    assert_eq!(report["harnesses"][0]["health"], "unhealthy");
+    assert_eq!(report["harnesses"][0]["action"], "re-certify");
 }
 
 #[test]
