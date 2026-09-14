@@ -723,7 +723,7 @@ impl Store {
     /// conflicting decisions, invalid serialization, or database failure.
     pub fn record_decision(&self, decision: &Decision) -> Result<WriteOutcome, StoreError> {
         let transaction = self.connection.unchecked_transaction()?;
-        let outcome = record_decision_in_transaction(&transaction, decision)?;
+        let outcome = record_decision_in_transaction(&transaction, &self.artifacts, decision)?;
         transaction.commit()?;
         Ok(outcome)
     }
@@ -737,7 +737,7 @@ impl Store {
     /// conflicting decision, or failed transaction.
     pub fn record_decision_and_ack(&self, decision: &Decision) -> Result<WriteOutcome, StoreError> {
         let transaction = self.connection.unchecked_transaction()?;
-        let outcome = record_decision_in_transaction(&transaction, decision)?;
+        let outcome = record_decision_in_transaction(&transaction, &self.artifacts, decision)?;
         let changed = transaction.execute(
             "UPDATE inbox_items SET acknowledged = 1 WHERE owner_id = ?1 AND result_id = ?2",
             params![decision.owner_id.as_str(), decision.result_id.to_string()],
@@ -993,6 +993,7 @@ impl Store {
 
 fn record_decision_in_transaction(
     transaction: &Transaction<'_>,
+    artifacts: &ArtifactStore,
     decision: &Decision,
 ) -> Result<WriteOutcome, StoreError> {
     validate_schema(&decision.schema)?;
@@ -1013,10 +1014,11 @@ fn record_decision_in_transaction(
         };
     }
 
-    let (stored_digest, owner_id, task_id, revision, envelope_json) = transaction
+    let (stored_digest, owner_id, task_id, revision, envelope_json, spec_json) = transaction
         .query_row(
-            "SELECT r.result_digest, i.owner_id, r.task_id, r.revision, r.envelope_json
+            "SELECT r.result_digest, i.owner_id, r.task_id, r.revision, r.envelope_json, t.spec_json
                  FROM results r JOIN inbox_items i ON i.result_id = r.result_id
+                 JOIN tasks t ON t.task_id = r.task_id AND t.revision = r.revision
                  WHERE r.result_id = ?1",
             [decision.result_id.to_string()],
             |row| {
@@ -1026,6 +1028,7 @@ fn record_decision_in_transaction(
                     row.get::<_, String>(2)?,
                     row.get::<_, u32>(3)?,
                     row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
                 ))
             },
         )
@@ -1035,6 +1038,9 @@ fn record_decision_in_transaction(
     if result.outcome != brgr_protocol::TerminalOutcome::Candidate {
         return Err(StoreError::DecisionRequiresCandidate);
     }
+    if result.artifacts.is_empty() {
+        return Err(StoreError::DecisionRequiresSealedArtifact);
+    }
     if stored_digest != decision.result_digest {
         return Err(StoreError::ResultDigestMismatch);
     }
@@ -1043,6 +1049,10 @@ fn record_decision_in_transaction(
     }
     if task_id != decision.task_id.to_string() || revision != decision.revision {
         return Err(StoreError::DecisionResultMismatch);
+    }
+    let spec: TaskSpec = serde_json::from_str(&spec_json)?;
+    for reference in &result.artifacts {
+        artifacts.read_verified(reference, spec.artifact_contract.max_bytes)?;
     }
 
     transaction.execute(
@@ -1305,6 +1315,8 @@ pub enum StoreError {
     DecisionResultMismatch,
     #[error("only a candidate result may be accepted or rejected")]
     DecisionRequiresCandidate,
+    #[error("candidate decision requires at least one sealed artifact")]
+    DecisionRequiresSealedArtifact,
     #[error("result {0} already has a different decision")]
     DecisionConflict(ResultId),
     #[error("the owner inbox item does not exist")]
@@ -1455,7 +1467,7 @@ mod tests {
         store
             .create_attempt(task.task_id, task.revision, attempt_id)
             .unwrap();
-        let result = result(&task, attempt_id);
+        let result = sealed_result(&store, &task, attempt_id);
         store
             .commit_terminal_result(&task.owner_id, &result)
             .unwrap();
@@ -1522,6 +1534,38 @@ mod tests {
         assert!(matches!(
             store.record_decision_and_ack(&decision),
             Err(StoreError::DecisionRequiresCandidate)
+        ));
+        assert_eq!(store.inbox(&task.owner_id, false).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn candidate_without_sealed_bytes_cannot_be_decided() {
+        let root = TempDir::new().unwrap();
+        let mut store = Store::open(root.path()).unwrap();
+        let task = task();
+        let attempt_id = AttemptId::new();
+        store.record_task(&task, "unsealed-decision").unwrap();
+        store
+            .create_attempt(task.task_id, task.revision, attempt_id)
+            .unwrap();
+        let result = result(&task, attempt_id);
+        store
+            .commit_terminal_result(&task.owner_id, &result)
+            .unwrap();
+        let decision = Decision {
+            schema: SCHEMA_V1.to_owned(),
+            decision_id: DecisionId::new(),
+            owner_id: task.owner_id.clone(),
+            task_id: task.task_id,
+            revision: task.revision,
+            result_id: result.result_id,
+            result_digest: Store::result_digest(&result).unwrap(),
+            verdict: DecisionVerdict::Accepted,
+            reason: "must fail".to_owned(),
+        };
+        assert!(matches!(
+            store.record_decision_and_ack(&decision),
+            Err(StoreError::DecisionRequiresSealedArtifact)
         ));
         assert_eq!(store.inbox(&task.owner_id, false).unwrap().len(), 1);
     }
@@ -1731,7 +1775,7 @@ mod tests {
         store
             .create_attempt(task.task_id, task.revision, attempt_id)
             .unwrap();
-        let result = result(&task, attempt_id);
+        let result = sealed_result(&store, &task, attempt_id);
         store
             .commit_terminal_result(&task.owner_id, &result)
             .unwrap();
@@ -1792,7 +1836,7 @@ mod tests {
         store
             .create_attempt(task.task_id, task.revision, attempt_id)
             .unwrap();
-        let result = result(&task, attempt_id);
+        let result = sealed_result(&store, &task, attempt_id);
         store
             .commit_terminal_result(&task.owner_id, &result)
             .unwrap();
@@ -1919,5 +1963,19 @@ mod tests {
             error: None,
             unresolved_effects: vec![],
         }
+    }
+
+    fn sealed_result(store: &Store, task: &TaskSpec, attempt_id: AttemptId) -> ResultEnvelope {
+        let mut envelope = result(task, attempt_id);
+        envelope.artifacts.push(
+            store
+                .seal_artifact_reader(
+                    std::io::Cursor::new(b"reviewable report"),
+                    &task.artifact_contract.media_type,
+                    task.artifact_contract.max_bytes,
+                )
+                .unwrap(),
+        );
+        envelope
     }
 }

@@ -488,7 +488,15 @@ mod tests {
             attempt_id,
             result_id: ResultId::new(),
             outcome: TerminalOutcome::Candidate,
-            artifacts: vec![],
+            artifacts: vec![
+                store
+                    .seal_artifact_reader(
+                        std::io::Cursor::new(b"reviewable report"),
+                        "text/plain",
+                        100,
+                    )
+                    .unwrap(),
+            ],
             error: None,
             unresolved_effects: vec![],
         };
