@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.0.2 — 2026-09-14
+
+Approved agents can activate an authored declarative process manifest after
+bounded probes, contract tests, and an authorized scratch run. Admission is
+durable before detached supervision; abandoned or pre-start-cancelled tasks
+settle to one inbox result. Retries now require a durable pre-spawn failure
+grant. The control home cannot overlap the source workspace, and artifact
+imports verify the opened file identity. This remains an unsigned,
+cooperative-local macOS arm64 release.
+
 ## 1.0.1 — 2026-09-14
 
 Reject candidate results whose artifact is missing, forged, or fails sealed

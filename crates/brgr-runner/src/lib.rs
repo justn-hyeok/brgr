@@ -26,6 +26,7 @@ pub const OMP_ROLE_ADAPTER_V1: &str = "omp-role/v1";
 const CAPTURE_OVERHEAD_BYTES: u64 = 1;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HarnessManifest {
     pub schema: String,
     pub id: String,
@@ -39,12 +40,14 @@ pub struct HarnessManifest {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ProbeSpec {
     pub version_argv: Vec<String>,
     pub help_argv: Vec<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LaunchSpec {
     pub argv: Vec<String>,
     #[serde(default)]
@@ -63,6 +66,7 @@ pub enum ExecutionMode {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ResultSpec {
     pub source: ResultSource,
     pub media_type: String,
@@ -79,6 +83,7 @@ pub enum ResultSource {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Capability {
     pub status: CapabilityStatus,
     pub semantics: String,
@@ -723,6 +728,13 @@ mod tests {
             },
             capabilities: BTreeMap::new(),
         }
+    }
+
+    #[test]
+    fn manifest_rejects_unrecognized_fields() {
+        let mut value = serde_json::to_value(echo_manifest(4_096)).unwrap();
+        value["unrecognized"] = serde_json::json!(true);
+        assert!(serde_json::from_value::<HarnessManifest>(value).is_err());
     }
 
     #[test]

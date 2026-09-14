@@ -32,8 +32,17 @@ same-user process.
 Each attempt records a launch intent and supervisor incarnation before the
 harness starts. A restarted observer compares the recorded identity with the
 live process. An uncertain run becomes `lost` with unresolved effects and is
-never retried automatically. Only a transient failure before process spawn may
-use the one remaining attempt in the two-attempt budget.
+never retried automatically. Task admission is durable before a detached
+supervisor starts. If that supervisor never claims the task, reconciliation
+records one `lost` inbox result (or `cancelled` if the owner cancelled first).
+Only a transient failure before process spawn, followed by an explicit durable
+retry grant, may use the one remaining attempt in the two-attempt budget.
+An ungranted failed result cannot be replayed through the store API.
+
+The brgr control home cannot overlap the source workspace. Artifact imports
+compare the checked file's device, inode, and size with the opened descriptor
+before reading and still enforce a byte limit and final digest. These checks
+guard cooperative local workflows, not hostile same-user filesystem mutation.
 
 For `local.omp-herdr` only, brgr records its OMP pane and terminal IDs,
 immutable agent session, task and

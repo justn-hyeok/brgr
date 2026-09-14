@@ -190,6 +190,46 @@ fn real_cli_run_binds_candidate_to_its_owner() {
 }
 
 #[test]
+fn control_home_inside_worker_workspace_is_rejected_before_task_admission() {
+    let temp = TempDir::new().unwrap();
+    let workspace = temp.path().join("work");
+    let home = workspace.join("brgr-control");
+    fs::create_dir_all(&workspace).unwrap();
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../testdata/fixtures/gjc")
+        .canonicalize()
+        .unwrap();
+    json_output(&run(
+        &home,
+        &["harness", "add", fixture.to_str().unwrap()],
+        &[],
+    ));
+    let output = run(
+        &home,
+        &[
+            "run",
+            "BRGR_FIXTURE_OK",
+            "--workspace",
+            workspace.to_str().unwrap(),
+        ],
+        &[("BRGR_OWNER_ID", "codex:home-overlap")],
+    );
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("must not overlap"));
+    let store = brgr_store::Store::open(home.join("store")).unwrap();
+    assert!(store.unstarted_tasks().unwrap().is_empty());
+    assert!(
+        store
+            .inbox(
+                &brgr_protocol::OwnerId::new("codex:home-overlap").unwrap(),
+                false
+            )
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
 fn non_git_workspace_runs_without_a_git_executable() {
     let temp = TempDir::new().unwrap();
     let home = temp.path().join("brgr");
@@ -294,6 +334,198 @@ fn unsupported_model_fails_before_task_admission() {
         &owner,
     ));
     assert_eq!(accepted["verdict"], "accepted");
+}
+
+#[test]
+fn authored_manifest_runs_unknown_positional_cli_to_owner_acceptance() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("brgr");
+    let workspace = temp.path().join("work");
+    fs::create_dir_all(&workspace).unwrap();
+    let executable = temp.path().join("positional-agent");
+    fs::write(
+        &executable,
+        "#!/bin/sh\ncase \"$1\" in\n --version) echo 'positional 1';;\n --help) echo '  -p, --print prompt';;\n -p) printf '%s' \"$2\";;\n *) exit 2;;\nesac\n",
+    )
+    .unwrap();
+    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+    let manifest_path = temp.path().join("positional-manifest.json");
+    let manifest = json!({
+        "schema": "brgr.harness/v1",
+        "id": "local.positional-agent",
+        "adapter": "process/v1",
+        "executable": executable.canonicalize().unwrap(),
+        "probe": {"version_argv": ["--version"], "help_argv": ["--help"]},
+        "launch": {
+            "argv": ["-p", "${input.prompt}"],
+            "model_argv": [], "effort_argv": [],
+            "env_allow": ["HOME", "PATH"], "mode": "one_shot"
+        },
+        "result": {
+            "source": {"kind": "stdout"}, "media_type": "text/plain",
+            "max_bytes": 1024, "success_exit_codes": [0]
+        },
+        "capabilities": {
+            "completion": {
+                "status": "supported", "semantics": "process_exit",
+                "evidence_ref": "help", "tested_identity": null
+            }
+        }
+    });
+    fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+    let path = manifest_path.to_str().unwrap();
+    let tested = json_output(&run(&home, &["harness", "test", "--manifest", path], &[]));
+    assert_eq!(tested["contract"], "passed");
+    json_output(&run(
+        &home,
+        &[
+            "harness",
+            "activate",
+            "--manifest",
+            path,
+            "--workspace",
+            workspace.to_str().unwrap(),
+            "--prompt",
+            "scratch",
+        ],
+        &[],
+    ));
+    let health = json_output(&run(
+        &home,
+        &["harness", "status", "local.positional-agent"],
+        &[],
+    ));
+    assert_eq!(health["health"], "healthy");
+    let owner = [("BRGR_OWNER_ID", "codex:custom-manifest")];
+    let result = json_output(&run(
+        &home,
+        &[
+            "run",
+            "CUSTOM_MANIFEST_OK",
+            "--harness",
+            "local.positional-agent",
+            "--workspace",
+            workspace.to_str().unwrap(),
+            "--foreground",
+        ],
+        &owner,
+    ));
+    assert_eq!(result["outcome"], "candidate");
+    let task = result["task_id"].as_str().unwrap();
+    let sealed = json_output(&run(&home, &["result", task], &owner));
+    assert_eq!(sealed["artifacts"][0]["text"], "CUSTOM_MANIFEST_OK");
+    let accepted = json_output(&run(
+        &home,
+        &["accept", task, "--reason", "custom result checked"],
+        &owner,
+    ));
+    assert_eq!(accepted["verdict"], "accepted");
+}
+
+#[test]
+fn detached_supervisor_exit_before_claim_becomes_one_durable_lost_inbox_item() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("brgr");
+    let workspace = temp.path().join("work");
+    fs::create_dir_all(&workspace).unwrap();
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../testdata/fixtures/gjc")
+        .canonicalize()
+        .unwrap();
+    json_output(&run(
+        &home,
+        &["harness", "add", fixture.to_str().unwrap()],
+        &[],
+    ));
+    let owner = [("BRGR_OWNER_ID", "codex:admission-crash")];
+    let launch = json_output(&run(
+        &home,
+        &[
+            "run",
+            "no model effect",
+            "--workspace",
+            workspace.to_str().unwrap(),
+        ],
+        &[owner[0], ("BRGR_TEST_EXIT_BEFORE_TASK_CLAIM", "1")],
+    ));
+    let task = launch["task_id"].as_str().unwrap();
+    let first_status = json_output(&run(&home, &["status", task], &owner));
+    assert_eq!(first_status["state"], "queued");
+    let mut terminal = None;
+    for _ in 0..120 {
+        let status = json_output(&run(&home, &["status", task], &owner));
+        if status["state"] == "terminal" {
+            terminal = Some(json_output(&run(&home, &["result", task], &owner)));
+            break;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    let terminal = terminal.expect("abandoned admitted task did not settle");
+    assert_eq!(terminal["result"]["outcome"], "lost");
+    assert_eq!(terminal["artifacts"].as_array().unwrap().len(), 0);
+    let result_id = terminal["result"]["result_id"].as_str().unwrap();
+    let store = brgr_store::Store::open(home.join("store")).unwrap();
+    assert_eq!(
+        store
+            .inbox(
+                &brgr_protocol::OwnerId::new("codex:admission-crash").unwrap(),
+                false
+            )
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(matches!(
+        store.claim_attempt(task.parse().unwrap(), 1, brgr_protocol::AttemptId::new()),
+        Err(brgr_store::StoreError::UnresolvedPriorAttempt { .. })
+    ));
+    json_output(&run(&home, &["status", task], &owner));
+    let replay = json_output(&run(&home, &["result", task], &owner));
+    assert_eq!(replay["result"]["result_id"], result_id);
+}
+
+#[test]
+fn queued_cancel_settles_without_starting_the_harness() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("brgr");
+    let workspace = temp.path().join("work");
+    fs::create_dir_all(&workspace).unwrap();
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../testdata/fixtures/gjc")
+        .canonicalize()
+        .unwrap();
+    json_output(&run(
+        &home,
+        &["harness", "add", fixture.to_str().unwrap()],
+        &[],
+    ));
+    let owner = [("BRGR_OWNER_ID", "codex:queued-cancel")];
+    let launch = json_output(&run(
+        &home,
+        &["run", "SLOW", "--workspace", workspace.to_str().unwrap()],
+        &[owner[0], ("BRGR_TEST_EXIT_BEFORE_TASK_CLAIM", "1")],
+    ));
+    let task = launch["task_id"].as_str().unwrap();
+    let requested = json_output(&run(&home, &["cancel", task], &owner));
+    assert_eq!(requested["state"], "cancel_requested");
+    let mut outcome = None;
+    for _ in 0..120 {
+        let status = json_output(&run(&home, &["status", task], &owner));
+        if status["state"] == "terminal" {
+            outcome = Some(json_output(&run(&home, &["result", task], &owner)));
+            break;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    let result = outcome.expect("queued cancellation did not settle");
+    assert_eq!(result["result"]["outcome"], "cancelled");
+    assert!(result["artifacts"].as_array().unwrap().is_empty());
+    assert!(matches!(
+        brgr_store::Store::open(home.join("store"))
+            .unwrap()
+            .claim_attempt(task.parse().unwrap(), 1, brgr_protocol::AttemptId::new()),
+        Err(brgr_store::StoreError::NonRetryablePriorAttempt { .. })
+    ));
 }
 
 #[test]

@@ -54,6 +54,8 @@ entries. For OMP, Cursor CLI, Command Code, or an approved unfamiliar CLI, use
 `brgr harness activate` and `brgr harness status`. Pass `--model MODEL` when
 that exact manifest supports model selection. Do not infer support for flags
 absent from the installed executable's help.
+See [agent-authored manifests](docs/custom-harness-registration.md) for a
+documented CLI whose prompt shape needs a custom declarative recipe.
 
 `brgr cleanup status TASK` shows whether an owned OMP pane was closed or
 retained. `brgr cleanup run TASK` retries a pending close. Neither command

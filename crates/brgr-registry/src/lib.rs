@@ -40,6 +40,10 @@ pub struct ActivationReceipt {
     pub tested_arch: String,
     #[serde(default)]
     pub scratch_result_digest: Option<String>,
+    #[serde(default)]
+    pub registration_mode: String,
+    #[serde(default)]
+    pub contract_suite: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -78,7 +82,7 @@ impl Registry {
         {
             return Err(RegistryError::ScratchRunRequired(manifest.id));
         }
-        self.persist_activation(&manifest, &probe, None)
+        self.persist_activation(&manifest, &probe, None, RecipeAuthority::Generated)
     }
 
     /// Builds a non-active process recipe from observed `--help` and `--version`.
@@ -112,6 +116,20 @@ impl Registry {
         Ok(())
     }
 
+    /// Checks an agent-authored process recipe against bounded native help and
+    /// a closed set of argv/environment substitutions without invoking a model.
+    ///
+    /// # Errors
+    ///
+    /// Rejects reserved names, unobserved flags, unsafe environment expansion,
+    /// or malformed capability claims before scratch activation.
+    pub async fn contract_test_custom(
+        &self,
+        manifest: &HarnessManifest,
+    ) -> Result<(), RegistryError> {
+        probe_custom_contract(manifest).await.map(|_| ())
+    }
+
     /// Runs an explicitly authorized scratch task, then activates the exact
     /// observed recipe only when it produces a nonempty successful result.
     /// This method may invoke a paid model and must not be called by discovery.
@@ -127,7 +145,69 @@ impl Registry {
         model: Option<&str>,
         effort: Option<&str>,
     ) -> Result<ActivationReceipt, RegistryError> {
-        self.contract_test(manifest).await?;
+        self.activate_checked(
+            manifest,
+            workspace,
+            prompt,
+            model,
+            effort,
+            RecipeAuthority::Generated,
+        )
+        .await
+    }
+
+    /// Activates an agent-authored declarative recipe only after its own
+    /// documented-flag contract and an authorized bounded live scratch pass.
+    ///
+    /// # Errors
+    ///
+    /// Rejects alias collisions, recipe drift, failed scratch output, or a
+    /// privileged environment name before persisting an activation.
+    pub async fn activate_custom_with_scratch(
+        &self,
+        manifest: &HarnessManifest,
+        workspace: &Path,
+        prompt: &str,
+        model: Option<&str>,
+        effort: Option<&str>,
+    ) -> Result<ActivationReceipt, RegistryError> {
+        if self.manifest_path(&manifest.id).exists() {
+            let existing: HarnessManifest =
+                serde_json::from_slice(&fs::read(self.manifest_path(&manifest.id))?)?;
+            if existing.executable != manifest.executable {
+                return Err(RegistryError::HarnessAliasCollision(manifest.id.clone()));
+            }
+        }
+        self.activate_checked(
+            manifest,
+            workspace,
+            prompt,
+            model,
+            effort,
+            RecipeAuthority::Custom,
+        )
+        .await
+    }
+
+    async fn activate_checked(
+        &self,
+        manifest: &HarnessManifest,
+        workspace: &Path,
+        prompt: &str,
+        model: Option<&str>,
+        effort: Option<&str>,
+        authority: RecipeAuthority,
+    ) -> Result<ActivationReceipt, RegistryError> {
+        let before = match authority {
+            RecipeAuthority::Generated => {
+                self.contract_test(manifest).await?;
+                let requested_name = name_from_id(&manifest.id, &manifest.adapter)?;
+                draft_manifest_as(&manifest.executable, requested_name)
+                    .await?
+                    .1
+            }
+            RecipeAuthority::Custom => probe_custom_contract(manifest).await?,
+        };
         if prompt.trim().is_empty() {
             return Err(RegistryError::EmptyScratchPrompt);
         }
@@ -137,7 +217,6 @@ impl Registry {
         if effort.is_some() && manifest.launch.effort_argv.is_empty() {
             return Err(RegistryError::UnsupportedScratchEffort);
         }
-        let before_digest = digest_file(&manifest.executable)?;
         let output = ProcessRunner::run(
             manifest,
             brgr_runner::RunRequest {
@@ -154,13 +233,27 @@ impl Registry {
         if !output.succeeded(manifest) || output.result.is_empty() {
             return Err(RegistryError::ScratchRunFailed);
         }
-        let requested_name = name_from_id(&manifest.id, &manifest.adapter)?;
-        let (after_manifest, probe) =
-            draft_manifest_as(&manifest.executable, requested_name).await?;
-        if after_manifest != *manifest || digest_file(&manifest.executable)? != before_digest {
+        let after = match authority {
+            RecipeAuthority::Generated => {
+                let requested_name = name_from_id(&manifest.id, &manifest.adapter)?;
+                let (observed, probe) =
+                    draft_manifest_as(&manifest.executable, requested_name).await?;
+                if observed != *manifest {
+                    return Err(RegistryError::ManifestNotObserved);
+                }
+                probe
+            }
+            RecipeAuthority::Custom => probe_custom_contract(manifest).await?,
+        };
+        if after != before {
             return Err(RegistryError::ManifestNotObserved);
         }
-        self.persist_activation(manifest, &probe, Some(digest_bytes(&output.result)))
+        self.persist_activation(
+            manifest,
+            &after,
+            Some(digest_bytes(&output.result)),
+            authority,
+        )
     }
 
     /// Loads an activated manifest after checking executable identity.
@@ -272,6 +365,7 @@ impl Registry {
         manifest: &HarnessManifest,
         probe: &ProbeEvidence,
         scratch_result_digest: Option<String>,
+        authority: RecipeAuthority,
     ) -> Result<ActivationReceipt, RegistryError> {
         validate_harness_id(&manifest.id)?;
         manifest.validate()?;
@@ -290,6 +384,8 @@ impl Registry {
             tested_os: std::env::consts::OS.to_owned(),
             tested_arch: std::env::consts::ARCH.to_owned(),
             scratch_result_digest,
+            registration_mode: authority.as_str().to_owned(),
+            contract_suite: "process-contract/v1".to_owned(),
         };
         write_json_atomic(&self.manifest_path(&manifest.id), &manifest_bytes)?;
         write_json_atomic(
@@ -312,10 +408,169 @@ impl Registry {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct ProbeEvidence {
     executable: String,
     version: String,
     help: String,
+}
+
+#[derive(Clone, Copy)]
+enum RecipeAuthority {
+    Generated,
+    Custom,
+}
+
+impl RecipeAuthority {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Generated => "generated",
+            Self::Custom => "agent_authored",
+        }
+    }
+}
+
+async fn probe_custom_contract(manifest: &HarnessManifest) -> Result<ProbeEvidence, RegistryError> {
+    manifest.validate()?;
+    validate_harness_id(&manifest.id)?;
+    if manifest.adapter != PROCESS_ADAPTER_V1
+        || matches!(
+            manifest.id.as_str(),
+            "local.gjc"
+                | "local.omp"
+                | "local.omp-herdr"
+                | "local.cursor-cli"
+                | "local.command-code"
+        )
+    {
+        return Err(RegistryError::ReservedCustomHarness);
+    }
+    if manifest.executable.canonicalize()? != manifest.executable {
+        return Err(RegistryError::ExecutableMustBeCanonical);
+    }
+    if manifest.probe.version_argv != ["--version"] || manifest.probe.help_argv != ["--help"] {
+        return Err(RegistryError::UnsafeCustomProbe);
+    }
+    if manifest
+        .launch
+        .env_allow
+        .iter()
+        .any(|name| !matches!(name.as_str(), "HOME" | "PATH" | "LANG" | "TMPDIR"))
+    {
+        return Err(RegistryError::CustomEnvironmentDenied);
+    }
+    let completion = manifest.capabilities.get("completion");
+    if !completion.is_some_and(|cap| cap.status == CapabilityStatus::Supported) {
+        return Err(RegistryError::CustomCapabilityMismatch(
+            "completion".to_owned(),
+        ));
+    }
+    for (name, args) in [
+        ("model_select", &manifest.launch.model_argv),
+        ("effort_select", &manifest.launch.effort_argv),
+    ] {
+        let claimed = manifest
+            .capabilities
+            .get(name)
+            .is_some_and(|cap| cap.status == CapabilityStatus::Supported);
+        if claimed == args.is_empty() {
+            return Err(RegistryError::CustomCapabilityMismatch(name.to_owned()));
+        }
+    }
+    let version = ProcessRunner::probe(
+        &manifest.executable,
+        &manifest.probe.version_argv,
+        PROBE_DEADLINE,
+    )
+    .await?;
+    let help = ProcessRunner::probe(
+        &manifest.executable,
+        &manifest.probe.help_argv,
+        PROBE_DEADLINE,
+    )
+    .await?;
+    if version.exit_code != Some(0)
+        || help.exit_code != Some(0)
+        || version.timed_out
+        || help.timed_out
+        || version.output_truncated
+        || help.output_truncated
+    {
+        return Err(RegistryError::ProbeFailed);
+    }
+    let help_text = String::from_utf8_lossy(&help.stdout);
+    validate_custom_argv(manifest, &help_text)?;
+    Ok(ProbeEvidence {
+        executable: digest_file(&manifest.executable)?,
+        version: digest_bytes(&version.stdout),
+        help: digest_bytes(&help.stdout),
+    })
+}
+
+fn validate_custom_argv(manifest: &HarnessManifest, help: &str) -> Result<(), RegistryError> {
+    for argument in manifest
+        .launch
+        .argv
+        .iter()
+        .chain(&manifest.launch.model_argv)
+        .chain(&manifest.launch.effort_argv)
+    {
+        if [
+            "--yolo",
+            "--dangerously-skip-permissions",
+            "--auto-approve",
+            "--auto-accept",
+            "--force",
+            "--approve-mcps",
+            "--tools-all",
+            "--permission-mode",
+            "--approval-mode",
+            "--sandbox",
+            "--config",
+        ]
+        .iter()
+        .any(|flag| argument == flag || argument.starts_with(&format!("{flag}=")))
+        {
+            return Err(RegistryError::UnsafeCustomPermission(argument.clone()));
+        }
+        if argument.contains("${input.prompt}") && argument != "${input.prompt}" {
+            return Err(RegistryError::UnsafeCustomPlaceholder(argument.clone()));
+        }
+        let mut rest = argument.as_str();
+        while let Some(start) = rest.find("${") {
+            let after = &rest[start + 2..];
+            let end = after
+                .find('}')
+                .ok_or_else(|| RegistryError::UnsafeCustomPlaceholder(argument.clone()))?;
+            if !matches!(
+                &after[..end],
+                "input.prompt"
+                    | "input.prompt_file"
+                    | "task.workspace"
+                    | "route.model"
+                    | "route.effort"
+            ) {
+                return Err(RegistryError::UnsafeCustomPlaceholder(argument.clone()));
+            }
+            rest = &after[end + 1..];
+        }
+        if argument.starts_with('-') {
+            let flag = argument.split('=').next().unwrap_or(argument);
+            let documented = help
+                .split(|character: char| {
+                    character.is_whitespace()
+                        || matches!(
+                            character,
+                            ',' | '=' | '<' | '>' | '[' | ']' | '(' | ')' | ':'
+                        )
+                })
+                .any(|token| token == flag);
+            if !documented {
+                return Err(RegistryError::UndocumentedCustomFlag(flag.to_owned()));
+            }
+        }
+    }
+    Ok(())
 }
 
 async fn draft_manifest(
@@ -877,6 +1132,24 @@ fn write_json_atomic(path: &Path, bytes: &[u8]) -> Result<(), RegistryError> {
 pub enum RegistryError {
     #[error("executable path must be absolute")]
     ExecutableMustBeAbsolute,
+    #[error("custom manifest executable must be its canonical real path")]
+    ExecutableMustBeCanonical,
+    #[error("custom manifests cannot shadow a built-in harness or adapter")]
+    ReservedCustomHarness,
+    #[error("custom manifest probes must be exactly --version and --help")]
+    UnsafeCustomProbe,
+    #[error("custom manifest requested a privileged environment variable")]
+    CustomEnvironmentDenied,
+    #[error("custom manifest capability and argv disagree: {0}")]
+    CustomCapabilityMismatch(String),
+    #[error("custom manifest uses an unsupported placeholder: {0}")]
+    UnsafeCustomPlaceholder(String),
+    #[error("custom manifest flag was not found in bounded help: {0}")]
+    UndocumentedCustomFlag(String),
+    #[error("custom manifest cannot silently expand execution permissions: {0}")]
+    UnsafeCustomPermission(String),
+    #[error("custom manifest id is already activated for another executable: {0}")]
+    HarnessAliasCollision(String),
     #[error("the installed harness is not supported by a verified recipe")]
     UnsupportedHarness,
     #[error("help does not document a supported bounded fresh-run flag contract")]
@@ -1057,6 +1330,102 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(result.result, b"second result");
+    }
+
+    #[tokio::test]
+    async fn agent_authored_positional_recipe_activates_without_core_changes() {
+        let root = tempfile::tempdir().unwrap();
+        let executable = root.path().join("novel-agent");
+        fs::write(
+            &executable,
+            "#!/bin/sh\ncase \"$1\" in\n --version) echo 'novel 1';;\n --help) echo '  -p, --print prompt';;\n -p) printf '%s' \"$2\";;\n *) exit 2;;\nesac\n",
+        )
+        .unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+        let manifest = HarnessManifest {
+            schema: MANIFEST_SCHEMA_V1.to_owned(),
+            id: "local.novel-agent".to_owned(),
+            adapter: PROCESS_ADAPTER_V1.to_owned(),
+            executable: executable.canonicalize().unwrap(),
+            probe: ProbeSpec {
+                version_argv: vec!["--version".to_owned()],
+                help_argv: vec!["--help".to_owned()],
+            },
+            launch: LaunchSpec {
+                argv: vec!["-p".to_owned(), "${input.prompt}".to_owned()],
+                model_argv: vec![],
+                effort_argv: vec![],
+                env_allow: vec!["HOME".to_owned(), "PATH".to_owned()],
+                mode: ExecutionMode::OneShot,
+            },
+            result: ResultSpec {
+                source: ResultSource::Stdout,
+                media_type: "text/plain".to_owned(),
+                max_bytes: 1_024,
+                success_exit_codes: vec![0],
+            },
+            capabilities: BTreeMap::from([
+                ("completion".to_owned(), supported("process_exit")),
+                ("model_select".to_owned(), unsupported("not_observed")),
+            ]),
+        };
+        let registry = Registry::open(root.path().join("registry")).unwrap();
+        registry.contract_test_custom(&manifest).await.unwrap();
+        let receipt = registry
+            .activate_custom_with_scratch(&manifest, root.path(), "first", None, None)
+            .await
+            .unwrap();
+        assert!(receipt.scratch_result_digest.is_some());
+        assert_eq!(receipt.registration_mode, "agent_authored");
+        assert_eq!(receipt.contract_suite, "process-contract/v1");
+        assert_eq!(registry.health(&manifest.id).unwrap(), Health::Healthy);
+        let loaded = registry.load_healthy(&manifest.id).unwrap();
+        let output = ProcessRunner::run(
+            &loaded,
+            brgr_runner::RunRequest {
+                workspace: root.path(),
+                prompt: "second",
+                model: None,
+                effort: None,
+                deadline: Duration::from_secs(2),
+                cancel_path: None,
+                pid_path: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(output.result, b"second");
+        let other_executable = root.path().join("other-agent");
+        fs::copy(&executable, &other_executable).unwrap();
+        let mut collision = manifest.clone();
+        collision.executable = other_executable.canonicalize().unwrap();
+        assert!(matches!(
+            registry
+                .activate_custom_with_scratch(&collision, root.path(), "third", None, None)
+                .await,
+            Err(RegistryError::HarnessAliasCollision(_))
+        ));
+        let mut altered = manifest.clone();
+        altered.launch.argv[0] = "--not-documented".to_owned();
+        assert!(matches!(
+            registry.contract_test_custom(&altered).await,
+            Err(RegistryError::UndocumentedCustomFlag(_))
+        ));
+        altered = manifest.clone();
+        altered
+            .launch
+            .env_allow
+            .push("COMMAND_CODE_API_KEY".to_owned());
+        assert!(matches!(
+            registry.contract_test_custom(&altered).await,
+            Err(RegistryError::CustomEnvironmentDenied)
+        ));
+        altered = manifest.clone();
+        altered.launch.argv.insert(0, "--yolo".to_owned());
+        assert!(matches!(
+            registry.contract_test_custom(&altered).await,
+            Err(RegistryError::UnsafeCustomPermission(_))
+        ));
     }
 
     #[tokio::test]

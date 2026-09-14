@@ -29,11 +29,15 @@ short handle. Use `brgr status`, `brgr result`, and `brgr cancel` for follow-up.
 For a rejected candidate, use `brgr revise TASK "<corrected objective>"
 --criterion "<new check>"`; do not rewrite the old result or silently retry.
 
-For an approved unfamiliar CLI, use `brgr harness draft EXECUTABLE`,
-`brgr harness test EXECUTABLE`, `brgr harness activate EXECUTABLE --workspace
-SCRATCH --prompt "<small authorized probe>" --model MODEL` when the model was
-chosen, then `brgr harness status ID`. Unsupported capabilities stay disabled;
-never guess vendor flags or switch the requested harness/model.
+For an approved unfamiliar CLI, use `brgr harness draft EXECUTABLE` when its
+documented shape is recognized. Otherwise inspect its bounded help/version,
+write a declarative process/v1 manifest using the repository's
+docs/custom-harness-registration.md, then run `brgr harness test --manifest
+FILE`, `brgr harness activate --manifest FILE --workspace SCRATCH --prompt
+"<small authorized probe>"`, and `brgr harness status ID`. Pass `--model MODEL`
+only when the exact manifest supports it. Do not probe untrusted downloaded
+executables, guess vendor flags, grant new secrets, or switch the requested
+harness/model. Unsupported capabilities stay disabled.
 
 When a hook surfaces a terminal inbox item, inspect the sealed result and its
 acceptance criteria. Run `brgr accept TASK` only after relevant evidence passes;
