@@ -27,3 +27,5 @@ harnesses are assumed cooperative, not isolated from a hostile same-user
 process. Herdr 0.9.0 lacks atomic conditional pane close, so optional pane
 cleanup is best-effort and should be disabled with `--keep-pane` for shared
 sessions.
+
+Verification receipts: [four real Luna harness runs](https://github.com/justn-hyeok/brgr/blob/v1.0.0/docs/live-four-harness-luna-evidence-2026-09-14.md) and [fixture contract tests](https://github.com/justn-hyeok/brgr/blob/v1.0.0/docs/four-stage-parallel-evidence-2026-09-14.md). These prove bounded paths, not every possible external side effect.
