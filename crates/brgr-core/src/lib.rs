@@ -482,6 +482,24 @@ async fn run_single_attempt(
         AttemptState::Starting,
         &mut producer_seq,
     )?;
+    if control.cancel_path.is_some_and(Path::exists) {
+        transition(
+            store,
+            &mut attempt,
+            AttemptState::CancelRequested,
+            &mut producer_seq,
+        )?;
+        let result = result_for(
+            spec,
+            attempt_id,
+            TerminalOutcome::Cancelled,
+            vec![],
+            Some("cancelled before process spawn".to_owned()),
+        );
+        attempt.record_terminal(result.clone())?;
+        store.commit_terminal_result(&spec.owner_id, &result)?;
+        return Ok((result, false));
+    }
     let launch_nonce = uuid::Uuid::new_v4().to_string();
     store.record_launch_intent(attempt_id, &launch_nonce, epoch)?;
     if let Some(identity) = control.runner_identity {
@@ -521,6 +539,9 @@ async fn run_single_attempt(
 
     attempt.record_terminal(result.clone())?;
     store.commit_terminal_result(&spec.owner_id, &result)?;
+    if retryable {
+        store.grant_pre_spawn_retry(attempt_id)?;
+    }
     Ok((result, retryable))
 }
 

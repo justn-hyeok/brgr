@@ -3,6 +3,7 @@ mod pane_cleanup;
 
 use std::{
     env,
+    fmt::Write as _,
     fs::{self, OpenOptions},
     io::{self, Read, Write},
     os::unix::{fs::PermissionsExt, process::CommandExt},
@@ -15,18 +16,20 @@ use std::{
 use anyhow::{Context, Result, bail};
 use brgr_core::{ExecutionObservation, Supervisor, TaskRevision};
 use brgr_protocol::{
-    ArtifactContract, AttemptBudget, Decision, DecisionId, DecisionVerdict, OwnerId, Route,
-    SCHEMA_V1, TaskId, TaskSpec, TerminalOutcome,
+    ArtifactContract, AttemptBudget, AttemptId, AttemptState, Decision, DecisionId,
+    DecisionVerdict, OwnerId, ResultEnvelope, ResultId, Route, SCHEMA_V1, TaskId, TaskSpec,
+    TerminalOutcome,
 };
 use brgr_registry::{ActivationReceipt, Health, Registry};
 use brgr_runner::{
     ExecutionMode, HarnessManifest, LaunchSpec, MANIFEST_SCHEMA_V1, PROCESS_ADAPTER_V1, ProbeSpec,
     ResultSource, ResultSpec,
 };
-use brgr_store::{RunnerIdentity, Store, UnfinishedAttempt};
+use brgr_store::{RunnerIdentity, Store, StoreError, UnfinishedAttempt};
 use clap::{Args, Parser, Subcommand};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use tempfile::NamedTempFile;
 
 #[derive(Parser)]
@@ -513,6 +516,11 @@ async fn start_task(
 ) -> Result<()> {
     spec.validate()?;
     activated.validate_task_route(&spec)?;
+    let source = options.source_workspace.canonicalize()?;
+    let home = paths.home.canonicalize()?;
+    if source.starts_with(&home) || home.starts_with(&source) {
+        bail!("brgr control home and the source workspace must not overlap");
+    }
     let task_id = spec.task_id;
     let harness_id = spec.route.harness_id.clone();
     let workspace = prepare_workspace(
@@ -534,11 +542,26 @@ async fn start_task(
     };
     let launch_path = paths.launch(task_id, launch.spec.revision);
     write_json_new(&launch_path, &launch)?;
+    let mut store = Store::open(&paths.store)?;
+    let request_digest = Sha256::digest(serde_json::to_vec(&launch.spec)?);
+    let mut request_digest_text = String::with_capacity(64);
+    for byte in request_digest {
+        write!(&mut request_digest_text, "{byte:02x}")?;
+    }
+    store.record_task(&launch.spec, &request_digest_text)?;
 
     if matches!(options.execution, ExecutionDisposition::Foreground) {
         return supervise(paths, &launch_path, options.json_output).await;
     }
-    spawn_supervisor(paths, &launch_path)?;
+    if let Err(error) = spawn_supervisor(paths, &launch_path) {
+        record_unstarted_terminal(
+            &mut store,
+            &launch.spec,
+            TerminalOutcome::Failed,
+            format!("detached supervisor could not start: {error}"),
+        )?;
+        return Err(error);
+    }
     let receipt = json!({
         "task_id": task_id,
         "state": "starting",
@@ -563,6 +586,10 @@ async fn supervise(paths: &Paths, launch_path: &Path, json_output: bool) -> Resu
         &launch.harness_id,
     )?;
     manifest.validate_task_route(&launch.spec)?;
+    #[cfg(debug_assertions)]
+    if env::var_os("BRGR_TEST_EXIT_BEFORE_TASK_CLAIM").is_some() {
+        std::process::exit(79);
+    }
     let receipt = ProcessReceipt {
         task_id: launch.spec.task_id,
         launch_path: launch_path.to_path_buf(),
@@ -637,7 +664,102 @@ fn spawn_supervisor(paths: &Paths, launch_path: &Path) -> Result<()> {
 fn reconcile_pending(paths: &Paths) -> Result<()> {
     let mut supervisor = Supervisor::open(&paths.store)?;
     supervisor.reconcile_after_restart(|attempt| observe_attempt(paths, attempt))?;
+    let mut store = Store::open(&paths.store)?;
+    for task in store.unstarted_tasks()? {
+        if unstarted_admission_is_stale(paths, &task)? {
+            let cancelled = paths.cancel(task.task_id).exists();
+            record_unstarted_terminal(
+                &mut store,
+                &task,
+                if cancelled {
+                    TerminalOutcome::Cancelled
+                } else {
+                    TerminalOutcome::Lost
+                },
+                if cancelled {
+                    "cancelled before the supervisor claimed the task".to_owned()
+                } else {
+                    "supervisor did not claim the admitted task".to_owned()
+                },
+            )?;
+        }
+    }
     Ok(())
+}
+
+fn unstarted_admission_is_stale(paths: &Paths, task: &TaskSpec) -> Result<bool> {
+    let launch_path = paths.launch(task.task_id, task.revision);
+    let metadata = match fs::symlink_metadata(&launch_path) {
+        Ok(metadata) if metadata.file_type().is_file() => metadata,
+        Ok(_) => return Ok(true),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(true),
+        Err(error) => return Err(error.into()),
+    };
+    if !metadata
+        .modified()?
+        .elapsed()
+        .is_ok_and(|age| age >= Duration::from_secs(5))
+    {
+        return Ok(false);
+    }
+    let receipt = fs::read(paths.supervisor(task.task_id))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<ProcessReceipt>(&bytes).ok());
+    let Some(receipt) =
+        receipt.filter(|value| value.task_id == task.task_id && value.launch_path == launch_path)
+    else {
+        return Ok(true);
+    };
+    let live = receipt
+        .identity
+        .handle
+        .parse::<u32>()
+        .ok()
+        .and_then(|pid| process_identity(pid).ok())
+        .is_some_and(|actual| actual == receipt.identity);
+    Ok(!live)
+}
+
+fn record_unstarted_terminal(
+    store: &mut Store,
+    task: &TaskSpec,
+    outcome: TerminalOutcome,
+    reason: String,
+) -> Result<bool> {
+    let attempt_id = AttemptId::new();
+    match store.claim_attempt(task.task_id, task.revision, attempt_id) {
+        Ok(()) => {}
+        Err(
+            StoreError::ActiveAttemptExists { .. }
+            | StoreError::UnresolvedPriorAttempt { .. }
+            | StoreError::NonRetryablePriorAttempt { .. }
+            | StoreError::AttemptBudgetExhausted { .. },
+        ) => return Ok(false),
+        Err(error) => return Err(error.into()),
+    }
+    let next = if outcome == TerminalOutcome::Cancelled {
+        AttemptState::CancelRequested
+    } else {
+        AttemptState::Starting
+    };
+    store.compare_and_set_attempt_state(attempt_id, AttemptState::Queued, next)?;
+    let result = ResultEnvelope {
+        schema: SCHEMA_V1.to_owned(),
+        task_id: task.task_id,
+        revision: task.revision,
+        attempt_id,
+        result_id: ResultId::new(),
+        outcome,
+        artifacts: vec![],
+        error: Some(reason),
+        unresolved_effects: if outcome == TerminalOutcome::Lost {
+            vec!["execution identity was not established".to_owned()]
+        } else {
+            vec![]
+        },
+    };
+    store.commit_terminal_result(&task.owner_id, &result)?;
+    Ok(true)
 }
 
 fn observe_attempt(paths: &Paths, attempt: &UnfinishedAttempt) -> ExecutionObservation {
@@ -704,7 +826,11 @@ fn status(paths: &Paths, task: Option<TaskId>, json_output: bool) -> Result<()> 
     let store = Store::open(&paths.store)?;
     if let Some(task_id) = task {
         let spec = store.task(task_id)?;
-        let state = store.attempt_state(task_id)?;
+        let state = match store.attempt_state(task_id) {
+            Ok(state) => state,
+            Err(StoreError::TaskNotFound(_)) => AttemptState::Queued,
+            Err(error) => return Err(error.into()),
+        };
         print_value(
             &json!({"task": spec, "state": format!("{state:?}").to_lowercase()}),
             json_output,
@@ -758,7 +884,12 @@ fn cancel(paths: &Paths, task: TaskId, json_output: bool) -> Result<()> {
     let store = Store::open(&paths.store)?;
     let spec = store.task(task)?;
     require_owner(&spec.owner_id)?;
-    if store.attempt_state(task)? == brgr_protocol::AttemptState::Terminal {
+    let state = match store.attempt_state(task) {
+        Ok(state) => state,
+        Err(StoreError::TaskNotFound(_)) => AttemptState::Queued,
+        Err(error) => return Err(error.into()),
+    };
+    if state == AttemptState::Terminal {
         bail!("task {task} is already terminal");
     }
     let launch: LaunchEnvelope =

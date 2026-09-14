@@ -58,6 +58,10 @@ CREATE TABLE IF NOT EXISTS results (
     FOREIGN KEY (attempt_id) REFERENCES attempts(attempt_id),
     FOREIGN KEY (task_id, revision) REFERENCES tasks(task_id, revision)
 );
+CREATE TABLE IF NOT EXISTS pre_spawn_retry_grants (
+    attempt_id TEXT PRIMARY KEY,
+    FOREIGN KEY (attempt_id) REFERENCES results(attempt_id)
+);
 CREATE TABLE IF NOT EXISTS inbox_items (
     owner_id TEXT NOT NULL,
     result_id TEXT NOT NULL,
@@ -226,8 +230,9 @@ impl Store {
 
     /// Claims the sole active attempt slot for a task revision.
     ///
-    /// A terminal attempt releases the slot for an explicit retry. A second
-    /// concurrent supervisor cannot create an overlapping live attempt.
+    /// Only a failed prior attempt can release the slot for a bounded retry.
+    /// Lost, cancelled, and candidate results cannot start another attempt on
+    /// the same revision. A concurrent supervisor cannot overlap a live run.
     ///
     /// # Errors
     ///
@@ -238,8 +243,8 @@ impl Store {
         revision: u32,
         attempt_id: AttemptId,
     ) -> Result<(), StoreError> {
-        let spec_json = self
-            .connection
+        let transaction = self.connection.unchecked_transaction()?;
+        let spec_json = transaction
             .query_row(
                 "SELECT spec_json FROM tasks WHERE task_id = ?1 AND revision = ?2",
                 params![task_id.to_string(), revision],
@@ -248,7 +253,7 @@ impl Store {
             .optional()?
             .ok_or(StoreError::TaskNotFound(task_id))?;
         let task: TaskSpec = serde_json::from_str(&spec_json)?;
-        let count: i64 = self.connection.query_row(
+        let count: i64 = transaction.query_row(
             "SELECT COUNT(*) FROM attempts WHERE task_id = ?1 AND revision = ?2",
             params![task_id.to_string(), revision],
             |row| row.get(0),
@@ -256,7 +261,39 @@ impl Store {
         if count >= i64::from(task.budget.max_attempts) {
             return Err(StoreError::AttemptBudgetExhausted { task_id, revision });
         }
-        let inserted = self.connection.execute(
+        let prior_result: Option<(String, String)> = transaction
+            .query_row(
+                "SELECT a.attempt_id, json_extract(r.envelope_json, '$.outcome')
+                 FROM results r JOIN attempts a ON a.attempt_id = r.attempt_id
+                 WHERE a.task_id = ?1 AND a.revision = ?2
+                 ORDER BY r.rowid DESC LIMIT 1",
+                params![task_id.to_string(), revision],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        if let Some((prior_id, outcome)) = &prior_result {
+            match outcome.as_str() {
+                "lost" => return Err(StoreError::UnresolvedPriorAttempt { task_id, revision }),
+                "candidate" | "cancelled" => {
+                    return Err(StoreError::NonRetryablePriorAttempt { task_id, revision });
+                }
+                "failed" => {
+                    let grant = transaction
+                        .query_row(
+                            "SELECT 1 FROM pre_spawn_retry_grants WHERE attempt_id = ?1",
+                            [prior_id],
+                            |_| Ok(()),
+                        )
+                        .optional()?
+                        .is_some();
+                    if !grant {
+                        return Err(StoreError::NonRetryablePriorAttempt { task_id, revision });
+                    }
+                }
+                _ => return Err(StoreError::NonRetryablePriorAttempt { task_id, revision }),
+            }
+        }
+        let inserted = transaction.execute(
             "INSERT INTO attempts (attempt_id, task_id, revision, state)
              VALUES (?1, ?2, ?3, ?4)",
             params![
@@ -267,11 +304,14 @@ impl Store {
             ],
         );
         match inserted {
-            Ok(_) => Ok(()),
+            Ok(_) => {
+                transaction.commit()?;
+                Ok(())
+            }
             Err(rusqlite::Error::SqliteFailure(error, _))
                 if error.code == rusqlite::ErrorCode::ConstraintViolation =>
             {
-                let active = self.connection.query_row(
+                let active = transaction.query_row(
                     "SELECT 1 FROM attempts WHERE task_id = ?1 AND revision = ?2 AND state <> 'terminal' LIMIT 1",
                     params![task_id.to_string(), revision],
                     |_| Ok(()),
@@ -286,6 +326,31 @@ impl Store {
             }
             Err(error) => Err(StoreError::Database(error)),
         }
+    }
+
+    /// Allows one bounded retry only after the runner reported a transient
+    /// process-spawn failure. A crash before this receipt stays non-retryable.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error unless the attempt has a committed failed result.
+    pub fn grant_pre_spawn_retry(&self, attempt_id: AttemptId) -> Result<(), StoreError> {
+        let outcome: Option<String> = self
+            .connection
+            .query_row(
+                "SELECT json_extract(envelope_json, '$.outcome') FROM results WHERE attempt_id = ?1",
+                [attempt_id.to_string()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if outcome.as_deref() != Some("failed") {
+            return Err(StoreError::RetryGrantRequiresFailedAttempt(attempt_id));
+        }
+        self.connection.execute(
+            "INSERT OR IGNORE INTO pre_spawn_retry_grants (attempt_id) VALUES (?1)",
+            [attempt_id.to_string()],
+        )?;
+        Ok(())
     }
 
     /// Compatibility alias for `claim_attempt`.
@@ -839,6 +904,25 @@ impl Store {
         rows.map(|row| Ok(serde_json::from_str(&row?)?)).collect()
     }
 
+    /// Returns admitted task revisions for which no supervisor ever claimed
+    /// an attempt. The caller can reconcile an abandoned launch without guessing
+    /// that a model run succeeded.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid stored task data or a database failure.
+    pub fn unstarted_tasks(&self) -> Result<Vec<TaskSpec>, StoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT t.spec_json FROM tasks t
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM attempts a
+                 WHERE a.task_id = t.task_id AND a.revision = t.revision
+             ) ORDER BY t.rowid",
+        )?;
+        let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+        rows.map(|row| Ok(serde_json::from_str(&row?)?)).collect()
+    }
+
     /// Returns the most recent attempt state for a task.
     ///
     /// # Errors
@@ -1336,6 +1420,12 @@ pub enum StoreError {
     ResultOwnerMismatch,
     #[error("attempt {0} already has a different terminal result")]
     TerminalResultConflict(AttemptId),
+    #[error("task {task_id} revision {revision} has an unresolved lost attempt")]
+    UnresolvedPriorAttempt { task_id: TaskId, revision: u32 },
+    #[error("task {task_id} revision {revision} already has a non-retryable terminal result")]
+    NonRetryablePriorAttempt { task_id: TaskId, revision: u32 },
+    #[error("attempt {0} cannot receive a pre-spawn retry grant without a failed result")]
+    RetryGrantRequiresFailedAttempt(AttemptId),
     #[error("candidate terminal result requires a sealed artifact")]
     CandidateRequiresArtifact,
     #[error("result {0} does not exist")]
@@ -1664,9 +1754,20 @@ mod tests {
             second.claim_attempt(task.task_id, task.revision, AttemptId::new()),
             Err(StoreError::ActiveAttemptExists { .. })
         ));
+        let retryable = ResultEnvelope {
+            outcome: TerminalOutcome::Failed,
+            artifacts: vec![],
+            error: Some("pre-spawn fixture failure".to_owned()),
+            ..result(&task, first_id)
+        };
         first
-            .commit_terminal_result(&task.owner_id, &sealed_result(&first, &task, first_id))
+            .commit_terminal_result(&task.owner_id, &retryable)
             .unwrap();
+        assert!(matches!(
+            second.claim_attempt(task.task_id, task.revision, AttemptId::new()),
+            Err(StoreError::NonRetryablePriorAttempt { .. })
+        ));
+        first.grant_pre_spawn_retry(first_id).unwrap();
         second
             .claim_attempt(task.task_id, task.revision, AttemptId::new())
             .unwrap();
@@ -1938,7 +2039,7 @@ mod tests {
         let mut store = Store::open(root.path()).unwrap();
         let task = task();
         store.record_task(&task, "bounded-attempts").unwrap();
-        for _ in 0..2 {
+        for number in 0..2 {
             let attempt_id = AttemptId::new();
             store
                 .claim_attempt(task.task_id, task.revision, attempt_id)
@@ -1952,14 +2053,52 @@ mod tests {
                     .compare_and_set_attempt_state(attempt_id, from, to)
                     .unwrap();
             }
+            let failed = ResultEnvelope {
+                outcome: TerminalOutcome::Failed,
+                artifacts: vec![],
+                error: Some("pre-spawn fixture failure".to_owned()),
+                ..result(&task, attempt_id)
+            };
             store
-                .commit_terminal_result(&task.owner_id, &sealed_result(&store, &task, attempt_id))
+                .commit_terminal_result(&task.owner_id, &failed)
                 .unwrap();
+            if number == 0 {
+                store.grant_pre_spawn_retry(attempt_id).unwrap();
+            }
         }
         assert!(matches!(
             store.claim_attempt(task.task_id, task.revision, AttemptId::new()),
             Err(StoreError::AttemptBudgetExhausted { .. })
         ));
+    }
+
+    #[test]
+    fn admitted_task_is_visible_and_lost_attempt_cannot_relaunch() {
+        let root = TempDir::new().unwrap();
+        let mut store = Store::open(root.path()).unwrap();
+        let task = task();
+        store.record_task(&task, "admission-test").unwrap();
+        assert_eq!(store.unstarted_tasks().unwrap(), vec![task.clone()]);
+        let attempt_id = AttemptId::new();
+        store
+            .claim_attempt(task.task_id, task.revision, attempt_id)
+            .unwrap();
+        assert!(store.unstarted_tasks().unwrap().is_empty());
+        store
+            .compare_and_set_attempt_state(attempt_id, AttemptState::Queued, AttemptState::Starting)
+            .unwrap();
+        let lost = ResultEnvelope {
+            outcome: TerminalOutcome::Lost,
+            error: Some("supervisor disappeared".to_owned()),
+            unresolved_effects: vec!["execution identity unknown".to_owned()],
+            ..result(&task, attempt_id)
+        };
+        store.commit_terminal_result(&task.owner_id, &lost).unwrap();
+        assert!(matches!(
+            store.claim_attempt(task.task_id, task.revision, AttemptId::new()),
+            Err(StoreError::UnresolvedPriorAttempt { .. })
+        ));
+        assert_eq!(store.inbox(&task.owner_id, false).unwrap().len(), 1);
     }
 
     fn task() -> TaskSpec {
