@@ -54,14 +54,17 @@ jobs:
           decision="$(BRGR_OWNER_ID=codex:release-smoke BRGR_SESSION_ID=release-smoke "$binary" --home "$scratch/home" --json accept "$task" --reason 'release fixture result verified')"
           printf '%s' "$decision" | jq -e '.verdict == "accepted"'
       - name: Generate SPDX SBOM
-        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610
-        with:
-          path: .
-          format: spdx-json
-          output-file: dist/brgr.spdx.json
-          artifact-name: brgr.spdx.json
-          upload-artifact: false
-          upload-release-assets: false
+        run: |
+          cargo install cargo-sbom --version 0.10.0 --locked --root "${RUNNER_TEMP}/brgr-sbom-tool"
+          "${RUNNER_TEMP}/brgr-sbom-tool/bin/cargo-sbom" \
+            --cargo-package brgr-cli \
+            --project-directory "$GITHUB_WORKSPACE" > dist/brgr.spdx.json
+          jq -e '
+            .spdxVersion == "SPDX-2.3"
+            and .name == "brgr-cli"
+            and (.packages | length > 0)
+            and all(.packages[]; .licenseDeclared != "NOASSERTION" and .licenseConcluded != "NOASSERTION")
+          ' dist/brgr.spdx.json
       - name: Verify downloadable checksums
         run: |
           cd dist
