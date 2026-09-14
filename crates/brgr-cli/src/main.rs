@@ -353,7 +353,7 @@ async fn main() -> Result<()> {
         }
         Command::Harness { command } => harness(&paths, command, cli.json).await,
         Command::Integrate { command } => integrate(&paths, command, cli.json),
-        Command::Doctor => doctor(&paths, cli.json),
+        Command::Doctor => doctor(&paths, cli.json).await,
         Command::Cleanup { command } => cleanup(&paths, command, cli.json),
         Command::Supervise { launch } => supervise(&paths, &launch, cli.json).await,
         Command::Hook { event } => {
@@ -1193,19 +1193,57 @@ fn integrate(paths: &Paths, command: IntegrateCommand, json_output: bool) -> Res
     Ok(())
 }
 
-fn doctor(paths: &Paths, json_output: bool) -> Result<()> {
+async fn doctor(paths: &Paths, json_output: bool) -> Result<()> {
     reconcile_pending(paths)?;
     let store_ok = Store::open(&paths.store).is_ok();
-    let registry_ok = Registry::open_with_control_home(&paths.registry, &paths.home).is_ok();
+    let registry = Registry::open_with_control_home(&paths.registry, &paths.home);
+    let registry_ok = registry.is_ok();
+    let mut harnesses = Vec::new();
+    if let Ok(registry) = registry {
+        match registry.registered_harness_ids() {
+            Ok(ids) => {
+                for id in ids {
+                    let health = match registry.health_probed(&id).await {
+                        Ok(Health::Healthy) => json!({"id": id, "health": "healthy"}),
+                        Ok(Health::Drifted { .. }) => {
+                            json!({"id": id, "health": "drifted", "action": "re-certify"})
+                        }
+                        Err(error) => json!({
+                            "id": id,
+                            "health": "unhealthy",
+                            "action": "re-certify",
+                            "reason": error.to_string(),
+                        }),
+                    };
+                    harnesses.push(health);
+                }
+            }
+            Err(error) => harnesses.push(json!({
+                "health": "unhealthy",
+                "reason": error.to_string(),
+            })),
+        }
+    }
     let integration = codex_integration::status(&paths.home)?;
+    let healthy_harnesses = !harnesses.is_empty()
+        && harnesses
+            .iter()
+            .all(|harness| harness["health"] == "healthy");
+    let healthy =
+        store_ok && registry_ok && healthy_harnesses && integration["status"] == "installed";
     let value = json!({
-        "status": if store_ok && registry_ok { "ok" } else { "error" },
+        "status": if healthy { "ok" } else { "needs_attention" },
         "store": store_ok,
         "registry": registry_ok,
+        "harnesses": harnesses,
         "codex_integration": integration,
     });
     print_value(&value, json_output);
-    Ok(())
+    if healthy {
+        Ok(())
+    } else {
+        bail!("brgr doctor found an unavailable personal-use path")
+    }
 }
 
 fn cleanup(paths: &Paths, command: CleanupCommand, json_output: bool) -> Result<()> {
