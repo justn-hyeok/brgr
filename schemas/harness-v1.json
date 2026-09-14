@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://brgr.dev/schemas/harness-v1.json",
+  "title": "brgr HarnessManifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "id", "adapter", "executable", "probe", "launch", "result", "capabilities"],
+  "properties": {
+    "schema": { "const": "brgr.harness/v1" },
+    "id": { "type": "string", "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)+$" },
+    "adapter": { "enum": ["process/v1", "omp-role/v1"] },
+    "executable": { "type": "string", "pattern": "^/" },
+    "probe": { "type": "object" },
+    "launch": { "type": "object" },
+    "result": { "type": "object" },
+    "capabilities": { "type": "object" }
+  }
+}

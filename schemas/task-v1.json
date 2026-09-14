@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://brgr.dev/schemas/task-v1.json",
+  "title": "brgr TaskSpec v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "task_id", "revision", "create_request_id", "owner_id", "objective", "workspace", "route", "required_capabilities", "artifact_contract", "acceptance_criteria", "budget"],
+  "properties": {
+    "schema": { "const": "brgr/v1" },
+    "task_id": { "type": "string", "format": "uuid" },
+    "revision": { "type": "integer", "minimum": 1 },
+    "create_request_id": { "type": "string", "minLength": 1 },
+    "owner_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "objective": { "type": "string", "minLength": 1 },
+    "workspace": { "type": "string", "minLength": 1 },
+    "route": {
+      "type": "object",
+      "required": ["harness_id"],
+      "properties": {
+        "harness_id": { "type": "string", "minLength": 1 },
+        "requested_model": { "type": ["string", "null"] },
+        "requested_effort": { "type": ["string", "null"] }
+      }
+    },
+    "required_capabilities": { "type": "array", "items": { "type": "string" } },
+    "artifact_contract": {
+      "type": "object",
+      "required": ["media_type", "max_bytes"],
+      "properties": {
+        "media_type": { "type": "string", "minLength": 1 },
+        "max_bytes": { "type": "integer", "minimum": 1, "maximum": 20971520 }
+      }
+    },
+    "acceptance_criteria": { "type": "array", "items": { "type": "string" } },
+    "budget": {
+      "type": "object",
+      "required": ["deadline_seconds", "max_attempts"],
+      "properties": {
+        "deadline_seconds": { "type": "integer", "minimum": 1 },
+        "max_attempts": { "type": "integer", "minimum": 1, "maximum": 2 }
+      }
+    }
+  }
+}
+

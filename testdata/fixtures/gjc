@@ -1,0 +1,26 @@
+#!/bin/sh
+set -eu
+
+case "${1:-}" in
+  --version)
+    printf 'gjc v-fixture\n'
+    exit 0
+    ;;
+  --help)
+    printf '%s\n' '-p, --print' '--mode=<value>' '--no-session' '--no-mcp' '--model' '--thinking'
+    exit 0
+    ;;
+esac
+
+prompt_file=''
+for argument in "$@"; do
+  case "$argument" in
+    @*) prompt_file=${argument#@} ;;
+  esac
+done
+
+if [ -n "$prompt_file" ] && /usr/bin/grep -q 'SLOW' "$prompt_file"; then
+  /bin/sleep 30
+fi
+printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"BRGR_FIXTURE_OK"}]}}'
+printf '%s\n' '{"type":"agent_end","stopReason":"completed"}'

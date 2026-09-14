@@ -2,9 +2,9 @@
 
 ## Project Structure & Module Organization
 
-`brgr` is a Rust workspace for harness-neutral local agent orchestration. Keep executable wiring in `crates/brgr-cli/` and shared task, attempt, result, and acceptance rules in `crates/brgr-core/`. Versioned wire types belong in `crates/brgr-protocol/`; persistence and artifact sealing belong in `crates/brgr-store/`; subprocess execution belongs in `crates/brgr-runner/`.
+`brgr` is a Rust workspace for harness-neutral local agent orchestration. CLI, Codex hooks, and OMP/Herdr integration live in `crates/brgr-cli/`. Task state and supervision live in `crates/brgr-core/`; versioned wire types in `crates/brgr-protocol/`; SQLite and sealed artifacts in `crates/brgr-store/`; shell-free execution in `crates/brgr-runner/`.
 
-Place integrations behind explicit boundaries: generic recipes in `crates/brgr-adapter-process/`, OMP support in `crates/brgr-adapter-omp/`, and optional Herdr presentation in `crates/brgr-presentation-herdr/`. Store declarative harness packages under `harnesses/<harness>/` and reusable fixtures under `testdata/`. A harness addition must not require a switch statement in the core.
+Harness registration belongs in `crates/brgr-registry/`; its generic process recipe must not require a core switch statement. Reusable fixtures are in `testdata/fixtures/`, wire schemas in `schemas/`, and operator guidance in `docs/`.
 
 ## Build, Test, and Development Commands
 
@@ -27,7 +27,7 @@ Put unit tests beside the code and black-box tests in each crate's `tests/` dire
 
 ## Commit & Pull Request Guidelines
 
-No repository history exists yet. Use Conventional Commit subjects such as `feat(store): seal result artifacts`. Keep commits narrowly scoped. Pull requests must explain the contract affected, include test evidence, identify migration or compatibility risk, and confirm that no harness/model fallback or acceptance decision occurs implicitly.
+The history uses Conventional Commit subjects such as `feat(store): seal result artifacts` and `fix(cli): preserve Codex hooks`. Keep commits narrowly scoped. Pull requests must explain the contract affected, include test evidence, identify migration or compatibility risk, and confirm that no harness/model fallback or acceptance decision occurs implicitly.
 
 ## Security & Architecture Boundaries
 

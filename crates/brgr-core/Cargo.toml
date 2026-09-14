@@ -1,0 +1,21 @@
+[package]
+name = "brgr-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+brgr-protocol = { path = "../brgr-protocol" }
+brgr-runner = { path = "../brgr-runner" }
+brgr-store = { path = "../brgr-store" }
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,30 @@
+[package]
+name = "brgr-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "brgr"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+brgr-core = { path = "../brgr-core" }
+brgr-protocol = { path = "../brgr-protocol" }
+brgr-registry = { path = "../brgr-registry" }
+brgr-runner = { path = "../brgr-runner" }
+brgr-store = { path = "../brgr-store" }
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+assert_cmd.workspace = true
+predicates.workspace = true
+
+[lints]
+workspace = true
