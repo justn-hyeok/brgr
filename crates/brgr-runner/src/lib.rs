@@ -376,13 +376,25 @@ async fn wait_for_probe_exit(
             return Ok((Some(status), false, false));
         }
         if stdout.metadata()?.len() > limit || stderr.metadata()?.len() > limit {
-            return Ok((Some(stop_process_group(child).await?), false, true));
+            return Ok((Some(stop_probe_group(child).await?), false, true));
         }
         if started.elapsed() >= deadline {
-            return Ok((Some(stop_process_group(child).await?), true, false));
+            return Ok((Some(stop_probe_group(child).await?), true, false));
         }
-        sleep(Duration::from_millis(5)).await;
+        sleep(Duration::from_millis(1)).await;
     }
+}
+
+async fn stop_probe_group(child: &mut tokio::process::Child) -> Result<ExitStatus, RunnerError> {
+    let pid = child.id().ok_or(RunnerError::MissingProcessId)?;
+    let kill = std::process::Command::new("/bin/kill")
+        .arg("-KILL")
+        .arg(format!("-{pid}"))
+        .output()?;
+    if !kill.status.success() && child.try_wait()?.is_none() {
+        child.start_kill()?;
+    }
+    Ok(child.wait().await?)
 }
 
 #[cfg(debug_assertions)]
@@ -1250,9 +1262,13 @@ mod tests {
     async fn probe_stops_a_flood_before_its_deadline_and_reads_the_original_descriptor() {
         let root = tempfile::tempdir().unwrap();
         let executable = root.path().join("probe");
+        let captured = root.path().join("captured");
         std::fs::write(
             &executable,
-            "#!/bin/sh\nwhile :; do printf 'model-catalog-line-12345678901234567890123456789012345678901234567890\\n'; done\n",
+            format!(
+                "#!/bin/sh\n/bin/ln stdout '{}'\nexec /usr/bin/yes MODEL_CATALOG_FLOOD\n",
+                captured.display()
+            ),
         )
         .unwrap();
         std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -1262,6 +1278,7 @@ mod tests {
         assert!(flooded.output_truncated);
         assert!(!flooded.timed_out);
         assert!(flooded.elapsed < Duration::from_secs(2));
+        assert!(std::fs::metadata(&captured).unwrap().len() < 8 * 1024 * 1024);
 
         std::fs::write(
             &executable,
