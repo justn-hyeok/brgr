@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.0.1 — 2026-09-14
+
+Reject candidate results whose artifact is missing, forged, or fails sealed
+byte verification before publishing them to an owner inbox. This closes a
+store API path that could create a candidate the owner could not safely decide.
+All other v1.0.0 feature and platform limits remain unchanged.
+
 ## 1.0.0 — 2026-09-14
 
 First managed local release. Codex can start bounded fresh tasks through OMP,

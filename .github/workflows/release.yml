@@ -73,7 +73,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          notes_file="docs/release-notes-${GITHUB_REF_NAME}.md"
+          test -f "$notes_file"
           gh release create "$GITHUB_REF_NAME" --draft \
             --title "$GITHUB_REF_NAME" \
-            --notes-file docs/release-notes-v1.md \
+            --notes-file "$notes_file" \
             dist/*.tar.gz dist/checksums.txt dist/brgr.spdx.json
