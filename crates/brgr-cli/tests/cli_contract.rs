@@ -626,6 +626,121 @@ fn detached_crash_windows_reconcile_without_duplicate_or_overlapping_attempts() 
 }
 
 #[test]
+fn restarted_supervisor_cannot_adopt_its_predecessors_unfinished_attempt() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("brgr");
+    let workspace = temp.path().join("work");
+    fs::create_dir_all(&workspace).unwrap();
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../testdata/fixtures/gjc")
+        .canonicalize()
+        .unwrap();
+    json_output(&run(
+        &home,
+        &["harness", "add", fixture.to_str().unwrap()],
+        &[],
+    ));
+    let owner = ("BRGR_OWNER_ID", "codex:restarted-supervisor");
+    let crashed = run(
+        &home,
+        &[
+            "run",
+            "BRGR_FIXTURE_OK",
+            "--workspace",
+            workspace.to_str().unwrap(),
+            "--foreground",
+        ],
+        &[owner, ("BRGR_TEST_CRASH_STAGE", "after_claim")],
+    );
+    assert!(!crashed.status.success());
+    let launch_path = fs::read_dir(home.join("launches"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "json")
+        })
+        .unwrap();
+    let launch: Value = serde_json::from_slice(&fs::read(&launch_path).unwrap()).unwrap();
+    let task = launch["spec"]["task_id"].as_str().unwrap();
+
+    // The replacement process is allowed to reconcile the old attempt, but
+    // must not claim that its own PID proves the dead predecessor is alive.
+    let restarted = run(
+        &home,
+        &["__supervise", launch_path.to_str().unwrap()],
+        &[owner],
+    );
+    assert!(!restarted.status.success());
+    let store = brgr_store::Store::open(home.join("store")).unwrap();
+    let result = store.latest_result(task.parse().unwrap()).unwrap();
+    assert_eq!(result.outcome, brgr_protocol::TerminalOutcome::Lost);
+    let owner_id = brgr_protocol::OwnerId::new(owner.1).unwrap();
+    assert_eq!(store.inbox(&owner_id, false).unwrap().len(), 1);
+    assert!(store.unfinished_attempts().unwrap().is_empty());
+}
+
+#[test]
+fn status_during_live_pre_identity_window_does_not_publish_lost() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("brgr");
+    let workspace = temp.path().join("work");
+    fs::create_dir_all(&workspace).unwrap();
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../testdata/fixtures/gjc")
+        .canonicalize()
+        .unwrap();
+    json_output(&run(
+        &home,
+        &["harness", "add", fixture.to_str().unwrap()],
+        &[],
+    ));
+    let owner = ("BRGR_OWNER_ID", "codex:pre-identity");
+    let launch = json_output(&run(
+        &home,
+        &[
+            "run",
+            "BRGR_FIXTURE_OK",
+            "--workspace",
+            workspace.to_str().unwrap(),
+        ],
+        &[owner, ("BRGR_TEST_PAUSE_AFTER_CLAIM_MS", "1500")],
+    ));
+    let task = launch["task_id"].as_str().unwrap();
+    let mut saw_window = false;
+    for _ in 0..100 {
+        let store = brgr_store::Store::open(home.join("store")).unwrap();
+        if store
+            .unfinished_attempts()
+            .unwrap()
+            .iter()
+            .any(|attempt| attempt.task.task_id.to_string() == task && attempt.launch.is_none())
+        {
+            let status = json_output(&run(&home, &["status", task], &[owner]));
+            assert_ne!(status["state"], "terminal");
+            saw_window = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(saw_window, "the live pre-identity window was not observed");
+    let mut result = None;
+    for _ in 0..120 {
+        let status = json_output(&run(&home, &["status", task], &[owner]));
+        if status["state"] == "terminal" {
+            result = Some(json_output(&run(&home, &["result", task], &[owner])));
+            break;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(
+        result.unwrap()["result"]["outcome"],
+        "candidate",
+        "a live supervisor was incorrectly recovered as lost"
+    );
+}
+
+#[test]
 fn queued_cancel_settles_without_starting_the_harness() {
     let temp = TempDir::new().unwrap();
     let home = temp.path().join("brgr");

@@ -620,7 +620,6 @@ async fn supervise(paths: &Paths, launch_path: &Path, json_output: bool) -> Resu
         launch_path: launch_path.to_path_buf(),
         identity: process_identity(std::process::id())?,
     };
-    write_json_atomic(&paths.supervisor(launch.spec.task_id), &receipt)?;
     let manifest = if manifest.adapter == brgr_runner::OMP_ROLE_ADAPTER_V1 {
         omp_process_manifest(paths, &launch, &manifest)?
     } else {
@@ -629,7 +628,11 @@ async fn supervise(paths: &Paths, launch_path: &Path, json_output: bool) -> Resu
     let cancel_path = paths.cancel(launch.spec.task_id);
     let pid_path = paths.pid(launch.spec.task_id);
     let mut supervisor = Supervisor::open(&paths.store)?;
+    // Reconcile before publishing our own task receipt. Otherwise a previous
+    // crashed attempt without a launch identity could mistake this new process
+    // for its original live supervisor and remain unfinished forever.
     supervisor.reconcile_after_restart(|attempt| observe_attempt(paths, attempt))?;
+    write_json_atomic(&paths.supervisor(launch.spec.task_id), &receipt)?;
     let result = supervisor
         .run_fresh_controlled(
             launch.spec,
@@ -788,12 +791,6 @@ fn record_unstarted_terminal(
 }
 
 fn observe_attempt(paths: &Paths, attempt: &UnfinishedAttempt) -> ExecutionObservation {
-    let Some(launch) = &attempt.launch else {
-        return ExecutionObservation::Unknown;
-    };
-    let Some(expected) = &launch.runner_identity else {
-        return ExecutionObservation::Unknown;
-    };
     let receipt: ProcessReceipt = match fs::read(paths.supervisor(attempt.task.task_id))
         .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
@@ -801,14 +798,16 @@ fn observe_attempt(paths: &Paths, attempt: &UnfinishedAttempt) -> ExecutionObser
         Some(receipt) => receipt,
         None => return ExecutionObservation::Unknown,
     };
-    if receipt.task_id != attempt.task.task_id || receipt.identity != *expected {
+    if receipt.task_id != attempt.task.task_id
+        || receipt.launch_path != paths.launch(attempt.task.task_id, attempt.task.revision)
+    {
         return ExecutionObservation::Unknown;
     }
     let Ok(pid) = receipt.identity.handle.parse::<u32>() else {
         return ExecutionObservation::Unknown;
     };
     match process_identity(pid) {
-        Ok(actual) if actual == *expected => ExecutionObservation::Alive(actual),
+        Ok(actual) if actual == receipt.identity => ExecutionObservation::SupervisorAlive(actual),
         Ok(_) => ExecutionObservation::NotObserved,
         Err(_) => ExecutionObservation::Unknown,
     }
