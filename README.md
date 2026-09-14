@@ -11,35 +11,47 @@ The v1 target is Apple Silicon on macOS 15 or newer. Release archives are
 unsigned and not notarized. Read [the unsigned distribution guide](docs/unsigned-distribution.md)
 before sharing or running a downloaded binary.
 
-The current release candidate is still in verification. GJC supports bounded
-fresh runs; OMP uses an installed `omp-role` and Herdr. After Codex accepts or
+The current release candidate is still in verification. GJC, Cursor CLI, and
+Command Code have bounded one-shot process recipes; OMP currently uses an
+installed `omp-role` and Herdr. After Codex accepts or
 rejects a result, brgr closes only the OMP pane it recorded as its own; use
 `--keep-pane` to retain it. See the cleanup safety limit below.
 
-## Quick start
+## Start from Codex
 
-Build locally, register a harness, and start one task:
+Install the local binary and Codex integration, then start a new Codex session:
 
 ```bash
 cargo install --path crates/brgr-cli --locked --root "$HOME/.local"
+brgr integrate codex install
 brgr harness add "$(command -v gjc)"
-brgr run "Review this change" --harness local.gjc
+```
+
+Ask Codex, for example, “GJC로 이 변경을 검토하고 실패 사례도 확인해줘.”
+Codex owns the task criteria and the accept/reject decision; brgr owns the
+bounded execution, sealed bytes, and durable inbox. The CLI remains an escape
+hatch for inspection and explicit operations:
+
+```bash
+brgr run "Review this change" --harness local.gjc --criterion "findings cite changed lines"
 brgr status
 brgr result TASK
 brgr accept TASK --reason "criteria verified"
 ```
 
-Use `brgr reject TASK --reason "..."` if the sealed result does not meet the
-task criteria. `brgr result TASK --ack` acknowledges a failed, cancelled, or
-lost result; acknowledgment is not acceptance. The command uses a dedicated
-Git worktree for a clean Git source. A dirty source is rejected unless you
-explicitly pass `--allow-clean-head-snapshot`, which excludes those changes.
+If a candidate misses the criteria, use `brgr reject TASK --reason "..."` and
+`brgr revise TASK "Corrected request" --criterion "new observable check"`.
+The old result and decision remain intact. `brgr result TASK --ack` acknowledges
+a failed, cancelled, or lost result; acknowledgment is not acceptance. A clean
+Git source gets a dedicated task worktree. Dirty changes are rejected unless
+`--allow-clean-head-snapshot` explicitly excludes them.
 
-To make Codex the natural-language entry point, run `brgr integrate codex
-install`, then start a new Codex session. It merges brgr hooks beside existing
-hooks; `brgr integrate codex status|uninstall` checks or removes only brgr's
-entries. Registration of an unknown CLI requires `brgr harness draft`,
-`brgr harness test`, then an authorized scratch run with `brgr harness activate`.
+`brgr integrate codex status|uninstall` checks or removes only brgr-owned
+entries. For Cursor CLI, Command Code, or an approved unfamiliar CLI, use
+`brgr harness draft`, `brgr harness test`, then an authorized scratch run with
+`brgr harness activate` and `brgr harness status`. Pass `--model MODEL` when
+that exact manifest supports model selection. Do not infer support for flags
+absent from the installed executable's help.
 
 `brgr cleanup status TASK` shows whether an owned OMP pane was closed or
 retained. `brgr cleanup run TASK` retries a pending close. Neither command

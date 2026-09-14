@@ -12,8 +12,9 @@ transitions. The runner executes declarative argv recipes without a shell. The
 store seals artifact bytes before committing result and inbox metadata. The
 registry activates only recipes supported by bounded help/version evidence.
 
-Execution and presentation are separate. GJC uses a one-shot process recipe.
-OMP may attach to Herdr for terminal presentation and lifecycle evidence, but
+Execution and presentation are separate. GJC, Cursor CLI, and Command Code use
+one-shot process recipes. The current OMP adapter requires Herdr for launch and
+lifecycle evidence; Herdr is not a requirement of the core contract, and
 pane and session identifiers remain metadata. A missing pane must not erase an
 already sealed result.
 

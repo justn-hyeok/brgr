@@ -7,7 +7,7 @@ download for malware.
 
 Before running a downloaded archive:
 
-1. Download the `.tar.gz` and `checksums.txt` from the same GitHub release.
+1. Download the `.tar.gz`, `brgr.spdx.json`, and `checksums.txt` from the same GitHub release.
 2. Verify it with `shasum -a 256 -c checksums.txt` from that directory.
 3. Extract the archive and move `brgr` to a directory on your `PATH`.
 4. Try `brgr --version`. If macOS blocks it, review the warning and use the
@@ -18,4 +18,3 @@ The project never asks users to disable Gatekeeper globally and never removes
 quarantine metadata automatically. See Apple's guidance on safely opening
 software from an unidentified developer:
 <https://support.apple.com/en-gb/102445>.
-

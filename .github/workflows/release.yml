@@ -26,15 +26,31 @@ jobs:
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - run: cargo test --workspace --all-features --locked
       - run: cargo build -p brgr-cli --release --locked
+      - name: Verify Apple Silicon deployment target
+        run: |
+          test "$(uname -m)" = arm64
+          file target/release/brgr | grep -q 'arm64'
+          otool -l target/release/brgr | grep -A 5 'LC_BUILD_VERSION' | grep -q 'minos 15.0'
       - name: Package unsigned archive
         run: |
           archive="brgr-${GITHUB_REF_NAME}-aarch64-apple-darwin"
           mkdir -p "dist/$archive"
           cp target/release/brgr README.md LICENSE "dist/$archive/"
+          cp -R docs "dist/$archive/docs"
+          test -f "dist/$archive/docs/unsigned-distribution.md"
           tar -C dist -czf "dist/$archive.tar.gz" "$archive"
-          shasum -a 256 "dist/$archive.tar.gz" > dist/checksums.txt
           tar -xzf "dist/$archive.tar.gz" -C "${RUNNER_TEMP}"
           "${RUNNER_TEMP}/$archive/brgr" --version
+          scratch="$(mktemp -d "${RUNNER_TEMP}/brgr-release-smoke.XXXXXX")"
+          mkdir "$scratch/work"
+          binary="${RUNNER_TEMP}/$archive/brgr"
+          "$binary" --home "$scratch/home" harness add "$GITHUB_WORKSPACE/testdata/fixtures/gjc"
+          result="$(BRGR_OWNER_ID=codex:release-smoke "$binary" --home "$scratch/home" --json run BRGR_FIXTURE_OK --workspace "$scratch/work" --foreground)"
+          task="$(printf '%s' "$result" | jq -er 'select(.outcome == "candidate" and .revision == 1) | .task_id')"
+          detail="$(BRGR_OWNER_ID=codex:release-smoke "$binary" --home "$scratch/home" --json result "$task")"
+          printf '%s' "$detail" | jq -e '.artifacts[0].text == "BRGR_FIXTURE_OK"'
+          decision="$(BRGR_OWNER_ID=codex:release-smoke "$binary" --home "$scratch/home" --json accept "$task" --reason 'release fixture result verified')"
+          printf '%s' "$decision" | jq -e '.verdict == "accepted"'
       - name: Generate SPDX SBOM
         uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610
         with:
@@ -44,6 +60,12 @@ jobs:
           artifact-name: brgr.spdx.json
           upload-artifact: false
           upload-release-assets: false
+      - name: Verify downloadable checksums
+        run: |
+          cd dist
+          archive="brgr-${GITHUB_REF_NAME}-aarch64-apple-darwin"
+          shasum -a 256 "$archive.tar.gz" brgr.spdx.json > checksums.txt
+          shasum -a 256 -c checksums.txt
       - name: Create unsigned draft release
         env:
           GH_TOKEN: ${{ github.token }}
