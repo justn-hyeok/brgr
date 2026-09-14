@@ -557,7 +557,7 @@ impl Store {
         result: &ResultEnvelope,
         observed: Option<&UnfinishedAttempt>,
     ) -> Result<WriteOutcome, StoreError> {
-        validate_schema(&result.schema)?;
+        validate_terminal_result(result)?;
         let envelope_json = serde_json::to_string(result)?;
         let digest = sha256(envelope_json.as_bytes());
         let transaction = self.connection.transaction()?;
@@ -581,24 +581,7 @@ impl Store {
             return Err(StoreError::TerminalResultConflict(result.attempt_id));
         }
 
-        let expected = transaction
-            .query_row(
-                "SELECT a.task_id, a.revision, t.owner_id, a.state
-                 FROM attempts a
-                 JOIN tasks t ON t.task_id = a.task_id AND t.revision = a.revision
-                 WHERE a.attempt_id = ?1",
-                [result.attempt_id.to_string()],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, u32>(1)?,
-                        row.get::<_, String>(2)?,
-                        row.get::<_, String>(3)?,
-                    ))
-                },
-            )
-            .optional()?
-            .ok_or(StoreError::AttemptNotFound(result.attempt_id))?;
+        let expected = terminal_attempt(&transaction, result.attempt_id)?;
         if (expected.0, expected.1) != (result.task_id.to_string(), result.revision) {
             return Err(StoreError::AttemptResultMismatch);
         }
@@ -612,6 +595,7 @@ impl Store {
                 to: AttemptState::Terminal,
             });
         }
+        verify_candidate_artifacts(&self.artifacts, result, &expected.4)?;
 
         transaction.execute(
             "INSERT INTO results
@@ -1170,6 +1154,53 @@ fn validate_schema(schema: &str) -> Result<(), StoreError> {
     Ok(())
 }
 
+fn validate_terminal_result(result: &ResultEnvelope) -> Result<(), StoreError> {
+    validate_schema(&result.schema)?;
+    if result.outcome == brgr_protocol::TerminalOutcome::Candidate && result.artifacts.is_empty() {
+        return Err(StoreError::CandidateRequiresArtifact);
+    }
+    Ok(())
+}
+
+fn terminal_attempt(
+    transaction: &Transaction<'_>,
+    attempt_id: AttemptId,
+) -> Result<(String, u32, String, String, String), StoreError> {
+    transaction
+        .query_row(
+            "SELECT a.task_id, a.revision, t.owner_id, a.state, t.spec_json
+             FROM attempts a
+             JOIN tasks t ON t.task_id = a.task_id AND t.revision = a.revision
+             WHERE a.attempt_id = ?1",
+            [attempt_id.to_string()],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )
+        .optional()?
+        .ok_or(StoreError::AttemptNotFound(attempt_id))
+}
+
+fn verify_candidate_artifacts(
+    artifacts: &ArtifactStore,
+    result: &ResultEnvelope,
+    task_json: &str,
+) -> Result<(), StoreError> {
+    if result.outcome == brgr_protocol::TerminalOutcome::Candidate {
+        let task: TaskSpec = serde_json::from_str(task_json)?;
+        for reference in &result.artifacts {
+            artifacts.read_verified(reference, task.artifact_contract.max_bytes)?;
+        }
+    }
+    Ok(())
+}
+
 fn state_name(state: AttemptState) -> &'static str {
     match state {
         AttemptState::Queued => "queued",
@@ -1305,6 +1336,8 @@ pub enum StoreError {
     ResultOwnerMismatch,
     #[error("attempt {0} already has a different terminal result")]
     TerminalResultConflict(AttemptId),
+    #[error("candidate terminal result requires a sealed artifact")]
+    CandidateRequiresArtifact,
     #[error("result {0} does not exist")]
     ResultNotFound(ResultId),
     #[error("result digest does not match the sealed result")]
@@ -1369,7 +1402,7 @@ mod tests {
         store
             .create_attempt(task.task_id, task.revision, attempt_id)
             .unwrap();
-        let result = result(&task, attempt_id);
+        let result = sealed_result(&store, &task, attempt_id);
 
         assert_eq!(
             store
@@ -1539,7 +1572,7 @@ mod tests {
     }
 
     #[test]
-    fn candidate_without_sealed_bytes_cannot_be_decided() {
+    fn candidate_without_sealed_bytes_cannot_enter_inbox() {
         let root = TempDir::new().unwrap();
         let mut store = Store::open(root.path()).unwrap();
         let task = task();
@@ -1549,25 +1582,30 @@ mod tests {
             .create_attempt(task.task_id, task.revision, attempt_id)
             .unwrap();
         let result = result(&task, attempt_id);
-        store
-            .commit_terminal_result(&task.owner_id, &result)
-            .unwrap();
-        let decision = Decision {
-            schema: SCHEMA_V1.to_owned(),
-            decision_id: DecisionId::new(),
-            owner_id: task.owner_id.clone(),
-            task_id: task.task_id,
-            revision: task.revision,
-            result_id: result.result_id,
-            result_digest: Store::result_digest(&result).unwrap(),
-            verdict: DecisionVerdict::Accepted,
-            reason: "must fail".to_owned(),
-        };
         assert!(matches!(
-            store.record_decision_and_ack(&decision),
-            Err(StoreError::DecisionRequiresSealedArtifact)
+            store.commit_terminal_result(&task.owner_id, &result),
+            Err(StoreError::CandidateRequiresArtifact)
         ));
-        assert_eq!(store.inbox(&task.owner_id, false).unwrap().len(), 1);
+        assert!(store.inbox(&task.owner_id, false).unwrap().is_empty());
+    }
+
+    #[test]
+    fn forged_candidate_artifact_cannot_enter_inbox() {
+        let root = TempDir::new().unwrap();
+        let mut store = Store::open(root.path()).unwrap();
+        let task = task();
+        let attempt_id = AttemptId::new();
+        store.record_task(&task, "forged-artifact").unwrap();
+        store
+            .create_attempt(task.task_id, task.revision, attempt_id)
+            .unwrap();
+        let mut result = sealed_result(&store, &task, attempt_id);
+        result.artifacts[0].store_relative_path = "../outside".to_owned();
+        assert!(matches!(
+            store.commit_terminal_result(&task.owner_id, &result),
+            Err(StoreError::InvalidArtifactReference)
+        ));
+        assert!(store.inbox(&task.owner_id, false).unwrap().is_empty());
     }
 
     #[test]
@@ -1599,7 +1637,7 @@ mod tests {
             Err(StoreError::AttemptTransitionInvalid { .. })
         ));
         store
-            .commit_terminal_result(&task.owner_id, &result(&task, attempt_id))
+            .commit_terminal_result(&task.owner_id, &sealed_result(&store, &task, attempt_id))
             .unwrap();
         assert!(matches!(
             store.set_attempt_state(attempt_id, AttemptState::Running),
@@ -1627,7 +1665,7 @@ mod tests {
             Err(StoreError::ActiveAttemptExists { .. })
         ));
         first
-            .commit_terminal_result(&task.owner_id, &result(&task, first_id))
+            .commit_terminal_result(&task.owner_id, &sealed_result(&first, &task, first_id))
             .unwrap();
         second
             .claim_attempt(task.task_id, task.revision, AttemptId::new())
@@ -1706,7 +1744,7 @@ mod tests {
             .unwrap();
         let observed = first.unfinished_attempts().unwrap().remove(0);
         let mut second = Store::open(root.path()).unwrap();
-        let completed = result(&task, attempt_id);
+        let completed = sealed_result(&second, &task, attempt_id);
         second
             .commit_terminal_result(&task.owner_id, &completed)
             .unwrap();
@@ -1915,7 +1953,7 @@ mod tests {
                     .unwrap();
             }
             store
-                .commit_terminal_result(&task.owner_id, &result(&task, attempt_id))
+                .commit_terminal_result(&task.owner_id, &sealed_result(&store, &task, attempt_id))
                 .unwrap();
         }
         assert!(matches!(
