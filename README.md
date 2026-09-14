@@ -11,8 +11,8 @@ The v1 target is Apple Silicon on macOS 15 or newer. Release archives are
 unsigned and not notarized. Read [the unsigned distribution guide](docs/unsigned-distribution.md)
 before sharing or running a downloaded binary.
 
-The current release candidate is still in verification. GJC, Cursor CLI,
-Command Code, and OMP have bounded one-shot process recipes. Herdr is optional:
+GJC, Cursor CLI, Command Code, and OMP have bounded one-shot process recipes.
+Herdr is optional:
 the separate `local.omp-herdr` adapter uses `omp-role` when an interactive pane
 is explicitly wanted. After Codex accepts or rejects that adapter's result,
 brgr closes only its recorded pane; use `--keep-pane` to retain it. See the

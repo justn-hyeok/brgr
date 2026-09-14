@@ -105,7 +105,7 @@ dependencies = [
 
 [[package]]
 name = "brgr-cli"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -124,7 +124,7 @@ dependencies = [
 
 [[package]]
 name = "brgr-core"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "brgr-protocol",
  "brgr-runner",
@@ -138,7 +138,7 @@ dependencies = [
 
 [[package]]
 name = "brgr-protocol"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -148,7 +148,7 @@ dependencies = [
 
 [[package]]
 name = "brgr-registry"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "brgr-runner",
  "serde",
@@ -161,7 +161,7 @@ dependencies = [
 
 [[package]]
 name = "brgr-runner"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "brgr-protocol",
  "serde",
@@ -174,7 +174,7 @@ dependencies = [
 
 [[package]]
 name = "brgr-store"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "brgr-protocol",
  "rusqlite",
