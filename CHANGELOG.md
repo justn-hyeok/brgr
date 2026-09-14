@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.0.5 — 2026-09-14
+
+Fix a Herdr-backed OMP revision replay: a new task revision could reuse the
+previous revision's report while its agent was still at startup idle. The
+wrapper now uses a fresh revision-scoped report and agent identity, refuses
+existing report bytes, and requires an observed lifecycle transition from the
+same pane, terminal, and immutable agent session bound to the spawn receipt
+before publishing a
+candidate. Tests and an actual WorkBuddy/DeepSeek R1→R2→R3 run cover the
+negative replay and corrected positive path. A detached successful run also
+has a durable offline-owner inbox regression test. All previous unsigned and
+best-effort Herdr cleanup limits remain.
+
 ## 1.0.4 — 2026-09-14
 
 Process-level crash fixtures now cover five detached supervisor windows,
