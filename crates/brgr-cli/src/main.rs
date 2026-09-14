@@ -188,9 +188,7 @@ enum CleanupCommand {
 
 #[derive(Subcommand)]
 enum HarnessCommand {
-    Add {
-        executable: PathBuf,
-    },
+    Add(AddHarnessArgs),
     Draft {
         executable: PathBuf,
     },
@@ -216,6 +214,21 @@ enum HarnessCommand {
         #[arg(default_value = "local.gjc")]
         harness: String,
     },
+}
+
+#[derive(Args)]
+struct AddHarnessArgs {
+    executable: PathBuf,
+    #[arg(long)]
+    workspace: Option<PathBuf>,
+    #[arg(long)]
+    prompt: Option<String>,
+    #[arg(long)]
+    model: Option<String>,
+    #[arg(long)]
+    effort: Option<String>,
+    #[arg(long)]
+    presentation_only: bool,
 }
 
 #[derive(Subcommand)]
@@ -376,7 +389,7 @@ async fn main() -> Result<()> {
 }
 
 async fn run_task(paths: &Paths, args: RunArgs, json_output: bool) -> Result<()> {
-    let registry = Registry::open(&paths.registry)?;
+    let registry = Registry::open_with_control_home(&paths.registry, &paths.home)?;
     match registry.health_probed(&args.harness).await? {
         Health::Healthy => {}
         Health::Drifted { .. } => bail!("harness {} probe identity changed", args.harness),
@@ -482,7 +495,7 @@ async fn revise_task(paths: &Paths, args: ReviseArgs, json_output: bool) -> Resu
         .spec()
         .clone();
 
-    let registry = Registry::open(&paths.registry)?;
+    let registry = Registry::open_with_control_home(&paths.registry, &paths.home)?;
     match registry
         .health_probed(&replacement.route.harness_id)
         .await?
@@ -1013,10 +1026,10 @@ fn decide(
 }
 
 async fn harness(paths: &Paths, command: HarnessCommand, json_output: bool) -> Result<()> {
-    let registry = Registry::open(&paths.registry)?;
+    let registry = Registry::open_with_control_home(&paths.registry, &paths.home)?;
     match command {
-        HarnessCommand::Add { executable } => {
-            let receipt = registry.add(&executable).await?;
+        HarnessCommand::Add(args) => {
+            let receipt = add_harness(&registry, args).await?;
             print_value(&serde_json::to_value(receipt)?, json_output);
         }
         HarnessCommand::Draft { executable } => {
@@ -1089,6 +1102,41 @@ async fn harness(paths: &Paths, command: HarnessCommand, json_output: bool) -> R
     Ok(())
 }
 
+async fn add_harness(registry: &Registry, args: AddHarnessArgs) -> Result<ActivationReceipt> {
+    let receipt = if args.presentation_only {
+        if args.workspace.is_some()
+            || args.prompt.is_some()
+            || args.model.is_some()
+            || args.effort.is_some()
+        {
+            bail!("presentation-only registration cannot claim a scratch run or model route");
+        }
+        registry.add(&args.executable).await?
+    } else {
+        let workspace = args
+            .workspace
+            .context("harness add needs --workspace for an authorized scratch run")?;
+        let prompt = args
+            .prompt
+            .context("harness add needs --prompt for an authorized scratch run")?;
+        let manifest = registry.draft(&args.executable).await?;
+        registry.contract_test(&manifest).await?;
+        registry
+            .activate_with_scratch(
+                &manifest,
+                &workspace,
+                &prompt,
+                args.model.as_deref(),
+                args.effort.as_deref(),
+            )
+            .await?
+    };
+    match registry.health_probed(&receipt.harness_id).await? {
+        Health::Healthy => Ok(receipt),
+        Health::Drifted { .. } => bail!("harness changed during activation health check"),
+    }
+}
+
 async fn harness_manifest_input(
     registry: &Registry,
     executable: Option<PathBuf>,
@@ -1132,7 +1180,7 @@ fn integrate(paths: &Paths, command: IntegrateCommand, json_output: bool) -> Res
 fn doctor(paths: &Paths, json_output: bool) -> Result<()> {
     reconcile_pending(paths)?;
     let store_ok = Store::open(&paths.store).is_ok();
-    let registry_ok = Registry::open(&paths.registry).is_ok();
+    let registry_ok = Registry::open_with_control_home(&paths.registry, &paths.home).is_ok();
     let integration = codex_integration::status(&paths.home)?;
     let value = json!({
         "status": if store_ok && registry_ok { "ok" } else { "error" },

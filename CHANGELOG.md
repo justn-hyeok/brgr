@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+Named process harnesses no longer activate through help/version probes alone.
+`harness add` requires an explicitly authorized scratch workspace and prompt,
+runs the observed contract and scratch task, then checks health. Scratch
+workspaces overlapping the brgr control directory are rejected. Older process
+activations without a scratch receipt require re-certification before new task
+admission; stored results and decisions are unchanged. The optional Herdr
+adapter is explicitly presentation-only and does not claim this certification.
+
+Release SBOM generation now targets the `brgr-cli` Cargo package, records
+metadata-derived dependency license declarations, and fails if any package
+license is unasserted.
+
 ## 1.0.5 — 2026-09-14
 
 Fix a Herdr-backed OMP revision replay: a new task revision could reuse the

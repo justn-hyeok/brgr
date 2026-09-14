@@ -32,10 +32,11 @@ Install the local binary and Codex integration, then start a new Codex session:
 ```bash
 cargo install --path crates/brgr-cli --locked --root "$HOME/.local"
 brgr integrate codex install
-brgr harness add "$(command -v gjc)"
 ```
 
-Ask Codex, for example, “GJC로 이 변경을 검토하고 실패 사례도 확인해줘.”
+Ask Codex, for example, “GJC를 작은 scratch 작업으로 검증해 등록하고,
+이 변경을 검토하면서 실패 사례도 확인해줘.” Registration may invoke the
+selected harness's model, so authorize its scratch prompt explicitly.
 Codex owns the task criteria and the accept/reject decision; brgr owns the
 bounded execution, sealed bytes, and durable inbox. The CLI remains an escape
 hatch for inspection and explicit operations:
@@ -71,6 +72,13 @@ that exact manifest supports model selection. Do not infer support for flags
 absent from the installed executable's help.
 See [agent-authored manifests](docs/custom-harness-registration.md) for a
 documented CLI whose prompt shape needs a custom declarative recipe.
+For an already approved executable, `brgr harness add EXECUTABLE --workspace
+SCRATCH --prompt "small authorized probe"` is the combined probe, contract-test,
+scratch, activation, and health-check escape hatch. `--presentation-only`
+registers the optional Herdr adapter without claiming a managed scratch run.
+Process activations created before this scratch requirement remain on disk but
+cannot start a new task; re-add each approved executable with an authorized
+scratch workspace and prompt. Existing sealed results and decisions are kept.
 
 `brgr cleanup status TASK` shows whether an owned OMP pane was closed or
 retained. `brgr cleanup run TASK` retries a pending close. Neither command
