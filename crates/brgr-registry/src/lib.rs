@@ -25,6 +25,7 @@ const PROBE_DEADLINE: Duration = Duration::from_secs(5);
 #[derive(Clone, Debug)]
 pub struct Registry {
     root: PathBuf,
+    control_home: PathBuf,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -66,7 +67,29 @@ impl Registry {
         for path in [&root, &root.join("manifests"), &root.join("activations")] {
             fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
         }
-        Ok(Self { root })
+        Ok(Self {
+            control_home: root.clone(),
+            root,
+        })
+    }
+
+    /// Opens a registry whose scratch runs must remain outside the entire
+    /// supervisor control home, not only the registry subdirectory.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a control home that does not contain the registry root.
+    pub fn open_with_control_home(
+        root: impl Into<PathBuf>,
+        control_home: &Path,
+    ) -> Result<Self, RegistryError> {
+        let mut registry = Self::open(root)?;
+        let canonical_home = control_home.canonicalize()?;
+        if !registry.root.canonicalize()?.starts_with(&canonical_home) {
+            return Err(RegistryError::InvalidControlHome);
+        }
+        registry.control_home = canonical_home;
+        Ok(registry)
     }
 
     /// Probes and activates only the explicitly presentation-only Herdr adapter.
@@ -198,7 +221,7 @@ impl Registry {
         authority: RecipeAuthority,
     ) -> Result<ActivationReceipt, RegistryError> {
         let workspace = workspace.canonicalize()?;
-        let control = self.root.canonicalize()?;
+        let control = self.control_home.canonicalize()?;
         if workspace.starts_with(&control) || control.starts_with(&workspace) {
             return Err(RegistryError::ScratchOverlapsControlHome);
         }
@@ -1185,6 +1208,8 @@ pub enum RegistryError {
     EmptyScratchPrompt,
     #[error("scratch workspace overlaps the brgr control directory")]
     ScratchOverlapsControlHome,
+    #[error("registry root is outside its declared control home")]
+    InvalidControlHome,
     #[error("this harness cannot select a model for its scratch run")]
     UnsupportedScratchModel,
     #[error("this harness cannot select effort for its scratch run")]
@@ -1231,6 +1256,29 @@ mod tests {
             fs::metadata(registry_path).unwrap().permissions().mode() & 0o777,
             0o700
         );
+    }
+
+    #[tokio::test]
+    async fn scratch_rejects_any_control_home_child_and_symlink_alias() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("control");
+        let store = home.join("store");
+        fs::create_dir_all(&store).unwrap();
+        let executable = root.path().join("mystery-agent");
+        fixture_executable(&executable);
+        let registry = Registry::open_with_control_home(home.join("registry"), &home).unwrap();
+        let draft = registry.draft(&executable).await.unwrap();
+        let alias = root.path().join("alias");
+        symlink(&store, &alias).unwrap();
+        for workspace in [&store, &alias] {
+            assert!(matches!(
+                registry
+                    .activate_with_scratch(&draft, workspace, "probe", None, None)
+                    .await,
+                Err(RegistryError::ScratchOverlapsControlHome)
+            ));
+        }
+        assert!(!registry.activation_path(&draft.id).exists());
     }
 
     #[test]

@@ -389,7 +389,7 @@ async fn main() -> Result<()> {
 }
 
 async fn run_task(paths: &Paths, args: RunArgs, json_output: bool) -> Result<()> {
-    let registry = Registry::open(&paths.registry)?;
+    let registry = Registry::open_with_control_home(&paths.registry, &paths.home)?;
     match registry.health_probed(&args.harness).await? {
         Health::Healthy => {}
         Health::Drifted { .. } => bail!("harness {} probe identity changed", args.harness),
@@ -495,7 +495,7 @@ async fn revise_task(paths: &Paths, args: ReviseArgs, json_output: bool) -> Resu
         .spec()
         .clone();
 
-    let registry = Registry::open(&paths.registry)?;
+    let registry = Registry::open_with_control_home(&paths.registry, &paths.home)?;
     match registry
         .health_probed(&replacement.route.harness_id)
         .await?
@@ -1026,7 +1026,7 @@ fn decide(
 }
 
 async fn harness(paths: &Paths, command: HarnessCommand, json_output: bool) -> Result<()> {
-    let registry = Registry::open(&paths.registry)?;
+    let registry = Registry::open_with_control_home(&paths.registry, &paths.home)?;
     match command {
         HarnessCommand::Add(args) => {
             let receipt = add_harness(&registry, args).await?;
@@ -1180,7 +1180,7 @@ fn integrate(paths: &Paths, command: IntegrateCommand, json_output: bool) -> Res
 fn doctor(paths: &Paths, json_output: bool) -> Result<()> {
     reconcile_pending(paths)?;
     let store_ok = Store::open(&paths.store).is_ok();
-    let registry_ok = Registry::open(&paths.registry).is_ok();
+    let registry_ok = Registry::open_with_control_home(&paths.registry, &paths.home).is_ok();
     let integration = codex_integration::status(&paths.home)?;
     let value = json!({
         "status": if store_ok && registry_ok { "ok" } else { "error" },

@@ -57,6 +57,25 @@ fn named_process_harness_cannot_activate_without_authorized_scratch() {
     assert!(!denied.status.success());
     assert!(!home.join("registry/activations/local.gjc.json").exists());
 
+    let unsafe_scratch = home.join("store");
+    fs::create_dir_all(&unsafe_scratch).unwrap();
+    let overlapping = run(
+        &home,
+        &[
+            "harness",
+            "add",
+            fixture.to_str().unwrap(),
+            "--workspace",
+            unsafe_scratch.to_str().unwrap(),
+            "--prompt",
+            "BRGR_FIXTURE_OK",
+        ],
+        &[],
+    );
+    assert!(!overlapping.status.success());
+    assert!(String::from_utf8_lossy(&overlapping.stderr).contains("control directory"));
+    assert!(!home.join("registry/activations/local.gjc.json").exists());
+
     add_fixture(&home, &fixture, &temp.path().join("scratch"));
     let health = json_output(&run(&home, &["harness", "status", "local.gjc"], &[]));
     assert_eq!(health["health"], "healthy");
