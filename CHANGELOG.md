@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.0.8 — 2026-09-14
+
+Publish the current v1 readiness checklist with linked implementation, live
+harness, crash-window, and unsigned-release evidence. The README now points
+to the open practical-use gates. No execution contract or adapter behavior
+changed; this is a public documentation and version-alignment patch, not a
+claim that every v1 acceptance gate has passed.
+
 ## 1.0.7 — 2026-09-14
 
 Command Code registration now enables `--effort` only when its installed help
