@@ -18,6 +18,13 @@ is explicitly wanted. After Codex accepts or rejects that adapter's result,
 brgr closes only its recorded pane; use `--keep-pane` to retain it. See the
 cleanup safety limit below.
 
+| Route or operation | v1 status |
+|---|---|
+| OMP process, GJC, Cursor CLI, Command Code | Certified bounded fresh-run contract; exact model/effort only where the activated recipe supports it |
+| Approved unfamiliar one-shot CLI | Supported after manifest contract test and authorized scratch activation |
+| `local.omp-herdr` presentation | Optional best effort; external worker stop is not certified and uncertain failure is `lost` |
+| Resume, in-flight steering, provider-side undo | Deferred; unsupported requests must fail rather than silently fall back |
+
 ## Start from Codex
 
 Install the local binary and Codex integration, then start a new Codex session:
