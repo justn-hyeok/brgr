@@ -1041,6 +1041,7 @@ fn generate_command_code_manifest(
     {
         return Err(RegistryError::RequiredFlagsMissing);
     }
+    let effort_supported = help.contains("--effort <level>");
     Ok(HarnessManifest {
         schema: MANIFEST_SCHEMA_V1.to_owned(),
         id: "local.command-code".to_owned(),
@@ -1068,7 +1069,11 @@ fn generate_command_code_manifest(
                 "${input.prompt}".to_owned(),
             ],
             model_argv: vec!["--model".to_owned(), "${route.model}".to_owned()],
-            effort_argv: vec![],
+            effort_argv: if effort_supported {
+                vec!["--effort".to_owned(), "${route.effort}".to_owned()]
+            } else {
+                vec![]
+            },
             env_allow: vec![
                 "HOME".to_owned(),
                 "PATH".to_owned(),
@@ -1091,7 +1096,14 @@ fn generate_command_code_manifest(
             ),
             ("cancel".to_owned(), supported("local_process_only")),
             ("model_select".to_owned(), supported("--model")),
-            ("effort_select".to_owned(), unsupported("not_observed")),
+            (
+                "effort_select".to_owned(),
+                if effort_supported {
+                    supported("--effort")
+                } else {
+                    unsupported("not_observed")
+                },
+            ),
         ]),
     })
 }
@@ -1716,6 +1728,10 @@ mod tests {
             cursor.capabilities["model_select"].status,
             CapabilityStatus::Supported
         );
+        assert_eq!(
+            cursor.capabilities["effort_select"].status,
+            CapabilityStatus::Unsupported
+        );
         assert!(generate_manifest("cursor-agent", PathBuf::from("/bin/echo"), "--print").is_err());
 
         let command_code_help = "--print [query] --permission-mode <mode> --no-session --no-skills --skip-onboarding --no-auto-update --max-turns <number> --model <model>";
@@ -1742,6 +1758,24 @@ mod tests {
         assert_eq!(
             command_code.capabilities["model_select"].status,
             CapabilityStatus::Supported
+        );
+        assert_eq!(
+            command_code.capabilities["effort_select"].status,
+            CapabilityStatus::Unsupported
+        );
+        let command_code_with_effort = generate_manifest(
+            "command-code",
+            PathBuf::from("/bin/echo"),
+            &format!("{command_code_help} --effort <level>"),
+        )
+        .unwrap();
+        assert_eq!(
+            command_code_with_effort.capabilities["effort_select"].status,
+            CapabilityStatus::Supported
+        );
+        assert_eq!(
+            command_code_with_effort.launch.effort_argv,
+            vec!["--effort", "${route.effort}"]
         );
         assert!(
             generate_manifest(
