@@ -760,6 +760,37 @@ impl Store {
         Ok(())
     }
 
+    /// Acknowledges an inbox item only while the caller's session epoch is
+    /// still current. The binding check and acknowledgment are one transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an unbound/stale session, missing item, or DB failure.
+    pub fn acknowledge_bound(
+        &self,
+        owner_id: &OwnerId,
+        result_id: ResultId,
+        session_id: &str,
+        binding_epoch: u64,
+    ) -> Result<(), StoreError> {
+        let transaction = self.connection.unchecked_transaction()?;
+        assert_owner_binding(
+            &transaction,
+            owner_id,
+            Some(session_id),
+            Some(binding_epoch),
+        )?;
+        let changed = transaction.execute(
+            "UPDATE inbox_items SET acknowledged = 1 WHERE owner_id = ?1 AND result_id = ?2",
+            params![owner_id.as_str(), result_id.to_string()],
+        )?;
+        if changed == 0 {
+            return Err(StoreError::InboxItemNotFound);
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
     /// Records the sole accept/reject decision for a result.
     ///
     /// Semantic replay is idempotent even when a caller generated a new
@@ -904,6 +935,35 @@ impl Store {
         rows.map(|row| Ok(serde_json::from_str(&row?)?)).collect()
     }
 
+    /// Lists latest task revisions whose owner is currently bound to a session.
+    /// The optional owner narrows an explicit `BRGR_OWNER_ID` without allowing
+    /// unrelated owners to consume the result limit.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid stored data, limits, or DB failures.
+    pub fn tasks_for_session(
+        &self,
+        session_id: &str,
+        owner_id: Option<&OwnerId>,
+        limit: usize,
+    ) -> Result<Vec<TaskSpec>, StoreError> {
+        let bounded = i64::try_from(limit.min(100)).map_err(|_| StoreError::InvalidTaskLimit)?;
+        let mut statement = self.connection.prepare(
+            "SELECT t.spec_json FROM tasks t
+             JOIN owner_bindings b ON b.owner_id = t.owner_id
+             JOIN (SELECT task_id, MAX(revision) AS revision FROM tasks GROUP BY task_id) latest
+               ON latest.task_id = t.task_id AND latest.revision = t.revision
+             WHERE b.session_id = ?1 AND (?2 IS NULL OR t.owner_id = ?2)
+             ORDER BY t.rowid DESC LIMIT ?3",
+        )?;
+        let rows = statement.query_map(
+            params![session_id, owner_id.map(OwnerId::as_str), bounded],
+            |row| row.get::<_, String>(0),
+        )?;
+        rows.map(|row| Ok(serde_json::from_str(&row?)?)).collect()
+    }
+
     /// Returns admitted task revisions for which no supervisor ever claimed
     /// an attempt. The caller can reconcile an abandoned launch without guessing
     /// that a model run succeeded.
@@ -1014,12 +1074,14 @@ impl Store {
         }
     }
 
-    /// Binds an owner to an explicit session epoch without inferring focus.
+    /// Initially binds an owner to an explicit session epoch without inferring
+    /// focus. A late hook cannot replace a different session; use
+    /// `rebind_owner` for an explicit transfer.
     ///
     /// # Errors
     ///
-    /// Returns an error when an older epoch attempts to replace a newer
-    /// binding or persistence fails.
+    /// Returns an error when another session is already bound or persistence
+    /// fails.
     pub fn bind_owner(
         &self,
         owner_id: &OwnerId,
@@ -1031,23 +1093,21 @@ impl Store {
         }
         let binding_epoch =
             i64::try_from(binding_epoch).map_err(|_| StoreError::NumericOverflow)?;
-        let existing = self
-            .connection
+        let transaction = self.connection.unchecked_transaction()?;
+        let existing = transaction
             .query_row(
                 "SELECT session_id, binding_epoch FROM owner_bindings WHERE owner_id = ?1",
                 [owner_id.as_str()],
                 |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
             )
             .optional()?;
-        if let Some((stored_session, stored_epoch)) = existing {
-            if stored_session == session_id && stored_epoch == binding_epoch {
+        if let Some((stored_session, _stored_epoch)) = existing {
+            if stored_session == session_id {
                 return Ok(WriteOutcome::AlreadyApplied);
             }
-            if binding_epoch <= stored_epoch {
-                return Err(StoreError::OwnerBindingConflict);
-            }
+            return Err(StoreError::OwnerBindingConflict);
         }
-        self.connection.execute(
+        transaction.execute(
             "INSERT INTO owner_bindings (owner_id, session_id, binding_epoch)
              VALUES (?1, ?2, ?3)
              ON CONFLICT(owner_id) DO UPDATE SET
@@ -1055,8 +1115,93 @@ impl Store {
                binding_epoch = excluded.binding_epoch",
             params![owner_id.as_str(), session_id, binding_epoch],
         )?;
+        transaction.commit()?;
         Ok(WriteOutcome::Inserted)
     }
+
+    /// Reads the current cooperative session binding for an owner.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if persistence or epoch conversion fails.
+    pub fn owner_binding(&self, owner_id: &OwnerId) -> Result<Option<(String, u64)>, StoreError> {
+        self.connection
+            .query_row(
+                "SELECT session_id, binding_epoch FROM owner_bindings WHERE owner_id = ?1",
+                [owner_id.as_str()],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .optional()?
+            .map(|(session, epoch)| {
+                Ok((
+                    session,
+                    u64::try_from(epoch).map_err(|_| StoreError::NumericOverflow)?,
+                ))
+            })
+            .transpose()
+    }
+
+    /// Explicitly transfers an owner to a new session with a larger epoch.
+    /// Existing inbox items and decisions remain under the same owner ID.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an empty session, epoch overflow, or DB failure.
+    pub fn rebind_owner(&self, owner_id: &OwnerId, session_id: &str) -> Result<u64, StoreError> {
+        if session_id.trim().is_empty() {
+            return Err(StoreError::InvalidOwnerBinding);
+        }
+        let transaction = self.connection.unchecked_transaction()?;
+        let prior: Option<(String, i64)> = transaction
+            .query_row(
+                "SELECT session_id, binding_epoch FROM owner_bindings WHERE owner_id = ?1",
+                [owner_id.as_str()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        if let Some((stored_session, epoch)) = &prior
+            && stored_session == session_id
+        {
+            return u64::try_from(*epoch).map_err(|_| StoreError::NumericOverflow);
+        }
+        let epoch = prior.map_or(Ok(1_i64), |(_, epoch)| {
+            epoch.checked_add(1).ok_or(StoreError::NumericOverflow)
+        })?;
+        transaction.execute(
+            "INSERT INTO owner_bindings (owner_id, session_id, binding_epoch)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(owner_id) DO UPDATE SET
+               session_id = excluded.session_id,
+               binding_epoch = excluded.binding_epoch",
+            params![owner_id.as_str(), session_id, epoch],
+        )?;
+        transaction.commit()?;
+        u64::try_from(epoch).map_err(|_| StoreError::NumericOverflow)
+    }
+}
+
+fn assert_owner_binding(
+    transaction: &Transaction<'_>,
+    owner_id: &OwnerId,
+    session_id: Option<&str>,
+    binding_epoch: Option<u64>,
+) -> Result<(), StoreError> {
+    let Some((bound_session, bound_epoch)) = transaction
+        .query_row(
+            "SELECT session_id, binding_epoch FROM owner_bindings WHERE owner_id = ?1",
+            [owner_id.as_str()],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+        )
+        .optional()?
+    else {
+        return Err(StoreError::OwnerUnbound(owner_id.clone()));
+    };
+    if session_id != Some(bound_session.as_str())
+        || binding_epoch != u64::try_from(bound_epoch).ok()
+    {
+        return Err(StoreError::OwnerBindingConflict);
+    }
+    Ok(())
 }
 
 fn record_decision_in_transaction(
@@ -1065,6 +1210,12 @@ fn record_decision_in_transaction(
     decision: &Decision,
 ) -> Result<WriteOutcome, StoreError> {
     validate_schema(&decision.schema)?;
+    assert_owner_binding(
+        transaction,
+        &decision.owner_id,
+        decision.session_id.as_deref(),
+        decision.binding_epoch,
+    )?;
     let decision_json = serde_json::to_string(decision)?;
     if let Some(stored_json) = transaction
         .query_row(
@@ -1142,6 +1293,8 @@ fn decisions_equal_except_id(left: &Decision, right: &Decision) -> bool {
         && left.revision == right.revision
         && left.result_id == right.result_id
         && left.result_digest == right.result_digest
+        && left.session_id == right.session_id
+        && left.binding_epoch == right.binding_epoch
         && left.verdict == right.verdict
         && left.reason == right.reason
 }
@@ -1450,8 +1603,10 @@ pub enum StoreError {
     EventConflict,
     #[error("owner binding session and epoch are invalid")]
     InvalidOwnerBinding,
-    #[error("owner binding cannot replace the same or a newer epoch")]
+    #[error("owner binding belongs to a different session or stale epoch")]
     OwnerBindingConflict,
+    #[error("owner {0} has no bound Codex session")]
+    OwnerUnbound(OwnerId),
     #[error("artifact limit must be positive")]
     InvalidArtifactLimit,
     #[error("artifact media type must not be empty")]
@@ -1574,10 +1729,15 @@ mod tests {
             store.bind_owner(&task.owner_id, "session-b", 1),
             Err(StoreError::OwnerBindingConflict)
         ));
-        assert_eq!(
-            store.bind_owner(&task.owner_id, "session-b", 2).unwrap(),
-            WriteOutcome::Inserted
-        );
+        assert!(matches!(
+            store.bind_owner(&task.owner_id, "session-b", 2),
+            Err(StoreError::OwnerBindingConflict)
+        ));
+        assert_eq!(store.rebind_owner(&task.owner_id, "session-b").unwrap(), 2);
+        assert!(matches!(
+            store.bind_owner(&task.owner_id, "session-a", 100),
+            Err(StoreError::OwnerBindingConflict)
+        ));
     }
 
     #[test]
@@ -1594,6 +1754,7 @@ mod tests {
         store
             .commit_terminal_result(&task.owner_id, &result)
             .unwrap();
+        store.bind_owner(&task.owner_id, "session-a", 1).unwrap();
         let decision = Decision {
             schema: SCHEMA_V1.to_owned(),
             decision_id: DecisionId::new(),
@@ -1602,6 +1763,8 @@ mod tests {
             revision: task.revision,
             result_id: result.result_id,
             result_digest: Store::result_digest(&result).unwrap(),
+            session_id: Some("session-a".to_owned()),
+            binding_epoch: Some(1),
             verdict: DecisionVerdict::Accepted,
             reason: "meets contract".to_owned(),
         };
@@ -1626,6 +1789,97 @@ mod tests {
     }
 
     #[test]
+    fn stale_binding_epoch_cannot_decide_or_replay_after_rebind() {
+        let root = TempDir::new().unwrap();
+        let mut store = Store::open(root.path()).unwrap();
+        let task = task();
+        store.record_task(&task, "binding-epoch").unwrap();
+        let attempt_id = AttemptId::new();
+        store
+            .claim_attempt(task.task_id, task.revision, attempt_id)
+            .unwrap();
+        let result = sealed_result(&store, &task, attempt_id);
+        store
+            .commit_terminal_result(&task.owner_id, &result)
+            .unwrap();
+        assert!(matches!(
+            store.record_decision(&Decision {
+                schema: SCHEMA_V1.to_owned(),
+                decision_id: DecisionId::new(),
+                owner_id: task.owner_id.clone(),
+                task_id: task.task_id,
+                revision: task.revision,
+                result_id: result.result_id,
+                result_digest: Store::result_digest(&result).unwrap(),
+                session_id: Some("session-a".to_owned()),
+                binding_epoch: Some(1),
+                verdict: DecisionVerdict::Accepted,
+                reason: "fixture".to_owned(),
+            }),
+            Err(StoreError::OwnerUnbound(_))
+        ));
+        assert_eq!(store.rebind_owner(&task.owner_id, "session-a").unwrap(), 1);
+        let old = Decision {
+            schema: SCHEMA_V1.to_owned(),
+            decision_id: DecisionId::new(),
+            owner_id: task.owner_id.clone(),
+            task_id: task.task_id,
+            revision: task.revision,
+            result_id: result.result_id,
+            result_digest: Store::result_digest(&result).unwrap(),
+            session_id: Some("session-a".to_owned()),
+            binding_epoch: Some(1),
+            verdict: DecisionVerdict::Accepted,
+            reason: "fixture".to_owned(),
+        };
+        assert_eq!(store.rebind_owner(&task.owner_id, "session-b").unwrap(), 2);
+        assert!(matches!(
+            store.acknowledge_bound(&task.owner_id, result.result_id, "session-a", 1),
+            Err(StoreError::OwnerBindingConflict)
+        ));
+        assert!(matches!(
+            store.record_decision_and_ack(&old),
+            Err(StoreError::OwnerBindingConflict)
+        ));
+        assert_eq!(store.inbox(&task.owner_id, false).unwrap().len(), 1);
+        let current = Decision {
+            session_id: Some("session-b".to_owned()),
+            binding_epoch: Some(2),
+            ..old
+        };
+        store.record_decision_and_ack(&current).unwrap();
+        assert!(store.inbox(&task.owner_id, false).unwrap().is_empty());
+        assert_eq!(store.rebind_owner(&task.owner_id, "session-b").unwrap(), 2);
+    }
+
+    #[test]
+    fn session_task_list_filters_before_applying_the_limit() {
+        let root = TempDir::new().unwrap();
+        let mut store = Store::open(root.path()).unwrap();
+        let owned = task();
+        store.record_task(&owned, "owned").unwrap();
+        store.bind_owner(&owned.owner_id, "session-a", 1).unwrap();
+        let other_owner = OwnerId::new("codex:other").unwrap();
+        store.bind_owner(&other_owner, "session-b", 1).unwrap();
+        for number in 0..21 {
+            let mut other = task();
+            other.owner_id = other_owner.clone();
+            other.create_request_id = format!("other-{number}");
+            store
+                .record_task(&other, &format!("digest-{number}"))
+                .unwrap();
+        }
+        let listed = store.tasks_for_session("session-a", None, 20).unwrap();
+        assert_eq!(listed, vec![owned]);
+        assert!(
+            store
+                .tasks_for_session("session-a", Some(&other_owner), 20)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn failed_result_cannot_be_accepted_through_store_api() {
         let root = TempDir::new().unwrap();
         let mut store = Store::open(root.path()).unwrap();
@@ -1643,6 +1897,7 @@ mod tests {
         store
             .commit_terminal_result(&task.owner_id, &result)
             .unwrap();
+        store.bind_owner(&task.owner_id, "session-a", 1).unwrap();
         let decision = Decision {
             schema: SCHEMA_V1.to_owned(),
             decision_id: DecisionId::new(),
@@ -1651,6 +1906,8 @@ mod tests {
             revision: task.revision,
             result_id: result.result_id,
             result_digest: Store::result_digest(&result).unwrap(),
+            session_id: Some("session-a".to_owned()),
+            binding_epoch: Some(1),
             verdict: DecisionVerdict::Accepted,
             reason: "must fail".to_owned(),
         };
@@ -1918,6 +2175,7 @@ mod tests {
         store
             .commit_terminal_result(&task.owner_id, &result)
             .unwrap();
+        store.bind_owner(&task.owner_id, "session-a", 1).unwrap();
         let decision = Decision {
             schema: SCHEMA_V1.to_owned(),
             decision_id: DecisionId::new(),
@@ -1926,6 +2184,8 @@ mod tests {
             revision: task.revision,
             result_id: result.result_id,
             result_digest: Store::result_digest(&result).unwrap(),
+            session_id: Some("session-a".to_owned()),
+            binding_epoch: Some(1),
             verdict: DecisionVerdict::Accepted,
             reason: "verified".to_owned(),
         };
@@ -1979,6 +2239,7 @@ mod tests {
         store
             .commit_terminal_result(&task.owner_id, &result)
             .unwrap();
+        store.bind_owner(&task.owner_id, "session-a", 1).unwrap();
         store
             .connection
             .execute_batch(
@@ -1994,6 +2255,8 @@ mod tests {
             revision: task.revision,
             result_id: result.result_id,
             result_digest: Store::result_digest(&result).unwrap(),
+            session_id: Some("session-a".to_owned()),
+            binding_epoch: Some(1),
             verdict: DecisionVerdict::Accepted,
             reason: "verified".to_owned(),
         };

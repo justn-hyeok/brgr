@@ -23,6 +23,12 @@ Candidate output is never accepted because a process exits successfully. Codex
 checks the task's acceptance criteria and records an accept or reject decision
 against the exact result digest. Transport acknowledgment only marks an inbox
 item as received.
+The decision also records the currently bound Codex session and monotonically
+increasing binding epoch. An unbound task cannot be read or decided through the
+CLI. A SessionStart hook may establish a first binding but cannot replace a
+different session; explicit `brgr bind TASK` transfers the stable owner and
+invalidates stale-session commands. This is cooperative identity checking,
+not authentication against another process running as the same OS user.
 
 The v1 trust model assumes installed same-user harnesses are cooperative. File
 permissions, digest locks, size limits, typed events, and environment allowlists

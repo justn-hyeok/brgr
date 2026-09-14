@@ -517,6 +517,7 @@ mod tests {
             result_digest: Some(Store::result_digest(&result).unwrap()),
         };
         assert!(!decision_is_complete(&store, &receipt).unwrap());
+        store.bind_owner(&owner_id, "session-a", 1).unwrap();
         let decision = Decision {
             schema: SCHEMA_V1.to_owned(),
             decision_id: DecisionId::new(),
@@ -525,6 +526,8 @@ mod tests {
             revision: 1,
             result_id: result.result_id,
             result_digest: Store::result_digest(&result).unwrap(),
+            session_id: Some("session-a".to_owned()),
+            binding_epoch: Some(1),
             verdict: DecisionVerdict::Accepted,
             reason: "checked".to_owned(),
         };

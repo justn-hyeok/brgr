@@ -58,6 +58,11 @@ enum Command {
     Cancel {
         task: TaskId,
     },
+    Bind {
+        task: TaskId,
+        #[arg(long)]
+        session: Option<String>,
+    },
     Accept {
         task: TaskId,
         #[arg(long, default_value = "acceptance criteria verified")]
@@ -321,6 +326,7 @@ async fn main() -> Result<()> {
         Command::Status { task } => status(&paths, task, cli.json),
         Command::Result { task, ack } => result(&paths, task, ack, cli.json),
         Command::Cancel { task } => cancel(&paths, task, cli.json),
+        Command::Bind { task, session } => bind(&paths, task, session, cli.json),
         Command::Accept { task, reason } => {
             decide(&paths, task, DecisionVerdict::Accepted, reason, cli.json)
         }
@@ -435,7 +441,7 @@ async fn run_task(paths: &Paths, args: RunArgs, json_output: bool) -> Result<()>
 async fn revise_task(paths: &Paths, args: ReviseArgs, json_output: bool) -> Result<()> {
     let store = Store::open(&paths.store)?;
     let previous = store.task(args.task)?;
-    require_owner(&previous.owner_id)?;
+    require_owner(&store, &previous.owner_id)?;
     let result = store.latest_result(args.task)?;
     if result.revision != previous.revision {
         bail!("the latest revision has not produced a terminal result");
@@ -520,6 +526,18 @@ async fn start_task(
     let home = paths.home.canonicalize()?;
     if source.starts_with(&home) || home.starts_with(&source) {
         bail!("brgr control home and the source workspace must not overlap");
+    }
+    let store = Store::open(&paths.store)?;
+    let session = current_session()?;
+    match (store.owner_binding(&spec.owner_id)?, session.as_deref()) {
+        (Some((bound, _)), Some(current)) if bound == current => {}
+        (None, Some(current)) => {
+            store.rebind_owner(&spec.owner_id, current)?;
+        }
+        (Some(_), _) => bail!(
+            "owner is bound to another session; run `brgr bind TASK --session SESSION` before starting another revision"
+        ),
+        (None, None) => {}
     }
     let task_id = spec.task_id;
     let harness_id = spec.route.harness_id.clone();
@@ -826,6 +844,7 @@ fn status(paths: &Paths, task: Option<TaskId>, json_output: bool) -> Result<()> 
     let store = Store::open(&paths.store)?;
     if let Some(task_id) = task {
         let spec = store.task(task_id)?;
+        require_owner(&store, &spec.owner_id)?;
         let state = match store.attempt_state(task_id) {
             Ok(state) => state,
             Err(StoreError::TaskNotFound(_)) => AttemptState::Queued,
@@ -836,8 +855,14 @@ fn status(paths: &Paths, task: Option<TaskId>, json_output: bool) -> Result<()> 
             json_output,
         );
     } else {
+        let session = current_session()?;
+        let owner = env::var("BRGR_OWNER_ID")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .map(OwnerId::new)
+            .transpose()?;
         let tasks = store
-            .tasks(20)?
+            .tasks_for_session(session.as_deref().unwrap_or(""), owner.as_ref(), 20)?
             .into_iter()
             .map(|spec| {
                 let state = store.attempt_state(spec.task_id).ok();
@@ -852,7 +877,7 @@ fn status(paths: &Paths, task: Option<TaskId>, json_output: bool) -> Result<()> 
 fn result(paths: &Paths, task: TaskId, ack: bool, json_output: bool) -> Result<()> {
     let store = Store::open(&paths.store)?;
     let spec = store.task(task)?;
-    require_owner(&spec.owner_id)?;
+    let (session_id, binding_epoch) = require_owner(&store, &spec.owner_id)?;
     let result = store.latest_result(task)?;
     let artifacts = result
         .artifacts
@@ -866,7 +891,7 @@ fn result(paths: &Paths, task: TaskId, ack: bool, json_output: bool) -> Result<(
         })
         .collect::<Result<Vec<_>>>()?;
     if ack {
-        store.acknowledge(&spec.owner_id, result.result_id)?;
+        store.acknowledge_bound(&spec.owner_id, result.result_id, &session_id, binding_epoch)?;
         if let Err(error) = pane_cleanup::mark_pending(&paths.runs, task, &result) {
             eprintln!("brgr pane cleanup queue could not be updated: {error}");
         } else if let Err(error) = pane_cleanup::close_if_eligible(&store, &paths.runs, task) {
@@ -883,7 +908,7 @@ fn result(paths: &Paths, task: TaskId, ack: bool, json_output: bool) -> Result<(
 fn cancel(paths: &Paths, task: TaskId, json_output: bool) -> Result<()> {
     let store = Store::open(&paths.store)?;
     let spec = store.task(task)?;
-    require_owner(&spec.owner_id)?;
+    require_owner(&store, &spec.owner_id)?;
     let state = match store.attempt_state(task) {
         Ok(state) => state,
         Err(StoreError::TaskNotFound(_)) => AttemptState::Queued,
@@ -912,6 +937,29 @@ fn cancel(paths: &Paths, task: TaskId, json_output: bool) -> Result<()> {
     Ok(())
 }
 
+fn bind(paths: &Paths, task: TaskId, session: Option<String>, json_output: bool) -> Result<()> {
+    let store = Store::open(&paths.store)?;
+    let spec = store.task(task)?;
+    if let Ok(explicit_owner) = env::var("BRGR_OWNER_ID")
+        && explicit_owner != spec.owner_id.as_str()
+    {
+        bail!("task belongs to {}; BRGR_OWNER_ID differs", spec.owner_id);
+    }
+    let observed = current_session()?;
+    let session = session
+        .or_else(|| observed.clone())
+        .context("provide --session SESSION or run inside a Codex session")?;
+    if observed.as_ref().is_some_and(|value| value != &session) {
+        bail!("requested session does not match the current Codex session");
+    }
+    let epoch = store.rebind_owner(&spec.owner_id, &session)?;
+    print_value(
+        &json!({"owner_id": spec.owner_id, "session_id": session, "binding_epoch": epoch}),
+        json_output,
+    );
+    Ok(())
+}
+
 fn decide(
     paths: &Paths,
     task: TaskId,
@@ -924,7 +972,7 @@ fn decide(
     }
     let store = Store::open(&paths.store)?;
     let spec = store.task(task)?;
-    require_owner(&spec.owner_id)?;
+    let (session_id, binding_epoch) = require_owner(&store, &spec.owner_id)?;
     let result = store.latest_result(task)?;
     if result.outcome != TerminalOutcome::Candidate {
         bail!("only candidate results can be accepted or rejected");
@@ -943,6 +991,8 @@ fn decide(
         revision: result.revision,
         result_id: result.result_id,
         result_digest: Store::result_digest(&result)?,
+        session_id: Some(session_id),
+        binding_epoch: Some(binding_epoch),
         verdict,
         reason,
     };
@@ -1094,7 +1144,7 @@ fn cleanup(paths: &Paths, command: CleanupCommand, json_output: bool) -> Result<
     };
     let store = Store::open(&paths.store)?;
     let spec = store.task(task)?;
-    require_owner(&spec.owner_id)?;
+    require_owner(&store, &spec.owner_id)?;
     let status = match command {
         CleanupCommand::Status { .. } => pane_cleanup::status(&store, &paths.runs, task)?,
         CleanupCommand::Run { .. } => pane_cleanup::close_if_eligible(&store, &paths.runs, task)?,
@@ -1561,23 +1611,48 @@ fn command_output(program: &str, args: &[&str]) -> Result<String> {
 }
 
 fn owner_from_environment() -> Result<OwnerId> {
+    let session = current_session()?;
     let owner = env::var("BRGR_OWNER_ID")
         .ok()
-        .or_else(|| {
-            env::var("CODEX_THREAD_ID")
-                .ok()
-                .map(|id| format!("codex:{id}"))
-        })
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| session.map(|id| format!("codex:{id}")))
         .unwrap_or_else(|| "codex:manual".to_owned());
     Ok(OwnerId::new(owner)?)
 }
 
-fn require_owner(expected: &OwnerId) -> Result<()> {
-    let caller = owner_from_environment()?;
-    if &caller != expected {
-        bail!("task belongs to {expected}; current caller is {caller}");
+fn current_session() -> Result<Option<String>> {
+    let codex = env::var("CODEX_THREAD_ID")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+    let explicit = env::var("BRGR_SESSION_ID")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+    if codex
+        .as_ref()
+        .zip(explicit.as_ref())
+        .is_some_and(|(a, b)| a != b)
+    {
+        bail!("CODEX_THREAD_ID and BRGR_SESSION_ID disagree");
     }
-    Ok(())
+    Ok(codex.or(explicit))
+}
+
+fn require_owner(store: &Store, expected: &OwnerId) -> Result<(String, u64)> {
+    if let Ok(explicit_owner) = env::var("BRGR_OWNER_ID")
+        && explicit_owner != expected.as_str()
+    {
+        bail!("task belongs to {expected}; BRGR_OWNER_ID differs");
+    }
+    let session = current_session()?.context("a Codex session is required; use `brgr bind TASK --session SESSION` to claim an unbound task")?;
+    let (bound, epoch) = store.owner_binding(expected)?.with_context(|| {
+        format!("owner {expected} is unbound; run `brgr bind TASK --session {session}`")
+    })?;
+    if bound != session {
+        bail!(
+            "owner {expected} is bound to another session; use `brgr bind TASK --session {session}` to transfer it"
+        );
+    }
+    Ok((session, epoch))
 }
 
 fn write_json_atomic(path: &Path, value: &impl Serialize) -> Result<()> {

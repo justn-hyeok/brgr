@@ -10,6 +10,8 @@ fn brgr() -> &'static str {
 fn run(home: &Path, args: &[&str], envs: &[(&str, &str)]) -> std::process::Output {
     let mut command = Command::new(brgr());
     command.arg("--home").arg(home).arg("--json").args(args);
+    command.env_remove("CODEX_THREAD_ID");
+    command.env("BRGR_SESSION_ID", "fixture-session");
     for (name, value) in envs {
         command.env(name, value);
     }
@@ -158,7 +160,11 @@ fn real_cli_run_binds_candidate_to_its_owner() {
     ));
     assert_eq!(result["outcome"], "candidate");
     let task = result["task_id"].as_str().unwrap();
-    let current = json_output(&run(&home, &["status", task], &[]));
+    let current = json_output(&run(
+        &home,
+        &["status", task],
+        &[("BRGR_OWNER_ID", "codex:owner-a")],
+    ));
     assert_eq!(
         current["task"]["acceptance_criteria"][0],
         "artifact text equals BRGR_FIXTURE_OK"
@@ -227,6 +233,66 @@ fn control_home_inside_worker_workspace_is_rejected_before_task_admission() {
             .unwrap()
             .is_empty()
     );
+}
+
+#[test]
+fn unbound_task_needs_explicit_session_and_stale_session_cannot_decide() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("brgr");
+    let workspace = temp.path().join("work");
+    fs::create_dir_all(&workspace).unwrap();
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../testdata/fixtures/gjc")
+        .canonicalize()
+        .unwrap();
+    json_output(&run(
+        &home,
+        &["harness", "add", fixture.to_str().unwrap()],
+        &[],
+    ));
+    let unbound = [("BRGR_OWNER_ID", "codex:unbound"), ("BRGR_SESSION_ID", "")];
+    let first = json_output(&run(
+        &home,
+        &[
+            "run",
+            "BRGR_FIXTURE_OK",
+            "--workspace",
+            workspace.to_str().unwrap(),
+            "--foreground",
+        ],
+        &unbound,
+    ));
+    let task = first["task_id"].as_str().unwrap();
+    assert_eq!(first["outcome"], "candidate");
+    assert!(!run(&home, &["result", task], &unbound).status.success());
+    assert!(!run(&home, &["accept", task], &unbound).status.success());
+    let bound = json_output(&run(
+        &home,
+        &["bind", task, "--session", "session-a"],
+        &unbound,
+    ));
+    let initial_epoch = bound["binding_epoch"].as_u64().unwrap();
+    let session_a = [
+        ("BRGR_OWNER_ID", "codex:unbound"),
+        ("BRGR_SESSION_ID", "session-a"),
+    ];
+    assert_eq!(
+        json_output(&run(&home, &["result", task], &session_a))["artifacts"][0]["text"],
+        "BRGR_FIXTURE_OK"
+    );
+    let session_b = [("BRGR_SESSION_ID", "session-b")];
+    let rebound = json_output(&run(&home, &["bind", task], &session_b));
+    assert!(rebound["binding_epoch"].as_u64().unwrap() > initial_epoch);
+    assert!(!run(&home, &["result", task], &session_a).status.success());
+    assert!(!run(&home, &["accept", task], &session_a).status.success());
+    let accepted = json_output(&run(
+        &home,
+        &["accept", task, "--reason", "new session verified fixture"],
+        &session_b,
+    ));
+    assert_eq!(accepted["verdict"], "accepted");
+    assert_eq!(accepted["session_id"], "session-b");
+    assert_eq!(accepted["binding_epoch"], rebound["binding_epoch"]);
 }
 
 #[test]

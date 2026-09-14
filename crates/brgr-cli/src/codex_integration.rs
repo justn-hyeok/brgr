@@ -28,6 +28,9 @@ for a fresh managed task. Keep the user conversation in Codex and report a
 short handle. Use `brgr status`, `brgr result`, and `brgr cancel` for follow-up.
 For a rejected candidate, use `brgr revise TASK "<corrected objective>"
 --criterion "<new check>"`; do not rewrite the old result or silently retry.
+An unbound result needs `brgr bind TASK` from the current Codex session before
+it can be read, acknowledged, or decided. After a session transfer, bind the
+same task explicitly; a stale session cannot decide it.
 
 For an approved unfamiliar CLI, use `brgr harness draft EXECUTABLE` when its
 documented shape is recognized. Otherwise inspect its bounded help/version,
