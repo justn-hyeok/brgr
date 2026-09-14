@@ -14,6 +14,11 @@ Before running a downloaded archive:
    per-item **Open Anyway** control in System Settings > Privacy & Security only
    if you trust the repository and verified the checksum.
 
+The SPDX SBOM is generated for the `brgr-cli` Cargo package and records
+dependency license declarations from the package metadata. It is an inventory,
+not a legal conclusion or a guarantee that every dependency is linked into
+the final executable. The checksum file covers both the archive and SBOM.
+
 The project never asks users to disable Gatekeeper globally and never removes
 quarantine metadata automatically. See Apple's guidance on safely opening
 software from an unidentified developer:
