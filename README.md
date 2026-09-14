@@ -12,9 +12,9 @@ unsigned and not notarized. Read [the unsigned distribution guide](docs/unsigned
 before sharing or running a downloaded binary.
 
 The public release is usable for the bounded managed-run contract, but the
-full natural-language v1 acceptance gates remain open. See the
-[current readiness checklist](docs/v1-readiness-checklist-2026-09-14.md)
-before treating it as complete production automation.
+full natural-language v1 acceptance gates remain open. The
+[current checklist](docs/v1-readiness-checklist-2026-09-14.md) separates
+personal-use reliability work from public-release gates.
 
 GJC, Cursor CLI, Command Code, and OMP have bounded one-shot process recipes.
 Herdr is optional:
@@ -107,6 +107,14 @@ model-catalog recipe. Older activations lacking it must be re-certified; an
 unknown selector fails before a task worktree or model request is started.
 Presentation-only Herdr model requests are checked against OMP's native
 catalog before brgr admission and checked again by `omp-role` at dispatch.
+
+`brgr doctor` probes every registered harness as well as the Codex integration
+and store. It exits with `needs_attention` and names an unhealthy harness when
+an executable or recipe has changed; re-add that harness with an authorized
+scratch run before starting new work. JSONL process capture discards repeated
+update events while retaining completed assistant/model evidence. Raw transport
+remains bounded to 64 MiB, and the sealed final answer still obeys its manifest
+artifact limit. Over-limit processes are stopped and produce a failed result.
 
 `brgr cleanup status TASK` shows whether an owned OMP pane was closed or
 retained. `brgr cleanup run TASK` retries a pending close. Neither command
