@@ -864,7 +864,9 @@ impl Store {
         let state = self
             .connection
             .query_row(
-                "SELECT state FROM attempts WHERE task_id = ?1 ORDER BY rowid DESC LIMIT 1",
+                "SELECT state FROM attempts WHERE task_id = ?1
+                 AND revision = (SELECT MAX(revision) FROM tasks WHERE task_id = ?1)
+                 ORDER BY rowid DESC LIMIT 1",
                 [task_id.to_string()],
                 |row| row.get::<_, String>(0),
             )
@@ -882,7 +884,9 @@ impl Store {
         let json = self
             .connection
             .query_row(
-                "SELECT envelope_json FROM results WHERE task_id = ?1 ORDER BY rowid DESC LIMIT 1",
+                "SELECT envelope_json FROM results WHERE task_id = ?1
+                 AND revision = (SELECT MAX(revision) FROM tasks WHERE task_id = ?1)
+                 ORDER BY rowid DESC LIMIT 1",
                 [task_id.to_string()],
                 |row| row.get::<_, String>(0),
             )
@@ -1009,9 +1013,9 @@ fn record_decision_in_transaction(
         };
     }
 
-    let (stored_digest, owner_id, task_id, revision) = transaction
+    let (stored_digest, owner_id, task_id, revision, envelope_json) = transaction
         .query_row(
-            "SELECT r.result_digest, i.owner_id, r.task_id, r.revision
+            "SELECT r.result_digest, i.owner_id, r.task_id, r.revision, r.envelope_json
                  FROM results r JOIN inbox_items i ON i.result_id = r.result_id
                  WHERE r.result_id = ?1",
             [decision.result_id.to_string()],
@@ -1021,11 +1025,16 @@ fn record_decision_in_transaction(
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
                     row.get::<_, u32>(3)?,
+                    row.get::<_, String>(4)?,
                 ))
             },
         )
         .optional()?
         .ok_or(StoreError::ResultNotFound(decision.result_id))?;
+    let result: ResultEnvelope = serde_json::from_str(&envelope_json)?;
+    if result.outcome != brgr_protocol::TerminalOutcome::Candidate {
+        return Err(StoreError::DecisionRequiresCandidate);
+    }
     if stored_digest != decision.result_digest {
         return Err(StoreError::ResultDigestMismatch);
     }
@@ -1294,6 +1303,8 @@ pub enum StoreError {
     DecisionOwnerMismatch,
     #[error("decision does not belong to its result task revision")]
     DecisionResultMismatch,
+    #[error("only a candidate result may be accepted or rejected")]
+    DecisionRequiresCandidate,
     #[error("result {0} already has a different decision")]
     DecisionConflict(ResultId),
     #[error("the owner inbox item does not exist")]
@@ -1477,6 +1488,42 @@ mod tests {
             store.record_decision(&conflicting),
             Err(StoreError::DecisionConflict(_))
         ));
+    }
+
+    #[test]
+    fn failed_result_cannot_be_accepted_through_store_api() {
+        let root = TempDir::new().unwrap();
+        let mut store = Store::open(root.path()).unwrap();
+        let task = task();
+        let attempt_id = AttemptId::new();
+        store.record_task(&task, "failed-decision").unwrap();
+        store
+            .create_attempt(task.task_id, task.revision, attempt_id)
+            .unwrap();
+        let result = ResultEnvelope {
+            outcome: TerminalOutcome::Failed,
+            error: Some("no artifact".to_owned()),
+            ..result(&task, attempt_id)
+        };
+        store
+            .commit_terminal_result(&task.owner_id, &result)
+            .unwrap();
+        let decision = Decision {
+            schema: SCHEMA_V1.to_owned(),
+            decision_id: DecisionId::new(),
+            owner_id: task.owner_id.clone(),
+            task_id: task.task_id,
+            revision: task.revision,
+            result_id: result.result_id,
+            result_digest: Store::result_digest(&result).unwrap(),
+            verdict: DecisionVerdict::Accepted,
+            reason: "must fail".to_owned(),
+        };
+        assert!(matches!(
+            store.record_decision_and_ack(&decision),
+            Err(StoreError::DecisionRequiresCandidate)
+        ));
+        assert_eq!(store.inbox(&task.owner_id, false).unwrap().len(), 1);
     }
 
     #[test]

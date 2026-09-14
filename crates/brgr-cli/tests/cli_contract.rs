@@ -1,4 +1,4 @@
-use std::{fs, path::Path, process::Command};
+use std::{fs, os::unix::fs::PermissionsExt, path::Path, process::Command};
 
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -78,6 +78,55 @@ fn conflicting_skill_does_not_change_existing_hooks() {
 }
 
 #[test]
+fn owned_old_skill_and_hook_upgrade_without_touching_foreign_hook() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("brgr");
+    let codex_home = temp.path().join("codex");
+    let envs = [("CODEX_HOME", codex_home.to_str().unwrap())];
+    let hooks_path = codex_home.join("hooks.json");
+    fs::create_dir_all(&codex_home).unwrap();
+    fs::write(
+        &hooks_path,
+        br#"{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"foreign-hook"}]}]}}"#,
+    )
+    .unwrap();
+    json_output(&run(&home, &["integrate", "codex", "install"], &envs));
+    let receipt_path = home.join("codex-integration.json");
+    let mut receipt: Value = serde_json::from_slice(&fs::read(&receipt_path).unwrap()).unwrap();
+    let skill_path = codex_home.join("skills/brgr/SKILL.md");
+    fs::write(&skill_path, "owned prior brgr skill\n").unwrap();
+    receipt["skill_text"] = json!("owned prior brgr skill\n");
+    let current_command = receipt["commands"]["Stop"].as_str().unwrap().to_owned();
+    let old_command = "owned-old-brgr-hook";
+    receipt["commands"]["Stop"] = json!(old_command);
+    fs::write(&receipt_path, serde_json::to_vec(&receipt).unwrap()).unwrap();
+    let mut hooks: Value = serde_json::from_slice(&fs::read(&hooks_path).unwrap()).unwrap();
+    for entry in hooks["hooks"]["Stop"].as_array_mut().unwrap() {
+        if entry["hooks"][0]["command"] == current_command {
+            entry["hooks"][0]["command"] = json!(old_command);
+        }
+    }
+    fs::write(&hooks_path, serde_json::to_vec(&hooks).unwrap()).unwrap();
+
+    json_output(&run(&home, &["integrate", "codex", "install"], &envs));
+    let updated: Value = serde_json::from_slice(&fs::read(&hooks_path).unwrap()).unwrap();
+    let commands = updated["hooks"]["Stop"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| entry["hooks"][0]["command"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert!(commands.contains(&"foreign-hook"));
+    assert!(commands.contains(&current_command.as_str()));
+    assert!(!commands.contains(&old_command));
+    assert!(
+        fs::read_to_string(skill_path)
+            .unwrap()
+            .contains("brgr revise")
+    );
+}
+
+#[test]
 fn real_cli_run_binds_candidate_to_its_owner() {
     let temp = TempDir::new().unwrap();
     let home = temp.path().join("brgr");
@@ -97,6 +146,8 @@ fn real_cli_run_binds_candidate_to_its_owner() {
         &[
             "run",
             "BRGR_FIXTURE_OK",
+            "--criterion",
+            "artifact text equals BRGR_FIXTURE_OK",
             "--workspace",
             workspace.to_str().unwrap(),
             "--deadline-seconds",
@@ -107,6 +158,11 @@ fn real_cli_run_binds_candidate_to_its_owner() {
     ));
     assert_eq!(result["outcome"], "candidate");
     let task = result["task_id"].as_str().unwrap();
+    let current = json_output(&run(&home, &["status", task], &[]));
+    assert_eq!(
+        current["task"]["acceptance_criteria"][0],
+        "artifact text equals BRGR_FIXTURE_OK"
+    );
     let readable = json_output(&run(
         &home,
         &["result", task],
@@ -131,6 +187,157 @@ fn real_cli_run_binds_candidate_to_its_owner() {
         &[("BRGR_OWNER_ID", "codex:owner-a")],
     ));
     assert_eq!(accepted["verdict"], "accepted");
+}
+
+#[test]
+fn unsupported_model_fails_before_task_admission() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("brgr");
+    let workspace = temp.path().join("work");
+    fs::create_dir_all(&workspace).unwrap();
+    let executable = temp.path().join("prompt-only");
+    fs::write(
+        &executable,
+        "#!/bin/sh\ncase \"$1\" in\n  --version) echo 'prompt-only 1';;\n  --help) echo '  --prompt-file <path>  fresh run';;\n  --prompt-file) /bin/cat \"$2\";;\n  *) exit 2;;\nesac\n",
+    )
+    .unwrap();
+    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+    json_output(&run(
+        &home,
+        &[
+            "harness",
+            "activate",
+            executable.to_str().unwrap(),
+            "--workspace",
+            workspace.to_str().unwrap(),
+            "--prompt",
+            "scratch",
+        ],
+        &[],
+    ));
+
+    let attempted = run(
+        &home,
+        &[
+            "run",
+            "should not launch",
+            "--harness",
+            "local.prompt-only",
+            "--model",
+            "gpt-5.6-luna",
+            "--workspace",
+            workspace.to_str().unwrap(),
+        ],
+        &[],
+    );
+    assert!(!attempted.status.success());
+    assert!(String::from_utf8_lossy(&attempted.stderr).contains("model_select"));
+    assert!(
+        fs::read_dir(home.join("launches"))
+            .unwrap()
+            .next()
+            .is_none()
+    );
+}
+
+#[test]
+fn rejected_result_can_be_revised_without_rewriting_its_decision() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("brgr");
+    let workspace = temp.path().join("work");
+    fs::create_dir_all(&workspace).unwrap();
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../testdata/fixtures/gjc")
+        .canonicalize()
+        .unwrap();
+    json_output(&run(
+        &home,
+        &["harness", "add", fixture.to_str().unwrap()],
+        &[],
+    ));
+    let owner = [("BRGR_OWNER_ID", "codex:revision-owner")];
+    let first = json_output(&run(
+        &home,
+        &[
+            "run",
+            "first draft",
+            "--workspace",
+            workspace.to_str().unwrap(),
+            "--foreground",
+        ],
+        &owner,
+    ));
+    let task = first["task_id"].as_str().unwrap();
+    let original_result = first["result_id"].as_str().unwrap().to_owned();
+    assert_eq!(first["revision"], 1);
+    assert_eq!(first["outcome"], "candidate");
+    json_output(&run(
+        &home,
+        &["reject", task, "--reason", "needs correction"],
+        &owner,
+    ));
+
+    let second = json_output(&run(
+        &home,
+        &[
+            "revise",
+            task,
+            "corrected draft",
+            "--criterion",
+            "the corrected draft is reviewable",
+            "--workspace",
+            workspace.to_str().unwrap(),
+            "--foreground",
+        ],
+        &owner,
+    ));
+    assert_eq!(second["task_id"], task);
+    assert_eq!(second["revision"], 2);
+    assert_eq!(second["outcome"], "candidate");
+    assert_ne!(second["result_id"], original_result);
+    assert!(home.join("launches").join(format!("{task}.json")).is_file());
+    assert!(
+        home.join("launches")
+            .join(format!("{task}-r2.json"))
+            .is_file()
+    );
+    let store = brgr_store::Store::open(home.join("store")).unwrap();
+    let first_id = original_result.parse().unwrap();
+    let original_decision = store.decision_for_result(first_id).unwrap().unwrap();
+    assert_eq!(
+        original_decision.verdict,
+        brgr_protocol::DecisionVerdict::Rejected
+    );
+    let latest = store.latest_result(task.parse().unwrap()).unwrap();
+    assert_eq!(
+        latest.result_id.to_string(),
+        second["result_id"].as_str().unwrap()
+    );
+    json_output(&run(
+        &home,
+        &["accept", task, "--reason", "corrected result checked"],
+        &owner,
+    ));
+    assert_eq!(
+        store
+            .decision_for_result(first_id)
+            .unwrap()
+            .unwrap()
+            .verdict,
+        brgr_protocol::DecisionVerdict::Rejected
+    );
+    let after_accept = run(
+        &home,
+        &["revise", task, "a third draft", "--foreground"],
+        &owner,
+    );
+    assert!(!after_accept.status.success());
+    assert!(
+        !home
+            .join("launches")
+            .join(format!("{task}-r3.json"))
+            .exists()
+    );
 }
 
 #[test]

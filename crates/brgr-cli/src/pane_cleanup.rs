@@ -473,7 +473,7 @@ mod tests {
                 media_type: "text/plain".to_owned(),
                 max_bytes: 100,
             },
-            acceptance_criteria: vec![],
+            acceptance_criteria: vec!["result is reviewable".to_owned()],
             budget: AttemptBudget {
                 deadline_seconds: 10,
                 max_attempts: 1,

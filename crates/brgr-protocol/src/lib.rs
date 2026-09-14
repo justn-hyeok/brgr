@@ -162,6 +162,27 @@ impl TaskSpec {
         if self.route.harness_id.trim().is_empty() {
             return Err(ProtocolError::EmptyHarness);
         }
+        if self
+            .route
+            .requested_model
+            .as_ref()
+            .is_some_and(|model| model.trim().is_empty())
+            || self
+                .route
+                .requested_effort
+                .as_ref()
+                .is_some_and(|effort| effort.trim().is_empty())
+        {
+            return Err(ProtocolError::EmptyRouteSelector);
+        }
+        if self.acceptance_criteria.is_empty()
+            || self
+                .acceptance_criteria
+                .iter()
+                .any(|criterion| criterion.trim().is_empty())
+        {
+            return Err(ProtocolError::InvalidAcceptanceCriteria);
+        }
         if self.artifact_contract.max_bytes == 0 || self.budget.deadline_seconds == 0 {
             return Err(ProtocolError::InvalidBudget);
         }
@@ -247,6 +268,10 @@ pub enum ProtocolError {
     EmptyWorkspace,
     #[error("harness id must not be empty")]
     EmptyHarness,
+    #[error("requested model and effort must not be blank")]
+    EmptyRouteSelector,
+    #[error("at least one nonempty acceptance criterion is required")]
+    InvalidAcceptanceCriteria,
     #[error("artifact and deadline limits must be positive")]
     InvalidBudget,
     #[error("v1 permits one initial attempt and at most one retry")]
@@ -310,7 +335,7 @@ mod tests {
                 media_type: "text/plain".to_owned(),
                 max_bytes: 1,
             },
-            acceptance_criteria: vec![],
+            acceptance_criteria: vec!["reviewed result".to_owned()],
             budget: AttemptBudget {
                 deadline_seconds: 1,
                 max_attempts: 3,
@@ -320,5 +345,10 @@ mod tests {
         assert_eq!(task.validate(), Err(ProtocolError::InvalidAttemptCount));
         task.budget.max_attempts = 2;
         assert!(task.validate().is_ok());
+        task.acceptance_criteria.clear();
+        assert_eq!(
+            task.validate(),
+            Err(ProtocolError::InvalidAcceptanceCriteria)
+        );
     }
 }

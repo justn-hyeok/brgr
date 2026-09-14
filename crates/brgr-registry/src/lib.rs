@@ -603,6 +603,8 @@ fn generate_omp_manifest(
         "--expected-report",
         "--reuse-worktree-objective",
         "--reuse-worktree-owner",
+        "--model",
+        "--effort",
     ]
     .iter()
     .all(|flag| help.contains(flag))
@@ -642,6 +644,8 @@ fn generate_omp_manifest(
                 "completion".to_owned(),
                 supported("contracted_report_and_terminal_herdr_state"),
             ),
+            ("model_select".to_owned(), supported("omp-role --model")),
+            ("effort_select".to_owned(), supported("omp-role --effort")),
             (
                 "presentation".to_owned(),
                 supported("herdr_optional_adapter"),
@@ -988,7 +992,7 @@ mod tests {
     async fn omp_role_symlink_keeps_legacy_adapter_name() {
         let root = tempfile::tempdir().unwrap();
         let target = root.path().join("launch_tui.py");
-        fs::write(&target, "#!/bin/sh\necho '--expected-report --reuse-worktree-objective --reuse-worktree-owner'\n").unwrap();
+        fs::write(&target, "#!/bin/sh\necho '--expected-report --reuse-worktree-objective --reuse-worktree-owner --model --effort'\n").unwrap();
         fs::set_permissions(&target, fs::Permissions::from_mode(0o700)).unwrap();
         let alias = root.path().join("omp-role");
         symlink(&target, &alias).unwrap();

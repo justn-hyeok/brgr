@@ -2,7 +2,6 @@ mod codex_integration;
 mod pane_cleanup;
 
 use std::{
-    collections::BTreeMap,
     env,
     fs::{self, OpenOptions},
     io::{self, Read, Write},
@@ -14,7 +13,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use brgr_core::{ExecutionObservation, Supervisor};
+use brgr_core::{ExecutionObservation, Supervisor, TaskRevision};
 use brgr_protocol::{
     ArtifactContract, AttemptBudget, Decision, DecisionId, DecisionVerdict, OwnerId, Route,
     SCHEMA_V1, TaskId, TaskSpec, TerminalOutcome,
@@ -44,6 +43,7 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     Run(RunArgs),
+    Revise(ReviseArgs),
     Status {
         task: Option<TaskId>,
     },
@@ -114,6 +114,8 @@ struct RunArgs {
     model: Option<String>,
     #[arg(long)]
     effort: Option<String>,
+    #[arg(long = "criterion")]
+    criteria: Vec<String>,
     #[arg(long, default_value_t = 3_600)]
     deadline_seconds: u64,
     #[arg(long)]
@@ -124,6 +126,45 @@ struct RunArgs {
     foreground: bool,
     #[arg(long)]
     keep_pane: bool,
+}
+
+#[derive(Args)]
+struct ReviseArgs {
+    task: TaskId,
+    objective: String,
+    #[arg(long = "criterion")]
+    criteria: Vec<String>,
+    #[arg(long)]
+    workspace: Option<PathBuf>,
+    #[arg(long)]
+    allow_clean_head_snapshot: bool,
+    #[arg(long, hide = true)]
+    foreground: bool,
+    #[arg(long)]
+    keep_pane: bool,
+}
+
+struct StartOptions<'a> {
+    source_workspace: &'a Path,
+    snapshot: WorkspaceSnapshot,
+    pane: PaneDisposition,
+    execution: ExecutionDisposition,
+    json_output: bool,
+}
+
+enum WorkspaceSnapshot {
+    RequireClean,
+    AllowCleanHead,
+}
+
+enum PaneDisposition {
+    CleanupAfterDecision,
+    Keep,
+}
+
+enum ExecutionDisposition {
+    Detached,
+    Foreground,
 }
 
 #[derive(Clone, Copy, Subcommand)]
@@ -255,6 +296,7 @@ async fn main() -> Result<()> {
     let paths = Paths::new(cli.home)?;
     match cli.command {
         Command::Run(args) => run_task(&paths, args, cli.json).await,
+        Command::Revise(args) => revise_task(&paths, args, cli.json).await,
         Command::Status { task } => status(&paths, task, cli.json),
         Command::Result { task, ack } => result(&paths, task, ack, cli.json),
         Command::Cancel { task } => cancel(&paths, task, cli.json),
@@ -311,7 +353,12 @@ async fn run_task(paths: &Paths, args: RunArgs, json_output: bool) -> Result<()>
     let task_id = TaskId::new();
     let source_workspace = args.workspace.unwrap_or(env::current_dir()?);
     let owner_id = owner_from_environment()?;
-    let mut spec = TaskSpec {
+    let criteria = if args.criteria.is_empty() {
+        vec![format!("Objective achieved: {}", args.objective)]
+    } else {
+        args.criteria
+    };
+    let spec = TaskSpec {
         schema: SCHEMA_V1.to_owned(),
         task_id,
         revision: 1,
@@ -326,35 +373,152 @@ async fn run_task(paths: &Paths, args: RunArgs, json_output: bool) -> Result<()>
         },
         required_capabilities: vec!["completion".to_owned()],
         artifact_contract: ArtifactContract {
-            media_type: activated.result.media_type,
+            media_type: activated.result.media_type.clone(),
             max_bytes: activated.result.max_bytes,
         },
-        acceptance_criteria: vec!["sealed non-empty result".to_owned()],
+        acceptance_criteria: criteria,
         budget: AttemptBudget {
             deadline_seconds: args.deadline_seconds,
             max_attempts: 2,
         },
     };
     spec.validate()?;
+    start_task(
+        paths,
+        spec,
+        &activated,
+        StartOptions {
+            source_workspace: &source_workspace,
+            snapshot: if args.allow_clean_head_snapshot {
+                WorkspaceSnapshot::AllowCleanHead
+            } else {
+                WorkspaceSnapshot::RequireClean
+            },
+            pane: if args.keep_pane {
+                PaneDisposition::Keep
+            } else {
+                PaneDisposition::CleanupAfterDecision
+            },
+            execution: if args.foreground {
+                ExecutionDisposition::Foreground
+            } else {
+                ExecutionDisposition::Detached
+            },
+            json_output,
+        },
+    )
+    .await
+}
+
+async fn revise_task(paths: &Paths, args: ReviseArgs, json_output: bool) -> Result<()> {
+    let store = Store::open(&paths.store)?;
+    let previous = store.task(args.task)?;
+    require_owner(&previous.owner_id)?;
+    let result = store.latest_result(args.task)?;
+    if result.revision != previous.revision {
+        bail!("the latest revision has not produced a terminal result");
+    }
+    let decision = store
+        .decision_for_result(result.result_id)?
+        .context("the previous result has no Codex decision")?;
+    if decision.verdict != DecisionVerdict::Rejected {
+        bail!("only a rejected result can be revised");
+    }
+    let next_revision = previous
+        .revision
+        .checked_add(1)
+        .context("revision overflow")?;
+    let source_workspace = args
+        .workspace
+        .unwrap_or_else(|| PathBuf::from(&previous.workspace));
+    let criteria = if args.criteria.is_empty() {
+        vec![format!("Objective achieved: {}", args.objective)]
+    } else {
+        args.criteria
+    };
+    let mut replacement = previous.clone();
+    replacement.revision = next_revision;
+    replacement.create_request_id = format!("revise-{}-{next_revision}", args.task);
+    replacement.objective = args.objective;
+    replacement.workspace = source_workspace.to_string_lossy().into_owned();
+    replacement.acceptance_criteria = criteria;
+    let replacement = TaskRevision::new(previous)?
+        .revise(replacement)?
+        .spec()
+        .clone();
+
+    let registry = Registry::open(&paths.registry)?;
+    match registry
+        .health_probed(&replacement.route.harness_id)
+        .await?
+    {
+        Health::Healthy => {}
+        Health::Drifted { .. } => bail!("harness probe identity changed"),
+    }
+    let activated = registry.load_healthy(&replacement.route.harness_id)?;
+    start_task(
+        paths,
+        replacement,
+        &activated,
+        StartOptions {
+            source_workspace: &source_workspace,
+            snapshot: if args.allow_clean_head_snapshot {
+                WorkspaceSnapshot::AllowCleanHead
+            } else {
+                WorkspaceSnapshot::RequireClean
+            },
+            pane: if args.keep_pane {
+                PaneDisposition::Keep
+            } else {
+                PaneDisposition::CleanupAfterDecision
+            },
+            execution: if args.foreground {
+                ExecutionDisposition::Foreground
+            } else {
+                ExecutionDisposition::Detached
+            },
+            json_output,
+        },
+    )
+    .await
+}
+
+async fn start_task(
+    paths: &Paths,
+    mut spec: TaskSpec,
+    activated: &HarnessManifest,
+    options: StartOptions<'_>,
+) -> Result<()> {
+    spec.validate()?;
+    activated.validate_task_route(&spec)?;
+    let task_id = spec.task_id;
+    let harness_id = spec.route.harness_id.clone();
     let workspace = prepare_workspace(
         paths,
-        &source_workspace,
+        options.source_workspace,
         task_id,
-        &args.harness,
-        args.allow_clean_head_snapshot,
+        spec.revision,
+        &harness_id,
+        matches!(options.snapshot, WorkspaceSnapshot::AllowCleanHead),
     )?;
     spec.workspace = workspace.to_string_lossy().into_owned();
     let launch = LaunchEnvelope {
         spec,
-        harness_id: args.harness,
+        harness_id,
         protocol_generation: "brgr-v1".to_owned(),
-        keep_pane: args.keep_pane,
+        keep_pane: matches!(options.pane, PaneDisposition::Keep),
     };
-    let launch_path = paths.launches.join(format!("{task_id}.json"));
-    write_json_atomic(&launch_path, &launch)?;
+    let launch_path = if launch.spec.revision == 1 {
+        paths.launches.join(format!("{task_id}.json"))
+    } else {
+        paths
+            .launches
+            .join(format!("{task_id}-r{}.json", launch.spec.revision))
+    };
+    write_json_new(&launch_path, &launch)?;
 
-    if args.foreground {
-        return supervise(paths, &launch_path, json_output).await;
+    if matches!(options.execution, ExecutionDisposition::Foreground) {
+        return supervise(paths, &launch_path, options.json_output).await;
     }
     spawn_supervisor(paths, &launch_path)?;
     let receipt = json!({
@@ -362,8 +526,11 @@ async fn run_task(paths: &Paths, args: RunArgs, json_output: bool) -> Result<()>
         "state": "starting",
         "workspace": workspace,
         "harness": launch.harness_id,
+        "revision": launch.spec.revision,
+        "requested_model": launch.spec.route.requested_model,
+        "requested_effort": launch.spec.route.requested_effort,
     });
-    print_value(&receipt, json_output);
+    print_value(&receipt, options.json_output);
     Ok(())
 }
 
@@ -812,7 +979,7 @@ fn omp_process_manifest(
             max_bytes: launch.spec.artifact_contract.max_bytes,
             success_exit_codes: vec![0],
         },
-        capabilities: BTreeMap::new(),
+        capabilities: activated.capabilities.clone(),
     })
 }
 
@@ -1051,6 +1218,7 @@ fn prepare_workspace(
     paths: &Paths,
     source: &Path,
     task_id: TaskId,
+    revision: u32,
     harness_id: &str,
     allow_clean_head_snapshot: bool,
 ) -> Result<PathBuf> {
@@ -1076,7 +1244,8 @@ fn prepare_workspace(
             "source worktree contains uncommitted changes; commit or capture them first, or pass --allow-clean-head-snapshot to explicitly exclude them"
         );
     }
-    let revision = command_output("git", &["-C", &root.to_string_lossy(), "rev-parse", "HEAD"])?;
+    let base_revision =
+        command_output("git", &["-C", &root.to_string_lossy(), "rev-parse", "HEAD"])?;
     let worktree_list = command_output(
         "git",
         &[
@@ -1097,10 +1266,15 @@ fn prepare_workspace(
         .and_then(|value| value.to_str())
         .unwrap_or("workspace");
     let short = task_id.to_string()[..8].to_owned();
+    let task_slug = if revision == 1 {
+        short
+    } else {
+        format!("{short}-r{revision}")
+    };
     let target_parent = paths.worktrees.join(repo_name);
     fs::create_dir_all(&target_parent)?;
-    let target = target_parent.join(&short);
-    let branch = format!("brgr/task-{short}");
+    let target = target_parent.join(&task_slug);
+    let branch = format!("brgr/task-{task_slug}");
     let status = if harness_id == "local.omp"
         && env::var("HERDR_ENV").as_deref() == Ok("1")
         && env::var_os("HERDR_PANE_ID").is_some()
@@ -1108,11 +1282,17 @@ fn prepare_workspace(
         ProcessCommand::new("herdr")
             .args(["worktree", "create", "--cwd"])
             .arg(&primary)
-            .args(["--branch", &branch, "--base", revision.trim(), "--path"])
+            .args([
+                "--branch",
+                &branch,
+                "--base",
+                base_revision.trim(),
+                "--path",
+            ])
             .arg(&target)
             .args([
                 "--label",
-                &format!("brgr-{short}"),
+                &format!("brgr-{task_slug}"),
                 "--no-focus",
                 "--trust-repository",
             ])
@@ -1124,7 +1304,7 @@ fn prepare_workspace(
             .args(["worktree", "add", "-b"])
             .arg(&branch)
             .arg(&target)
-            .arg(revision.trim())
+            .arg(base_revision.trim())
             .status()?
     };
     if !status.success() {
@@ -1172,6 +1352,20 @@ fn write_json_atomic(path: &Path, value: &impl Serialize) -> Result<()> {
         .set_permissions(fs::Permissions::from_mode(0o600))?;
     temporary.as_file_mut().sync_all()?;
     temporary.persist(path)?;
+    Ok(())
+}
+
+fn write_json_new(path: &Path, value: &impl Serialize) -> Result<()> {
+    let parent = path.parent().context("launch path has no parent")?;
+    let mut temporary = NamedTempFile::new_in(parent)?;
+    serde_json::to_writer_pretty(&mut temporary, value)?;
+    temporary.write_all(b"\n")?;
+    temporary
+        .as_file_mut()
+        .set_permissions(fs::Permissions::from_mode(0o600))?;
+    temporary
+        .persist_noclobber(path)
+        .map_err(|error| error.error)?;
     Ok(())
 }
 

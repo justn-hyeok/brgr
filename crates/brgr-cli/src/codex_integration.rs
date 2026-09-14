@@ -23,9 +23,17 @@ Translate the user's natural-language request into the smallest matching `brgr`
 CLI operation. Preserve an explicitly named harness, model, and effort. Never
 silently substitute one of those dimensions.
 
-Use `brgr run "<objective>" --harness <id>` for a fresh managed task. Report the
-short task receipt rather than internal UUIDs beyond the returned task handle.
-Use `brgr status`, `brgr result`, and `brgr cancel` for follow-up requests.
+Use `brgr run "<objective>" --harness <id> --criterion "<observable check>"`
+for a fresh managed task. Keep the user conversation in Codex and report a
+short handle. Use `brgr status`, `brgr result`, and `brgr cancel` for follow-up.
+For a rejected candidate, use `brgr revise TASK "<corrected objective>"
+--criterion "<new check>"`; do not rewrite the old result or silently retry.
+
+For an approved unfamiliar CLI, use `brgr harness draft EXECUTABLE`,
+`brgr harness test EXECUTABLE`, `brgr harness activate EXECUTABLE --workspace
+SCRATCH --prompt "<small authorized probe>" --model MODEL` when the model was
+chosen, then `brgr harness status ID`. Unsupported capabilities stay disabled;
+never guess vendor flags or switch the requested harness/model.
 
 When a hook surfaces a terminal inbox item, inspect the sealed result and its
 acceptance criteria. Run `brgr accept TASK` only after relevant evidence passes;
@@ -48,10 +56,15 @@ pub fn install(brgr_home: &Path) -> Result<Value> {
     let codex_home = codex_home()?;
     let hooks_path = codex_home.join("hooks.json");
     let skill_path = codex_home.join("skills/brgr/SKILL.md");
-    if skill_path.exists() && fs::read_to_string(&skill_path)? != SKILL_TEXT {
-        bail!("refusing to overwrite a modified ~/.codex/skills/brgr/SKILL.md");
-    }
-    let original_skill_exists = skill_path.exists();
+    let receipt_path = brgr_home.join("codex-integration.json");
+    let previous_receipt = if receipt_path.exists() {
+        Some(serde_json::from_slice::<Receipt>(&fs::read(
+            &receipt_path,
+        )?)?)
+    } else {
+        None
+    };
+    let original_skill = load_owned_skill(&skill_path, previous_receipt.as_ref())?;
     let original_hooks = if hooks_path.exists() {
         Some(fs::read(&hooks_path)?)
     } else {
@@ -68,6 +81,8 @@ pub fn install(brgr_home: &Path) -> Result<Value> {
         .get_mut("hooks")
         .and_then(Value::as_object_mut)
         .context("Codex hooks.json must contain an object named hooks")?;
+
+    remove_obsolete_hooks(hooks, &hooks_path, previous_receipt.as_ref(), &commands);
 
     let mut added = 0_u8;
     for (event, command) in &commands {
@@ -95,7 +110,10 @@ pub fn install(brgr_home: &Path) -> Result<Value> {
     }
 
     fs::create_dir_all(&codex_home)?;
-    let backup = if hooks_path.exists() && added > 0 {
+    let hooks_changed = original_hooks.as_ref().is_none_or(|bytes| {
+        serde_json::from_slice::<Value>(bytes).is_ok_and(|original| original != document)
+    });
+    let backup = if hooks_path.exists() && hooks_changed {
         let stamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
         let path = hooks_path.with_file_name(format!("hooks.json.brgr-backup-{stamp}"));
         fs::copy(&hooks_path, &path)?;
@@ -112,7 +130,6 @@ pub fn install(brgr_home: &Path) -> Result<Value> {
         commands,
         skill_text: SKILL_TEXT.to_owned(),
     };
-    let receipt_path = brgr_home.join("codex-integration.json");
     let changed = (|| -> Result<()> {
         write_bytes_atomic(&skill_path, SKILL_TEXT.as_bytes())?;
         write_json_atomic(&hooks_path, &document)?;
@@ -125,7 +142,9 @@ pub fn install(brgr_home: &Path) -> Result<Value> {
         } else if hooks_path.exists() {
             fs::remove_file(&hooks_path)?;
         }
-        if !original_skill_exists && skill_path.exists() {
+        if let Some(bytes) = original_skill {
+            write_bytes_atomic(&skill_path, &bytes)?;
+        } else if skill_path.exists() {
             fs::remove_file(&skill_path)?;
         }
         return Err(error);
@@ -136,6 +155,48 @@ pub fn install(brgr_home: &Path) -> Result<Value> {
         "backup": backup,
         "receipt": receipt_path,
     }))
+}
+
+fn load_owned_skill(path: &Path, previous: Option<&Receipt>) -> Result<Option<Vec<u8>>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let bytes = fs::read(path)?;
+    let current = String::from_utf8(bytes.clone())?;
+    let owned_previous =
+        previous.is_some_and(|receipt| receipt.skill_path == path && receipt.skill_text == current);
+    if current != SKILL_TEXT && !owned_previous {
+        bail!("refusing to overwrite a modified ~/.codex/skills/brgr/SKILL.md");
+    }
+    Ok(Some(bytes))
+}
+
+fn remove_obsolete_hooks(
+    hooks: &mut serde_json::Map<String, Value>,
+    hooks_path: &Path,
+    previous: Option<&Receipt>,
+    commands: &BTreeMap<String, String>,
+) {
+    let Some(previous) = previous.filter(|receipt| receipt.hooks_path == hooks_path) else {
+        return;
+    };
+    for (event, old_command) in &previous.commands {
+        if commands.get(event) == Some(old_command) {
+            continue;
+        }
+        if let Some(entries) = hooks.get_mut(event).and_then(Value::as_array_mut) {
+            entries.retain(|entry| {
+                !entry
+                    .get("hooks")
+                    .and_then(Value::as_array)
+                    .is_some_and(|inner| {
+                        inner.len() == 1
+                            && inner[0].get("command").and_then(Value::as_str)
+                                == Some(old_command.as_str())
+                    })
+            });
+        }
+    }
 }
 
 pub fn status(brgr_home: &Path) -> Result<Value> {

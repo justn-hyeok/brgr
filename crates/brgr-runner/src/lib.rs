@@ -2,12 +2,14 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
+    io::Read as _,
     os::unix::process::CommandExt,
     path::{Path, PathBuf},
     process::{ExitStatus, Stdio},
     time::{Duration, Instant},
 };
 
+use brgr_protocol::TaskSpec;
 use serde::{Deserialize, Serialize};
 use tempfile::TempDir;
 use thiserror::Error;
@@ -15,7 +17,7 @@ use tokio::{
     io::{AsyncRead, AsyncReadExt},
     process::Command,
     task::JoinError,
-    time::sleep,
+    time::{sleep, timeout},
 };
 
 pub const MANIFEST_SCHEMA_V1: &str = "brgr.harness/v1";
@@ -191,16 +193,33 @@ impl ProcessRunner {
             .take()
             .ok_or(RunnerError::MissingPipe("stderr"))?;
         let limit = manifest.result.max_bytes;
-        let stdout_task = tokio::spawn(read_bounded(stdout, limit));
-        let stderr_task = tokio::spawn(read_bounded(stderr, limit));
+        let mut stdout_task = tokio::spawn(read_bounded(stdout, limit));
+        let mut stderr_task = tokio::spawn(read_bounded(stderr, limit));
+        let process_group_id = child.id().ok_or(RunnerError::MissingProcessId)?;
 
         let (status, timed_out, cancelled) =
             wait_for_exit(&mut child, started, request.deadline, request.cancel_path).await?;
         if let Some(path) = request.pid_path {
             let _ = std::fs::remove_file(path);
         }
-        let (stdout, stdout_truncated) = join_capture(stdout_task.await)?;
-        let (stderr, stderr_truncated) = join_capture(stderr_task.await)?;
+        let remaining = request.deadline.saturating_sub(started.elapsed());
+        let captures = timeout(remaining, async {
+            let (stdout, stderr) = tokio::join!(&mut stdout_task, &mut stderr_task);
+            Ok::<_, RunnerError>((join_capture(stdout)?, join_capture(stderr)?))
+        })
+        .await;
+        let ((stdout, stdout_truncated), (stderr, stderr_truncated)) = if let Ok(result) = captures
+        {
+            result?
+        } else {
+            let _ = std::process::Command::new("/bin/kill")
+                .arg("-KILL")
+                .arg(format!("-{process_group_id}"))
+                .output();
+            stdout_task.abort();
+            stderr_task.abort();
+            return Err(RunnerError::CaptureDeadlineElapsed);
+        };
         let successful_exit = status
             .as_ref()
             .and_then(std::process::ExitStatus::code)
@@ -276,6 +295,71 @@ impl ProcessRunner {
 }
 
 impl HarnessManifest {
+    /// Rejects an unsupported route before any task workspace or process is created.
+    ///
+    /// # Errors
+    ///
+    /// Returns an explicit capability error for an unclaimed model, effort, or
+    /// required operation. OMP's internal process wrapper preserves the
+    /// activated OMP capabilities but has its own executable identity.
+    pub fn validate_task_route(&self, task: &TaskSpec) -> Result<(), RunnerError> {
+        self.validate()?;
+        if self.id != task.route.harness_id
+            && !(self.id == "internal.omp-runner" && task.route.harness_id == "local.omp")
+        {
+            return Err(RunnerError::HarnessRouteMismatch {
+                requested: task.route.harness_id.clone(),
+                actual: self.id.clone(),
+            });
+        }
+        for name in &task.required_capabilities {
+            self.require_capability(name)?;
+        }
+        if task.route.requested_model.is_some() {
+            self.require_capability("model_select")?;
+            if self.adapter != OMP_ROLE_ADAPTER_V1
+                && self.launch.model_argv.is_empty()
+                && !self
+                    .launch
+                    .argv
+                    .iter()
+                    .any(|arg| arg.contains("${route.model}"))
+            {
+                return Err(RunnerError::UnsupportedCapability(
+                    "model_select".to_owned(),
+                ));
+            }
+        }
+        if task.route.requested_effort.is_some() {
+            self.require_capability("effort_select")?;
+            if self.adapter != OMP_ROLE_ADAPTER_V1
+                && self.launch.effort_argv.is_empty()
+                && !self
+                    .launch
+                    .argv
+                    .iter()
+                    .any(|arg| arg.contains("${route.effort}"))
+            {
+                return Err(RunnerError::UnsupportedCapability(
+                    "effort_select".to_owned(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn require_capability(&self, name: &str) -> Result<(), RunnerError> {
+        if self
+            .capabilities
+            .get(name)
+            .is_some_and(|capability| capability.status == CapabilityStatus::Supported)
+        {
+            Ok(())
+        } else {
+            Err(RunnerError::UnsupportedCapability(name.to_owned()))
+        }
+    }
+
     /// Validates the non-programmable v1 manifest contract.
     ///
     /// # Errors
@@ -450,7 +534,21 @@ fn collect_result(
                     observed_bytes: metadata.len(),
                 });
             }
-            Ok(std::fs::read(result_path)?)
+            let mut file = std::fs::File::open(&result_path)?;
+            if !file.metadata()?.is_file() {
+                return Err(RunnerError::ResultNotRegularFile(result_path));
+            }
+            let mut bytes = Vec::new();
+            file.by_ref()
+                .take(manifest.result.max_bytes.saturating_add(1))
+                .read_to_end(&mut bytes)?;
+            if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > manifest.result.max_bytes {
+                return Err(RunnerError::ResultTooLarge {
+                    max_bytes: manifest.result.max_bytes,
+                    observed_bytes: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+                });
+            }
+            Ok(bytes)
         }
     }
 }
@@ -531,6 +629,10 @@ pub enum RunnerError {
     UnsupportedSchema(String),
     #[error("unsupported adapter: {0}")]
     UnsupportedAdapter(String),
+    #[error("task requested harness {requested}, but manifest is {actual}")]
+    HarnessRouteMismatch { requested: String, actual: String },
+    #[error("harness does not support required capability: {0}")]
+    UnsupportedCapability(String),
     #[error("invalid harness id: {0}")]
     InvalidHarnessId(String),
     #[error("executable must be an existing absolute file: {}", .0.display())]
@@ -567,6 +669,8 @@ pub enum RunnerError {
     MissingProcessId,
     #[error("capture task failed")]
     CaptureTask(#[source] JoinError),
+    #[error("process output capture exceeded the total attempt deadline")]
+    CaptureDeadlineElapsed,
     #[error(transparent)]
     Io(#[from] std::io::Error),
 }
@@ -574,6 +678,8 @@ pub enum RunnerError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use brgr_protocol::{ArtifactContract, AttemptBudget, OwnerId, Route, SCHEMA_V1, TaskId};
+    use std::os::unix::fs::PermissionsExt;
 
     fn echo_manifest(max_bytes: u64) -> HarnessManifest {
         HarnessManifest {
@@ -630,6 +736,86 @@ mod tests {
             render_argv(&manifest, &request, &substitutions).unwrap(),
             ["--print", prompt]
         );
+    }
+
+    #[test]
+    fn unsupported_model_is_rejected_before_process_execution() {
+        let mut manifest = echo_manifest(4_096);
+        manifest.id = "local.synthetic".to_owned();
+        manifest.capabilities.insert(
+            "completion".to_owned(),
+            Capability {
+                status: CapabilityStatus::Supported,
+                semantics: "process_exit".to_owned(),
+                evidence_ref: None,
+                tested_identity: None,
+            },
+        );
+        let task = TaskSpec {
+            schema: SCHEMA_V1.to_owned(),
+            task_id: TaskId::new(),
+            revision: 1,
+            create_request_id: "route-test".to_owned(),
+            owner_id: OwnerId::new("codex:test").unwrap(),
+            objective: "check route".to_owned(),
+            workspace: "/tmp/check-route".to_owned(),
+            route: Route {
+                harness_id: manifest.id.clone(),
+                requested_model: Some("gpt-5.6-luna".to_owned()),
+                requested_effort: None,
+            },
+            required_capabilities: vec!["completion".to_owned()],
+            artifact_contract: ArtifactContract {
+                media_type: "text/plain".to_owned(),
+                max_bytes: 4_096,
+            },
+            acceptance_criteria: vec!["exact answer".to_owned()],
+            budget: AttemptBudget {
+                deadline_seconds: 2,
+                max_attempts: 1,
+            },
+        };
+        assert!(matches!(
+            manifest.validate_task_route(&task),
+            Err(RunnerError::UnsupportedCapability(name)) if name == "model_select"
+        ));
+    }
+
+    #[tokio::test]
+    async fn inherited_stdout_cannot_extend_the_total_deadline() {
+        let workspace = tempfile::tempdir().unwrap();
+        let executable = workspace.path().join("fork-stdout-holder");
+        std::fs::write(
+            &executable,
+            "#!/bin/sh\n(sleep 3) &\nprintf 'parent done\\n'\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let mut manifest = echo_manifest(4_096);
+        manifest.executable = executable;
+        manifest.launch.argv.clear();
+
+        let started = Instant::now();
+        let result = ProcessRunner::run(
+            &manifest,
+            RunRequest {
+                workspace: workspace.path(),
+                prompt: "bounded",
+                model: None,
+                effort: None,
+                deadline: Duration::from_millis(250),
+                cancel_path: None,
+                pid_path: None,
+            },
+        )
+        .await;
+
+        match result {
+            Err(RunnerError::CaptureDeadlineElapsed) => {}
+            Ok(output) => assert!(output.timed_out && !output.succeeded(&manifest)),
+            other => panic!("unexpected unbounded outcome: {other:?}"),
+        }
+        assert!(started.elapsed() < Duration::from_secs(2));
     }
 
     #[tokio::test]

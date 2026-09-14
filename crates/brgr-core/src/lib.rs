@@ -418,6 +418,7 @@ impl Supervisor {
         runner_identity: Option<&RunnerIdentity>,
     ) -> Result<ResultEnvelope, SupervisorError> {
         let revision = TaskRevision::new(spec.clone())?;
+        manifest.validate_task_route(&spec)?;
         let request_bytes = serde_json::to_vec(&spec)?;
         self.store.record_task(&spec, &sha256(&request_bytes))?;
         let control = AttemptControl {
