@@ -6,11 +6,16 @@ use std::{
     os::unix::{fs::MetadataExt, process::CommandExt},
     path::{Path, PathBuf},
     process::{ExitStatus, Stdio},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 
 use brgr_protocol::TaskSpec;
 use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 use tempfile::TempDir;
 use thiserror::Error;
 use tokio::{
@@ -24,6 +29,8 @@ pub const MANIFEST_SCHEMA_V1: &str = "brgr.harness/v1";
 pub const PROCESS_ADAPTER_V1: &str = "process/v1";
 pub const OMP_ROLE_ADAPTER_V1: &str = "omp-role/v1";
 const CAPTURE_OVERHEAD_BYTES: u64 = 1;
+const JSONL_TRANSPORT_LIMIT_BYTES: u64 = 64 * 1024 * 1024;
+const JSONL_METADATA_SLACK_BYTES: u64 = 1024 * 1024;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -213,21 +220,17 @@ impl ProcessRunner {
         if let Some(path) = request.pid_path {
             std::fs::write(path, format!("{}\n", child.id().unwrap_or_default()))?;
         }
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or(RunnerError::MissingPipe("stdout"))?;
-        let stderr = child
-            .stderr
-            .take()
-            .ok_or(RunnerError::MissingPipe("stderr"))?;
-        let limit = manifest.result.max_bytes;
-        let mut stdout_task = tokio::spawn(read_bounded(stdout, limit));
-        let mut stderr_task = tokio::spawn(read_bounded(stderr, limit));
+        let (mut stdout_task, mut stderr_task, overflow) = start_capture(&mut child, manifest)?;
         let process_group_id = child.id().ok_or(RunnerError::MissingProcessId)?;
 
-        let (status, timed_out, cancelled) =
-            wait_for_exit(&mut child, started, request.deadline, request.cancel_path).await?;
+        let (status, timed_out, cancelled) = wait_for_exit(
+            &mut child,
+            started,
+            request.deadline,
+            request.cancel_path,
+            &overflow,
+        )
+        .await?;
         if let Some(path) = request.pid_path {
             let _ = std::fs::remove_file(path);
         }
@@ -249,16 +252,19 @@ impl ProcessRunner {
             stderr_task.abort();
             return Err(RunnerError::CaptureDeadlineElapsed);
         };
-        let successful_exit = status
-            .as_ref()
-            .and_then(std::process::ExitStatus::code)
-            .is_some_and(|code| manifest.result.success_exit_codes.contains(&code));
-        let (result, observed_model) =
-            if !cancelled && !timed_out && !stdout_truncated && successful_exit {
-                collect_result_with_model(manifest, &request, &substitutions, &stdout)?
-            } else {
-                (Vec::new(), None)
-            };
+        let output_truncated =
+            overflow.load(Ordering::Relaxed) || stdout_truncated || stderr_truncated;
+        let (result, observed_model) = if can_collect_result(
+            status.as_ref(),
+            manifest,
+            cancelled,
+            timed_out,
+            output_truncated,
+        ) {
+            collect_result_with_model(manifest, &request, &substitutions, &stdout)?
+        } else {
+            (Vec::new(), None)
+        };
 
         Ok(ExecutionOutput {
             exit_code: status.and_then(|value| value.code()),
@@ -268,7 +274,7 @@ impl ProcessRunner {
             observed_model,
             timed_out,
             cancelled,
-            output_truncated: stdout_truncated || stderr_truncated,
+            output_truncated,
             elapsed: started.elapsed(),
         })
     }
@@ -571,11 +577,12 @@ async fn wait_for_exit(
     started: Instant,
     deadline: Duration,
     cancel_path: Option<&Path>,
+    overflow: &AtomicBool,
 ) -> Result<(Option<ExitStatus>, bool, bool), RunnerError> {
     loop {
         let cancelled = cancel_path.is_some_and(Path::exists);
         let timed_out = started.elapsed() >= deadline;
-        if cancelled || timed_out {
+        if cancelled || timed_out || overflow.load(Ordering::Relaxed) {
             let status = stop_process_group(child).await?;
             return Ok((Some(status), timed_out, cancelled));
         }
@@ -584,6 +591,21 @@ async fn wait_for_exit(
         }
         sleep(Duration::from_millis(50)).await;
     }
+}
+
+fn can_collect_result(
+    status: Option<&ExitStatus>,
+    manifest: &HarnessManifest,
+    cancelled: bool,
+    timed_out: bool,
+    truncated: bool,
+) -> bool {
+    !cancelled
+        && !timed_out
+        && !truncated
+        && status
+            .and_then(ExitStatus::code)
+            .is_some_and(|code| manifest.result.success_exit_codes.contains(&code))
 }
 
 async fn stop_process_group(child: &mut tokio::process::Child) -> Result<ExitStatus, RunnerError> {
@@ -707,6 +729,12 @@ fn collect_result_with_model(
     stdout: &[u8],
 ) -> Result<(Vec<u8>, Option<String>), RunnerError> {
     let result = collect_result(manifest, request.workspace, values, stdout)?;
+    if u64::try_from(result.len()).unwrap_or(u64::MAX) > manifest.result.max_bytes {
+        return Err(RunnerError::ResultTooLarge {
+            max_bytes: manifest.result.max_bytes,
+            observed_bytes: u64::try_from(result.len()).unwrap_or(u64::MAX),
+        });
+    }
     let observed_model =
         if !result.is_empty() && manifest.result.source == ResultSource::JsonlAssistantFinal {
             observe_jsonl_model(stdout, request.model)?
@@ -847,6 +875,160 @@ where
         bytes.truncate(usize::try_from(limit).expect("validated output limit fits usize"));
     }
     Ok((bytes, truncated))
+}
+
+type CaptureTask = tokio::task::JoinHandle<Result<(Vec<u8>, bool), std::io::Error>>;
+
+fn start_capture(
+    child: &mut tokio::process::Child,
+    manifest: &HarnessManifest,
+) -> Result<(CaptureTask, CaptureTask, Arc<AtomicBool>), RunnerError> {
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or(RunnerError::MissingPipe("stdout"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or(RunnerError::MissingPipe("stderr"))?;
+    let limit = manifest.result.max_bytes;
+    let overflow = Arc::new(AtomicBool::new(false));
+    Ok((
+        tokio::spawn(capture_stdout(
+            stdout,
+            limit,
+            manifest.result.source.clone(),
+            Arc::clone(&overflow),
+        )),
+        tokio::spawn(capture_bounded(stderr, limit, Arc::clone(&overflow))),
+        overflow,
+    ))
+}
+
+async fn capture_bounded<R>(
+    reader: R,
+    limit: u64,
+    overflow: Arc<AtomicBool>,
+) -> Result<(Vec<u8>, bool), std::io::Error>
+where
+    R: AsyncRead + Unpin,
+{
+    let capture = read_bounded(reader, limit).await?;
+    if capture.1 {
+        overflow.store(true, Ordering::Relaxed);
+    }
+    Ok(capture)
+}
+
+async fn capture_stdout<R>(
+    reader: R,
+    limit: u64,
+    source: ResultSource,
+    overflow: Arc<AtomicBool>,
+) -> Result<(Vec<u8>, bool), std::io::Error>
+where
+    R: AsyncRead + Unpin,
+{
+    if source == ResultSource::JsonlAssistantFinal {
+        read_jsonl_semantic(reader, limit, overflow).await
+    } else {
+        capture_bounded(reader, limit, overflow).await
+    }
+}
+
+// JSONL update events repeat growing message bodies. Keep only events used by
+// result and model verification while bounding the bytes read and retained.
+async fn read_jsonl_semantic<R>(
+    mut reader: R,
+    result_limit: u64,
+    overflow: Arc<AtomicBool>,
+) -> Result<(Vec<u8>, bool), std::io::Error>
+where
+    R: AsyncRead + Unpin,
+{
+    let semantic_limit = result_limit.saturating_add(JSONL_METADATA_SLACK_BYTES);
+    let line_limit = semantic_limit;
+    let mut retained = Vec::new();
+    let mut line = Vec::new();
+    let mut chunk = [0_u8; 8192];
+    let mut raw_bytes = 0_u64;
+    loop {
+        let count = reader.read(&mut chunk).await?;
+        if count == 0 {
+            break;
+        }
+        for byte in &chunk[..count] {
+            raw_bytes = raw_bytes.saturating_add(1);
+            if raw_bytes > JSONL_TRANSPORT_LIMIT_BYTES {
+                overflow.store(true, Ordering::Relaxed);
+                return Ok((retained, true));
+            }
+            if *byte == b'\n' {
+                if !retain_jsonl_event(&line, &mut retained, semantic_limit) {
+                    overflow.store(true, Ordering::Relaxed);
+                    return Ok((retained, true));
+                }
+                line.clear();
+            } else if u64::try_from(line.len()).unwrap_or(u64::MAX) < line_limit {
+                line.push(*byte);
+            } else {
+                overflow.store(true, Ordering::Relaxed);
+                return Ok((retained, true));
+            }
+        }
+    }
+    if !line.is_empty() && !retain_jsonl_event(&line, &mut retained, semantic_limit) {
+        overflow.store(true, Ordering::Relaxed);
+        return Ok((retained, true));
+    }
+    Ok((retained, false))
+}
+
+fn retain_jsonl_event(line: &[u8], retained: &mut Vec<u8>, limit: u64) -> bool {
+    if line.is_empty() {
+        return true;
+    }
+    let bytes = match serde_json::from_slice::<Value>(line) {
+        Ok(event) => match event.get("type").and_then(Value::as_str) {
+            Some("message_end")
+                if event.pointer("/message/role").and_then(Value::as_str) == Some("assistant") =>
+            {
+                serde_json::to_vec(&json!({
+                    "type": "message_end",
+                    "message": {
+                        "role": "assistant",
+                        "provider": event.pointer("/message/provider"),
+                        "model": event.pointer("/message/model"),
+                        "content": event.pointer("/message/content"),
+                    },
+                }))
+                .expect("JSON values serialize")
+            }
+            Some("agent_end") => serde_json::to_vec(&json!({
+                "type": "agent_end",
+                "stopReason": event.get("stopReason"),
+            }))
+            .expect("JSON values serialize"),
+            Some("turn_end")
+                if event.pointer("/message/role").and_then(Value::as_str) == Some("assistant") =>
+            {
+                b"{\"type\":\"turn_end\",\"message\":{\"role\":\"assistant\"}}".to_vec()
+            }
+            _ => return true,
+        },
+        Err(_) => line.to_vec(),
+    };
+    if u64::try_from(retained.len())
+        .unwrap_or(u64::MAX)
+        .saturating_add(u64::try_from(bytes.len()).unwrap_or(u64::MAX))
+        .saturating_add(1)
+        > limit
+    {
+        return false;
+    }
+    retained.extend_from_slice(&bytes);
+    retained.push(b'\n');
+    true
 }
 
 fn join_capture(
@@ -1039,7 +1221,7 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_model_is_rejected_before_process_execution() {
+    fn unsupported_route_is_rejected_before_process_execution() {
         let mut manifest = echo_manifest(4_096);
         manifest.id = "local.synthetic".to_owned();
         manifest.capabilities.insert(
@@ -1051,7 +1233,7 @@ mod tests {
                 tested_identity: None,
             },
         );
-        let task = TaskSpec {
+        let mut task = TaskSpec {
             schema: SCHEMA_V1.to_owned(),
             task_id: TaskId::new(),
             revision: 1,
@@ -1078,6 +1260,12 @@ mod tests {
         assert!(matches!(
             manifest.validate_task_route(&task),
             Err(RunnerError::UnsupportedCapability(name)) if name == "model_select"
+        ));
+        task.route.requested_model = None;
+        task.route.requested_effort = Some("low".to_owned());
+        assert!(matches!(
+            manifest.validate_task_route(&task),
+            Err(RunnerError::UnsupportedCapability(name)) if name == "effort_select"
         ));
     }
 
@@ -1162,6 +1350,136 @@ mod tests {
 
         assert!(output.output_truncated);
         assert!(!output.succeeded(&manifest));
+    }
+
+    #[tokio::test]
+    async fn jsonl_updates_can_exceed_result_limit_without_losing_final_evidence() {
+        use tokio::io::AsyncWriteExt as _;
+
+        let update = format!(
+            "{}\n",
+            json!({"type": "message_update", "delta": "x".repeat(8192)})
+        );
+        let mut raw = update.repeat(200).into_bytes();
+        raw.extend_from_slice(
+            format!(
+                "{}\n{}\n",
+                json!({
+                    "type": "message_end",
+                    "message": {
+                        "role": "assistant",
+                        "provider": "openai-codex",
+                        "model": "gpt-5.6-luna",
+                        "content": [{"type": "text", "text": "READY"}],
+                    },
+                }),
+                json!({"type": "agent_end", "stopReason": "completed"})
+            )
+            .as_bytes(),
+        );
+        assert!(raw.len() > 1_048_576);
+        let (mut writer, reader) = tokio::io::duplex(8192);
+        let writer_task = tokio::spawn(async move { writer.write_all(&raw).await.unwrap() });
+        let overflow = Arc::new(AtomicBool::new(false));
+        let (semantic, truncated) = read_jsonl_semantic(reader, 1_048_576, Arc::clone(&overflow))
+            .await
+            .unwrap();
+        writer_task.await.unwrap();
+
+        assert!(!truncated);
+        assert!(!overflow.load(Ordering::Relaxed));
+        assert!(semantic.len() < 1024);
+        assert_eq!(extract_jsonl_assistant_final(&semantic).unwrap(), b"READY");
+        assert_eq!(
+            observe_jsonl_model(&semantic, Some("openai-codex/gpt-5.6-luna"))
+                .unwrap()
+                .as_deref(),
+            Some("openai-codex/gpt-5.6-luna")
+        );
+    }
+
+    #[tokio::test]
+    async fn malformed_jsonl_line_is_not_hidden_by_semantic_capture() {
+        use tokio::io::AsyncWriteExt as _;
+
+        let (mut writer, reader) = tokio::io::duplex(256);
+        let writer_task = tokio::spawn(async move {
+            writer
+                .write_all(b"not-json\n{\"type\":\"agent_end\",\"stopReason\":\"completed\"}\n")
+                .await
+                .unwrap();
+        });
+        let overflow = Arc::new(AtomicBool::new(false));
+        let (semantic, truncated) = read_jsonl_semantic(reader, 1024, overflow).await.unwrap();
+        writer_task.await.unwrap();
+
+        assert!(!truncated);
+        assert!(matches!(
+            extract_jsonl_assistant_final(&semantic),
+            Err(RunnerError::MalformedJsonl(_))
+        ));
+    }
+
+    #[test]
+    fn jsonl_final_artifact_still_obeys_result_limit() {
+        let workspace = tempfile::tempdir().unwrap();
+        let mut manifest = echo_manifest(4);
+        manifest.result.source = ResultSource::JsonlAssistantFinal;
+        let events = b"{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"TOO-LONG\"}]}}\n{\"type\":\"agent_end\",\"stopReason\":\"completed\"}\n";
+        let request = RunRequest {
+            workspace: workspace.path(),
+            prompt: "ignored",
+            model: None,
+            effort: None,
+            deadline: Duration::from_secs(1),
+            cancel_path: None,
+            pid_path: None,
+        };
+        let values = Substitutions {
+            prompt_file: workspace.path(),
+            prompt: "ignored",
+            workspace: workspace.path(),
+            model: None,
+            effort: None,
+        };
+        assert!(matches!(
+            collect_result_with_model(&manifest, &request, &values, events),
+            Err(RunnerError::ResultTooLarge { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn oversized_jsonl_event_stops_its_process_group_before_deadline() {
+        let workspace = tempfile::tempdir().unwrap();
+        let executable = workspace.path().join("oversized-jsonl");
+        std::fs::write(
+            &executable,
+            "#!/bin/sh\n/usr/bin/awk 'BEGIN { for (i = 0; i < 1200000; i++) printf \"x\" }'\n/bin/sleep 30\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let mut manifest = echo_manifest(16);
+        manifest.executable = executable;
+        manifest.result.source = ResultSource::JsonlAssistantFinal;
+        let started = Instant::now();
+        let output = ProcessRunner::run(
+            &manifest,
+            RunRequest {
+                workspace: workspace.path(),
+                prompt: "ignored",
+                model: None,
+                effort: None,
+                deadline: Duration::from_secs(10),
+                cancel_path: None,
+                pid_path: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(output.output_truncated);
+        assert!(!output.succeeded(&manifest));
+        assert!(started.elapsed() < Duration::from_secs(5));
     }
 
     #[tokio::test]
