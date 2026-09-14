@@ -238,6 +238,30 @@ fn unsupported_model_fails_before_task_admission() {
             .next()
             .is_none()
     );
+    let owner = [("BRGR_OWNER_ID", "codex:generic-owner")];
+    let result = json_output(&run(
+        &home,
+        &[
+            "run",
+            "GENERIC_PROCESS_OK",
+            "--harness",
+            "local.prompt-only",
+            "--workspace",
+            workspace.to_str().unwrap(),
+            "--foreground",
+        ],
+        &owner,
+    ));
+    assert_eq!(result["outcome"], "candidate");
+    let task = result["task_id"].as_str().unwrap();
+    let sealed = json_output(&run(&home, &["result", task], &owner));
+    assert_eq!(sealed["artifacts"][0]["text"], "GENERIC_PROCESS_OK");
+    let accepted = json_output(&run(
+        &home,
+        &["accept", task, "--reason", "generic result checked"],
+        &owner,
+    ));
+    assert_eq!(accepted["verdict"], "accepted");
 }
 
 #[test]
