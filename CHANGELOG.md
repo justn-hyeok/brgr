@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.0.9 — 2026-09-14
+
+Harden the local managed-run path for personal use. `brgr doctor` now checks
+every registered harness and the Codex integration, returns `needs_attention`
+for missing or drifted paths, and exits unsuccessfully until they are healthy.
+This changes the exit status of an unhealthy doctor check.
+
+JSONL process capture now discards repeated update events while retaining
+assistant completion and model evidence. It bounds raw transport to 64 MiB,
+keeps the final artifact limit, and stops the process group promptly on
+overflow. A fresh Codex session and the installed GJC and OMP process routes
+completed sealed-result, owner-inbox, and explicit-decision checks. No wire or
+store schema, implicit model fallback, or automatic acceptance changed.
+
+This is the last planned `1.0.x` personal-use stabilization patch. The separate
+public v1 completion checklist remains `NO-GO`.
+
 ## 1.0.8 — 2026-09-14
 
 Publish the current v1 readiness checklist with linked implementation, live
