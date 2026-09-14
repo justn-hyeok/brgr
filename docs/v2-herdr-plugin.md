@@ -90,6 +90,12 @@ sealed fixture candidate in an isolated store; v2.0.0 read the unchanged
 `brgr/v1` result and recorded an explicit owner decision. A separate isolated
 install upgraded v1 Codex hooks and skill to v2 using its ownership receipt.
 
-A clean Herdr GitHub source install succeeded from the PR branch before the
-host-bridge change. The final tagged GitHub package and post-merge release
-artifacts remain to be verified at their exact commits.
+A clean Herdr GitHub source install of PR commit `c363109` built the plugin
+binary and registered its actions and panes. Codex 0.154.0 launched from that
+managed checkout with a private bridge directory at mode `0700`. It produced
+fixture task `6e0da337-ce9a-4dd6-aa43-c2cc52e6ce23`; the stored artifact
+again matched `BRGR_FIXTURE_OK`. Codex recorded decision
+`917e354a-2b99-440c-906b-2cf9f962cad5` as `accepted`, and an independent
+store read confirmed the result digest, owner session, acknowledged inbox, and
+board state. The final tagged GitHub package and post-merge release artifacts
+remain to be verified at their exact commits.
