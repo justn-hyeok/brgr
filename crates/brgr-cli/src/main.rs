@@ -553,17 +553,11 @@ async fn supervise(paths: &Paths, launch_path: &Path, json_output: bool) -> Resu
     if launch.protocol_generation != "brgr-v1" {
         bail!("unsupported task protocol generation");
     }
-    let manifest = match (&launch.manifest, &launch.executable_digest) {
-        (Some(manifest), Some(digest)) => {
-            if manifest.id != launch.harness_id {
-                bail!("task-pinned harness id differs from its manifest");
-            }
-            Registry::verify_pinned_executable(manifest, digest)?;
-            manifest.clone()
-        }
-        (None, None) => Registry::open(&paths.registry)?.load_healthy(&launch.harness_id)?,
-        _ => bail!("task has an incomplete pinned manifest"),
-    };
+    let manifest = pinned_manifest_for_launch(
+        launch.manifest.as_ref(),
+        launch.executable_digest.as_deref(),
+        &launch.harness_id,
+    )?;
     manifest.validate_task_route(&launch.spec)?;
     let receipt = ProcessReceipt {
         task_id: launch.spec.task_id,
@@ -593,6 +587,21 @@ async fn supervise(paths: &Paths, launch_path: &Path, json_output: bool) -> Resu
     let _ = fs::remove_file(paths.supervisor(result.task_id));
     print_value(&serde_json::to_value(result)?, json_output);
     Ok(())
+}
+
+fn pinned_manifest_for_launch(
+    manifest: Option<&HarnessManifest>,
+    digest: Option<&str>,
+    harness_id: &str,
+) -> Result<HarnessManifest> {
+    let (Some(manifest), Some(digest)) = (manifest, digest) else {
+        bail!("launch lacks a complete pinned manifest; unsafe replay is disabled");
+    };
+    if manifest.id != harness_id {
+        bail!("task-pinned harness id differs from its manifest");
+    }
+    Registry::verify_pinned_executable(manifest, digest)?;
+    Ok(manifest.clone())
 }
 
 fn spawn_supervisor(paths: &Paths, launch_path: &Path) -> Result<()> {
@@ -1420,5 +1429,18 @@ fn print_value(value: &serde_json::Value, json_output: bool) {
         println!("{value}");
     } else if let Ok(pretty) = serde_json::to_string_pretty(value) {
         println!("{pretty}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_launch_without_pinned_manifest_cannot_replay() {
+        let error = pinned_manifest_for_launch(None, None, "local.gjc").unwrap_err();
+        assert!(error.to_string().contains("unsafe replay is disabled"));
+        let error = pinned_manifest_for_launch(None, Some("digest"), "local.gjc").unwrap_err();
+        assert!(error.to_string().contains("unsafe replay is disabled"));
     }
 }
