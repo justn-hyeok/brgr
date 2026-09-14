@@ -54,3 +54,23 @@ itself remains executable code. The scratch directory is **not a sandbox**: do n
 or activate an untrusted downloaded executable, or grant it secrets, merely
 because a generated manifest looks valid. Treat unknown capabilities as
 unsupported and re-test when the executable or help identity changes.
+
+For a model-selecting CLI, add a bounded read-only catalog recipe under
+`probe.model_catalog` before claiming `model_select`:
+
+```json
+{
+  "model_catalog": {
+    "argv": ["--list-models"],
+    "format": { "kind": "dash_separated" }
+  }
+}
+```
+
+The supported formats are `json_selectors` (with `pointer` and `field`),
+`canonical_provider_table`, `dash_separated`, and `first_column`. An argv
+element may contain `${model.query}` (full selector) or `${model.id}` (the
+part after the final `/`) to filter the native list. Brgr matches
+the requested selector exactly; an absent or malformed catalog fails before
+the scratch model or task workspace starts. Use only documented read-only
+catalog commands, not a flag whose behavior you inferred from its name.

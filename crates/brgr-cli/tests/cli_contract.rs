@@ -106,6 +106,96 @@ fn named_process_harness_cannot_activate_without_authorized_scratch() {
 }
 
 #[test]
+fn herdr_unknown_model_stops_before_git_worktree_and_task_admission() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("brgr");
+    let binaries = temp.path().join("bin");
+    let repository = temp.path().join("repo");
+    fs::create_dir_all(&binaries).unwrap();
+    fs::create_dir_all(&repository).unwrap();
+    let omp = binaries.join("omp");
+    fs::write(
+        &omp,
+        "#!/bin/sh\ncase \"$1\" in models) echo '{\"models\":[]}';; *) exit 2;; esac\n",
+    )
+    .unwrap();
+    let launcher = binaries.join("omp-role");
+    fs::write(
+        &launcher,
+        "#!/bin/sh\necho '--expected-report --reuse-worktree-objective --reuse-worktree-owner --model --effort'\n",
+    )
+    .unwrap();
+    for executable in [&omp, &launcher] {
+        fs::set_permissions(executable, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let path = format!("{}:/usr/bin:/bin", binaries.display());
+    json_output(&run(
+        &home,
+        &[
+            "harness",
+            "add",
+            launcher.to_str().unwrap(),
+            "--presentation-only",
+        ],
+        &[("PATH", &path)],
+    ));
+    assert!(
+        Command::new("git")
+            .args(["init", "-b", "main"])
+            .current_dir(&repository)
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    fs::write(repository.join("README"), b"clean fixture\n").unwrap();
+    assert!(
+        Command::new("git")
+            .args(["-C", repository.to_str().unwrap(), "add", "README"])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    assert!(
+        Command::new("git")
+            .args([
+                "-C",
+                repository.to_str().unwrap(),
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "commit",
+                "-m",
+                "seed",
+            ])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    let denied = run(
+        &home,
+        &[
+            "run",
+            "MUST_NOT_START",
+            "--harness",
+            "local.omp-herdr",
+            "--model",
+            "fake/missing",
+            "--workspace",
+            repository.to_str().unwrap(),
+        ],
+        &[("PATH", &path), ("BRGR_OWNER_ID", "codex:herdr-preflight")],
+    );
+    assert!(!denied.status.success());
+    assert!(String::from_utf8_lossy(&denied.stderr).contains("absent from the current catalog"));
+    assert_eq!(fs::read_dir(home.join("launches")).unwrap().count(), 0);
+    assert_eq!(fs::read_dir(home.join("worktrees")).unwrap().count(), 0);
+}
+
+#[test]
 fn installed_hooks_preserve_foreign_entries_and_uninstall_exact_ownership() {
     let temp = TempDir::new().unwrap();
     let home = temp.path().join("brgr");
@@ -1007,7 +1097,7 @@ fn omp_fallback_model_cannot_be_sealed_as_requested_model() {
     let executable = temp.path().join("omp");
     fs::write(
         &executable,
-        "#!/bin/sh\ncase \"$1\" in\n --version) echo 'omp fixture 1'; exit 0;;\n --help) printf '%s\\n' '-p, --print' '--mode=<value>' '--no-session' '--no-prewalk' '--no-extensions' '--no-title' '--model=<value>' '--thinking=<value>'; exit 0;;\nesac\nprintf '%s\\n' '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"provider\":\"other\",\"model\":\"fallback\",\"content\":[{\"type\":\"text\",\"text\":\"SHOULD_NOT_ACCEPT\"}]}}' '{\"type\":\"agent_end\",\"stopReason\":\"completed\"}'\n",
+        "#!/bin/sh\ncase \"$1\" in\n --version) echo 'omp fixture 1'; exit 0;;\n --help) printf '%s\\n' '-p, --print' '--mode=<value>' '--no-session' '--no-prewalk' '--no-extensions' '--no-title' '--model=<value>' '--thinking=<value>'; exit 0;;\n models) echo '{\"models\":[{\"selector\":\"other/fallback\"},{\"selector\":\"workbuddy/deepseek-v4.1-flash\"}]}'; exit 0;;\nesac\nprintf '%s\\n' '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"provider\":\"other\",\"model\":\"fallback\",\"content\":[{\"type\":\"text\",\"text\":\"SHOULD_NOT_ACCEPT\"}]}}' '{\"type\":\"agent_end\",\"stopReason\":\"completed\"}'\n",
     )
     .unwrap();
     fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
@@ -1025,6 +1115,24 @@ fn omp_fallback_model_cannot_be_sealed_as_requested_model() {
         &[],
     ));
     let owner = [("BRGR_OWNER_ID", "codex:wrong-model")];
+    let unknown = run(
+        &home,
+        &[
+            "run",
+            "unknown model must not start",
+            "--harness",
+            "local.omp",
+            "--workspace",
+            workspace.to_str().unwrap(),
+            "--model",
+            "unknown/model",
+        ],
+        &owner,
+    );
+    assert!(!unknown.status.success());
+    assert!(String::from_utf8_lossy(&unknown.stderr).contains("absent from the current catalog"));
+    assert_eq!(fs::read_dir(home.join("launches")).unwrap().count(), 0);
+    assert_eq!(fs::read_dir(home.join("worktrees")).unwrap().count(), 0);
     let result = json_output(&run(
         &home,
         &[

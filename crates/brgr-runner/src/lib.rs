@@ -2,7 +2,7 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
-    io::Read as _,
+    io::{Read as _, Seek as _, SeekFrom},
     os::unix::{fs::MetadataExt, process::CommandExt},
     path::{Path, PathBuf},
     process::{ExitStatus, Stdio},
@@ -44,6 +44,24 @@ pub struct HarnessManifest {
 pub struct ProbeSpec {
     pub version_argv: Vec<String>,
     pub help_argv: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_catalog: Option<ModelCatalogSpec>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelCatalogSpec {
+    pub argv: Vec<String>,
+    pub format: ModelCatalogFormat,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ModelCatalogFormat {
+    JsonSelectors { pointer: String, field: String },
+    CanonicalProviderTable,
+    DashSeparated,
+    FirstColumn,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -266,45 +284,117 @@ impl ProcessRunner {
         argv: &[String],
         deadline: Duration,
     ) -> Result<ExecutionOutput, RunnerError> {
-        let manifest = HarnessManifest {
-            schema: MANIFEST_SCHEMA_V1.to_owned(),
-            id: "internal.probe".to_owned(),
-            adapter: PROCESS_ADAPTER_V1.to_owned(),
-            executable: executable.to_path_buf(),
-            probe: ProbeSpec {
-                version_argv: argv.to_vec(),
-                help_argv: argv.to_vec(),
-            },
-            launch: LaunchSpec {
-                argv: argv.to_vec(),
-                model_argv: vec![],
-                effort_argv: vec![],
-                env_allow: vec!["HOME".to_owned(), "PATH".to_owned(), "LANG".to_owned()],
-                mode: ExecutionMode::OneShot,
-            },
-            result: ResultSpec {
-                source: ResultSource::Stdout,
-                media_type: "text/plain".to_owned(),
-                max_bytes: 65_536,
-                success_exit_codes: vec![0],
-            },
-            capabilities: BTreeMap::new(),
-        };
+        if !executable.is_absolute() || !executable.is_file() {
+            return Err(RunnerError::InvalidExecutable(executable.to_path_buf()));
+        }
+        if argv.len() > 64 || argv.iter().any(|argument| argument.contains('\0')) {
+            return Err(RunnerError::InvalidArgument);
+        }
         let scratch = TempDir::new()?;
-        Self::run(
-            &manifest,
-            RunRequest {
-                workspace: scratch.path(),
-                prompt: "",
-                model: None,
-                effort: None,
-                deadline,
-                cancel_path: None,
-                pid_path: None,
-            },
+        let stdout_path = scratch.path().join("stdout");
+        let stderr_path = scratch.path().join("stderr");
+        let mut stdout_file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&stdout_path)?;
+        let mut stderr_file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&stderr_path)?;
+        let mut command = Command::new(executable);
+        command
+            .args(argv)
+            .current_dir(scratch.path())
+            .env_clear()
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(stdout_file.try_clone()?))
+            .stderr(Stdio::from(stderr_file.try_clone()?))
+            .kill_on_drop(true);
+        command.as_std_mut().process_group(0);
+        for name in ["HOME", "PATH", "LANG"] {
+            if let Some(value) = std::env::var_os(name) {
+                command.env(name, value);
+            }
+        }
+        let started = Instant::now();
+        let mut child = command.spawn().map_err(RunnerError::SpawnIo)?;
+        let (status, timed_out, quota_exceeded) = wait_for_probe_exit(
+            &mut child,
+            started,
+            deadline,
+            &stdout_file,
+            &stderr_file,
+            65_536,
         )
-        .await
+        .await?;
+        let (stdout, stdout_truncated) = read_probe_file(&mut stdout_file, 65_536)?;
+        let (stderr, stderr_truncated) = read_probe_file(&mut stderr_file, 65_536)?;
+        let exit_code = status.and_then(|value| value.code());
+        let output_truncated = quota_exceeded || stdout_truncated || stderr_truncated;
+        let result = if exit_code == Some(0) && !timed_out && !output_truncated {
+            stdout.clone()
+        } else {
+            Vec::new()
+        };
+        Ok(ExecutionOutput {
+            exit_code,
+            stdout,
+            stderr,
+            result,
+            observed_model: None,
+            timed_out,
+            cancelled: false,
+            output_truncated,
+            elapsed: started.elapsed(),
+        })
     }
+}
+
+fn read_probe_file(file: &mut std::fs::File, limit: u64) -> Result<(Vec<u8>, bool), RunnerError> {
+    let mut bytes = Vec::new();
+    file.seek(SeekFrom::Start(0))?;
+    file.take(limit.saturating_add(1)).read_to_end(&mut bytes)?;
+    let truncated = u64::try_from(bytes.len()).unwrap_or(u64::MAX) > limit;
+    if truncated {
+        bytes.truncate(usize::try_from(limit).expect("probe limit fits usize"));
+    }
+    Ok((bytes, truncated))
+}
+
+async fn wait_for_probe_exit(
+    child: &mut tokio::process::Child,
+    started: Instant,
+    deadline: Duration,
+    stdout: &std::fs::File,
+    stderr: &std::fs::File,
+    limit: u64,
+) -> Result<(Option<ExitStatus>, bool, bool), RunnerError> {
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok((Some(status), false, false));
+        }
+        if stdout.metadata()?.len() > limit || stderr.metadata()?.len() > limit {
+            return Ok((Some(stop_probe_group(child).await?), false, true));
+        }
+        if started.elapsed() >= deadline {
+            return Ok((Some(stop_probe_group(child).await?), true, false));
+        }
+        sleep(Duration::from_millis(1)).await;
+    }
+}
+
+async fn stop_probe_group(child: &mut tokio::process::Child) -> Result<ExitStatus, RunnerError> {
+    let pid = child.id().ok_or(RunnerError::MissingProcessId)?;
+    let kill = std::process::Command::new("/bin/kill")
+        .arg("-KILL")
+        .arg(format!("-{pid}"))
+        .output()?;
+    if !kill.status.success() && child.try_wait()?.is_none() {
+        child.start_kill()?;
+    }
+    Ok(child.wait().await?)
 }
 
 #[cfg(debug_assertions)]
@@ -411,6 +501,24 @@ impl HarnessManifest {
         if self.launch.argv.iter().any(|value| value.contains('\0')) {
             return Err(RunnerError::InvalidArgument);
         }
+        if let Some(catalog) = &self.probe.model_catalog
+            && (catalog.argv.is_empty()
+                || catalog.argv.len() > 64
+                || catalog.argv.iter().any(|arg| {
+                    arg.contains('\0')
+                        || arg
+                            .replace("${model.query}", "")
+                            .replace("${model.id}", "")
+                            .contains("${")
+                })
+                || matches!(
+                    &catalog.format,
+                    ModelCatalogFormat::JsonSelectors { pointer, field }
+                        if !pointer.starts_with('/') || field.is_empty()
+                ))
+        {
+            return Err(RunnerError::InvalidModelCatalog);
+        }
         if self.result.max_bytes == 0 || self.result.max_bytes > 20 * 1024 * 1024 {
             return Err(RunnerError::InvalidOutputLimit);
         }
@@ -483,8 +591,11 @@ async fn stop_process_group(child: &mut tokio::process::Child) -> Result<ExitSta
     let term = std::process::Command::new("/bin/kill")
         .arg("-TERM")
         .arg(format!("-{pid}"))
-        .status()?;
-    if !term.success() {
+        .output()?;
+    if !term.status.success() {
+        if let Some(status) = child.try_wait()? {
+            return Ok(status);
+        }
         child.start_kill()?;
         return Ok(child.wait().await?);
     }
@@ -772,6 +883,8 @@ pub enum RunnerError {
     MissingSuccessExitCode,
     #[error("invalid or duplicate environment name: {0}")]
     InvalidEnvironmentName(String),
+    #[error("model catalog manifest is malformed")]
+    InvalidModelCatalog,
     #[error("required substitution is missing: {0}")]
     MissingSubstitution(String),
     #[error("unknown substitution in argument: {0}")]
@@ -821,6 +934,7 @@ mod tests {
             probe: ProbeSpec {
                 version_argv: vec!["--version".to_owned()],
                 help_argv: vec!["--help".to_owned()],
+                model_catalog: None,
             },
             launch: LaunchSpec {
                 argv: vec!["@${input.prompt_file}".to_owned()],
@@ -1097,6 +1211,85 @@ mod tests {
             manifest.validate(),
             Err(RunnerError::InvalidExecutable(_))
         ));
+    }
+
+    #[test]
+    fn optional_catalog_preserves_old_manifest_shape_and_rejects_unknown_templates() {
+        let mut manifest = echo_manifest(4_096);
+        let old = serde_json::to_vec(&manifest).unwrap();
+        assert!(!String::from_utf8_lossy(&old).contains("model_catalog"));
+        let decoded: HarnessManifest = serde_json::from_slice(&old).unwrap();
+        assert_eq!(serde_json::to_vec(&decoded).unwrap(), old);
+        manifest.probe.model_catalog = Some(ModelCatalogSpec {
+            argv: vec!["--list-models=${unknown}".to_owned()],
+            format: ModelCatalogFormat::FirstColumn,
+        });
+        assert!(matches!(
+            manifest.validate(),
+            Err(RunnerError::InvalidModelCatalog)
+        ));
+    }
+
+    #[tokio::test]
+    async fn file_backed_probe_captures_full_help_and_flags_oversize() {
+        let root = tempfile::tempdir().unwrap();
+        let executable = root.path().join("probe");
+        std::fs::write(
+            &executable,
+            "#!/bin/sh\ni=0\nwhile [ \"$i\" -lt 100 ]; do printf 'model-catalog-line-12345678901234567890123456789012345678901234567890\\n'; i=$((i+1)); done\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let output = ProcessRunner::probe(&executable, &[], Duration::from_secs(2))
+            .await
+            .unwrap();
+        assert_eq!(output.exit_code, Some(0));
+        assert!(output.stdout.len() > 512);
+        assert!(!output.output_truncated);
+        std::fs::write(
+            &executable,
+            "#!/bin/sh\ni=0\nwhile [ \"$i\" -lt 1200 ]; do printf 'model-catalog-line-12345678901234567890123456789012345678901234567890\\n'; i=$((i+1)); done\n",
+        )
+        .unwrap();
+        let oversized = ProcessRunner::probe(&executable, &[], Duration::from_secs(2))
+            .await
+            .unwrap();
+        assert!(oversized.output_truncated);
+        assert_eq!(oversized.stdout.len(), 65_536);
+    }
+
+    #[tokio::test]
+    async fn probe_stops_a_flood_before_its_deadline_and_reads_the_original_descriptor() {
+        let root = tempfile::tempdir().unwrap();
+        let executable = root.path().join("probe");
+        let captured = root.path().join("captured");
+        std::fs::write(
+            &executable,
+            format!(
+                "#!/bin/sh\n/bin/ln stdout '{}'\nexec /usr/bin/yes MODEL_CATALOG_FLOOD\n",
+                captured.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let flooded = ProcessRunner::probe(&executable, &[], Duration::from_secs(2))
+            .await
+            .unwrap();
+        assert!(flooded.output_truncated);
+        assert!(!flooded.timed_out);
+        assert!(flooded.elapsed < Duration::from_secs(2));
+        assert!(std::fs::metadata(&captured).unwrap().len() < 8 * 1024 * 1024);
+
+        std::fs::write(
+            &executable,
+            "#!/bin/sh\n/bin/mv stdout moved\n/bin/ln -s /etc/passwd stdout\nprintf 'SAFE_PROBE'\n",
+        )
+        .unwrap();
+        let replaced = ProcessRunner::probe(&executable, &[], Duration::from_secs(2))
+            .await
+            .unwrap();
+        assert_eq!(replaced.stdout, b"SAFE_PROBE");
+        assert!(!replaced.output_truncated);
     }
 
     #[test]

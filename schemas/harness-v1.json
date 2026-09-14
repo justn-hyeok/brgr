@@ -15,7 +15,20 @@
       "required": ["version_argv", "help_argv"],
       "properties": {
         "version_argv": { "$ref": "#/$defs/argv" },
-        "help_argv": { "$ref": "#/$defs/argv" }
+        "help_argv": { "$ref": "#/$defs/argv" },
+        "model_catalog": {
+          "type": "object", "additionalProperties": false,
+          "required": ["argv", "format"],
+          "properties": {
+            "argv": { "$ref": "#/$defs/argv" },
+            "format": {
+              "oneOf": [
+                { "type": "object", "additionalProperties": false, "required": ["kind", "pointer", "field"], "properties": { "kind": { "const": "json_selectors" }, "pointer": { "type": "string", "pattern": "^/" }, "field": { "type": "string", "minLength": 1 } } },
+                { "type": "object", "additionalProperties": false, "required": ["kind"], "properties": { "kind": { "enum": ["canonical_provider_table", "dash_separated", "first_column"] } } }
+              ]
+            }
+          }
+        }
       }
     },
     "launch": {
@@ -29,7 +42,7 @@
           "type": "array", "uniqueItems": true, "maxItems": 32,
           "items": { "type": "string", "pattern": "^[A-Z_][A-Z0-9_]*$" }
         },
-        "mode": { "const": "one_shot" }
+        "mode": { "enum": ["one_shot", "delegated_external"] }
       }
     },
     "result": {

@@ -52,6 +52,9 @@ certify a managed process scratch run.
 An older process activation without a scratch receipt must be recertified by
 the same approved add flow before a new task; do not infer old approval or
 silently switch harnesses. Existing results and decisions remain intact.
+When an exact model is requested, re-certify a legacy activation that lacks
+a bounded native model catalog; an unknown selector must fail before a task
+worktree or paid scratch. Do not replace it with a fuzzy or auto model.
 
 When a hook surfaces a terminal inbox item, inspect the sealed result and its
 acceptance criteria. Run `brgr accept TASK` only after relevant evidence passes;
