@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.0.7 — 2026-09-14
+
+Command Code registration now enables `--effort` only when its installed help
+documents that option. A requested effort is passed as a separate argv value;
+older executables without the flag remain explicitly unsupported. Live
+minimum-effort Luna runs across OMP, GJC, Cursor CLI, and Command Code are
+recorded in `docs/live-four-harness-luna-min-2026-09-14.md`. Cursor's `none`
+level is selected through its exact model variant, not an invented effort flag.
+Native effort remains unobserved; accepting a response does not prove that a
+provider honored an effort setting.
+
 ## 1.0.6 — 2026-09-14
 
 Named process harnesses no longer activate through help/version probes alone.

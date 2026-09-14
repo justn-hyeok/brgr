@@ -35,6 +35,14 @@ verified effort value in this event stream, so `effort_source` remains
 identity unless their adapter supplies evidence. A missing or different OMP
 model fails closed rather than becoming an accepted candidate.
 
+For lowest available Luna effort on the installed CLIs tested on 2026-09-14:
+OMP uses `openai-codex/gpt-5.6-luna` with `--effort low`, GJC uses the same
+model with `--effort minimal`, Cursor CLI uses the exact model variant
+`gpt-5.6-luna-none` without an effort flag, and Command Code uses
+`gpt-5.6-luna` with `--effort low`. Recheck each executable's native catalog
+after upgrading it. These are route requests; only OMP and GJC expose a
+native model observation, and none expose a verified effort observation.
+
 ## Start from Codex
 
 Install the local binary and Codex integration, then start a new Codex session:
