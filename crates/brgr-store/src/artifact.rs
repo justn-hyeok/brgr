@@ -1,6 +1,7 @@
 use std::{
     fs::{self, File, OpenOptions},
     io::{self, Read, Write},
+    os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
 };
 
@@ -44,6 +45,11 @@ impl ArtifactStore {
         }
 
         let file = File::open(source)?;
+        if !same_regular_file(&metadata, &file.metadata()?) {
+            return Err(StoreError::ArtifactNotRegularFile {
+                path: source.to_path_buf(),
+            });
+        }
         self.seal_reader(file, media_type, max_bytes)
     }
 
@@ -181,7 +187,7 @@ impl ArtifactStore {
             return Err(StoreError::ArtifactIntegrityMismatch);
         }
         let mut file = File::open(&path)?;
-        if !file.metadata()?.is_file() {
+        if !same_regular_file(&metadata, &file.metadata()?) {
             return Err(StoreError::ArtifactNotRegularFile { path });
         }
         let mut bytes = Vec::new();
@@ -196,6 +202,14 @@ impl ArtifactStore {
         }
         Ok(bytes)
     }
+}
+
+fn same_regular_file(before: &fs::Metadata, opened: &fs::Metadata) -> bool {
+    before.file_type().is_file()
+        && opened.file_type().is_file()
+        && before.dev() == opened.dev()
+        && before.ino() == opened.ino()
+        && before.len() == opened.len()
 }
 
 fn sync_directory(path: &Path) -> Result<(), StoreError> {
@@ -288,6 +302,22 @@ mod tests {
                 Err(StoreError::ArtifactNotRegularFile { .. })
             ));
         }
+    }
+
+    #[test]
+    fn opened_artifact_must_match_the_checked_inode_and_size() {
+        let root = TempDir::new().unwrap();
+        let first = root.path().join("first");
+        let second = root.path().join("second");
+        fs::write(&first, b"first").unwrap();
+        fs::write(&second, b"other").unwrap();
+        let checked = fs::symlink_metadata(&first).unwrap();
+        let different = File::open(&second).unwrap().metadata().unwrap();
+        assert!(!same_regular_file(&checked, &different));
+        assert!(same_regular_file(
+            &checked,
+            &File::open(&first).unwrap().metadata().unwrap()
+        ));
     }
 
     fn walk_files(root: &Path) -> Vec<PathBuf> {
