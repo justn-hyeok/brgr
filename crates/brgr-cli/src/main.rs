@@ -620,7 +620,6 @@ async fn supervise(paths: &Paths, launch_path: &Path, json_output: bool) -> Resu
         launch_path: launch_path.to_path_buf(),
         identity: process_identity(std::process::id())?,
     };
-    write_json_atomic(&paths.supervisor(launch.spec.task_id), &receipt)?;
     let manifest = if manifest.adapter == brgr_runner::OMP_ROLE_ADAPTER_V1 {
         omp_process_manifest(paths, &launch, &manifest)?
     } else {
@@ -629,7 +628,11 @@ async fn supervise(paths: &Paths, launch_path: &Path, json_output: bool) -> Resu
     let cancel_path = paths.cancel(launch.spec.task_id);
     let pid_path = paths.pid(launch.spec.task_id);
     let mut supervisor = Supervisor::open(&paths.store)?;
+    // Reconcile before publishing our own task receipt. Otherwise a previous
+    // crashed attempt without a launch identity could mistake this new process
+    // for its original live supervisor and remain unfinished forever.
     supervisor.reconcile_after_restart(|attempt| observe_attempt(paths, attempt))?;
+    write_json_atomic(&paths.supervisor(launch.spec.task_id), &receipt)?;
     let result = supervisor
         .run_fresh_controlled(
             launch.spec,

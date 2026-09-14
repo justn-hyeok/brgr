@@ -15,7 +15,9 @@ also verifies that a successful detached result remains in the durable inbox
 until an explicit decision and acknowledgment. Recovery defers to a live
 task-bound supervisor during the brief startup
 identity window and treats a stale recovery snapshot as concurrent progress,
-without replacing the runner's result. Older stored results and
+without replacing the runner's result. A replacement supervisor reconciles
+old attempts before publishing its own receipt; process-level tests exercise
+the live startup and dead-predecessor paths. Older stored results and
 decisions are not rewritten; already accepted historical results should be
 re-evaluated against their original criteria if they came from a revised
 Herdr-backed OMP task.

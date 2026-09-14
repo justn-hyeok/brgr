@@ -12,7 +12,10 @@ candidate. Tests and an actual WorkBuddy/DeepSeek R1→R2→R3 run cover the
 negative replay and corrected positive path. A detached successful run also
 has a durable offline-owner inbox regression test. Recovery now defers to a
 live task-bound supervisor during the brief identity-recording window and
-ignores a stale observation when a concurrent runner advances first. All
+ignores a stale observation when a concurrent runner advances first. A
+replacement supervisor reconciles old attempts before publishing its own
+receipt, so it cannot adopt a dead predecessor. Process-level tests exercise
+both sides of that race. All
 previous unsigned and best-effort Herdr cleanup limits remain.
 
 ## 1.0.4 — 2026-09-14
