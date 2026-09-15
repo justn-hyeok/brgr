@@ -14,7 +14,7 @@ identity or the completion oracle.
 | `brgr.open` | Opens a `board` tab in the selected Herdr workspace. |
 | `brgr.codex` | Opens a Codex tab for that workspace's linked worktree or cwd. |
 | `brgr.doctor` | Checks the brgr store, registered harnesses, and Codex integration. |
-| `board` pane | Refreshes the latest 20 task states and decisions every two seconds; never reads prompt or artifact bytes. |
+| `board` pane | Refreshes the latest 20 task states and decisions every two seconds; never returns prompt or artifact bytes. |
 | `codex` pane | Installs only brgr-owned Codex hooks/skill, places the plugin binary on `PATH`, starts a fresh Codex session, and hosts its private brgr command bridge. |
 
 Herdr supplies the workspace and worktree context. The Codex pane chooses the
@@ -27,16 +27,21 @@ session establishes its own owner binding. All commands use argv arrays
 without a shell. The `board` is read-only task metadata for the same OS user;
 only the bound Codex owner can read sealed result contents or decide them.
 
-Codex keeps its normal command sandbox. Its plugin pane adds the brgr control
-home as a writable root and passes brgr CLI calls through a private file bridge
-served by that pane's host process. The host executes only the submitted brgr
-binary argv, with the requesting Codex session identity, a finite deadline,
-and bounded request and response sizes. Foreground budgets that exceed the
+Codex keeps its normal command sandbox. Its plugin pane adds only an ephemeral
+bridge directory as a writable root and passes brgr CLI calls through the
+private file bridge served by that pane's host process. The host pins every
+request to the selected brgr control home and permits managed task, result,
+decision, health, and cleanup operations. It rejects harness mutation, Codex
+integration mutation, internal plugin entrypoints, and task workspaces outside
+the selected Herdr workspace. Register or re-certify harnesses and change Codex
+integration explicitly outside the plugin Codex pane. Requests retain the
+requesting Codex session identity, a finite deadline, and bounded request,
+process-output, and encoded-response sizes. Foreground budgets that exceed the
 bridge's seven-day command limit (including its completion margin) fail before
 admission. The bridge disappears when the Codex pane exits. A missing bridge
 fails visibly; it does not trigger a generic sandbox bypass. This is a
-cooperative same-user boundary, not protection from
-a hostile local process with the user's permissions.
+cooperative same-user boundary, not protection from a hostile local process
+with the user's permissions.
 
 ## Installation and migration
 

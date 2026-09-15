@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased
+
+Harden the v2 personal-use path around the Herdr host bridge, Git worktree
+admission, harness health checks, SQLite writer contention, and the read-only
+board. The plugin Codex pane now exposes only an ephemeral bridge directory;
+the host pins accepted brgr commands to the configured control home and
+selected workspace and rejects registry or integration mutation. Bridge
+timeouts and output overflow stop the spawned process group, and encoded
+responses are bounded before publication.
+
+Concurrent admissions share a repository-wide lock across linked worktrees,
+preserve collisions, and release the lock before foreground execution. Harness
+health distinguishes executable, spawn, timeout, exit, and probe-evidence
+failures and detects current Codex hook or skill drift. The board reads an
+existing store without schema mutation and validates relational task, result,
+and decision identities before projecting them. No wire format, automatic
+acceptance, implicit fallback, or public v1 readiness claim changes.
+
 ## 2.0.0 — 2026-09-15
 
 Package brgr as a Herdr 0.9+ plugin on macOS. Workspace actions open a
