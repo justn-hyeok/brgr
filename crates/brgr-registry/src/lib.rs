@@ -634,6 +634,7 @@ async fn probe_custom_contract(manifest: &HarnessManifest) -> Result<ProbeEviden
                 | "local.omp-herdr"
                 | "local.cursor-cli"
                 | "local.command-code"
+                | "local.devin"
         )
     {
         return Err(RegistryError::ReservedCustomHarness);
@@ -855,6 +856,7 @@ fn generate_manifest(
         "omp-role" => generate_omp_manifest(executable, help),
         "cursor" | "cursor-agent" | "cursor-cli" => generate_cursor_manifest(executable, help),
         "command-code" | "commandcode" | "cmdc" => generate_command_code_manifest(executable, help),
+        "devin" => generate_devin_manifest(executable, help),
         _ => generate_generic_manifest(requested_name, executable, help),
     }
 }
@@ -1206,6 +1208,72 @@ fn generate_command_code_manifest(
                     unsupported("not_observed")
                 },
             ),
+        ]),
+    })
+}
+
+fn generate_devin_manifest(
+    executable: PathBuf,
+    help: &str,
+) -> Result<HarnessManifest, RegistryError> {
+    if ![
+        "--prompt-file <FILE>",
+        "-p, --print",
+        "--permission-mode <PERMISSION_MODE>",
+        "--respect-workspace-trust [<RESPECT_WORKSPACE_TRUST>]",
+    ]
+    .iter()
+    .all(|flag| help.contains(flag))
+    {
+        return Err(RegistryError::RequiredFlagsMissing);
+    }
+    Ok(HarnessManifest {
+        schema: MANIFEST_SCHEMA_V1.to_owned(),
+        id: "local.devin".to_owned(),
+        adapter: PROCESS_ADAPTER_V1.to_owned(),
+        executable,
+        probe: ProbeSpec {
+            version_argv: vec!["--version".to_owned()],
+            help_argv: vec!["--help".to_owned()],
+            model_catalog: None,
+        },
+        launch: LaunchSpec {
+            argv: vec![
+                "--permission-mode".to_owned(),
+                "smart".to_owned(),
+                "--respect-workspace-trust".to_owned(),
+                "false".to_owned(),
+                "--prompt-file".to_owned(),
+                "${input.prompt_file}".to_owned(),
+                "-p".to_owned(),
+            ],
+            model_argv: vec![],
+            effort_argv: vec![],
+            env_allow: vec![
+                "HOME".to_owned(),
+                "PATH".to_owned(),
+                "LANG".to_owned(),
+                "TMPDIR".to_owned(),
+            ],
+            mode: ExecutionMode::OneShot,
+        },
+        result: ResultSpec {
+            source: ResultSource::Stdout,
+            media_type: "text/plain".to_owned(),
+            max_bytes: 1_048_576,
+            success_exit_codes: vec![0],
+        },
+        capabilities: BTreeMap::from([
+            (
+                "completion".to_owned(),
+                supported("print_mode_process_exit_with_nonempty_stdout"),
+            ),
+            ("cancel".to_owned(), supported("local_process_only")),
+            (
+                "model_select".to_owned(),
+                unsupported("configured_default_only"),
+            ),
+            ("effort_select".to_owned(), unsupported("not_observed")),
         ]),
     })
 }
@@ -1939,6 +2007,39 @@ mod tests {
                 "--print [query]"
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn devin_recipe_uses_bounded_print_mode_and_configured_model() {
+        let help = "--prompt-file <FILE> -p, --print [<PROMPT>] --permission-mode <PERMISSION_MODE> --respect-workspace-trust [<RESPECT_WORKSPACE_TRUST>] --model <MODEL>";
+        let devin = generate_manifest("devin", PathBuf::from("/bin/echo"), help).unwrap();
+        assert_eq!(devin.id, "local.devin");
+        assert_eq!(
+            devin.launch.argv,
+            [
+                "--permission-mode",
+                "smart",
+                "--respect-workspace-trust",
+                "false",
+                "--prompt-file",
+                "${input.prompt_file}",
+                "-p",
+            ]
+        );
+        assert!(devin.launch.model_argv.is_empty());
+        assert!(devin.launch.effort_argv.is_empty());
+        assert!(devin.probe.model_catalog.is_none());
+        assert_eq!(
+            devin.capabilities["model_select"].status,
+            CapabilityStatus::Unsupported
+        );
+        assert_eq!(
+            devin.capabilities["effort_select"].status,
+            CapabilityStatus::Unsupported
+        );
+        assert!(
+            generate_manifest("devin", PathBuf::from("/bin/echo"), "--prompt-file <FILE>").is_err()
         );
     }
 

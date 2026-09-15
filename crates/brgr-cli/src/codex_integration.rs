@@ -61,6 +61,11 @@ directory outside the source worktree and brgr control home. The scratch run
 may call a paid model; preserve an exact requested model/effort or fail closed.
 `--presentation-only` is limited to the optional Herdr adapter and does not
 certify a managed process scratch run.
+The built-in `local.devin` recipe uses Devin CLI's configured model in bounded
+prompt-file print mode. If Devin reports a stale default model, select a working
+model once with `/model` in an interactive Devin session before registration.
+Do not pass `--model` or `--effort` to this route: its current catalog exceeds
+the bounded probe limit, so brgr deliberately leaves both selectors unsupported.
 An older process activation without a scratch receipt must be recertified by
 the same approved add flow before a new task; do not infer old approval or
 silently switch harnesses. Existing results and decisions remain intact.
