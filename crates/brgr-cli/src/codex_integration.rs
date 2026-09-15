@@ -238,11 +238,19 @@ pub fn status(brgr_home: &Path) -> Result<Value> {
     let hooks_present = installed_command_count(&receipt)?;
     let skill_matches = receipt.skill_path.exists()
         && fs::read_to_string(&receipt.skill_path)? == receipt.skill_text;
+    let current_commands = hook_commands(&env::current_exe()?, brgr_home);
+    let current_skill = receipt.skill_text == SKILL_TEXT;
+    let installed = hooks_present == receipt.commands.len()
+        && skill_matches
+        && current_skill
+        && receipt.commands == current_commands;
     Ok(json!({
-        "status": if hooks_present == receipt.commands.len() && skill_matches { "installed" } else { "drifted" },
+        "status": if installed { "installed" } else { "drifted" },
         "hooks_present": hooks_present,
         "hooks_expected": receipt.commands.len(),
         "skill_matches": skill_matches,
+        "current_skill": current_skill,
+        "current_hooks": receipt.commands == current_commands,
     }))
 }
 

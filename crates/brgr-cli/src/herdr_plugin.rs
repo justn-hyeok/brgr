@@ -2,6 +2,7 @@
 
 use std::{
     env,
+    ffi::OsString,
     fmt::Write as _,
     fs,
     io::{self, IsTerminal as _, Write as _},
@@ -12,8 +13,7 @@ use std::{
 };
 
 use anyhow::{Context as _, Result, bail};
-use brgr_protocol::AttemptState;
-use brgr_store::{Store, StoreError};
+use brgr_store::BoardStore;
 use serde::Deserialize;
 use tempfile::Builder;
 use tokio::{
@@ -61,11 +61,16 @@ fn require_host() -> Result<()> {
 }
 
 fn workspace_id(context: &PluginContext) -> Result<String> {
-    let id = context
-        .workspace_id
-        .clone()
-        .or_else(|| env::var("HERDR_WORKSPACE_ID").ok())
-        .context("Herdr did not supply a workspace id")?;
+    parse_workspace_id(
+        context
+            .workspace_id
+            .clone()
+            .or_else(|| env::var("HERDR_WORKSPACE_ID").ok()),
+    )
+}
+
+fn parse_workspace_id(id: Option<String>) -> Result<String> {
+    let id = id.context("Herdr did not supply a workspace id")?;
     if id.is_empty() || id.len() > 128 || !id.is_ascii() {
         bail!("Herdr supplied an invalid workspace id");
     }
@@ -80,27 +85,31 @@ fn workspace_path(context: &PluginContext) -> Result<&Path> {
         .or(context.workspace_cwd.as_deref())
         .or(context.focused_pane_cwd.as_deref())
         .context("Herdr did not supply a workspace directory")?;
-    if !path.is_absolute() || !path.is_dir() {
-        bail!(
-            "Herdr workspace directory is unavailable: {}",
-            path.display()
-        );
-    }
+    require_absolute_dir(path, "Herdr workspace directory")?;
     Ok(path)
 }
 
 fn launched_workspace_path(context: &PluginContext) -> Result<PathBuf> {
-    if let Some(path) = env::var_os(WORKSPACE_PATH_ENV) {
+    launched_workspace_path_from(context, env::var_os(WORKSPACE_PATH_ENV))
+}
+
+fn launched_workspace_path_from(
+    context: &PluginContext,
+    pinned: Option<OsString>,
+) -> Result<PathBuf> {
+    if let Some(path) = pinned {
         let path = PathBuf::from(path);
-        if !path.is_absolute() || !path.is_dir() {
-            bail!(
-                "brgr plugin workspace directory is unavailable: {}",
-                path.display()
-            );
-        }
+        require_absolute_dir(&path, "brgr plugin workspace directory")?;
         return Ok(path);
     }
     Ok(workspace_path(context)?.to_path_buf())
+}
+
+fn require_absolute_dir(path: &Path, label: &str) -> Result<()> {
+    if !path.is_absolute() || !path.is_dir() {
+        bail!("{label} is unavailable: {}", path.display());
+    }
+    Ok(())
 }
 
 pub async fn open(no_focus: bool, codex: bool) -> Result<()> {
@@ -151,51 +160,36 @@ pub async fn open(no_focus: bool, codex: bool) -> Result<()> {
 }
 
 fn board_snapshot(paths: &Paths) -> Result<String> {
-    let store = Store::open(&paths.store)?;
+    let store = BoardStore::open_existing(&paths.store)?;
     let mut output = String::from("brgr · managed tasks\n\n");
     output.push_str("Codex owns final accept/reject. Use the Herdr 'Open Codex for brgr' action to run or review work.\n\n");
     output.push_str("TASK      PROJECT               HARNESS            REV  STATE       RESULT      DECISION\n");
-    let tasks = store.tasks(20)?;
+    let tasks = store.rows(20)?;
     if tasks.is_empty() {
         output.push_str("No managed tasks yet.\n");
     }
     for task in tasks {
-        let state = match store.attempt_state(task.task_id) {
-            Ok(state) => state,
-            Err(StoreError::TaskNotFound(_)) => AttemptState::Queued,
-            Err(error) => return Err(error.into()),
-        };
-        let result = match store.latest_result(task.task_id) {
-            Ok(result) => Some(result),
-            Err(StoreError::TaskNotFound(_)) => None,
-            Err(error) => return Err(error.into()),
-        };
-        let decision = result
-            .as_ref()
-            .map(|result| store.decision_for_result(result.result_id))
-            .transpose()?
-            .flatten();
         let project = Path::new(&task.workspace)
             .file_name()
             .and_then(|name| name.to_str())
             .unwrap_or("-");
         let task_id = task.task_id.to_string();
-        let outcome = result.as_ref().map_or_else(
+        let outcome = task.result_outcome.map_or_else(
             || "-".to_owned(),
-            |value| format!("{:?}", value.outcome).to_lowercase(),
+            |value| format!("{value:?}").to_lowercase(),
         );
-        let verdict = decision.map_or_else(
+        let verdict = task.decision_verdict.map_or_else(
             || "-".to_owned(),
-            |value| format!("{:?}", value.verdict).to_lowercase(),
+            |value| format!("{value:?}").to_lowercase(),
         );
         writeln!(
             output,
             "{:<9} {:<21} {:<18} {:<4} {:<11} {:<11} {}",
             &task_id[..8],
             truncate(project, 20),
-            truncate(&task.route.harness_id, 17),
+            truncate(&task.harness_id, 17),
             task.revision,
-            format!("{state:?}").to_lowercase(),
+            format!("{:?}", task.attempt_state).to_lowercase(),
             outcome,
             verdict,
         )?;
@@ -207,19 +201,43 @@ fn board_snapshot(paths: &Paths) -> Result<String> {
 }
 
 fn truncate(value: &str, max_chars: usize) -> String {
-    value.chars().take(max_chars).collect()
+    value
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                '\u{fffd}'
+            } else {
+                character
+            }
+        })
+        .take(max_chars)
+        .collect()
 }
 
 pub async fn board(paths: &Paths, once: bool) -> Result<()> {
     require_host()?;
     loop {
-        let snapshot = board_snapshot(paths)?;
-        if once {
-            print!("{snapshot}");
-            return Ok(());
+        match board_snapshot(paths) {
+            Ok(snapshot) => {
+                if once {
+                    print!("{snapshot}");
+                    return Ok(());
+                }
+                print!("\x1b[2J\x1b[H{snapshot}");
+                io::stdout().flush()?;
+            }
+            Err(error) => {
+                let rendered = format!(
+                    "brgr · managed tasks\n\nboard refresh failed: {error}\nNo tasks were mutated or reconciled.\n"
+                );
+                if once {
+                    eprint!("{rendered}");
+                    return Err(error);
+                }
+                print!("\x1b[2J\x1b[H{rendered}");
+                io::stdout().flush()?;
+            }
         }
-        print!("\x1b[2J\x1b[H{snapshot}");
-        io::stdout().flush()?;
         sleep(Duration::from_secs(2)).await;
     }
 }
@@ -243,26 +261,18 @@ async fn launch_codex(paths: &Paths) -> Result<()> {
     codex_integration::install(&paths.home)
         .context("brgr could not install its Codex integration")?;
     let executable = env::current_exe()?;
-    let binary_dir = executable
-        .parent()
-        .context("brgr executable has no parent directory")?
-        .to_path_buf();
-    let mut binary_paths = vec![binary_dir];
-    if let Some(previous) = env::var_os("PATH") {
-        binary_paths.extend(env::split_paths(&previous));
-    }
-    let path = env::join_paths(binary_paths).context("could not add brgr to Codex PATH")?;
+    let path = plugin_path_value(&executable, env::var_os("PATH"))?;
     let path_text = path.to_str().context("Codex PATH is not UTF-8")?;
     let bridge_dir = Builder::new()
-        .prefix("plugin-bridge-")
-        .tempdir_in(&paths.home)
+        .prefix("brgr-plugin-bridge-")
+        .tempdir()
         .context("brgr could not create its private Codex bridge")?;
     fs::set_permissions(bridge_dir.path(), fs::Permissions::from_mode(0o700))?;
     let mut child = Command::new("codex")
         .arg("-C")
         .arg(&workspace)
         .arg("--add-dir")
-        .arg(&paths.home)
+        .arg(bridge_dir.path())
         .arg("-c")
         .arg(codex_env_config("PATH", path_text)?)
         .arg("-c")
@@ -293,11 +303,13 @@ async fn launch_codex(paths: &Paths) -> Result<()> {
         bridge_dir.path().to_path_buf(),
         executable,
         paths.home.clone(),
+        workspace.clone(),
     ));
     let status = tokio::select! {
         status = child.wait() => status.context("brgr could not wait for Codex")?,
         stopped = &mut bridge => {
             let _ = child.kill().await;
+            let _ = child.wait().await;
             bail!("brgr Herdr bridge stopped while Codex was running: {stopped:?}");
         }
     };
@@ -307,6 +319,16 @@ async fn launch_codex(paths: &Paths) -> Result<()> {
         bail!("Codex exited with {status}");
     }
     Ok(())
+}
+fn plugin_path_value(executable: &Path, previous: Option<OsString>) -> Result<OsString> {
+    let binary_dir = executable
+        .parent()
+        .context("brgr executable has no parent directory")?;
+    let mut binary_paths = vec![binary_dir.to_path_buf()];
+    if let Some(previous) = previous {
+        binary_paths.extend(env::split_paths(&previous));
+    }
+    env::join_paths(binary_paths).context("could not add brgr to Codex PATH")
 }
 
 fn codex_env_config(name: &str, value: &str) -> Result<String> {
@@ -318,8 +340,10 @@ fn codex_env_config(name: &str, value: &str) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{PluginContext, PluginWorktree, workspace_path};
-    use std::path::PathBuf;
+    use super::{
+        OsString, Path, PathBuf, PluginContext, PluginWorktree, codex_env_config,
+        launched_workspace_path_from, parse_workspace_id, plugin_path_value, workspace_path,
+    };
 
     #[test]
     fn worktree_checkout_wins_over_pane_and_workspace_cwd() {
@@ -361,5 +385,54 @@ mod tests {
             ..PluginContext::default()
         };
         assert_eq!(workspace_path(&context).unwrap(), project.as_path());
+    }
+
+    #[test]
+    fn pinned_workspace_beats_live_focused_plugin_checkout() {
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        let plugin = root.path().join("plugin");
+        std::fs::create_dir(&project).unwrap();
+        std::fs::create_dir(&plugin).unwrap();
+        let context = PluginContext {
+            workspace_cwd: Some(plugin.clone()),
+            focused_pane_cwd: Some(plugin),
+            ..PluginContext::default()
+        };
+        let pinned = launched_workspace_path_from(&context, Some(project.clone().into())).unwrap();
+        assert_eq!(pinned, project);
+        assert!(launched_workspace_path_from(&context, Some(OsString::from("relative"))).is_err());
+    }
+
+    #[test]
+    fn workspace_id_rejects_empty_non_ascii_and_oversize() {
+        assert!(parse_workspace_id(None).is_err());
+        assert!(parse_workspace_id(Some(String::new())).is_err());
+        assert!(parse_workspace_id(Some("워크".to_owned())).is_err());
+        assert!(parse_workspace_id(Some("a".repeat(129))).is_err());
+        assert_eq!(parse_workspace_id(Some("w1".to_owned())).unwrap(), "w1");
+    }
+
+    #[test]
+    fn plugin_path_puts_brgr_directory_first() {
+        let executable = Path::new("/opt/brgr/bin/brgr");
+        let path = plugin_path_value(executable, Some(OsString::from("/usr/bin:/bin"))).unwrap();
+        let path = path.to_str().unwrap();
+        assert!(path.starts_with("/opt/brgr/bin:"));
+        assert!(path.contains("/usr/bin"));
+    }
+
+    #[test]
+    fn sandbox_env_injection_json_quotes_special_characters() {
+        let value = r#"/tmp/a b/"quote""#;
+        assert_eq!(
+            codex_env_config("PATH", value).unwrap(),
+            r#"shell_environment_policy.set.PATH="/tmp/a b/\"quote\"""#
+        );
+    }
+
+    #[test]
+    fn board_cells_replace_terminal_control_characters() {
+        assert_eq!(super::truncate("repo\n\u{1b}[31m", 20), "repo��[31m");
     }
 }

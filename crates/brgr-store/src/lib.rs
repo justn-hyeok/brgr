@@ -1,23 +1,26 @@
 //! Durable `SQLite` metadata and content-addressed artifact storage.
 
 mod artifact;
+mod board;
 
 use std::{
     fmt::Write as _,
     fs,
     io::Read,
     path::{Path, PathBuf},
+    time::Duration,
 };
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
 use artifact::ArtifactStore;
+pub use board::{BoardStore, BoardTaskRow};
 use brgr_protocol::{
     ArtifactRef, AttemptId, AttemptState, Decision, Event, EventId, EventKind, InboxItem, OwnerId,
     ResultEnvelope, ResultId, RouteObservation, SCHEMA_V1, TaskId, TaskSpec,
 };
-use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -169,6 +172,7 @@ impl Store {
         private_directory(root)?;
         let database_path = root.join("brgr.sqlite3");
         let connection = Connection::open(&database_path)?;
+        connection.busy_timeout(Duration::from_secs(5))?;
         connection.pragma_update(None, "journal_mode", "WAL")?;
         connection.pragma_update(None, "synchronous", "FULL")?;
         connection.execute_batch(SCHEMA)?;
@@ -193,7 +197,9 @@ impl Store {
     ) -> Result<WriteOutcome, StoreError> {
         task.validate()?;
         validate_digest(request_digest)?;
-        let transaction = self.connection.transaction()?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let idempotency =
             record_idempotency(&transaction, &task.create_request_id, request_digest)?;
         if idempotency == WriteOutcome::AlreadyApplied {
@@ -2490,6 +2496,7 @@ mod tests {
     fn database_busy_keeps_terminal_result_retriable_without_partial_inbox() {
         let root = TempDir::new().unwrap();
         let mut store = Store::open(root.path()).unwrap();
+        store.connection.busy_timeout(Duration::ZERO).unwrap();
         let task = task();
         store.record_task(&task, "busy-terminal").unwrap();
         let attempt_id = AttemptId::new();
@@ -2599,6 +2606,316 @@ mod tests {
             Err(StoreError::UnresolvedPriorAttempt { .. })
         ));
         assert_eq!(store.inbox(&task.owner_id, false).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn board_rows_order_latest_revision_and_skip_malformed_history() {
+        let root = TempDir::new().unwrap();
+        let mut store = Store::open(root.path()).unwrap();
+        let mut recorded = Vec::new();
+        for index in 0..21 {
+            let mut item = task();
+            item.objective = format!("SECRET_OBJECTIVE_{index}");
+            item.create_request_id = format!("board-req-{index}");
+            item.workspace = format!("/tmp/project-{index}");
+            store
+                .record_task(&item, &format!("board-digest-{index}"))
+                .unwrap();
+            recorded.push(item);
+        }
+        let mut revised = recorded[0].clone();
+        revised.revision = 2;
+        revised.create_request_id = "board-req-0-r2".to_owned();
+        store.record_task(&revised, "board-digest-0-r2").unwrap();
+
+        let bad_id = TaskId::new();
+        store
+            .connection
+            .execute(
+                "INSERT INTO tasks
+                 (task_id, revision, owner_id, create_request_id, request_digest, spec_json)
+                 VALUES (?1, 1, 'codex:test-owner', 'malformed-board', 'digest',
+                         '{\"objective\":\"SECRET_MALFORMED_BYTES\"}')",
+                [bad_id.to_string()],
+            )
+            .unwrap();
+
+        let count = |store: &Store| {
+            store
+                .connection
+                .query_row("SELECT COUNT(*) FROM tasks", [], |row| row.get::<_, i64>(0))
+                .unwrap()
+        };
+        let before = count(&store);
+        let rows = BoardStore::open_existing(root.path())
+            .unwrap()
+            .rows(20)
+            .unwrap();
+        assert!(
+            BoardStore::open_existing(root.path())
+                .unwrap()
+                .rows(0)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(count(&store), before);
+        assert_eq!(rows.len(), 20);
+        assert_eq!(rows[0].task_id, recorded[0].task_id);
+        assert_eq!(rows[0].revision, 2);
+        assert!(rows.iter().all(|row| row.task_id != recorded[1].task_id));
+        assert!(rows.iter().all(|row| row.task_id != bad_id));
+        let rendered = format!("{rows:?}");
+        assert!(!rendered.contains("SECRET_OBJECTIVE"));
+        assert!(!rendered.contains("SECRET_MALFORMED_BYTES"));
+        assert!(!rendered.contains("reviewable report"));
+    }
+
+    #[test]
+    fn board_rows_join_latest_result_decision_and_survive_writer_lock() {
+        let root = TempDir::new().unwrap();
+        let mut store = Store::open(root.path()).unwrap();
+        let decided_task = task();
+        store.record_task(&decided_task, "board-terminal").unwrap();
+        let attempt_id = AttemptId::new();
+        store
+            .claim_attempt(decided_task.task_id, decided_task.revision, attempt_id)
+            .unwrap();
+        let result = sealed_result(&store, &decided_task, attempt_id);
+        store
+            .commit_terminal_result(&decided_task.owner_id, &result)
+            .unwrap();
+        store
+            .bind_owner(&decided_task.owner_id, "session-a", 1)
+            .unwrap();
+        store
+            .record_decision(&Decision {
+                schema: SCHEMA_V1.to_owned(),
+                decision_id: DecisionId::new(),
+                owner_id: decided_task.owner_id.clone(),
+                task_id: decided_task.task_id,
+                revision: decided_task.revision,
+                result_id: result.result_id,
+                result_digest: Store::result_digest(&result).unwrap(),
+                session_id: Some("session-a".to_owned()),
+                binding_epoch: Some(1),
+                verdict: DecisionVerdict::Accepted,
+                reason: "SECRET_REASON_NOT_FOR_BOARD".to_owned(),
+            })
+            .unwrap();
+
+        let mut other = task();
+        other.create_request_id = "board-other".to_owned();
+        store.record_task(&other, "board-other").unwrap();
+        let other_attempt = AttemptId::new();
+        store
+            .claim_attempt(other.task_id, other.revision, other_attempt)
+            .unwrap();
+        let other_result = sealed_result(&store, &other, other_attempt);
+        store
+            .commit_terminal_result(&other.owner_id, &other_result)
+            .unwrap();
+        store
+            .connection
+            .execute(
+                "UPDATE results SET envelope_json = 'not-json' WHERE result_id = ?1",
+                [other_result.result_id.to_string()],
+            )
+            .unwrap();
+        let rows = BoardStore::open_existing(root.path())
+            .unwrap()
+            .rows(20)
+            .unwrap();
+        assert_eq!(rows.len(), 2);
+        let decided = rows
+            .iter()
+            .find(|row| row.task_id == decided_task.task_id)
+            .unwrap();
+        let broken = rows
+            .iter()
+            .find(|row| row.task_id == other.task_id)
+            .unwrap();
+        assert_eq!(decided.result_outcome, Some(TerminalOutcome::Candidate));
+        assert_eq!(decided.decision_verdict, Some(DecisionVerdict::Accepted));
+        assert_eq!(decided.attempt_state, AttemptState::Terminal);
+        assert_eq!(broken.result_outcome, None);
+        assert!(!format!("{rows:?}").contains("SECRET_REASON_NOT_FOR_BOARD"));
+        assert!(!format!("{rows:?}").contains("reviewable report"));
+
+        drop(store);
+        let blocker = Connection::open(root.path().join("brgr.sqlite3")).unwrap();
+        blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let locked_rows = BoardStore::open_existing(root.path())
+            .unwrap()
+            .rows(20)
+            .unwrap();
+        assert_eq!(locked_rows.len(), 2);
+        assert!(locked_rows.iter().any(|row| {
+            row.decision_verdict == Some(DecisionVerdict::Accepted)
+                && row.result_outcome == Some(TerminalOutcome::Candidate)
+        }));
+        blocker.execute_batch("ROLLBACK").unwrap();
+    }
+
+    #[test]
+    fn board_rows_retry_across_concurrent_task_writes() {
+        let root = TempDir::new().unwrap();
+        let mut store = Store::open(root.path()).unwrap();
+        let seed = task();
+        store.record_task(&seed, "board-seed").unwrap();
+        let path = root.path().to_path_buf();
+        let writer_path = path.clone();
+        let writer = std::thread::spawn(move || {
+            let mut writer = Store::open(&writer_path).unwrap();
+            for index in 0..24 {
+                let mut item = task();
+                item.create_request_id = format!("concurrent-{index}");
+                writer
+                    .record_task(&item, &format!("concurrent-digest-{index}"))
+                    .unwrap();
+            }
+        });
+        let board = BoardStore::open_existing(&path).unwrap();
+        for _ in 0..32 {
+            board.rows(20).unwrap();
+        }
+        writer.join().unwrap();
+        assert!(board.rows(20).unwrap().len() <= 20);
+        assert!(!board.rows(20).unwrap().is_empty());
+    }
+
+    #[test]
+    fn open_applies_remaining_schema_when_tasks_already_exist() {
+        let root = TempDir::new().unwrap();
+        fs::create_dir_all(root.path()).unwrap();
+        let connection = Connection::open(root.path().join("brgr.sqlite3")).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE tasks (
+                    task_id TEXT NOT NULL,
+                    revision INTEGER NOT NULL,
+                    owner_id TEXT NOT NULL,
+                    create_request_id TEXT NOT NULL UNIQUE,
+                    request_digest TEXT NOT NULL,
+                    spec_json TEXT NOT NULL,
+                    PRIMARY KEY (task_id, revision)
+                );",
+            )
+            .unwrap();
+        drop(connection);
+        let mut store = Store::open(root.path()).unwrap();
+        let present = |name: &str| {
+            store
+                .connection
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE name = ?1",
+                    [name],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(present("owner_bindings"), 1);
+        assert_eq!(present("decisions"), 1);
+        assert_eq!(present("one_active_attempt_per_revision"), 1);
+        store.record_task(&task(), "partial-schema").unwrap();
+    }
+
+    #[test]
+    fn board_rows_omit_invalid_attempt_state_and_decision_without_valid_result() {
+        let root = TempDir::new().unwrap();
+        let mut store = Store::open(root.path()).unwrap();
+
+        let invalid_state = task();
+        store
+            .record_task(&invalid_state, "board-invalid-state")
+            .unwrap();
+        let invalid_attempt = AttemptId::new();
+        store
+            .claim_attempt(
+                invalid_state.task_id,
+                invalid_state.revision,
+                invalid_attempt,
+            )
+            .unwrap();
+        store
+            .connection
+            .execute(
+                "UPDATE attempts SET state = 'not-a-real-state' WHERE attempt_id = ?1",
+                [invalid_attempt.to_string()],
+            )
+            .unwrap();
+
+        let mut decided = task();
+        decided.create_request_id = "board-orphan-decision".to_owned();
+        store
+            .record_task(&decided, "board-orphan-decision")
+            .unwrap();
+        let attempt_id = AttemptId::new();
+        store
+            .claim_attempt(decided.task_id, decided.revision, attempt_id)
+            .unwrap();
+        let result = sealed_result(&store, &decided, attempt_id);
+        store
+            .commit_terminal_result(&decided.owner_id, &result)
+            .unwrap();
+        store.bind_owner(&decided.owner_id, "session-a", 1).unwrap();
+        store
+            .record_decision(&Decision {
+                schema: SCHEMA_V1.to_owned(),
+                decision_id: DecisionId::new(),
+                owner_id: decided.owner_id.clone(),
+                task_id: decided.task_id,
+                revision: decided.revision,
+                result_id: result.result_id,
+                result_digest: Store::result_digest(&result).unwrap(),
+                session_id: Some("session-a".to_owned()),
+                binding_epoch: Some(1),
+                verdict: DecisionVerdict::Accepted,
+                reason: "SECRET_ORPHAN_REASON".to_owned(),
+            })
+            .unwrap();
+        store
+            .connection
+            .execute(
+                "UPDATE results SET envelope_json = 'not-json' WHERE result_id = ?1",
+                [result.result_id.to_string()],
+            )
+            .unwrap();
+
+        let rows = BoardStore::open_existing(root.path())
+            .unwrap()
+            .rows(20)
+            .unwrap();
+        assert!(rows.iter().all(|row| row.task_id != invalid_state.task_id));
+        let broken = rows
+            .iter()
+            .find(|row| row.task_id == decided.task_id)
+            .unwrap();
+        assert_eq!(broken.result_outcome, None);
+        assert_eq!(broken.decision_verdict, None);
+        assert!(!format!("{rows:?}").contains("SECRET_ORPHAN_REASON"));
+
+        let mut forged = result.clone();
+        forged.task_id = TaskId::new();
+        store
+            .connection
+            .execute(
+                "UPDATE results SET envelope_json = ?1 WHERE result_id = ?2",
+                params![
+                    serde_json::to_string(&forged).unwrap(),
+                    result.result_id.to_string()
+                ],
+            )
+            .unwrap();
+        let rows = BoardStore::open_existing(root.path())
+            .unwrap()
+            .rows(20)
+            .unwrap();
+        let forged = rows
+            .iter()
+            .find(|row| row.task_id == decided.task_id)
+            .unwrap();
+        assert_eq!(forged.result_outcome, None);
+        assert_eq!(forged.decision_verdict, None);
     }
 
     fn task() -> TaskSpec {

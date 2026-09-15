@@ -11,9 +11,9 @@ use std::{
 };
 
 use brgr_runner::{
-    Capability, CapabilityStatus, ExecutionMode, HarnessManifest, LaunchSpec, MANIFEST_SCHEMA_V1,
-    ModelCatalogFormat, ModelCatalogSpec, OMP_ROLE_ADAPTER_V1, PROCESS_ADAPTER_V1, ProbeSpec,
-    ProcessRunner, ResultSource, ResultSpec, RunnerError,
+    Capability, CapabilityStatus, ExecutionMode, ExecutionOutput, HarnessManifest, LaunchSpec,
+    MANIFEST_SCHEMA_V1, ModelCatalogFormat, ModelCatalogSpec, OMP_ROLE_ADAPTER_V1,
+    PROCESS_ADAPTER_V1, ProbeSpec, ProcessRunner, ResultSource, ResultSpec, RunnerError,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -50,7 +50,54 @@ pub struct ActivationReceipt {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Health {
     Healthy,
-    Drifted { expected: String, observed: String },
+    ExecutableChanged { expected: String, observed: String },
+    Unspawnable,
+    TimedOut,
+    ExitedNonzero { exit_code: Option<i32> },
+    EvidenceChanged { expected: String, observed: String },
+}
+
+impl Health {
+    /// Stable diagnostic code for operator output. Never includes probe text.
+    #[must_use]
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::Healthy => "healthy",
+            Self::ExecutableChanged { .. } => "executable_changed",
+            Self::Unspawnable => "unspawnable",
+            Self::TimedOut => "timed_out",
+            Self::ExitedNonzero { .. } => "exited_nonzero",
+            Self::EvidenceChanged { .. } => "probe_evidence_changed",
+        }
+    }
+}
+
+/// Concrete re-certification command. Never updates, copies, or activates.
+/// The executable path is POSIX-quoted so spaces are copy-safe; probe bytes are never included.
+#[must_use]
+pub fn recertify_action(manifest: &HarnessManifest) -> String {
+    let executable = quote_executable(&manifest.executable);
+    if manifest.adapter == OMP_ROLE_ADAPTER_V1 {
+        format!("re-certify with `brgr harness add {executable} --presentation-only`")
+    } else {
+        format!(
+            "re-certify with `brgr harness add {executable} --workspace <dir> --prompt <prompt>`"
+        )
+    }
+}
+
+fn quote_executable(path: &Path) -> String {
+    let raw = path.to_string_lossy();
+    let mut quoted = String::from("'");
+    for ch in raw.chars() {
+        if ch == '\'' {
+            quoted.push_str("'\\''");
+        } else {
+            quoted.push(ch);
+        }
+    }
+    quoted.push('\'');
+    quoted
 }
 
 impl Registry {
@@ -340,8 +387,12 @@ impl Registry {
                 manifest.validate()?;
                 Ok((manifest, receipt))
             }
-            Health::Drifted { expected, observed } => {
+            Health::ExecutableChanged { expected, observed } => {
                 Err(RegistryError::ExecutableDrift { expected, observed })
+            }
+            Health::Unspawnable => Err(RegistryError::ExecutableUnspawnable),
+            Health::TimedOut | Health::ExitedNonzero { .. } | Health::EvidenceChanged { .. } => {
+                Err(RegistryError::ProbeFailed)
             }
         }
     }
@@ -388,28 +439,55 @@ impl Registry {
     ///
     /// # Errors
     ///
-    /// Returns an error when package identity or probing fails.
+    /// Returns an error when package identity cannot be read. Probe spawn,
+    /// timeout, nonzero exit, and evidence drift are classified as [`Health`].
+    /// Probes inherit the caller `PATH` via [`ProcessRunner::probe`].
     pub async fn health_probed(&self, harness_id: &str) -> Result<Health, RegistryError> {
-        let manifest = self.load_healthy(harness_id)?;
+        validate_harness_id(harness_id)?;
+        let manifest_bytes = fs::read(self.manifest_path(harness_id))?;
+        let manifest: HarnessManifest = serde_json::from_slice(&manifest_bytes)?;
         let receipt: ActivationReceipt =
             serde_json::from_slice(&fs::read(self.activation_path(harness_id))?)?;
+        validate_package_identity(harness_id, &manifest, &receipt, &manifest_bytes)?;
+        if !receipt.executable_realpath.is_file() {
+            return Ok(Health::Unspawnable);
+        }
+        validate_package(harness_id, &manifest, &receipt, &manifest_bytes)?;
+        match health_for(&receipt)? {
+            Health::Healthy => {}
+            other => return Ok(other),
+        }
+        manifest.validate()?;
         for (argv, expected) in [
             (&manifest.probe.version_argv, &receipt.version_digest),
             (&manifest.probe.help_argv, &receipt.help_digest),
         ] {
-            let observed = ProcessRunner::probe(&manifest.executable, argv, PROBE_DEADLINE).await?;
-            if observed.exit_code != Some(0) || observed.timed_out || observed.output_truncated {
-                return Err(RegistryError::ProbeFailed);
-            }
-            let observed_digest = digest_bytes(&observed.stdout);
-            if &observed_digest != expected {
-                return Ok(Health::Drifted {
-                    expected: expected.clone(),
-                    observed: observed_digest,
-                });
+            let observed =
+                match ProcessRunner::probe(&manifest.executable, argv, PROBE_DEADLINE).await {
+                    Ok(output) => output,
+                    Err(RunnerError::SpawnIo(_) | RunnerError::InvalidExecutable(_)) => {
+                        return Ok(Health::Unspawnable);
+                    }
+                    Err(error) => return Err(error.into()),
+                };
+            match classify_probe(&observed, expected)? {
+                Health::Healthy => {}
+                other => return Ok(other),
             }
         }
         Ok(Health::Healthy)
+    }
+
+    /// Operator action for a stored recipe. Does not re-run or mutate it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RegistryError`] when the manifest cannot be read.
+    pub fn recertify_action_for(&self, harness_id: &str) -> Result<String, RegistryError> {
+        validate_harness_id(harness_id)?;
+        let manifest: HarnessManifest =
+            serde_json::from_slice(&fs::read(self.manifest_path(harness_id))?)?;
+        Ok(recertify_action(&manifest))
     }
 
     /// Resolves an exact requested model through a bounded native catalog
@@ -1347,11 +1425,23 @@ fn validate_package(
     receipt: &ActivationReceipt,
     manifest_bytes: &[u8],
 ) -> Result<(), RegistryError> {
+    validate_package_identity(harness_id, manifest, receipt, manifest_bytes)?;
+    if manifest.executable.canonicalize()? != receipt.executable_realpath {
+        return Err(RegistryError::ActivationMismatch);
+    }
+    Ok(())
+}
+
+fn validate_package_identity(
+    harness_id: &str,
+    manifest: &HarnessManifest,
+    receipt: &ActivationReceipt,
+    manifest_bytes: &[u8],
+) -> Result<(), RegistryError> {
     if receipt.schema != "brgr.activation/v1"
         || receipt.harness_id != harness_id
         || manifest.id != harness_id
         || manifest.executable != receipt.executable_realpath
-        || manifest.executable.canonicalize()? != receipt.executable_realpath
     {
         return Err(RegistryError::ActivationMismatch);
     }
@@ -1380,13 +1470,52 @@ fn validate_package(
 }
 
 fn health_for(receipt: &ActivationReceipt) -> Result<Health, RegistryError> {
-    let observed = digest_file(&receipt.executable_realpath)?;
-    if observed == receipt.executable_digest {
+    match fs::read(&receipt.executable_realpath) {
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied
+            ) =>
+        {
+            Ok(Health::Unspawnable)
+        }
+        Err(error) => Err(error.into()),
+        Ok(bytes) => {
+            let observed = digest_bytes(&bytes);
+            if observed == receipt.executable_digest {
+                Ok(Health::Healthy)
+            } else {
+                Ok(Health::ExecutableChanged {
+                    expected: receipt.executable_digest.clone(),
+                    observed,
+                })
+            }
+        }
+    }
+}
+
+fn classify_probe(
+    observed: &ExecutionOutput,
+    expected_digest: &str,
+) -> Result<Health, RegistryError> {
+    if observed.timed_out {
+        return Ok(Health::TimedOut);
+    }
+    if observed.exit_code != Some(0) {
+        return Ok(Health::ExitedNonzero {
+            exit_code: observed.exit_code,
+        });
+    }
+    if observed.output_truncated {
+        return Err(RegistryError::ProbeFailed);
+    }
+    let observed_digest = digest_bytes(&observed.stdout);
+    if observed_digest == expected_digest {
         Ok(Health::Healthy)
     } else {
-        Ok(Health::Drifted {
-            expected: receipt.executable_digest.clone(),
-            observed,
+        Ok(Health::EvidenceChanged {
+            expected: expected_digest.to_owned(),
+            observed: observed_digest,
         })
     }
 }
@@ -1487,6 +1616,8 @@ pub enum RegistryError {
     ProbeFailed,
     #[error("activation executable drifted: expected {expected}, observed {observed}")]
     ExecutableDrift { expected: String, observed: String },
+    #[error("activation executable cannot be spawned; re-certify it with brgr harness add")]
+    ExecutableUnspawnable,
     #[error("registry path has no parent")]
     MissingParent,
     #[error(transparent)]
@@ -2134,7 +2265,113 @@ mod tests {
         assert_eq!(registry.health(&draft.id).unwrap(), Health::Healthy);
         assert!(matches!(
             registry.health_probed(&draft.id).await.unwrap(),
-            Health::Drifted { .. }
+            Health::EvidenceChanged { .. }
         ));
+    }
+
+    #[tokio::test]
+    async fn health_probed_classifies_local_drift() {
+        let root = tempfile::tempdir().unwrap();
+        let sidecar = root.path().join("sidecar");
+        let executable = root.path().join("fixture-agent");
+        fs::write(
+            &executable,
+            format!(
+                "#!/bin/sh\nif [ -f '{0}' ]; then\n  case \"$(/bin/cat '{0}')\" in\n    sleep) /bin/sleep 30;;\n    fail) exit 3;;\n  esac\nfi\ncase \"$1\" in\n  --version) echo 1.0;;\n  --help) echo '  --prompt-file <path>';;\n  --prompt-file) /bin/cat \"$2\";;\nesac\n",
+                sidecar.display(),
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+        let registry = Registry::open(root.path().join("registry")).unwrap();
+        let draft = registry.draft(&executable).await.unwrap();
+        registry
+            .activate_with_scratch(&draft, &scratch_workspace(&root), "test", None, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            registry.health_probed(&draft.id).await.unwrap(),
+            Health::Healthy
+        );
+
+        let original = fs::read(&executable).unwrap();
+        let alias = root.path().join("gjc-link");
+        symlink(&executable, &alias).unwrap();
+        let mut rebuilt = original.clone();
+        rebuilt.extend_from_slice(b"# rebuilt\n");
+        fs::write(&executable, &rebuilt).unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(matches!(
+            registry.health_probed(&draft.id).await.unwrap(),
+            Health::ExecutableChanged { .. }
+        ));
+
+        fs::write(&executable, &original).unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(
+            registry.health_probed(&draft.id).await.unwrap(),
+            Health::Healthy
+        );
+
+        fs::write(&sidecar, "sleep").unwrap();
+        assert_eq!(
+            registry.health_probed(&draft.id).await.unwrap(),
+            Health::TimedOut
+        );
+        fs::write(&sidecar, "fail").unwrap();
+        assert!(matches!(
+            registry.health_probed(&draft.id).await.unwrap(),
+            Health::ExitedNonzero { exit_code: Some(3) }
+        ));
+        fs::remove_file(&sidecar).unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(
+            registry.health_probed(&draft.id).await.unwrap(),
+            Health::Unspawnable
+        );
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::remove_file(&executable).unwrap();
+        assert_eq!(
+            registry.health_probed(&draft.id).await.unwrap(),
+            Health::Unspawnable
+        );
+        let manifest_path = registry.manifest_path(&draft.id);
+        let original_manifest = fs::read(&manifest_path).unwrap();
+        let mut changed_manifest = original_manifest.clone();
+        changed_manifest.push(b' ');
+        fs::write(&manifest_path, changed_manifest).unwrap();
+        assert!(matches!(
+            registry.health_probed(&draft.id).await,
+            Err(RegistryError::ManifestDrift { .. })
+        ));
+        fs::write(&manifest_path, original_manifest).unwrap();
+        let action = registry.recertify_action_for(&draft.id).unwrap();
+        assert!(action.contains("re-certify"));
+        assert!(action.contains("--prompt"));
+        assert!(!action.contains("--help"));
+    }
+
+    #[test]
+    fn recertify_action_quotes_executable_paths_with_spaces() {
+        let help =
+            "--expected-report --reuse-worktree-objective --reuse-worktree-owner --model --effort";
+        let presentation =
+            generate_omp_manifest(PathBuf::from("/tmp/my harness/omp-role"), help).unwrap();
+        let action = recertify_action(&presentation);
+        assert!(action.contains("'/tmp/my harness/omp-role'"));
+        assert!(action.contains("--presentation-only"));
+        assert!(!action.contains("unused-help"));
+        assert!(!action.contains("--expected-report"));
+
+        let process = generate_generic_manifest(
+            "mystery-agent",
+            PathBuf::from("/opt/my tools/agent"),
+            "  --prompt-file <path>\n",
+        )
+        .unwrap();
+        let action = recertify_action(&process);
+        assert!(action.contains("'/opt/my tools/agent'"));
+        assert!(action.contains("--prompt"));
+        assert!(!action.contains("--prompt-file <path>"));
     }
 }

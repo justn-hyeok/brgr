@@ -2,6 +2,7 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
+    ffi::OsStr,
     io::{Read as _, Seek as _, SeekFrom},
     os::unix::{fs::MetadataExt, process::CommandExt},
     path::{Path, PathBuf},
@@ -290,6 +291,23 @@ impl ProcessRunner {
         argv: &[String],
         deadline: Duration,
     ) -> Result<ExecutionOutput, RunnerError> {
+        Self::probe_with_path(executable, argv, deadline, None).await
+    }
+
+    /// Like [`Self::probe`], with an optional `PATH` that replaces the process
+    /// environment. Production health probing uses [`Self::probe`] so it
+    /// inherits the caller `PATH`; this override is for deterministic tests.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RunnerError`] when the executable or probe contract is
+    /// invalid, times out, or cannot be captured.
+    pub async fn probe_with_path(
+        executable: &Path,
+        argv: &[String],
+        deadline: Duration,
+        path: Option<&OsStr>,
+    ) -> Result<ExecutionOutput, RunnerError> {
         if !executable.is_absolute() || !executable.is_file() {
             return Err(RunnerError::InvalidExecutable(executable.to_path_buf()));
         }
@@ -319,10 +337,15 @@ impl ProcessRunner {
             .stderr(Stdio::from(stderr_file.try_clone()?))
             .kill_on_drop(true);
         command.as_std_mut().process_group(0);
-        for name in ["HOME", "PATH", "LANG"] {
+        for name in ["HOME", "LANG"] {
             if let Some(value) = std::env::var_os(name) {
                 command.env(name, value);
             }
+        }
+        if let Some(path) = path {
+            command.env("PATH", path);
+        } else if let Some(value) = std::env::var_os("PATH") {
+            command.env("PATH", value);
         }
         let started = Instant::now();
         let mut child = command.spawn().map_err(RunnerError::SpawnIo)?;
@@ -1693,5 +1716,42 @@ mod tests {
             extract_jsonl_assistant_final(missing_turn.as_bytes()),
             Err(RunnerError::MissingTerminalEvent)
         ));
+    }
+
+    #[tokio::test]
+    async fn probe_with_path_can_hide_an_env_interpreter() {
+        let root = tempfile::tempdir().unwrap();
+        let bin = root.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let interp = bin.join("brgr-health-interp");
+        std::fs::write(&interp, "#!/bin/sh\necho ok\n").unwrap();
+        std::fs::set_permissions(&interp, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let executable = root.path().join("tool");
+        std::fs::write(&executable, "#!/usr/bin/env brgr-health-interp\n").unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        let wide = ProcessRunner::probe_with_path(
+            &executable,
+            &[],
+            Duration::from_secs(2),
+            Some(bin.as_os_str()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(wide.exit_code, Some(0));
+        assert_eq!(wide.stdout, b"ok\n");
+
+        let narrow = ProcessRunner::probe_with_path(
+            &executable,
+            &[],
+            Duration::from_secs(2),
+            Some(OsStr::new("/usr/bin:/bin")),
+        )
+        .await
+        .unwrap();
+        assert_ne!(narrow.exit_code, Some(0));
+        let dumped = String::from_utf8_lossy(&narrow.stdout);
+        assert!(!dumped.contains("python"));
+        assert_ne!(dumped.trim(), "ok");
     }
 }

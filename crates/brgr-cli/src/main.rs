@@ -2,6 +2,7 @@ mod codex_integration;
 mod herdr_plugin;
 mod pane_cleanup;
 mod plugin_bridge;
+mod workspace;
 
 use std::{
     env,
@@ -358,7 +359,6 @@ struct HookInput {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    let paths = Paths::new(cli.home.clone())?;
     if !matches!(
         &cli.command,
         Command::Plugin { .. } | Command::Supervise { .. } | Command::Hook { .. }
@@ -367,15 +367,14 @@ async fn main() -> Result<()> {
         let budget_seconds = match &cli.command {
             Command::Run(args) if args.foreground => args.deadline_seconds,
             Command::Revise(args) if args.foreground => {
-                Store::open(&paths.store)?
-                    .task(args.task)?
-                    .budget
-                    .deadline_seconds
+                plugin_bridge::MAX_BRIDGE_SECONDS.saturating_sub(120)
             }
             _ => 3_600,
         };
         return plugin_bridge::client(Path::new(&dir), budget_seconds.saturating_add(120)).await;
     }
+    validate_bridge_host_preflight(&cli)?;
+    let paths = Paths::new(cli.home.clone())?;
     match cli.command {
         Command::Run(args) => run_task(&paths, args, cli.json).await,
         Command::Revise(args) => revise_task(&paths, args, cli.json).await,
@@ -431,12 +430,94 @@ async fn main() -> Result<()> {
     }
 }
 
+fn validate_bridge_host_preflight(cli: &Cli) -> Result<()> {
+    let host_home = env::var_os(plugin_bridge::BRIDGE_HOST_HOME_ENV);
+    let host_workspace = env::var_os(plugin_bridge::BRIDGE_HOST_WORKSPACE_ENV);
+    match (host_home, host_workspace) {
+        (None, None) => Ok(()),
+        (Some(home), Some(workspace)) => {
+            let home = PathBuf::from(home);
+            require_bridge_home(cli.home.as_deref(), &home)?;
+            validate_bridge_host_command(
+                &cli.command,
+                &PathBuf::from(workspace),
+                &env::current_dir()?,
+            )
+        }
+        _ => bail!("brgr Herdr bridge host context is incomplete"),
+    }
+}
+
+fn require_bridge_home(requested: Option<&Path>, expected: &Path) -> Result<()> {
+    if requested != Some(expected) {
+        bail!("brgr Herdr bridge cannot override its control home");
+    }
+    Ok(())
+}
+
+fn validate_bridge_host_command(
+    command: &Command,
+    workspace_root: &Path,
+    current_dir: &Path,
+) -> Result<()> {
+    let workspace_root = workspace_root
+        .canonicalize()
+        .context("brgr Herdr bridge workspace is unavailable")?;
+    match command {
+        Command::Run(args) => {
+            require_bridge_workspace(
+                args.workspace.as_deref().unwrap_or(current_dir),
+                &workspace_root,
+            )?;
+            Ok(())
+        }
+        Command::Revise(args) => {
+            if let Some(workspace) = args.workspace.as_deref() {
+                require_bridge_workspace(workspace, &workspace_root)?;
+            }
+            Ok(())
+        }
+        Command::Status { .. }
+        | Command::Result { .. }
+        | Command::Cancel { .. }
+        | Command::Bind { .. }
+        | Command::Accept { .. }
+        | Command::Reject { .. }
+        | Command::Doctor
+        | Command::Cleanup { .. }
+        | Command::Harness {
+            command: HarnessCommand::Status { .. },
+        }
+        | Command::Supervise { .. } => Ok(()),
+        Command::Harness { .. } | Command::Integrate { .. } => bail!(
+            "this brgr command is unavailable through the Herdr host bridge; run it explicitly outside the plugin Codex pane"
+        ),
+        Command::Plugin { .. } | Command::Hook { .. } | Command::OmpRun { .. } => {
+            bail!("internal brgr commands are unavailable through the Herdr host bridge")
+        }
+    }
+}
+
+fn require_bridge_workspace(candidate: &Path, workspace_root: &Path) -> Result<()> {
+    let candidate = candidate
+        .canonicalize()
+        .context("brgr Herdr bridge task workspace is unavailable")?;
+    if !candidate.starts_with(workspace_root) {
+        bail!("brgr Herdr bridge task workspace is outside the selected Herdr workspace");
+    }
+    Ok(())
+}
+
 async fn run_task(paths: &Paths, args: RunArgs, json_output: bool) -> Result<()> {
     let registry = Registry::open_with_control_home(&paths.registry, &paths.home)?;
-    match registry.health_probed(&args.harness).await? {
-        Health::Healthy => {}
-        Health::Drifted { .. } => bail!("harness {} probe identity changed", args.harness),
-    }
+    let probed = registry.health_probed(&args.harness).await?;
+    require_healthy_harness(
+        &args.harness,
+        probed,
+        &registry
+            .recertify_action_for(&args.harness)
+            .unwrap_or_else(|_| recertify_action_fallback()),
+    )?;
     let (activated, activation) = registry
         .load_healthy_with_receipt(&args.harness)
         .with_context(|| format!("harness {} is not active and healthy", args.harness))?;
@@ -543,13 +624,16 @@ async fn revise_task(paths: &Paths, args: ReviseArgs, json_output: bool) -> Resu
         .clone();
 
     let registry = Registry::open_with_control_home(&paths.registry, &paths.home)?;
-    match registry
+    let probed = registry
         .health_probed(&replacement.route.harness_id)
-        .await?
-    {
-        Health::Healthy => {}
-        Health::Drifted { .. } => bail!("harness probe identity changed"),
-    }
+        .await?;
+    require_healthy_harness(
+        &replacement.route.harness_id,
+        probed,
+        &registry
+            .recertify_action_for(&replacement.route.harness_id)
+            .unwrap_or_else(|_| recertify_action_fallback()),
+    )?;
     let (activated, activation) =
         registry.load_healthy_with_receipt(&replacement.route.harness_id)?;
     activated.validate_task_route(&replacement)?;
@@ -598,6 +682,7 @@ async fn start_task(
     if source.starts_with(&home) || home.starts_with(&source) {
         bail!("brgr control home and the source workspace must not overlap");
     }
+    let admission = workspace::acquire_admission_lock(&paths.worktrees, options.source_workspace)?;
     let store = Store::open(&paths.store)?;
     let session = current_session()?;
     match (store.owner_binding(&spec.owner_id)?, session.as_deref()) {
@@ -612,8 +697,8 @@ async fn start_task(
     }
     let task_id = spec.task_id;
     let harness_id = spec.route.harness_id.clone();
-    let workspace = prepare_workspace(
-        paths,
+    let workspace = workspace::prepare_workspace(
+        &paths.worktrees,
         options.source_workspace,
         task_id,
         spec.revision,
@@ -638,6 +723,7 @@ async fn start_task(
         write!(&mut request_digest_text, "{byte:02x}")?;
     }
     store.record_task(&launch.spec, &request_digest_text)?;
+    drop(admission);
 
     if matches!(options.execution, ExecutionDisposition::Foreground) {
         return supervise(paths, &launch_path, options.json_output).await;
@@ -770,6 +856,9 @@ fn reconcile_pending(paths: &Paths) -> Result<()> {
                 },
                 if cancelled {
                     "cancelled before the supervisor claimed the task".to_owned()
+                } else if !workspace::workspace_is_present(&task.workspace) {
+                    "task worktree is missing; refusing to recreate or retry automatically"
+                        .to_owned()
                 } else {
                     "supervisor did not claim the admitted task".to_owned()
                 },
@@ -780,6 +869,9 @@ fn reconcile_pending(paths: &Paths) -> Result<()> {
 }
 
 fn unstarted_admission_is_stale(paths: &Paths, task: &TaskSpec) -> Result<bool> {
+    if !workspace::workspace_is_present(&task.workspace) {
+        return Ok(true);
+    }
     let launch_path = paths.launch(task.task_id, task.revision);
     let metadata = match fs::symlink_metadata(&launch_path) {
         Ok(metadata) if metadata.file_type().is_file() => metadata,
@@ -923,7 +1015,11 @@ fn status(paths: &Paths, task: Option<TaskId>, json_output: bool) -> Result<()> 
             Err(error) => return Err(error.into()),
         };
         print_value(
-            &json!({"task": spec, "state": format!("{state:?}").to_lowercase()}),
+            &json!({
+                "task": spec,
+                "state": format!("{state:?}").to_lowercase(),
+                "workspace_present": workspace::workspace_is_present(&spec.workspace),
+            }),
             json_output,
         );
     } else {
@@ -1146,16 +1242,13 @@ async fn harness(paths: &Paths, command: HarnessCommand, json_output: bool) -> R
         }
         HarnessCommand::Status { harness } => {
             let health = registry.health_probed(&harness).await?;
-            let value = match health {
-                Health::Healthy => json!({"harness": harness, "health": "healthy"}),
-                Health::Drifted { expected, observed } => json!({
-                    "harness": harness,
-                    "health": "drifted",
-                    "expected": expected,
-                    "observed": observed,
-                }),
-            };
-            print_value(&value, json_output);
+            let action = registry
+                .recertify_action_for(&harness)
+                .unwrap_or_else(|_| recertify_action_fallback());
+            print_value(
+                &harness_health_value("harness", &harness, health, &action),
+                json_output,
+            );
         }
     }
     Ok(())
@@ -1190,10 +1283,15 @@ async fn add_harness(registry: &Registry, args: AddHarnessArgs) -> Result<Activa
             )
             .await?
     };
-    match registry.health_probed(&receipt.harness_id).await? {
-        Health::Healthy => Ok(receipt),
-        Health::Drifted { .. } => bail!("harness changed during activation health check"),
-    }
+    let probed = registry.health_probed(&receipt.harness_id).await?;
+    require_healthy_harness(
+        &receipt.harness_id,
+        probed,
+        &registry
+            .recertify_action_for(&receipt.harness_id)
+            .unwrap_or_else(|_| recertify_action_fallback()),
+    )?;
+    Ok(receipt)
 }
 
 async fn harness_manifest_input(
@@ -1247,14 +1345,16 @@ async fn doctor(paths: &Paths, json_output: bool) -> Result<()> {
             Ok(ids) => {
                 for id in ids {
                     let health = match registry.health_probed(&id).await {
-                        Ok(Health::Healthy) => json!({"id": id, "health": "healthy"}),
-                        Ok(Health::Drifted { .. }) => {
-                            json!({"id": id, "health": "drifted", "action": "re-certify"})
+                        Ok(status) => {
+                            let action = registry
+                                .recertify_action_for(&id)
+                                .unwrap_or_else(|_| recertify_action_fallback());
+                            doctor_harness_value(&id, status, &action)
                         }
                         Err(error) => json!({
                             "id": id,
                             "health": "unhealthy",
-                            "action": "re-certify",
+                            "action": recertify_action_fallback(),
                             "reason": error.to_string(),
                         }),
                     };
@@ -1286,6 +1386,38 @@ async fn doctor(paths: &Paths, json_output: bool) -> Result<()> {
         Ok(())
     } else {
         bail!("brgr doctor found an unavailable personal-use path")
+    }
+}
+
+fn recertify_action_fallback() -> String {
+    "re-certify with `brgr harness add <executable>`".to_owned()
+}
+
+fn require_healthy_harness(id: &str, health: Health, action: &str) -> Result<()> {
+    match health {
+        Health::Healthy => Ok(()),
+        other => bail!("harness {id} is {}; {action}", other.code()),
+    }
+}
+
+fn doctor_harness_value(id: &str, health: Health, action: &str) -> serde_json::Value {
+    harness_health_value("id", id, health, action)
+}
+
+fn harness_health_value(id_key: &str, id: &str, health: Health, action: &str) -> serde_json::Value {
+    match health {
+        Health::Healthy => json!({ id_key: id, "health": "healthy" }),
+        Health::ExitedNonzero { exit_code } => json!({
+            id_key: id,
+            "health": "exited_nonzero",
+            "exit_code": exit_code,
+            "action": action,
+        }),
+        other => json!({
+            id_key: id,
+            "health": other.code(),
+            "action": action,
+        }),
     }
 }
 
@@ -1783,119 +1915,6 @@ fn recover_omp_contract(
     write_json_atomic(&contract_path, &contract)
 }
 
-fn prepare_workspace(
-    paths: &Paths,
-    source: &Path,
-    task_id: TaskId,
-    revision: u32,
-    adapter: &str,
-    allow_clean_head_snapshot: bool,
-) -> Result<PathBuf> {
-    let source = source.canonicalize()?;
-    let root_output = ProcessCommand::new("git")
-        .args([
-            "-C",
-            &source.to_string_lossy(),
-            "rev-parse",
-            "--show-toplevel",
-        ])
-        .output();
-    let root_output = match root_output {
-        Ok(output) => output,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(source),
-        Err(error) => return Err(error.into()),
-    };
-    if !root_output.status.success() {
-        return Ok(source);
-    }
-    let root = PathBuf::from(String::from_utf8(root_output.stdout)?.trim());
-    let dirty = command_output(
-        "git",
-        &["-C", &root.to_string_lossy(), "status", "--porcelain"],
-    )?;
-    if !dirty.trim().is_empty() && !allow_clean_head_snapshot {
-        bail!(
-            "source worktree contains uncommitted changes; commit or capture them first, or pass --allow-clean-head-snapshot to explicitly exclude them"
-        );
-    }
-    let base_revision =
-        command_output("git", &["-C", &root.to_string_lossy(), "rev-parse", "HEAD"])?;
-    let worktree_list = command_output(
-        "git",
-        &[
-            "-C",
-            &root.to_string_lossy(),
-            "worktree",
-            "list",
-            "--porcelain",
-        ],
-    )?;
-    let primary = worktree_list
-        .lines()
-        .find_map(|line| line.strip_prefix("worktree "))
-        .map(PathBuf::from)
-        .context("git worktree inventory did not contain a primary checkout")?;
-    let repo_name = root
-        .file_name()
-        .and_then(|value| value.to_str())
-        .unwrap_or("workspace");
-    let short = task_id.to_string()[..8].to_owned();
-    let task_slug = if revision == 1 {
-        short
-    } else {
-        format!("{short}-r{revision}")
-    };
-    let target_parent = paths.worktrees.join(repo_name);
-    fs::create_dir_all(&target_parent)?;
-    let target = target_parent.join(&task_slug);
-    let branch = format!("brgr/task-{task_slug}");
-    let status = if adapter == brgr_runner::OMP_ROLE_ADAPTER_V1
-        && env::var("HERDR_ENV").as_deref() == Ok("1")
-        && env::var_os("HERDR_PANE_ID").is_some()
-    {
-        ProcessCommand::new("herdr")
-            .args(["worktree", "create", "--cwd"])
-            .arg(&primary)
-            .args([
-                "--branch",
-                &branch,
-                "--base",
-                base_revision.trim(),
-                "--path",
-            ])
-            .arg(&target)
-            .args([
-                "--label",
-                &format!("brgr-{task_slug}"),
-                "--no-focus",
-                "--trust-repository",
-            ])
-            .status()?
-    } else {
-        ProcessCommand::new("git")
-            .arg("-C")
-            .arg(&primary)
-            .args(["worktree", "add", "-b"])
-            .arg(&branch)
-            .arg(&target)
-            .arg(base_revision.trim())
-            .status()?
-    };
-    if !status.success() {
-        bail!("failed to create task worktree {}", target.display());
-    }
-    let relative = source.strip_prefix(&root).unwrap_or(Path::new(""));
-    Ok(target.join(relative))
-}
-
-fn command_output(program: &str, args: &[&str]) -> Result<String> {
-    let output = ProcessCommand::new(program).args(args).output()?;
-    if !output.status.success() {
-        bail!("{program} command failed");
-    }
-    Ok(String::from_utf8(output.stdout)?)
-}
-
 fn owner_from_environment() -> Result<OwnerId> {
     let session = current_session()?;
     let owner = env::var("BRGR_OWNER_ID")
@@ -1980,6 +1999,66 @@ fn print_value(value: &serde_json::Value, json_output: bool) {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn bridge_host_allows_managed_operations_and_rejects_privileged_changes() {
+        let root = TempDir::new().unwrap();
+        let inside = root.path().join("project");
+        let outside = TempDir::new().unwrap();
+        fs::create_dir(&inside).unwrap();
+
+        let run = Cli::try_parse_from([
+            "brgr",
+            "run",
+            "check",
+            "--workspace",
+            inside.to_str().unwrap(),
+        ])
+        .unwrap();
+        validate_bridge_host_command(&run.command, root.path(), root.path()).unwrap();
+
+        let escaped = Cli::try_parse_from([
+            "brgr",
+            "run",
+            "check",
+            "--workspace",
+            outside.path().to_str().unwrap(),
+        ])
+        .unwrap();
+        assert!(validate_bridge_host_command(&escaped.command, root.path(), root.path()).is_err());
+
+        let harness_status =
+            Cli::try_parse_from(["brgr", "harness", "status", "local.gjc"]).unwrap();
+        validate_bridge_host_command(&harness_status.command, root.path(), root.path()).unwrap();
+
+        let harness_add = Cli::try_parse_from([
+            "brgr",
+            "harness",
+            "add",
+            "/tmp/untrusted-agent",
+            "--workspace",
+            inside.to_str().unwrap(),
+            "--prompt",
+            "probe",
+        ])
+        .unwrap();
+        assert!(
+            validate_bridge_host_command(&harness_add.command, root.path(), root.path()).is_err()
+        );
+
+        let integrate = Cli::try_parse_from(["brgr", "integrate", "codex", "uninstall"]).unwrap();
+        assert!(
+            validate_bridge_host_command(&integrate.command, root.path(), root.path()).is_err()
+        );
+    }
+
+    #[test]
+    fn bridge_host_rejects_control_home_override() {
+        let expected = Path::new("/private/tmp/brgr-home");
+        assert!(require_bridge_home(Some(expected), expected).is_ok());
+        assert!(require_bridge_home(None, expected).is_err());
+        assert!(require_bridge_home(Some(Path::new("/private/tmp/other-home")), expected).is_err());
+    }
 
     #[test]
     fn legacy_launch_without_pinned_manifest_cannot_replay() {

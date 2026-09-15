@@ -1,6 +1,11 @@
 use std::{
-    fs, io::Write as _, os::unix::fs::PermissionsExt, path::Path, process::Command, thread,
-    time::Duration,
+    fs,
+    io::Write as _,
+    os::unix::fs::PermissionsExt,
+    path::{Path, PathBuf},
+    process::Command,
+    thread,
+    time::{Duration, Instant},
 };
 
 use serde_json::{Value, json};
@@ -96,6 +101,55 @@ fn plugin_board_shows_candidate_then_explicit_decision_without_prompt_text() {
             .unwrap()
             .contains("accepted")
     );
+    let decided_text =
+        String::from_utf8(run(&home, &["plugin", "board", "--once"], &envs).stdout).unwrap();
+    assert!(!decided_text.contains("BRGR_FIXTURE_OK"));
+    assert!(!decided_text.contains("fixture verified"));
+}
+
+#[test]
+fn plugin_board_refresh_failure_is_visible_without_mutating_tasks() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("brgr");
+    let workspace = temp.path().join("work");
+    fs::create_dir_all(&workspace).unwrap();
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../testdata/fixtures/gjc")
+        .canonicalize()
+        .unwrap();
+    add_fixture(&home, &fixture, &temp.path().join("scratch"));
+    let envs = [
+        ("BRGR_OWNER_ID", "codex:board-fail"),
+        ("HERDR_ENV", "1"),
+        ("HERDR_PLUGIN_ID", "brgr"),
+    ];
+    let created = json_output(&run(
+        &home,
+        &[
+            "run",
+            "BRGR_FIXTURE_OK",
+            "--workspace",
+            workspace.to_str().unwrap(),
+            "--foreground",
+        ],
+        &envs,
+    ));
+    let task_id = created["task_id"].as_str().unwrap();
+    let store = home.join("store").join("brgr.sqlite3");
+    let original = fs::read(&store).unwrap();
+    fs::write(&store, b"not a sqlite database").unwrap();
+    let failed = run(&home, &["plugin", "board", "--once"], &envs);
+    assert!(!failed.status.success());
+    let stderr = String::from_utf8_lossy(&failed.stderr);
+    assert!(stderr.contains("board refresh failed"));
+    assert!(stderr.contains("No tasks were mutated or reconciled"));
+    assert!(!stderr.contains("BRGR_FIXTURE_OK"));
+    fs::write(&store, original).unwrap();
+    let restored = run(&home, &["plugin", "board", "--once"], &envs);
+    assert!(restored.status.success());
+    let restored_text = String::from_utf8(restored.stdout).unwrap();
+    assert!(restored_text.contains(&task_id[..8]));
+    assert!(restored_text.contains("candidate"));
 }
 
 #[test]
@@ -104,10 +158,14 @@ fn plugin_codex_bridge_runs_a_fixture_outside_the_codex_process() {
     let home = temp.path().join("brgr");
     let codex_home = temp.path().join("codex-home");
     let workspace = temp.path().join("work");
+    let outside = temp.path().join("outside");
     let fake_bin = temp.path().join("bin");
     let output_path = temp.path().join("candidate.json");
     let codex_args_path = temp.path().join("codex-args.txt");
+    let denied_harness_path = temp.path().join("denied-harness.txt");
+    let denied_workspace_path = temp.path().join("denied-workspace.txt");
     fs::create_dir_all(&workspace).unwrap();
+    fs::create_dir_all(&outside).unwrap();
     fs::create_dir_all(&fake_bin).unwrap();
     let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../testdata/fixtures/gjc")
@@ -118,7 +176,7 @@ fn plugin_codex_bridge_runs_a_fixture_outside_the_codex_process() {
     let fake_codex = fake_bin.join("codex");
     fs::write(
         &fake_codex,
-        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$BRGR_TEST_CODEX_ARGS\"\nexport CODEX_THREAD_ID=bridge-test\nexec \"$BRGR_BIN\" --json run BRGR_FIXTURE_OK --harness local.gjc --criterion 'artifact text equals BRGR_FIXTURE_OK' --workspace \"$BRGR_TEST_WORKSPACE\" --foreground > \"$BRGR_TEST_OUTPUT\"\n",
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$BRGR_TEST_CODEX_ARGS\"\nexport CODEX_THREAD_ID=bridge-test\n\"$BRGR_BIN\" --json harness add /bin/echo --presentation-only > /dev/null 2> \"$BRGR_TEST_DENIED_HARNESS\"\nprintf '%s\\n' \"$?\" >> \"$BRGR_TEST_DENIED_HARNESS\"\n\"$BRGR_BIN\" --json run ESCAPE --harness local.gjc --workspace \"$BRGR_TEST_OUTSIDE\" --foreground > /dev/null 2> \"$BRGR_TEST_DENIED_WORKSPACE\"\nprintf '%s\\n' \"$?\" >> \"$BRGR_TEST_DENIED_WORKSPACE\"\nexec \"$BRGR_BIN\" --json run BRGR_FIXTURE_OK --harness local.gjc --criterion 'artifact text equals BRGR_FIXTURE_OK' --workspace \"$BRGR_TEST_WORKSPACE\" --foreground > \"$BRGR_TEST_OUTPUT\"\n",
     )
     .unwrap();
     fs::set_permissions(&fake_codex, fs::Permissions::from_mode(0o700)).unwrap();
@@ -137,8 +195,11 @@ fn plugin_codex_bridge_runs_a_fixture_outside_the_codex_process() {
         .env("CODEX_HOME", &codex_home)
         .env("BRGR_BIN", brgr())
         .env("BRGR_TEST_WORKSPACE", &workspace)
+        .env("BRGR_TEST_OUTSIDE", &outside)
         .env("BRGR_TEST_OUTPUT", &output_path)
         .env("BRGR_TEST_CODEX_ARGS", &codex_args_path)
+        .env("BRGR_TEST_DENIED_HARNESS", &denied_harness_path)
+        .env("BRGR_TEST_DENIED_WORKSPACE", &denied_workspace_path)
         .env("PATH", path)
         .env_remove("CODEX_THREAD_ID")
         .env_remove("BRGR_SESSION_ID")
@@ -152,6 +213,29 @@ fn plugin_codex_bridge_runs_a_fixture_outside_the_codex_process() {
     let codex_args = fs::read_to_string(codex_args_path).unwrap();
     assert!(codex_args.contains("shell_environment_policy.set.PATH="));
     assert!(codex_args.contains("shell_environment_policy.set.BRGR_PLUGIN_BRIDGE_DIR="));
+    let args = codex_args.lines().collect::<Vec<_>>();
+    let add_dir = args
+        .windows(2)
+        .find_map(|pair| (pair[0] == "--add-dir").then_some(pair[1]))
+        .expect("Codex launch must expose only the private bridge directory");
+    assert_ne!(Path::new(add_dir), home);
+    assert!(
+        !Path::new(add_dir).exists(),
+        "bridge tempdir must close with Codex"
+    );
+    let denied_harness = fs::read_to_string(&denied_harness_path).unwrap();
+    assert!(denied_harness.contains("unavailable through the Herdr host bridge"));
+    assert_ne!(denied_harness.lines().last(), Some("0"));
+    let denied_workspace = fs::read_to_string(&denied_workspace_path).unwrap();
+    assert!(denied_workspace.contains("outside the selected Herdr workspace"));
+    assert_ne!(denied_workspace.lines().last(), Some("0"));
+    assert_eq!(
+        brgr_registry::Registry::open(home.join("registry"))
+            .unwrap()
+            .registered_harness_ids()
+            .unwrap(),
+        vec!["local.gjc"]
+    );
     let candidate: Value = serde_json::from_slice(&fs::read(&output_path).unwrap()).unwrap();
     assert_eq!(candidate["outcome"], "candidate");
     let task = candidate["task_id"].as_str().unwrap();
@@ -171,6 +255,181 @@ fn plugin_codex_bridge_runs_a_fixture_outside_the_codex_process() {
             .to_string_lossy()
             .starts_with("plugin-bridge-")
     }));
+}
+
+#[test]
+fn plugin_codex_uses_pinned_workspace_not_live_plugin_cwd() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("brgr");
+    let codex_home = temp.path().join("codex-home");
+    let project = temp.path().join("project");
+    let plugin_checkout = temp.path().join("plugin-checkout");
+    let fake_bin = temp.path().join("bin");
+    let codex_args_path = temp.path().join("codex-args.txt");
+    fs::create_dir_all(&project).unwrap();
+    fs::create_dir_all(&plugin_checkout).unwrap();
+    fs::create_dir_all(&fake_bin).unwrap();
+    let fake_codex = fake_bin.join("codex");
+    fs::write(
+        &fake_codex,
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$BRGR_TEST_CODEX_ARGS\"\n",
+    )
+    .unwrap();
+    fs::set_permissions(&fake_codex, fs::Permissions::from_mode(0o700)).unwrap();
+    let path = std::env::join_paths(
+        std::iter::once(fake_bin.clone())
+            .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+    )
+    .unwrap();
+    let context = json!({
+        "workspace_id": "w1",
+        "workspace_cwd": plugin_checkout,
+        "focused_pane_cwd": plugin_checkout
+    });
+    let launched = Command::new(brgr())
+        .args(["plugin", "codex"])
+        .env("HERDR_ENV", "1")
+        .env("HERDR_PLUGIN_ID", "brgr")
+        .env("HERDR_PLUGIN_CONTEXT_JSON", context.to_string())
+        .env("BRGR_PLUGIN_WORKSPACE_CWD", &project)
+        .env("BRGR_HOME", &home)
+        .env("CODEX_HOME", &codex_home)
+        .env("BRGR_TEST_CODEX_ARGS", &codex_args_path)
+        .env("PATH", path)
+        .env_remove("CODEX_THREAD_ID")
+        .env_remove("BRGR_SESSION_ID")
+        .output()
+        .unwrap();
+    assert!(
+        launched.status.success(),
+        "{}",
+        String::from_utf8_lossy(&launched.stderr)
+    );
+    let args = fs::read_to_string(codex_args_path).unwrap();
+    let mut found_cwd = false;
+    let mut lines = args.lines();
+    while let Some(line) = lines.next() {
+        if line == "-C" {
+            assert_eq!(lines.next(), Some(project.to_str().unwrap()));
+            found_cwd = true;
+            break;
+        }
+    }
+    assert!(found_cwd, "{args}");
+    assert!(args.contains("shell_environment_policy.set.PATH="));
+    assert!(args.contains("shell_environment_policy.set.BRGR_HOME="));
+}
+
+#[test]
+fn plugin_entrypoints_fail_closed_without_herdr_host() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("brgr");
+    let board = run(&home, &["plugin", "board", "--once"], &[]);
+    assert!(!board.status.success());
+    assert!(String::from_utf8_lossy(&board.stderr).contains("brgr Herdr plugin host"));
+    let open = run(&home, &["plugin", "open", "--no-focus"], &[]);
+    assert!(!open.status.success());
+    assert!(String::from_utf8_lossy(&open.stderr).contains("brgr Herdr plugin host"));
+}
+
+#[test]
+fn plugin_codex_missing_binary_fails_visibly_without_launching() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("brgr");
+    let workspace = temp.path().join("work");
+    let empty_bin = temp.path().join("empty-bin");
+    fs::create_dir_all(&workspace).unwrap();
+    fs::create_dir_all(&empty_bin).unwrap();
+    let context = json!({"workspace_id": "w1", "workspace_cwd": workspace});
+    let launched = Command::new(brgr())
+        .args(["plugin", "codex"])
+        .env("HERDR_ENV", "1")
+        .env("HERDR_PLUGIN_ID", "brgr")
+        .env("HERDR_PLUGIN_CONTEXT_JSON", context.to_string())
+        .env("BRGR_HOME", &home)
+        .env("CODEX_HOME", temp.path().join("codex-home"))
+        .env("PATH", &empty_bin)
+        .output()
+        .unwrap();
+    assert!(!launched.status.success());
+    assert!(String::from_utf8_lossy(&launched.stderr).contains("could not start Codex"));
+}
+
+#[test]
+fn plugin_open_surfaces_herdr_launch_failure() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("brgr");
+    let workspace = temp.path().join("work");
+    let fake_bin = temp.path().join("bin");
+    fs::create_dir_all(&workspace).unwrap();
+    fs::create_dir_all(&fake_bin).unwrap();
+    let herdr = fake_bin.join("herdr");
+    fs::write(&herdr, "#!/bin/sh\necho 'pane refused' >&2\nexit 7\n").unwrap();
+    fs::set_permissions(&herdr, fs::Permissions::from_mode(0o700)).unwrap();
+    let context = json!({"workspace_id": "w1", "workspace_cwd": workspace});
+    let launched = Command::new(brgr())
+        .args(["plugin", "open", "--no-focus", "--codex"])
+        .env("HERDR_ENV", "1")
+        .env("HERDR_PLUGIN_ID", "brgr")
+        .env("HERDR_PLUGIN_CONTEXT_JSON", context.to_string())
+        .env("HERDR_BIN_PATH", &herdr)
+        .env("BRGR_HOME", &home)
+        .output()
+        .unwrap();
+    assert!(!launched.status.success());
+    let stderr = String::from_utf8_lossy(&launched.stderr);
+    assert!(stderr.contains("could not open the brgr pane"));
+    assert!(stderr.contains("pane refused"));
+}
+
+#[test]
+fn stale_codex_skill_or_hooks_report_drift_until_reinstall() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("brgr");
+    let codex_home = temp.path().join("codex");
+    let envs = [("CODEX_HOME", codex_home.to_str().unwrap())];
+    json_output(&run(&home, &["integrate", "codex", "install"], &envs));
+    assert_eq!(
+        json_output(&run(&home, &["integrate", "codex", "status"], &envs))["status"],
+        "installed"
+    );
+
+    let receipt_path = home.join("codex-integration.json");
+    let mut receipt: Value = serde_json::from_slice(&fs::read(&receipt_path).unwrap()).unwrap();
+    let skill_path = PathBuf::from(receipt["skill_path"].as_str().unwrap());
+    fs::write(&skill_path, "owned prior brgr skill\n").unwrap();
+    receipt["skill_text"] = json!("owned prior brgr skill\n");
+    fs::write(&receipt_path, serde_json::to_vec(&receipt).unwrap()).unwrap();
+    let stale_skill = json_output(&run(&home, &["integrate", "codex", "status"], &envs));
+    assert_eq!(stale_skill["status"], "drifted");
+    assert_eq!(stale_skill["current_skill"], false);
+
+    json_output(&run(&home, &["integrate", "codex", "install"], &envs));
+    let mut receipt: Value = serde_json::from_slice(&fs::read(&receipt_path).unwrap()).unwrap();
+    let old_command = receipt["commands"]["Stop"].as_str().unwrap().to_owned();
+    let drifted_command = format!("{old_command}-old");
+    receipt["commands"]["Stop"] = json!(drifted_command);
+    fs::write(&receipt_path, serde_json::to_vec(&receipt).unwrap()).unwrap();
+    let mut hooks: Value =
+        serde_json::from_slice(&fs::read(codex_home.join("hooks.json")).unwrap()).unwrap();
+    for entry in hooks["hooks"]["Stop"].as_array_mut().unwrap() {
+        if entry["hooks"][0]["command"] == old_command {
+            entry["hooks"][0]["command"] = json!(drifted_command);
+        }
+    }
+    fs::write(
+        codex_home.join("hooks.json"),
+        serde_json::to_vec(&hooks).unwrap(),
+    )
+    .unwrap();
+    let stale_hooks = json_output(&run(&home, &["integrate", "codex", "status"], &envs));
+    assert_eq!(stale_hooks["status"], "drifted");
+    assert_eq!(stale_hooks["current_hooks"], false);
+    json_output(&run(&home, &["integrate", "codex", "install"], &envs));
+    assert_eq!(
+        json_output(&run(&home, &["integrate", "codex", "status"], &envs))["status"],
+        "installed"
+    );
 }
 
 #[test]
@@ -219,8 +478,14 @@ fn doctor_reports_changed_harness_instead_of_ok() {
     let report: Value = serde_json::from_slice(&changed.stdout).unwrap();
     assert_eq!(report["status"], "needs_attention");
     assert_eq!(report["harnesses"][0]["id"], "local.gjc");
-    assert_eq!(report["harnesses"][0]["health"], "unhealthy");
-    assert_eq!(report["harnesses"][0]["action"], "re-certify");
+    assert_eq!(report["harnesses"][0]["health"], "executable_changed");
+    let action = report["harnesses"][0]["action"].as_str().unwrap();
+    assert!(action.contains("re-certify"));
+    assert!(action.contains("harness add"));
+    assert!(action.contains("--prompt"));
+    let dumped = String::from_utf8_lossy(&changed.stdout);
+    assert!(!dumped.contains("--mode=<value>"));
+    assert!(!dumped.contains("BRGR_FIXTURE_OK"));
 }
 
 #[test]
@@ -1479,4 +1744,350 @@ fn dirty_source_is_rejected_before_creating_a_task_worktree() {
         String::from_utf8_lossy(&rejected.stderr)
     );
     assert!(!home.join("worktrees/repo").exists());
+    assert_eq!(
+        fs::read_to_string(repository.join("user-note.txt")).unwrap(),
+        "uncommitted work\n"
+    );
+    let branches = Command::new("git")
+        .args([
+            "-C",
+            repository.to_str().unwrap(),
+            "branch",
+            "--list",
+            "brgr/*",
+        ])
+        .output()
+        .unwrap();
+    assert!(branches.status.success());
+    assert!(String::from_utf8_lossy(&branches.stdout).trim().is_empty());
+}
+fn seed_git_repo(repository: &Path) {
+    assert!(
+        Command::new("git")
+            .args(["init", "-b", "main"])
+            .current_dir(repository)
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    for (key, value) in [
+        ("user.name", "Fixture"),
+        ("user.email", "fixture@example.invalid"),
+    ] {
+        assert!(
+            Command::new("git")
+                .args(["-C", repository.to_str().unwrap(), "config", key, value])
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+    fs::write(repository.join("README"), b"seed\n").unwrap();
+    assert!(
+        Command::new("git")
+            .args(["-C", repository.to_str().unwrap(), "add", "README"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        Command::new("git")
+            .args(["-C", repository.to_str().unwrap(), "commit", "-m", "seed"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        Command::new("git")
+            .args(["-C", repository.to_str().unwrap(), "branch", "user/keep-me"])
+            .status()
+            .unwrap()
+            .success()
+    );
+}
+
+fn git_branches(repository: &Path) -> String {
+    let output = Command::new("git")
+        .args(["-C", repository.to_str().unwrap(), "branch", "--list"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+fn gjc_fixture() -> std::path::PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../testdata/fixtures/gjc")
+        .canonicalize()
+        .unwrap()
+}
+
+#[test]
+fn concurrent_git_worktree_admissions_keep_distinct_identities() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("brgr");
+    let repository = temp.path().join("repo");
+    fs::create_dir_all(&repository).unwrap();
+    seed_git_repo(&repository);
+    add_fixture(&home, &gjc_fixture(), &temp.path().join("scratch"));
+    let repo = repository.to_str().unwrap().to_owned();
+    let home_path = home.clone();
+    thread::scope(|scope| {
+        let left = scope.spawn(|| {
+            run(
+                &home_path,
+                &[
+                    "run",
+                    "BRGR_FIXTURE_OK",
+                    "--workspace",
+                    &repo,
+                    "--foreground",
+                ],
+                &[("BRGR_OWNER_ID", "codex:worktree-left")],
+            )
+        });
+        let right = scope.spawn(|| {
+            run(
+                &home_path,
+                &[
+                    "run",
+                    "BRGR_FIXTURE_OK",
+                    "--workspace",
+                    &repo,
+                    "--foreground",
+                ],
+                &[("BRGR_OWNER_ID", "codex:worktree-right")],
+            )
+        });
+        let left = json_output(&left.join().unwrap());
+        let right = json_output(&right.join().unwrap());
+        assert_eq!(left["outcome"], "candidate");
+        assert_eq!(right["outcome"], "candidate");
+        assert_ne!(left["task_id"], right["task_id"]);
+        assert_ne!(left["result_id"], right["result_id"]);
+    });
+    let listed = git_branches(&repository);
+    assert!(listed.contains("user/keep-me"));
+    assert_eq!(
+        fs::read_to_string(repository.join("README")).unwrap(),
+        "seed\n"
+    );
+    let created = fs::read_dir(home.join("worktrees/repo")).unwrap().count();
+    assert_eq!(created, 2);
+}
+
+#[test]
+fn worktree_created_before_admission_is_preserved_and_not_reused() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("brgr");
+    let repository = temp.path().join("repo");
+    fs::create_dir_all(&repository).unwrap();
+    seed_git_repo(&repository);
+    add_fixture(&home, &gjc_fixture(), &temp.path().join("scratch"));
+    let crashed = run(
+        &home,
+        &[
+            "run",
+            "BRGR_FIXTURE_OK",
+            "--workspace",
+            repository.to_str().unwrap(),
+        ],
+        &[
+            ("BRGR_OWNER_ID", "codex:worktree-gap"),
+            ("BRGR_TEST_EXIT_AFTER_WORKTREE", "1"),
+        ],
+    );
+    assert_eq!(crashed.status.code(), Some(78));
+    let leftover = fs::read_dir(home.join("worktrees/repo")).unwrap();
+    let leftovers: Vec<_> = leftover.map(|entry| entry.unwrap().path()).collect();
+    assert_eq!(leftovers.len(), 1);
+    assert!(leftovers[0].join("README").is_file());
+    let store = brgr_store::Store::open(home.join("store")).unwrap();
+    assert!(store.unstarted_tasks().unwrap().is_empty());
+    assert_eq!(
+        home.join("launches").read_dir().map_or(0, Iterator::count),
+        0
+    );
+    let listed = git_branches(&repository);
+    assert!(listed.contains("user/keep-me"));
+    assert!(listed.contains("brgr/task-"));
+
+    let recovered = json_output(&run(
+        &home,
+        &[
+            "run",
+            "BRGR_FIXTURE_OK",
+            "--workspace",
+            repository.to_str().unwrap(),
+            "--foreground",
+        ],
+        &[("BRGR_OWNER_ID", "codex:worktree-gap")],
+    ));
+    assert_eq!(recovered["outcome"], "candidate");
+    assert_eq!(
+        fs::read_dir(home.join("worktrees/repo")).unwrap().count(),
+        2,
+        "orphan worktree must be kept and a new admission must use a new path"
+    );
+    assert_eq!(
+        fs::read_to_string(repository.join("README")).unwrap(),
+        "seed\n"
+    );
+}
+
+#[test]
+fn missing_task_worktree_fails_closed_without_recreate_or_new_identity() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("brgr");
+    let repository = temp.path().join("repo");
+    fs::create_dir_all(&repository).unwrap();
+    seed_git_repo(&repository);
+    add_fixture(&home, &gjc_fixture(), &temp.path().join("scratch"));
+    let started = json_output(&run(
+        &home,
+        &[
+            "run",
+            "BRGR_FIXTURE_OK",
+            "--workspace",
+            repository.to_str().unwrap(),
+        ],
+        &[
+            ("BRGR_OWNER_ID", "codex:worktree-missing"),
+            ("BRGR_TEST_EXIT_BEFORE_TASK_CLAIM", "1"),
+        ],
+    ));
+    let task = started["task_id"].as_str().unwrap();
+    let workspace = Path::new(started["workspace"].as_str().unwrap());
+    assert!(workspace.is_dir());
+    fs::remove_dir_all(workspace).unwrap();
+    assert!(
+        Command::new("git")
+            .args(["-C", repository.to_str().unwrap(), "worktree", "prune"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    let status = json_output(&run(
+        &home,
+        &["status", task],
+        &[("BRGR_OWNER_ID", "codex:worktree-missing")],
+    ));
+    assert_eq!(status["task"]["task_id"], task);
+    assert_eq!(status["workspace_present"], false);
+    assert_eq!(status["state"], "terminal");
+    let result = json_output(&run(
+        &home,
+        &["result", task],
+        &[("BRGR_OWNER_ID", "codex:worktree-missing")],
+    ));
+    assert_eq!(result["result"]["outcome"], "lost");
+    assert_eq!(result["result"]["task_id"], task);
+    assert!(
+        result["result"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("task worktree is missing")
+    );
+    assert!(!workspace.exists());
+    assert!(git_branches(&repository).contains("user/keep-me"));
+    let store = brgr_store::Store::open(home.join("store")).unwrap();
+    assert_eq!(store.unstarted_tasks().unwrap().len(), 0);
+}
+
+fn add_slow_prompt_file_harness(home: &Path, root: &Path) {
+    fs::create_dir_all(root.join("scratch")).unwrap();
+    let executable = root.join("slow-agent");
+    fs::write(
+        &executable,
+        "#!/bin/sh\ncase \"$1\" in\n  --version) echo 'slow 1';;\n  --help) echo '  --prompt-file <path>  fresh run';;\n  --prompt-file)\n    if /usr/bin/grep -q SLOW_RUN \"$2\"; then /bin/sleep 4; fi\n    /bin/cat \"$2\";;\n  *) exit 2;;\nesac\n",
+    )
+    .unwrap();
+    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+    json_output(&run(
+        home,
+        &[
+            "harness",
+            "add",
+            executable.to_str().unwrap(),
+            "--workspace",
+            root.join("scratch").to_str().unwrap(),
+            "--prompt",
+            "scratch",
+        ],
+        &[],
+    ));
+}
+
+#[test]
+fn foreground_admission_lock_is_released_before_slow_harness_execution() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("brgr");
+    let repository = temp.path().join("repo");
+    fs::create_dir_all(&repository).unwrap();
+    seed_git_repo(&repository);
+    add_fixture(&home, &gjc_fixture(), &temp.path().join("gjc-scratch"));
+    add_slow_prompt_file_harness(&home, &temp.path().join("slow"));
+    let repo = repository.to_str().unwrap().to_owned();
+    let home_path = home.clone();
+    thread::scope(|scope| {
+        let first = scope.spawn(|| {
+            run(
+                &home_path,
+                &[
+                    "run",
+                    "SLOW_RUN",
+                    "--harness",
+                    "local.slow-agent",
+                    "--workspace",
+                    &repo,
+                    "--foreground",
+                ],
+                &[("BRGR_OWNER_ID", "codex:worktree-slow")],
+            )
+        });
+        let admitted = Instant::now();
+        while admitted.elapsed() < Duration::from_secs(2) {
+            if home_path
+                .join("launches")
+                .read_dir()
+                .map_or(0, Iterator::count)
+                > 0
+            {
+                break;
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+        let second_started = Instant::now();
+        let second = json_output(&run(
+            &home_path,
+            &[
+                "run",
+                "BRGR_FIXTURE_OK",
+                "--workspace",
+                &repo,
+                "--foreground",
+            ],
+            &[("BRGR_OWNER_ID", "codex:worktree-fast")],
+        ));
+        let second_elapsed = second_started.elapsed();
+        assert_eq!(second["outcome"], "candidate");
+        assert!(
+            second_elapsed < Duration::from_secs(3),
+            "second admission waited on the first foreground run: {second_elapsed:?}"
+        );
+        assert!(
+            !first.is_finished(),
+            "second task finished only after the slow first harness completed"
+        );
+        let first = json_output(&first.join().unwrap());
+        assert_eq!(first["outcome"], "candidate");
+        assert_ne!(first["task_id"], second["task_id"]);
+        assert_ne!(first["result_id"], second["result_id"]);
+    });
+    assert!(git_branches(&repository).contains("user/keep-me"));
+    assert_eq!(
+        fs::read_to_string(repository.join("README")).unwrap(),
+        "seed\n"
+    );
 }
