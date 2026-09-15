@@ -45,7 +45,7 @@ with the user's permissions.
 
 ## Installation and migration
 
-`herdr plugin install justn-hyeok/brgr --ref v2.0.0` builds from `Cargo.lock`.
+`herdr plugin install justn-hyeok/brgr --ref v2.0.1` builds from `Cargo.lock`.
 `herdr plugin link .` links a local built checkout for development and does not
 run build commands. Plugin installation does not register a harness, perform a
 paid scratch run, erase the v1 store, or close any pane/worktree. Opening the
@@ -102,5 +102,5 @@ fixture task `6e0da337-ce9a-4dd6-aa43-c2cc52e6ce23`; the stored artifact
 again matched `BRGR_FIXTURE_OK`. Codex recorded decision
 `917e354a-2b99-440c-906b-2cf9f962cad5` as `accepted`, and an independent
 store read confirmed the result digest, owner session, acknowledged inbox, and
-board state. The final tagged GitHub package and post-merge release artifacts
-remain to be verified at their exact commits.
+board state. Each later patch tag must independently rebuild and verify its
+GitHub package; these historical receipts are not evidence for a newer tag.

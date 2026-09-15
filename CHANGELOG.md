@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.0.1 — 2026-09-15
 
 Harden the v2 personal-use path around the Herdr host bridge, Git worktree
 admission, harness health checks, SQLite writer contention, and the read-only

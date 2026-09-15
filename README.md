@@ -22,10 +22,10 @@ personal-use reliability work from public-release gates.
 
 ## Herdr plugin
 
-Install the public v2 plugin from GitHub after the `v2.0.0` release:
+Install the current public v2 plugin from GitHub:
 
 ```bash
-herdr plugin install justn-hyeok/brgr --ref v2.0.0
+herdr plugin install justn-hyeok/brgr --ref v2.0.1
 ```
 
 The plugin builds `brgr` from the pinned Cargo lockfile, so a Rust toolchain is
