@@ -1,6 +1,8 @@
 use std::{
     collections::BTreeMap,
-    env, fs,
+    env,
+    fmt::Write as _,
+    fs,
     io::Write,
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
@@ -10,6 +12,7 @@ use std::{
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use tempfile::NamedTempFile;
 
 const SKILL_TEXT: &str = r#"---
@@ -80,6 +83,10 @@ struct Receipt {
     skill_path: PathBuf,
     commands: BTreeMap<String, String>,
     skill_text: String,
+    #[serde(default)]
+    executable_path: Option<PathBuf>,
+    #[serde(default)]
+    executable_digest: Option<String>,
 }
 
 pub fn install(brgr_home: &Path) -> Result<Value> {
@@ -154,12 +161,7 @@ pub fn install(brgr_home: &Path) -> Result<Value> {
     let skill_dir = skill_path.parent().context("skill path has no parent")?;
     fs::create_dir_all(skill_dir)?;
     fs::set_permissions(skill_dir, fs::Permissions::from_mode(0o700))?;
-    let receipt = Receipt {
-        hooks_path: hooks_path.clone(),
-        skill_path: skill_path.clone(),
-        commands,
-        skill_text: SKILL_TEXT.to_owned(),
-    };
+    let receipt = installation_receipt(&hooks_path, &skill_path, commands, &executable)?;
     let changed = (|| -> Result<()> {
         write_bytes_atomic(&skill_path, SKILL_TEXT.as_bytes())?;
         write_json_atomic(&hooks_path, &document)?;
@@ -185,6 +187,22 @@ pub fn install(brgr_home: &Path) -> Result<Value> {
         "backup": backup,
         "receipt": receipt_path,
     }))
+}
+
+fn installation_receipt(
+    hooks_path: &Path,
+    skill_path: &Path,
+    commands: BTreeMap<String, String>,
+    executable: &Path,
+) -> Result<Receipt> {
+    Ok(Receipt {
+        hooks_path: hooks_path.to_path_buf(),
+        skill_path: skill_path.to_path_buf(),
+        commands,
+        skill_text: SKILL_TEXT.to_owned(),
+        executable_path: Some(executable.to_path_buf()),
+        executable_digest: Some(file_digest(executable)?),
+    })
 }
 
 fn load_owned_skill(path: &Path, previous: Option<&Receipt>) -> Result<Option<Vec<u8>>> {
@@ -238,20 +256,36 @@ pub fn status(brgr_home: &Path) -> Result<Value> {
     let hooks_present = installed_command_count(&receipt)?;
     let skill_matches = receipt.skill_path.exists()
         && fs::read_to_string(&receipt.skill_path)? == receipt.skill_text;
-    let current_commands = hook_commands(&env::current_exe()?, brgr_home);
     let current_skill = receipt.skill_text == SKILL_TEXT;
-    let installed = hooks_present == receipt.commands.len()
-        && skill_matches
-        && current_skill
-        && receipt.commands == current_commands;
+    let current_hooks = match (
+        receipt.executable_path.as_deref(),
+        receipt.executable_digest.as_deref(),
+    ) {
+        (Some(executable), Some(expected_digest)) => {
+            receipt.commands == hook_commands(executable, brgr_home)
+                && file_digest(executable).is_ok_and(|actual| actual == expected_digest)
+        }
+        _ => receipt.commands == hook_commands(&env::current_exe()?, brgr_home),
+    };
+    let installed =
+        hooks_present == receipt.commands.len() && skill_matches && current_skill && current_hooks;
     Ok(json!({
         "status": if installed { "installed" } else { "drifted" },
         "hooks_present": hooks_present,
         "hooks_expected": receipt.commands.len(),
         "skill_matches": skill_matches,
         "current_skill": current_skill,
-        "current_hooks": receipt.commands == current_commands,
+        "current_hooks": current_hooks,
     }))
+}
+
+fn file_digest(path: &Path) -> Result<String> {
+    let digest = Sha256::digest(fs::read(path)?);
+    let mut encoded = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        write!(&mut encoded, "{byte:02x}")?;
+    }
+    Ok(encoded)
 }
 
 pub fn uninstall(brgr_home: &Path) -> Result<Value> {

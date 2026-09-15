@@ -433,6 +433,40 @@ fn stale_codex_skill_or_hooks_report_drift_until_reinstall() {
 }
 
 #[test]
+fn codex_integration_accepts_an_equivalent_caller_and_detects_hook_binary_drift() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("brgr");
+    let codex_home = temp.path().join("codex");
+    let hook_binary = temp.path().join("installed-brgr");
+    fs::copy(brgr(), &hook_binary).unwrap();
+    fs::set_permissions(&hook_binary, fs::Permissions::from_mode(0o700)).unwrap();
+
+    let installed = Command::new(&hook_binary)
+        .arg("--home")
+        .arg(&home)
+        .arg("--json")
+        .args(["integrate", "codex", "install"])
+        .env("CODEX_HOME", &codex_home)
+        .output()
+        .unwrap();
+    assert!(installed.status.success());
+    let envs = [("CODEX_HOME", codex_home.to_str().unwrap())];
+    let equivalent = json_output(&run(&home, &["integrate", "codex", "status"], &envs));
+    assert_eq!(equivalent["status"], "installed");
+    assert_eq!(equivalent["current_hooks"], true);
+
+    fs::OpenOptions::new()
+        .append(true)
+        .open(&hook_binary)
+        .unwrap()
+        .write_all(b"drift")
+        .unwrap();
+    let drifted = json_output(&run(&home, &["integrate", "codex", "status"], &envs));
+    assert_eq!(drifted["status"], "drifted");
+    assert_eq!(drifted["current_hooks"], false);
+}
+
+#[test]
 fn missing_plugin_bridge_fails_before_task_admission() {
     let temp = TempDir::new().unwrap();
     let home = temp.path().join("brgr");
