@@ -1,5 +1,19 @@
 # Changelog
 
+## 2.0.2 — 2026-09-15
+
+Add a generated `local.devin` process recipe for Devin CLI. It uses documented
+prompt-file print mode, smart permissions, and an explicit non-interactive
+workspace-trust override, then seals nonempty stdout through the existing v1
+result and Codex decision contract. Devin model and effort selection remain
+unsupported through brgr; the recipe uses Devin's configured default and fails
+instead of probing its current 64 KiB-plus model catalog or guessing a variant.
+
+The installed Devin 3000.10.27 path completed an authorized scratch run and a
+fresh managed run through sealed artifact, durable owner inbox, and explicit
+acceptance. This adds no shell execution, implicit model fallback, automatic
+acceptance, or store/wire migration.
+
 ## 2.0.1 — 2026-09-15
 
 Harden the v2 personal-use path around the Herdr host bridge, Git worktree

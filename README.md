@@ -25,7 +25,7 @@ personal-use reliability work from public-release gates.
 Install the current public v2 plugin from GitHub:
 
 ```bash
-herdr plugin install justn-hyeok/brgr --ref v2.0.1
+herdr plugin install justn-hyeok/brgr --ref v2.0.2
 ```
 
 The plugin builds `brgr` from the pinned Cargo lockfile, so a Rust toolchain is
@@ -52,7 +52,7 @@ decision state without revealing prompts or artifact contents.
 See [the v2 plugin contract](docs/v2-herdr-plugin.md) for ownership, context,
 recovery, and verification boundaries.
 
-GJC, Cursor CLI, Command Code, and OMP have bounded one-shot process recipes.
+GJC, Cursor CLI, Command Code, Devin CLI, and OMP have bounded one-shot process recipes.
 Herdr is optional:
 the separate `local.omp-herdr` adapter uses `omp-role` when an interactive pane
 is explicitly wanted. After Codex accepts or rejects that adapter's result,
@@ -61,10 +61,18 @@ cleanup safety limit below.
 
 | Route or operation | v1 status |
 |---|---|
-| OMP process, GJC, Cursor CLI, Command Code | Certified bounded fresh-run contract; exact model/effort only where the activated recipe supports it |
+| OMP process, GJC, Cursor CLI, Command Code, Devin CLI | Certified bounded fresh-run contract; exact model/effort only where the activated recipe supports it |
 | Approved unfamiliar one-shot CLI | Supported after manifest contract test and authorized scratch activation |
 | `local.omp-herdr` presentation | Optional best effort; external worker stop is not certified and uncertain failure is `lost` |
 | Resume, in-flight steering, provider-side undo | Deferred; unsupported requests must fail rather than silently fall back |
+
+`local.devin` runs `devin` in documented prompt-file print mode with smart
+permissions and the non-interactive workspace-trust override. It uses the model
+already selected in Devin CLI. Run `/model` once in an interactive Devin session
+if that configured default is stale. Devin's current JSON catalog exceeds
+brgr's bounded probe limit, so `brgr run --model` and `--effort` intentionally
+fail for this route instead of guessing a family variant. See the
+[v2.0.2 live receipt](docs/live-devin-cli-v2.0.2-2026-09-15.md).
 
 For JSONL OMP process results, brgr checks every assistant event's native
 `provider/model` against an explicitly requested selector before publishing a
@@ -124,7 +132,7 @@ fixture, set both `BRGR_OWNER_ID=codex:example` and
 `BRGR_SESSION_ID=example-session` on run and follow-up commands.
 
 `brgr integrate codex status|uninstall` checks or removes only brgr-owned
-entries. For OMP, Cursor CLI, Command Code, or an approved unfamiliar CLI, use
+entries. For OMP, Cursor CLI, Command Code, Devin CLI, or an approved unfamiliar CLI, use
 `brgr harness draft`, `brgr harness test`, then an authorized scratch run with
 `brgr harness activate` and `brgr harness status`. Pass `--model MODEL` when
 that exact manifest supports model selection. Do not infer support for flags

@@ -23,8 +23,8 @@ process run brgr CLI commands with the bound Codex session identity. Codex's
 other shell commands retain their normal sandbox; the bridge never decides a
 candidate from process or pane state.
 
-Execution and presentation are separate. GJC, Cursor CLI, Command Code, and OMP
-use one-shot process recipes for the managed baseline. OMP's process recipe
+Execution and presentation are separate. GJC, Cursor CLI, Command Code, Devin
+CLI, and OMP use one-shot process recipes for the managed baseline. OMP's process recipe
 collects an assistant final turn and observed process exit without Herdr. The
 separate `local.omp-herdr` adapter preserves interactive presentation for an
 explicitly chosen pane; pane and session identifiers remain metadata. A missing

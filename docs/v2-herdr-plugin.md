@@ -45,7 +45,7 @@ with the user's permissions.
 
 ## Installation and migration
 
-`herdr plugin install justn-hyeok/brgr --ref v2.0.1` builds from `Cargo.lock`.
+`herdr plugin install justn-hyeok/brgr --ref v2.0.2` builds from `Cargo.lock`.
 `herdr plugin link .` links a local built checkout for development and does not
 run build commands. Plugin installation does not register a harness, perform a
 paid scratch run, erase the v1 store, or close any pane/worktree. Opening the
