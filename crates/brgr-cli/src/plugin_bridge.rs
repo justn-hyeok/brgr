@@ -657,11 +657,19 @@ mod tests {
         .await;
         assert_eq!(response.code, 1);
         assert!(response.stderr.contains("timed out"));
-        let pid: u32 = fs::read_to_string(&pid_file)
-            .unwrap()
-            .trim()
-            .parse()
-            .unwrap();
+        let pid: u32 = {
+            let mut last = String::new();
+            for _ in 0..100 {
+                match fs::read_to_string(&pid_file) {
+                    Ok(contents) if !contents.trim().is_empty() => {
+                        last = contents;
+                        break;
+                    }
+                    _ => tokio::time::sleep(Duration::from_millis(10)).await,
+                }
+            }
+            last.trim().parse().unwrap()
+        };
         assert!(!process_is_live(pid));
     }
 
