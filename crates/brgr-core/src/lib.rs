@@ -1087,15 +1087,14 @@ mod tests {
             1
         );
     }
-    #[derive(Debug)]
-    struct OmpCompletionNotification {
-        completion_id: u32,
-        report: Vec<u8>,
-        producer: &'static str,
-    }
-
+    /// Gate 3-2: OMP duplicate turn notifications live outside brgr's store —
+    /// there is no production ingestion path to quarantine-test. What brgr
+    /// owns is idempotent commit: replaying the same sealed result after a
+    /// restart (the shape duplicate notifications take when they reach the
+    /// commit path) must return AlreadyApplied with zero new inbox, result,
+    /// or decision rows. Conflicting replays must be rejected, not merged.
     #[test]
-    fn restart_quarantines_duplicate_omp_completions_after_one_brgr_commit() {
+    fn restart_replay_of_same_result_is_idempotent_without_new_rows() {
         let root = tempfile::TempDir::new().unwrap();
         let task = task_spec(TaskId::new(), 1);
         let attempt_id = AttemptId::new();
@@ -1132,50 +1131,40 @@ mod tests {
             assert_eq!(store.inbox(&task.owner_id, false).unwrap().len(), 1);
         }
 
+        // Restart, then replay the identical sealed result 11 times — the
+        // duplicate-notification shape. Every replay is AlreadyApplied and
+        // adds no rows anywhere.
         let mut restarted = Store::open(root.path()).unwrap();
-        assert_eq!(
-            restarted
-                .commit_terminal_result(&task.owner_id, &result)
-                .unwrap(),
-            brgr_store::WriteOutcome::AlreadyApplied
-        );
-        let notifications = (1..=11)
-            .map(|completion_id| OmpCompletionNotification {
-                completion_id,
-                report: report.clone(),
-                producer: "omp",
-            })
-            .collect::<Vec<_>>();
-        let mut quarantined = Vec::new();
-        for notification in notifications {
-            if notification.producer != "brgr" {
-                quarantined.push(notification);
-            }
+        for _ in 1..=11 {
+            assert_eq!(
+                restarted
+                    .commit_terminal_result(&task.owner_id, &result)
+                    .unwrap(),
+                brgr_store::WriteOutcome::AlreadyApplied
+            );
         }
-
         assert_eq!(restarted.inbox(&task.owner_id, false).unwrap().len(), 1);
         assert_eq!(restarted.inbox(&task.owner_id, true).unwrap().len(), 1);
         assert_eq!(restarted.latest_result(task.task_id).unwrap(), result);
-        assert_eq!(
-            restarted.latest_result(task.task_id).unwrap().outcome,
-            TerminalOutcome::Candidate
-        );
         assert!(
             restarted
                 .decision_for_result(result.result_id)
                 .unwrap()
                 .is_none()
         );
-        assert_eq!(quarantined.len(), 11);
-        assert_eq!(
-            quarantined
-                .iter()
-                .map(|item| item.completion_id)
-                .collect::<Vec<_>>(),
-            (1..=11).collect::<Vec<_>>()
+
+        // A conflicting replay (same attempt, new result id) is rejected —
+        // never merged into a second inbox item.
+        let conflicting = ResultEnvelope {
+            result_id: ResultId::new(),
+            ..result.clone()
+        };
+        assert!(
+            restarted
+                .commit_terminal_result(&task.owner_id, &conflicting)
+                .is_err()
         );
-        assert!(quarantined.iter().all(|item| item.report == report));
-        assert!(quarantined.iter().all(|item| item.producer == "omp"));
+        assert_eq!(restarted.inbox(&task.owner_id, false).unwrap().len(), 1);
     }
 
     #[test]
