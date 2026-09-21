@@ -2143,4 +2143,31 @@ mod tests {
         initial["result"]["agent"]["terminal_id"] = json!("term-replaced");
         assert!(omp_spawn_matches_initial(&spawned, &initial).is_err());
     }
+
+    #[test]
+    fn omp_second_read_rejects_replaced_session_or_reused_pane() {
+        let initial = json!({"result": {"agent": {
+            "name": "brgr-fixture",
+            "agent": "omp",
+            "pane_id": "w1:p2",
+            "terminal_id": "term-original",
+            "agent_session": {"kind": "path", "value": "/tmp/session-original"},
+            "state_change_seq": 11,
+            "agent_status": "idle"
+        }}});
+        let mut second_read = initial.clone();
+        second_read["result"]["agent"]["state_change_seq"] = json!(12);
+        second_read["result"]["agent"]["agent_status"] = json!("done");
+
+        // A replacement can retain the pane and terminal while rotating the
+        // immutable session identity; fail closed before accepting its report.
+        second_read["result"]["agent"]["agent_session"]["value"] = json!("/tmp/session-replaced");
+        assert!(omp_completion_ready(&initial, &second_read, "brgr-fixture").is_err());
+
+        // A reused pane id is unsafe even when the session value is restored:
+        // the replacement terminal is a distinct live identity.
+        second_read["result"]["agent"]["agent_session"]["value"] = json!("/tmp/session-original");
+        second_read["result"]["agent"]["terminal_id"] = json!("term-reused");
+        assert!(omp_completion_ready(&initial, &second_read, "brgr-fixture").is_err());
+    }
 }
