@@ -1091,7 +1091,7 @@ mod tests {
     /// there is no production ingestion path to quarantine-test. What brgr
     /// owns is idempotent commit: replaying the same sealed result after a
     /// restart (the shape duplicate notifications take when they reach the
-    /// commit path) must return AlreadyApplied with zero new inbox, result,
+    /// commit path) must return `AlreadyApplied` with zero new inbox, result,
     /// or decision rows. Conflicting replays must be rejected, not merged.
     #[test]
     fn restart_replay_of_same_result_is_idempotent_without_new_rows() {
