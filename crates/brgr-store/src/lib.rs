@@ -2519,6 +2519,69 @@ mod tests {
     }
 
     #[test]
+    fn sqlite_full_keeps_terminal_result_retriable_without_partial_commit() {
+        let root = TempDir::new().unwrap();
+        let mut store = Store::open(root.path()).unwrap();
+        // DELETE mode grows the database file synchronously at commit, so the
+        // page cap below fails deterministically. Production WAL shares the
+        // same single-transaction rollback path this test exercises.
+        store
+            .connection
+            .execute_batch("PRAGMA journal_mode=DELETE")
+            .unwrap();
+        let task = task();
+        store.record_task(&task, "full-terminal").unwrap();
+        let attempt_id = AttemptId::new();
+        store
+            .claim_attempt(task.task_id, task.revision, attempt_id)
+            .unwrap();
+        let mut result = sealed_result(&store, &task, attempt_id);
+        // Force overflow pages so the commit must grow the database file.
+        result.error = Some("disk pressure".to_owned() + &"x".repeat(32_768));
+        let page_count: i64 = store
+            .connection
+            .query_row("PRAGMA page_count", [], |row| row.get(0))
+            .unwrap();
+        store
+            .connection
+            .execute_batch(&format!("PRAGMA max_page_count={page_count}"))
+            .unwrap();
+        let error = store
+            .commit_terminal_result(&task.owner_id, &result)
+            .unwrap_err();
+        assert!(
+            matches!(
+                &error,
+                StoreError::Database(rusqlite::Error::SqliteFailure(inner, _))
+                    if inner.code == rusqlite::ErrorCode::DiskFull
+            ),
+            "unexpected commit error: {error:?}"
+        );
+        assert!(store.inbox(&task.owner_id, false).unwrap().is_empty());
+        let stored_results: u32 = store
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM results WHERE attempt_id = ?1",
+                [result.attempt_id.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored_results, 0);
+        assert_eq!(
+            store.attempt_state_by_id(attempt_id).unwrap(),
+            AttemptState::Queued
+        );
+        store
+            .connection
+            .execute_batch("PRAGMA max_page_count=1073741823")
+            .unwrap();
+        store
+            .commit_terminal_result(&task.owner_id, &result)
+            .unwrap();
+        assert_eq!(store.inbox(&task.owner_id, false).unwrap().len(), 1);
+    }
+
+    #[test]
     fn request_id_rejects_a_changed_digest() {
         let root = TempDir::new().unwrap();
         let mut store = Store::open(root.path()).unwrap();

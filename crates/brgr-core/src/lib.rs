@@ -822,6 +822,105 @@ mod tests {
         assert!(!is_retryable_spawn_failure(&after_spawn));
     }
 
+    fn delegated_fixture_manifest() -> HarnessManifest {
+        HarnessManifest {
+            schema: MANIFEST_SCHEMA_V1.to_owned(),
+            id: "internal.fixture-delegated".to_owned(),
+            adapter: PROCESS_ADAPTER_V1.to_owned(),
+            executable: PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../testdata/fixtures/gjc")
+                .canonicalize()
+                .unwrap(),
+            probe: ProbeSpec {
+                version_argv: vec!["--version".to_owned()],
+                help_argv: vec!["--help".to_owned()],
+                model_catalog: None,
+            },
+            launch: LaunchSpec {
+                argv: vec![
+                    "-p".to_owned(),
+                    "--mode=json".to_owned(),
+                    "@${input.prompt_file}".to_owned(),
+                ],
+                model_argv: vec![],
+                effort_argv: vec![],
+                env_allow: vec![],
+                mode: ExecutionMode::DelegatedExternal,
+            },
+            result: ResultSpec {
+                source: ResultSource::JsonlAssistantFinal,
+                media_type: "text/plain".to_owned(),
+                max_bytes: 1_024,
+                success_exit_codes: vec![0],
+            },
+            capabilities: BTreeMap::new(),
+        }
+    }
+
+    async fn run_delegated_interrupted(timed_out: bool) {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let cancel = root.path().join("cancel");
+        let mut spec = task_spec(TaskId::new(), 1);
+        spec.route.harness_id = "internal.fixture-delegated".to_owned();
+        spec.required_capabilities = vec![];
+        spec.workspace = workspace.path().to_string_lossy().into_owned();
+        spec.objective = "SLOW".to_owned();
+        spec.budget.deadline_seconds = if timed_out { 1 } else { 30 };
+        let owner = spec.owner_id.clone();
+        let task_id = spec.task_id;
+        let supervisor = Supervisor::open(root.path()).unwrap();
+        let manifest = delegated_fixture_manifest();
+        let (supervisor, result) = if timed_out {
+            let mut supervisor = supervisor;
+            let result = supervisor
+                .run_fresh_controlled(spec, &manifest, None, None, None)
+                .await
+                .unwrap();
+            (supervisor, result)
+        } else {
+            let cancel_for_task = cancel.clone();
+            let task = tokio::spawn(async move {
+                let mut supervisor = supervisor;
+                let result = supervisor
+                    .run_fresh_controlled(spec, &manifest, Some(&cancel_for_task), None, None)
+                    .await;
+                (supervisor, result)
+            });
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            std::fs::write(&cancel, b"cancel").unwrap();
+            let (supervisor, result) = task.await.unwrap();
+            (supervisor, result.unwrap())
+        };
+
+        assert_eq!(result.outcome, TerminalOutcome::Lost);
+        assert!(result.artifacts.is_empty());
+        assert!(!result.unresolved_effects.is_empty());
+        let inbox = supervisor.store().inbox(&owner, false).unwrap();
+        assert_eq!(inbox.len(), 1);
+        assert_eq!(inbox[0].result.outcome, TerminalOutcome::Lost);
+        assert!(inbox[0].result.artifacts.is_empty());
+        let stored = supervisor.store().latest_result(task_id).unwrap();
+        assert_eq!(stored.outcome, result.outcome);
+        assert_eq!(stored.attempt_id, result.attempt_id);
+        assert!(!stored.unresolved_effects.is_empty());
+        assert!(matches!(
+            supervisor
+                .store()
+                .claim_attempt(task_id, 1, AttemptId::new()),
+            Err(StoreError::UnresolvedPriorAttempt { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn delegated_cancel_during_flight_is_lost_without_stop_claim_or_retry() {
+        run_delegated_interrupted(false).await;
+    }
+
+    #[tokio::test]
+    async fn delegated_deadline_exceeded_is_lost_without_stop_claim_or_retry() {
+        run_delegated_interrupted(true).await;
+    }
     #[test]
     fn delegated_external_failure_is_lost_with_unresolved_effects() {
         let root = tempfile::tempdir().unwrap();
@@ -987,6 +1086,85 @@ mod tests {
             reopened.store().inbox(&task.owner_id, false).unwrap().len(),
             1
         );
+    }
+    /// Gate 3-2: OMP duplicate turn notifications live outside brgr's store —
+    /// there is no production ingestion path to quarantine-test. What brgr
+    /// owns is idempotent commit: replaying the same sealed result after a
+    /// restart (the shape duplicate notifications take when they reach the
+    /// commit path) must return `AlreadyApplied` with zero new inbox, result,
+    /// or decision rows. Conflicting replays must be rejected, not merged.
+    #[test]
+    fn restart_replay_of_same_result_is_idempotent_without_new_rows() {
+        let root = tempfile::TempDir::new().unwrap();
+        let task = task_spec(TaskId::new(), 1);
+        let attempt_id = AttemptId::new();
+        let report = b"deterministic brgr report".to_vec();
+        let result;
+        {
+            let mut store = Store::open(root.path()).unwrap();
+            store.record_task(&task, "gate-3-2").unwrap();
+            store
+                .claim_attempt(task.task_id, task.revision, attempt_id)
+                .unwrap();
+            let artifact = store
+                .seal_artifact_reader(Cursor::new(report.clone()), "text/plain", 1_024)
+                .unwrap();
+            result = ResultEnvelope {
+                schema: SCHEMA_V1.to_owned(),
+                task_id: task.task_id,
+                revision: task.revision,
+                attempt_id,
+                result_id: ResultId::new(),
+                outcome: TerminalOutcome::Candidate,
+                artifacts: vec![artifact],
+                error: None,
+                legacy_embedded_route_observation: None,
+                route_observation: None,
+                unresolved_effects: vec![],
+            };
+            assert_eq!(
+                store
+                    .commit_terminal_result(&task.owner_id, &result)
+                    .unwrap(),
+                brgr_store::WriteOutcome::Inserted
+            );
+            assert_eq!(store.inbox(&task.owner_id, false).unwrap().len(), 1);
+        }
+
+        // Restart, then replay the identical sealed result 11 times — the
+        // duplicate-notification shape. Every replay is AlreadyApplied and
+        // adds no rows anywhere.
+        let mut restarted = Store::open(root.path()).unwrap();
+        for _ in 1..=11 {
+            assert_eq!(
+                restarted
+                    .commit_terminal_result(&task.owner_id, &result)
+                    .unwrap(),
+                brgr_store::WriteOutcome::AlreadyApplied
+            );
+        }
+        assert_eq!(restarted.inbox(&task.owner_id, false).unwrap().len(), 1);
+        assert_eq!(restarted.inbox(&task.owner_id, true).unwrap().len(), 1);
+        assert_eq!(restarted.latest_result(task.task_id).unwrap(), result);
+        assert!(
+            restarted
+                .decision_for_result(result.result_id)
+                .unwrap()
+                .is_none()
+        );
+
+        // A conflicting replay (same attempt, new result id) is rejected —
+        // never merged into a second inbox item.
+        let conflicting = ResultEnvelope {
+            result_id: ResultId::new(),
+            ..result.clone()
+        };
+        assert!(
+            restarted
+                .commit_terminal_result(&task.owner_id, &conflicting)
+                .is_err()
+        );
+        assert_eq!(restarted.inbox(&task.owner_id, false).unwrap().len(), 1);
     }
 
     #[test]

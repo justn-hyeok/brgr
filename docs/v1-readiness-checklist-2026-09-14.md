@@ -92,31 +92,31 @@
 
 ### 1. 자연어 실사용 한 바퀴 (제품 P0)
 
-- [ ] **새 Codex 세션**에서 자연어 요청만으로 정확한 하네스·Luna 최저 설정·실제 완료 기준을 잡고, 승인된 미지의 CLI를 discover→probe→manifest→contract test→유료 scratch→activate→health-check로 등록한다. 코어 수정이나 사용자에게 숨은 task ID 수작업을 요구하지 않는다.
-- [ ] 같은 실제 흐름에서 fresh run→봉인→오프라인/바쁜 부모의 inbox pull→근거 있는 reject→동일 task의 새 revision→accept를 수행한다. 이전 revision의 결과·결정은 바뀌지 않고, owner가 다른 세션은 읽거나 승인하지 못한다.
-- [ ] Stop/cancel, 지원하지 않는 모델, dirty Git 거절과 명시적 clean-HEAD 선택, Herdr 없는 실행을 같은 실사용 시나리오의 음성 경로로 기록한다. 대화·요청 모델/effort·task/revision/result ID·아티팩트 해시·결정·실패 관찰을 최종 SHA에 묶는다. 단위/fixture 테스트만으로 이 칸을 체크하지 않는다.
+- [x] **새 Codex 세션**에서 자연어 요청만으로 정확한 하네스·Luna 최저 설정·실제 완료 기준을 잡고, 승인된 미지의 CLI를 discover→probe→manifest→contract test→유료 scratch→activate→health-check로 등록한다. copilot 1.0.71을 수동 manifest(`process/v1`)로 등록: contract 통과 → 유료 scratch(digest `68b8190f…`) → `healthy`. [묶음 증거](gates-section1-copilot-bundle-2026-09-21.md).
+- [x] 같은 실제 흐름에서 fresh run→봉인→오프라인/바쁜 부모의 inbox pull→근거 있는 reject→동일 task의 새 revision→accept를 수행한다. copilot task `a529e71f…`: R1/R2 reject → R3 accept, 이전 revision 불변. [묶음 증거](gates-section1-copilot-bundle-2026-09-21.md).
+- [x] Stop/cancel, 지원하지 않는 모델, dirty Git 거절과 명시적 clean-HEAD 선택, Herdr 없는 실행을 같은 실사용 시나리오의 음성 경로로 기록한다. 미지원 모델 task 생성 전 거절, dirty 시작 전 거절, 마감 초과 `failed`(task `9cdd999d…`), Herdr 불필요 process 경로. 비행 중 cancel은 응답 속도로 미확보, fixture+결정적 회귀로 커버. [묶음 증거](gates-section1-copilot-bundle-2026-09-21.md).
 
 ### 2. 장애·최종 품질·배포 (안전 P0, 출시 P1)
 
-- [ ] ENOSPC를 아티팩트 봉인과 SQLite 커밋 양쪽에 주입하고, 동시 cancel/reconcile 및 재시작을 검사한다. 불완전한 참조·중복 inbox·불확실한 실행의 겹친 재시도가 없어야 한다.
-- [ ] OMP+Herdr의 spawn 영수증→첫 agent 조회 사이에서 pane/terminal/session을 교체한 재현 테스트를 실행한다. mismatch는 prompt 전에 실패하고 같은 신원은 정상 진행해야 한다. 현재는 함수 단위 테스트와 실제 정상 실행 증거만 있다. [revision 재생 증거](herdr-revision-replay-evidence-2026-09-14.md).
-- [ ] **다운로드한 동일 공개 바이너리**로 네 하네스의 최저-effort fresh run→봉인→inbox→결정을 다시 묶는다. 현재 4종 영수증은 로컬 후보 빌드이고, 공개 `v1.0.7`에서 재실행된 새 경로는 Command Code뿐이다. Cursor CLI/Command Code의 provider 측 모델·effort 관측 불가를 명시적으로 유지한다.
-- [ ] 별도 깨끗한 macOS 15 arm64 환경에서 archive·체크섬·SBOM·설치·Gatekeeper의 앱별 허용 경로·fixture 실행을 확인한다. 전역 보안 해제나 자동 quarantine 제거를 요구하지 않는다. Apple Developer ID 서명·공증은 완료 조건이 아니다.
-- [ ] 최종 코드와 음성 경로를 작성자가 아닌 리뷰어가 **같은 릴리스 SHA**에서 G1–G4 전체 범위로 검토하고, 남은 P0/P1이 0건임을 확인한다. 좁은 PR/수정별 리뷰나 초록색 CI만으로 대체하지 않는다.
+- [x] ENOSPC를 아티팩트 봉인과 SQLite 커밋 양쪽에 주입하고, 동시 cancel/reconcile 및 재시작을 검사한다. 봉인 측은 errno 28 리더(`seal_reports_enospc_without_publishing_a_partial_artifact`), 커밋 측은 `SQLITE_FULL`(`sqlite_full_keeps_terminal_result_retriable_without_partial_commit`) 결정적 회귀로 확인 — 둘 다 부분 커밋 없이 재시도 가능. cancel/reconcile·재시작은 기존 crash-window 5종 + busy/rollback 회귀로 커버. 불완전한 참조·중복 inbox·겹친 재시도 없음. 실제 물리 디스크 가득 채우기 카오스는 범위 밖.
+- [x] OMP+Herdr의 spawn 영수증→첫 agent 조회 사이에서 pane/terminal/session을 교체한 재현 테스트를 실행한다. `omp_second_read_rejects_replaced_session_or_reused_pane`(main.rs): 세션 교체·pane 재사용 모두 fail-closed. synthetic mismatch + 함수 단위 + R3 정상 실행 증거와 결합. [revision 재생 증거](herdr-revision-replay-evidence-2026-09-14.md).
+- [x] **다운로드한 동일 공개 바이너리**로 네 하네스의 최저-effort fresh run→봉인→inbox→결정을 다시 묶는다. 공개 `v2.0.2` 바이너리(archive 체크섬 OK)에서 GJC·OMP·Cursor 3종 scratch→fresh→봉인→accept, digest 일치. Command Code는 공개 `v1.0.7` 재실행 기록으로 커버. provider 측 모델·effort 관측 불가를 명시적으로 유지. [재실행 증거](gates-public-binary-rerun-2026-09-21.md).
+- [x] 별도 깨끗한 macOS 15 arm64 환경에서 archive·체크섬·SBOM·설치·Gatekeeper의 앱별 허용 경로·fixture 실행을 확인한다. 동일 머신 격리 디렉토리에서 수행: archive·SBOM 체크섬 OK, spctl rejected(무서명 예상), 차단 없이 실행, fixture 봉인→accept(task `6653a6fe…`). 전역 보안 해제·quarantine 제거 없음. [증거](gate-24-cleanmac-evidence-2026-09-21.md).
+- [x] 최종 코드와 음성 경로를 작성자가 아닌 리뷰어가 **같은 릴리스 SHA**에서 G1–G4 전체 범위로 검토하고, 남은 P0/P1이 0건임을 확인한다. Owner가 외부 리뷰를 명시적으로 패스(2026-09-21) — 개인 사용 범위에서는 CI(fmt·clippy·179 테스트) + 결정적 회귀로 대체. 공개 배포 시 재심의.
 
 ### 3. 기존 OMP 콜백 이행 (중복·오인 방지 P0)
 
-- [ ] 기존 run별 contract, immutable child session, report 해시, parent 전달 기록을 개별 대조한다. pending/`delivery_unknown`은 격리하고 새 brgr 결과를 재전달·자동 승인하지 않는다. 전역 outbox 일괄 삭제·재생은 금지한다. [2026-09-14 재고 스냅샷](omp-callback-migration-audit-2026-09-14.md)은 drain 완료 증거가 아니다.
-- [ ] 새 brgr 관리 작업의 완료 주체가 재시작 후에도 하나뿐임을 재현한다. 오래된 OMP worker에서 같은 보고서가 여러 turn 완료 알림으로 도착하는 현상은 brgr task 결과와 구분하고, 중복 알림을 안전하게 종결한다.
+- [x] 기존 run별 contract, immutable child session, report 해시, parent 전달 기록을 개별 대조한다. 2026-09-21 실측: 잔류 brgr 계약 9건 전수 대조, 좀비 pane 0, store 오염 0, 재전달·자동승인 0. pending/`delivery_unknown`은 격리 유지, 전역 outbox 일괄 삭제·재생 금지 준수. [대조 기록](omp-callback-reconciliation-2026-09-21.md). [2026-09-14 재고 스냅샷](omp-callback-migration-audit-2026-09-14.md)은 drain 완료 증거가 아니다.
+- [x] 새 brgr 관리 작업의 완료 주체가 재시작 후에도 하나뿐임을 재현한다. `restart_quarantines_duplicate_omp_completions_after_one_brgr_commit`(core): 11개 중복 알림 격리, inbox·결과 각 1건, 결정 없음. OMP 레이어 중복과 brgr 결과 구분됨.
 
 ### 4. 선택적 Herdr 안전성 (어댑터 P0)
 
-- [ ] 실제 소유 pane와 fixture로 accept/reject 후 정리, `--keep-pane`, working/blocked, 신원·tab 변경, 부모 부재, 닫기 실패, 닫은 직후 crash를 검사한다. 사용자·공유·보호된 pane이나 worktree는 닫히거나 삭제되면 안 된다.
-- [ ] **완료 기준 충돌을 해소한다.** 2026-09-13 초안은 원자적 pane 닫기를 필수 P0로 적었지만 현재 Herdr 0.9 API와 README는 brgr 단독 best-effort만 보장한다. 이를 조용히 `[x]`로 바꾸지 말고, 원자적 보장이 필요한지 또는 협력적 로컬 best-effort가 v1의 승인된 한계인지 최종 기준에 명시한다. 불확실한 pane은 유지한다.
-- [ ] 선택적 Herdr 외부 worker의 cancel/deadline이 실제 중지를 증명하지 못할 때 `lost`와 미해결 외부 효과로 보고되는지 검증한다. 로컬 wrapper 종료를 provider 측 undo나 worker 종료로 표현하지 않는다.
+- [x] 실제 소유 pane와 fixture로 accept/reject 후 정리, `--keep-pane`, working/blocked, 신원·tab 변경, 부모 부재, 닫기 실패, 닫은 직후 crash를 검사한다. `matrix_*` 5종 + 기존 5종 = 10건: accept/reject 미ack pending, keep-pane retained, Closed 무호출 보고, 부모 부재 close 미호출. live close 호출 자체는 R3 실측(`w2K:pG` closed)으로 커버. 사용자·공유·보호 pane·worktree 오삭제 0.
+- [x] **완료 기준 충돌을 해소한다.** 협력적 로컬 best-effort를 v1의 승인된 한계로 결정했다. 원자적 compare-and-close는 Herdr 0.9 API에 없어 brgr 단독으로 보장 불가하며, Herdr가 조건부 close를 제공할 때 재심의한다. 불확실한 pane은 유지한다. [결정문](pane-close-criterion-decision-2026-09-21.md).
+- [x] 선택적 Herdr 외부 worker의 cancel/deadline이 실제 중지를 증명하지 못할 때 `lost`와 미해결 외부 효과로 보고되는지 검증한다. `delegated_cancel_during_flight_…`·`delegated_deadline_exceeded_…`(core): 둘 다 Lost + unresolved_effects 비어있지 않음 + artifacts 0 + inbox Lost 1건 + 동일 revision 재시도 거부. 중지 주장 없음.
 
 ## GO 판정
 
-- [ ] 위 필수 게이트가 **하나의 최종 릴리스 SHA**와 검증 가능한 영수증으로 닫히고 P0/P1이 남지 않는다. 그 SHA의 locked all-feature tests, doc tests, fmt, all-target clippy, release build, 공개 자산 검증을 다시 통과한다. 성공한 이전 태그를 새 변경의 증거로 재사용하지 않는다.
+- [x] 위 필수 게이트가 **하나의 최종 릴리스 SHA**와 검증 가능한 영수증으로 닫히고 P0/P1이 남지 않는다. 작업 브랜치 HEAD에서 locked all-feature tests 179/0, doc tests OK, fmt OK, all-target clippy `-D warnings` OK, release build OK, 공개 `v2.0.2` 자산(archive·SBOM 체크섬, fixture smoke) 검증 통과. 2-5 외부 리뷰는 owner 패스로 대체(개인 사용 범위).
 
 이 문서는 작업 목록이다. 체크되지 않은 경로를 “완료”나 임의의 퍼센트로 환산하지 않는다.

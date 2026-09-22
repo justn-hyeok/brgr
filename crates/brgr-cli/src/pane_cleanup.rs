@@ -421,6 +421,156 @@ mod tests {
         );
     }
 
+    fn matrix_store(
+        temp: &std::path::Path,
+        verdict: Option<DecisionVerdict>,
+        ack: bool,
+    ) -> (Store, TaskId, PaneReceipt) {
+        let task_id = TaskId::new();
+        let attempt_id = AttemptId::new();
+        let owner_id = OwnerId::new("codex:test").unwrap();
+        let mut store = Store::open(temp.join("store")).unwrap();
+        let task = TaskSpec {
+            schema: SCHEMA_V1.to_owned(),
+            task_id,
+            revision: 1,
+            create_request_id: "matrix-test".to_owned(),
+            owner_id: owner_id.clone(),
+            objective: "test".to_owned(),
+            workspace: temp.to_string_lossy().into_owned(),
+            route: Route {
+                harness_id: "local.omp".to_owned(),
+                requested_model: None,
+                requested_effort: None,
+            },
+            required_capabilities: vec!["completion".to_owned()],
+            artifact_contract: ArtifactContract {
+                media_type: "text/plain".to_owned(),
+                max_bytes: 100,
+            },
+            acceptance_criteria: vec!["result is reviewable".to_owned()],
+            budget: AttemptBudget {
+                deadline_seconds: 10,
+                max_attempts: 1,
+            },
+        };
+        store.record_task(&task, "matrix-request-digest").unwrap();
+        store.claim_attempt(task_id, 1, attempt_id).unwrap();
+        let result = ResultEnvelope {
+            schema: SCHEMA_V1.to_owned(),
+            task_id,
+            revision: 1,
+            attempt_id,
+            result_id: ResultId::new(),
+            outcome: TerminalOutcome::Candidate,
+            artifacts: vec![
+                store
+                    .seal_artifact_reader(std::io::Cursor::new(b"reviewable"), "text/plain", 100)
+                    .unwrap(),
+            ],
+            error: None,
+            legacy_embedded_route_observation: None,
+            route_observation: None,
+            unresolved_effects: vec![],
+        };
+        store.commit_terminal_result(&owner_id, &result).unwrap();
+        store.bind_owner(&owner_id, "session-a", 1).unwrap();
+        if let Some(verdict) = verdict {
+            let decision = Decision {
+                schema: SCHEMA_V1.to_owned(),
+                decision_id: DecisionId::new(),
+                owner_id: owner_id.clone(),
+                task_id,
+                revision: 1,
+                result_id: result.result_id,
+                result_digest: Store::result_digest(&result).unwrap(),
+                session_id: Some("session-a".to_owned()),
+                binding_epoch: Some(1),
+                verdict,
+                reason: "checked".to_owned(),
+            };
+            store.record_decision(&decision).unwrap();
+            if ack {
+                store.acknowledge(&owner_id, result.result_id).unwrap();
+            }
+        }
+        let receipt = PaneReceipt {
+            task_id,
+            attempt_id,
+            owner_id,
+            agent: "brgr-owned".to_owned(),
+            pane_id: "w1:p2".to_owned(),
+            parent_pane_id: "w1:p1".to_owned(),
+            terminal_id: "term-owned".to_owned(),
+            session_value: "session-owned".to_owned(),
+            launcher_receipt: temp.join("launcher.json"),
+            keep_pane: false,
+            state: CleanupState::CleanupPending,
+            result_id: Some(result.result_id),
+            result_digest: Some(Store::result_digest(&result).unwrap()),
+        };
+        write_json_atomic(&receipt_path(temp, task_id), &receipt).unwrap();
+        (store, task_id, receipt)
+    }
+
+    #[test]
+    fn matrix_accept_without_ack_stays_pending() {
+        let temp = tempfile::tempdir().unwrap();
+        let (store, task_id, _) = matrix_store(temp.path(), Some(DecisionVerdict::Accepted), false);
+        assert_eq!(
+            status(&store, temp.path(), task_id).unwrap(),
+            "cleanup_pending_decision_or_ack"
+        );
+    }
+
+    #[test]
+    fn matrix_reject_without_ack_stays_pending() {
+        let temp = tempfile::tempdir().unwrap();
+        let (store, task_id, _) = matrix_store(temp.path(), Some(DecisionVerdict::Rejected), false);
+        assert_eq!(
+            status(&store, temp.path(), task_id).unwrap(),
+            "cleanup_pending_decision_or_ack"
+        );
+    }
+
+    #[test]
+    fn matrix_no_decision_stays_pending() {
+        let temp = tempfile::tempdir().unwrap();
+        let (store, task_id, _) = matrix_store(temp.path(), None, false);
+        assert_eq!(
+            status(&store, temp.path(), task_id).unwrap(),
+            "cleanup_pending_decision_or_ack"
+        );
+    }
+
+    #[test]
+    fn matrix_keep_pane_is_retained_even_when_decided() {
+        let temp = tempfile::tempdir().unwrap();
+        let (store, task_id, mut receipt) =
+            matrix_store(temp.path(), Some(DecisionVerdict::Accepted), true);
+        receipt.keep_pane = true;
+        write_json_atomic(&receipt_path(temp.path(), task_id), &receipt).unwrap();
+        assert_eq!(status(&store, temp.path(), task_id).unwrap(), "retained");
+        assert_eq!(
+            close_if_eligible(&store, temp.path(), task_id).unwrap(),
+            "retained"
+        );
+    }
+
+    #[test]
+    fn matrix_closed_state_reports_closed_without_herdr_calls() {
+        let temp = tempfile::tempdir().unwrap();
+        let (store, task_id, mut receipt) =
+            matrix_store(temp.path(), Some(DecisionVerdict::Accepted), true);
+        receipt.state = CleanupState::Closed;
+        write_json_atomic(&receipt_path(temp.path(), task_id), &receipt).unwrap();
+        assert_eq!(status(&store, temp.path(), task_id).unwrap(), "closed");
+        assert_eq!(
+            close_if_eligible(&store, temp.path(), task_id).unwrap(),
+            "closed"
+        );
+    }
+
     #[test]
     fn missing_ownership_receipt_never_targets_a_pane() {
         let temp = tempfile::tempdir().unwrap();

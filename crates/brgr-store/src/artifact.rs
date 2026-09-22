@@ -245,6 +245,52 @@ mod tests {
         assert_eq!(published_files, 0);
     }
 
+    #[cfg(unix)]
+    struct EnospcReader {
+        remaining: usize,
+    }
+
+    #[cfg(unix)]
+    impl std::io::Read for EnospcReader {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if self.remaining == 0 {
+                return Err(std::io::Error::from_raw_os_error(28));
+            }
+            let next = buf.len().min(self.remaining);
+            buf[..next].fill(0x61);
+            self.remaining -= next;
+            Ok(next)
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn seal_reports_enospc_without_publishing_a_partial_artifact() {
+        let root = TempDir::new().unwrap();
+        let store = ArtifactStore::open(root.path()).unwrap();
+
+        let error = store
+            .seal_reader(EnospcReader { remaining: 100_000 }, "text/plain", 1_048_576)
+            .unwrap_err();
+        assert!(
+            matches!(&error, StoreError::Io(source) if source.raw_os_error() == Some(28)),
+            "unexpected seal error: {error:?}"
+        );
+        let published_files = walk_files(&root.path().join("artifacts/sha256"))
+            .into_iter()
+            .filter(|path| !path.components().any(|part| part.as_os_str() == ".tmp"))
+            .count();
+        assert_eq!(published_files, 0);
+
+        let reference = store
+            .seal_reader(Cursor::new(b"after space is reclaimed"), "text/plain", 100)
+            .unwrap();
+        assert_eq!(
+            store.read_verified(&reference, 100).unwrap(),
+            b"after space is reclaimed"
+        );
+    }
+
     #[test]
     fn same_content_reuses_one_private_content_addressed_file() {
         let root = TempDir::new().unwrap();
