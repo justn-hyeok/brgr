@@ -1,5 +1,17 @@
 # Changelog
 
+## 2.2.1 — 2026-09-23
+
+Allow an explicit `herdr.auto_worker_pane` setting to open the brgr worker
+pane for detached managed runs from ordinary Herdr panes. It defaults off to
+preserve standalone CLI behavior without the plugin. The brgr plugin's Codex
+pane continues to open a worker automatically. The adjacent/tab placement,
+exact caller pane, task receipt, and explicit owner decision stay in brgr.
+Update the installed brgr Codex skill to route bounded harness work through
+that path and describe recursive child settlement and bidirectional messages.
+A deterministic fixture launched from an ordinary Herdr shell pane reached a
+sealed result and explicit acceptance in an unfocused adjacent worker pane.
+
 ## 2.2.0 — 2026-09-23
 
 Add bounded recursive worker delegation across registered process harnesses.

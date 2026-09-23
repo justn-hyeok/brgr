@@ -19,8 +19,10 @@ OMP-to-GJC or GJC-to-GJC adapter.
   must reference an opposite-direction question on that attempt. Unanswered
   questions prevent the worker's successful exit from becoming a candidate;
   an unacknowledged reply remains available to its recipient after exit.
-- Herdr plugin runs open a manifest-declared `worker` pane. Its placement is
-  `adjacent` by default, splitting the exact caller pane without focus. A
+- With `herdr.auto_worker_pane = true`, detached runs from ordinary Herdr
+  panes open a manifest-declared `worker` pane. The brgr plugin Codex pane
+  always opens one. Placement is `adjacent` by default, splitting the exact caller pane
+  without focus. A
   `tab` preference keeps the worker visible in a new tab. The selection is
   stored in `BRGR_HOME/config.toml` and captured in the launch receipt:
 
@@ -49,6 +51,8 @@ live question, reply, and acknowledgment traffic in both directions at each
 edge. Its accepted rerun completed a single Codex ↔ OMP ↔ GJC ↔ GJC chain
 with explicit decisions at all three levels. The rerun used longer parent
 deadlines after an earlier middle GJC timed out.
+An [ordinary Herdr pane receipt](live-ordinary-herdr-pane-2026-09-23.md)
+records the v2.2.1 caller path using a deterministic fixture.
 
 ## Remaining product gates
 

@@ -17,7 +17,7 @@ use tempfile::NamedTempFile;
 
 const SKILL_TEXT: &str = r#"---
 name: brgr
-description: Run, inspect, cancel, and decide durable local agent tasks through brgr when the user requests work through OMP, GJC, or another registered harness.
+description: Run and orchestrate bounded OMP, GJC, or other registered harness tasks through brgr, including worker panes from Herdr.
 ---
 
 # brgr managed tasks
@@ -38,6 +38,21 @@ report that failure instead of requesting a generic sandbox bypass.
 Use `brgr run "<objective>" --harness <id> --criterion "<observable check>"`
 for a fresh managed task. Keep the user conversation in Codex and report a
 short handle. Use `brgr status`, `brgr result`, and `brgr cancel` for follow-up.
+In an ordinary Herdr pane, set `brgr config set-auto-worker-pane true` once to
+make detached `brgr run` open a brgr worker pane beside the exact caller.
+The brgr plugin Codex pane already uses this path. Set
+`brgr config set-worker-placement tab` for a new tab. For a bounded task
+through a registered harness, use the enabled brgr path to split and
+orchestrate; do not create a separate raw Herdr agent pane for the same task.
+Check the returned `worker_pane` and task ID. A foreground run is intentionally
+in the current terminal. Interactive TUI sessions and an exact user-selected
+execution path remain separate.
+For a nested task, give the child one bounded objective and criterion. Use
+`brgr wait CHILD`, inspect its sealed `brgr result CHILD`, then explicitly
+accept or reject it before the parent reports completion. Use
+`brgr message send|wait|ack` for questions in either direction. Each child
+remains bound to the exact parent attempt; never replace that edge with a
+direct harness CLI call.
 For a rejected candidate, use `brgr revise TASK "<corrected objective>"
 --criterion "<new check>"`; do not rewrite the old result or silently retry.
 An unbound result needs `brgr bind TASK` from the current Codex session before

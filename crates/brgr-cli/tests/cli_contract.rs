@@ -19,6 +19,18 @@ fn run(home: &Path, args: &[&str], envs: &[(&str, &str)]) -> std::process::Outpu
     let mut command = Command::new(brgr());
     command.arg("--home").arg(home).arg("--json").args(args);
     command.env_remove("CODEX_THREAD_ID");
+    for name in [
+        "HERDR_ENV",
+        "HERDR_PANE_ID",
+        "HERDR_TAB_ID",
+        "HERDR_WORKSPACE_ID",
+        "HERDR_BIN_PATH",
+        "HERDR_SOCKET_PATH",
+        "HERDR_SESSION",
+        "HERDR_PLUGIN_ID",
+    ] {
+        command.env_remove(name);
+    }
     command.env("BRGR_SESSION_ID", "fixture-session");
     for (name, value) in envs {
         command.env(name, value);
@@ -369,6 +381,69 @@ fn plugin_entrypoints_fail_closed_without_herdr_host() {
     assert!(String::from_utf8_lossy(&open.stderr).contains("brgr Herdr plugin host"));
 }
 
+fn ordinary_herdr_pane_opens_a_brgr_worker(
+    home: &Path,
+    workspace: &Path,
+    fake_herdr: &Path,
+    herdr_args: &Path,
+) {
+    json_output(&run(
+        home,
+        &["config", "set-worker-placement", "adjacent"],
+        &[],
+    ));
+    let ordinary_herdr_env = [
+        ("BRGR_OWNER_ID", "codex:plugin-worker"),
+        ("HERDR_ENV", "1"),
+        ("HERDR_WORKSPACE_ID", "w1"),
+        ("HERDR_PANE_ID", "w1:p9"),
+        ("HERDR_BIN_PATH", fake_herdr.to_str().unwrap()),
+        ("BRGR_TEST_HERDR_ARGS", herdr_args.to_str().unwrap()),
+    ];
+    let disabled = json_output(&run(
+        home,
+        &[
+            "run",
+            "BRGR_FIXTURE_OK",
+            "--workspace",
+            workspace.to_str().unwrap(),
+        ],
+        &ordinary_herdr_env,
+    ));
+    assert!(disabled.get("worker_pane").is_none());
+    let disabled_task = disabled["task_id"].as_str().unwrap();
+    let owner = [("BRGR_OWNER_ID", "codex:plugin-worker")];
+    assert_eq!(
+        json_output(&run(
+            home,
+            &["wait", disabled_task, "--timeout-seconds", "10"],
+            &owner,
+        ))["outcome"],
+        "candidate"
+    );
+    assert_eq!(
+        json_output(&run(home, &["accept", disabled_task], &owner))["verdict"],
+        "accepted"
+    );
+    let enabled = json_output(&run(home, &["config", "set-auto-worker-pane", "true"], &[]));
+    assert_eq!(enabled["herdr"]["auto_worker_pane"], true);
+    let ordinary = json_output(&run(
+        home,
+        &[
+            "run",
+            "BRGR_FIXTURE_OK",
+            "--workspace",
+            workspace.to_str().unwrap(),
+        ],
+        &ordinary_herdr_env,
+    ));
+    assert_eq!(ordinary["worker_placement"], "adjacent");
+    assert_eq!(ordinary["worker_pane"], "w1:p2");
+    let ordinary_args = fs::read_to_string(herdr_args).unwrap();
+    assert!(ordinary_args.contains("--target-pane\nw1:p9\n"));
+    assert!(!ordinary_args.contains("--workspace\n"));
+}
+
 #[test]
 fn plugin_worker_placement_respects_config_and_reaches_owner_decision() {
     let temp = TempDir::new().unwrap();
@@ -437,6 +512,8 @@ fn plugin_worker_placement_respects_config_and_reaches_owner_decision() {
     assert!(second_args.contains("--placement\ntab\n"));
     assert!(second_args.contains("--workspace\nw1\n"));
     assert!(!second_args.contains("--target-pane\n"));
+
+    ordinary_herdr_pane_opens_a_brgr_worker(&home, &workspace, &fake_herdr, &herdr_args);
 
     let task = first["task_id"].as_str().unwrap();
     let launch = home.join("launches").join(format!("{task}.json"));

@@ -161,7 +161,13 @@ enum PluginCommand {
 #[derive(Subcommand)]
 enum ConfigCommand {
     Show,
-    SetWorkerPlacement { placement: WorkerPlacement },
+    SetWorkerPlacement {
+        placement: WorkerPlacement,
+    },
+    SetAutoWorkerPane {
+        #[arg(action = clap::ArgAction::Set)]
+        enabled: bool,
+    },
 }
 
 #[derive(Args)]
@@ -563,9 +569,16 @@ fn validate_bridge_host_command(
 
 fn config_command(paths: &Paths, command: &ConfigCommand, json_output: bool) -> Result<()> {
     let mut config = Config::load(&paths.config)?;
-    if let ConfigCommand::SetWorkerPlacement { placement } = command {
-        config.herdr.worker_placement = *placement;
-        config.save(&paths.config)?;
+    match command {
+        ConfigCommand::Show => {}
+        ConfigCommand::SetWorkerPlacement { placement } => {
+            config.herdr.worker_placement = *placement;
+            config.save(&paths.config)?;
+        }
+        ConfigCommand::SetAutoWorkerPane { enabled } => {
+            config.herdr.auto_worker_pane = *enabled;
+            config.save(&paths.config)?;
+        }
     }
     if json_output {
         print_value(&serde_json::to_value(&config)?, true);
@@ -908,12 +921,14 @@ fn plugin_worker_placement(
     execution: &ExecutionDisposition,
 ) -> Result<Option<WorkerPlacement>> {
     if env::var("HERDR_ENV").as_deref() == Ok("1")
-        && env::var("HERDR_PLUGIN_ID").as_deref() == Ok("brgr")
-        && (env::var_os(plugin_bridge::BRIDGE_HOST_HOME_ENV).is_some()
-            || env::var("BRGR_WORKER_HERDR_CONTEXT").as_deref() == Ok("1"))
         && matches!(execution, ExecutionDisposition::Detached)
     {
-        Ok(Some(Config::load(&paths.config)?.herdr.worker_placement))
+        let config = Config::load(&paths.config)?;
+        let plugin_caller = env::var("HERDR_PLUGIN_ID").as_deref() == Ok("brgr")
+            && (env::var_os(plugin_bridge::BRIDGE_HOST_HOME_ENV).is_some()
+                || env::var("BRGR_WORKER_HERDR_CONTEXT").as_deref() == Ok("1"));
+        Ok((plugin_caller || config.herdr.auto_worker_pane)
+            .then_some(config.herdr.worker_placement))
     } else {
         Ok(None)
     }
