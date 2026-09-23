@@ -370,6 +370,698 @@ fn plugin_entrypoints_fail_closed_without_herdr_host() {
 }
 
 #[test]
+fn plugin_worker_placement_respects_config_and_reaches_owner_decision() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("brgr");
+    let workspace = temp.path().join("work");
+    let fake_herdr = temp.path().join("herdr");
+    let herdr_args = temp.path().join("herdr-args");
+    fs::create_dir_all(&workspace).unwrap();
+    fs::write(
+        &fake_herdr,
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$BRGR_TEST_HERDR_ARGS\"\nprintf '%s\\n' '{\"result\":{\"type\":\"plugin_pane_opened\",\"plugin_pane\":{\"plugin_id\":\"brgr\",\"entrypoint\":\"worker\",\"pane\":{\"pane_id\":\"w1:p2\"}}}}'\n",
+    )
+    .unwrap();
+    fs::set_permissions(&fake_herdr, fs::Permissions::from_mode(0o700)).unwrap();
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../testdata/fixtures/gjc")
+        .canonicalize()
+        .unwrap();
+    add_fixture(&home, &fixture, &temp.path().join("scratch"));
+    let host_home = home.to_str().unwrap();
+    let host_env = [
+        ("BRGR_OWNER_ID", "codex:plugin-worker"),
+        ("HERDR_ENV", "1"),
+        ("HERDR_PLUGIN_ID", "brgr"),
+        ("HERDR_WORKSPACE_ID", "w1"),
+        ("HERDR_PANE_ID", "w1:p1"),
+        ("HERDR_SESSION", "fixture-session"),
+        ("HERDR_BIN_PATH", fake_herdr.to_str().unwrap()),
+        ("BRGR_PLUGIN_HOST_HOME", host_home),
+        ("BRGR_PLUGIN_HOST_WORKSPACE", workspace.to_str().unwrap()),
+        ("BRGR_TEST_HERDR_ARGS", herdr_args.to_str().unwrap()),
+    ];
+    let first = json_output(&run(
+        &home,
+        &[
+            "run",
+            "BRGR_FIXTURE_OK",
+            "--workspace",
+            workspace.to_str().unwrap(),
+        ],
+        &host_env,
+    ));
+    assert_eq!(first["worker_placement"], "adjacent");
+    assert_eq!(first["worker_pane"], "w1:p2");
+    let first_args = fs::read_to_string(&herdr_args).unwrap();
+    assert!(first_args.starts_with("--session\nfixture-session\n"));
+    assert!(first_args.contains("--target-pane\nw1:p1\n"));
+    assert!(first_args.contains("--placement\nsplit\n"));
+    assert!(!first_args.contains("--workspace\n"));
+    assert!(first_args.contains("--no-focus\n"));
+
+    let config = json_output(&run(&home, &["config", "set-worker-placement", "tab"], &[]));
+    assert_eq!(config["herdr"]["worker_placement"], "tab");
+    let second = json_output(&run(
+        &home,
+        &[
+            "run",
+            "BRGR_FIXTURE_OK",
+            "--workspace",
+            workspace.to_str().unwrap(),
+        ],
+        &host_env,
+    ));
+    assert_eq!(second["worker_placement"], "tab");
+    let second_args = fs::read_to_string(&herdr_args).unwrap();
+    assert!(second_args.contains("--placement\ntab\n"));
+    assert!(second_args.contains("--workspace\nw1\n"));
+    assert!(!second_args.contains("--target-pane\n"));
+
+    let task = first["task_id"].as_str().unwrap();
+    let launch = home.join("launches").join(format!("{task}.json"));
+    let worker = run(
+        &home,
+        &["plugin", "worker"],
+        &[
+            ("HERDR_ENV", "1"),
+            ("HERDR_PLUGIN_ID", "brgr"),
+            ("BRGR_PLUGIN_WORKER_LAUNCH", launch.to_str().unwrap()),
+        ],
+    );
+    assert!(
+        worker.status.success(),
+        "{}",
+        String::from_utf8_lossy(&worker.stderr)
+    );
+    let result = json_output(&run(&home, &["result", task], &host_env));
+    assert_eq!(result["result"]["outcome"], "candidate");
+    assert_eq!(result["artifacts"][0]["text"], "BRGR_FIXTURE_OK");
+    let decision = json_output(&run(
+        &home,
+        &["accept", task, "--reason", "fixture output verified"],
+        &host_env,
+    ));
+    assert_eq!(decision["verdict"], "accepted");
+}
+
+const RECURSIVE_GJC_FIXTURE: &str = r#"#!/bin/sh
+set -eu
+case "${1:-}" in
+  --version) echo 'gjc v-recursive-fixture'; exit 0;;
+  --help)
+    printf '%s\n' '-p, --print' '--mode=<value>' '--no-session' '--no-mcp' '--model' '--thinking'
+    exit 0;;
+esac
+prompt_file=
+for argument in "$@"; do
+  case "$argument" in @*) prompt_file=${argument#@};; esac
+done
+test -f "$prompt_file"
+if test -n "${BRGR_PARENT_ATTEMPT_ID:-}"; then
+  if /usr/bin/grep -q UNSETTLED "$prompt_file"; then
+    "$BRGR_BIN" --json run LEAF --harness local.gjc --workspace "$PWD" --foreground >/dev/null
+  elif /usr/bin/grep -q ROOT "$prompt_file"; then
+    child_json=$("$BRGR_BIN" --json run CHILD --harness local.gjc --workspace "$PWD")
+    child_task=$(printf '%s\n' "$child_json" | /usr/bin/sed -n 's/.*"task_id":"\([^"]*\)".*/\1/p')
+    test -n "$child_task"
+    "$BRGR_BIN" --json wait "$child_task" --timeout-seconds 10 >/dev/null
+    "$BRGR_BIN" --json result "$child_task" >/dev/null
+    "$BRGR_BIN" --json accept "$child_task" --reason 'child artifact checked' >/dev/null
+  elif /usr/bin/grep -q CHILD "$prompt_file"; then
+    child_json=$("$BRGR_BIN" --json run LEAF --harness local.gjc --workspace "$PWD")
+    child_task=$(printf '%s\n' "$child_json" | /usr/bin/sed -n 's/.*"task_id":"\([^"]*\)".*/\1/p')
+    test -n "$child_task"
+    "$BRGR_BIN" --json wait "$child_task" --timeout-seconds 10 >/dev/null
+    "$BRGR_BIN" --json result "$child_task" >/dev/null
+    "$BRGR_BIN" --json accept "$child_task" --reason 'leaf artifact checked' >/dev/null
+  fi
+fi
+printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"BRGR_RECURSIVE_OK"}]}}'
+printf '%s\n' '{"type":"agent_end","stopReason":"completed"}'
+"#;
+
+#[test]
+fn a_worker_can_delegate_twice_and_decide_each_child_before_reporting() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("brgr");
+    let workspace = temp.path().join("work");
+    let executable = temp.path().join("gjc");
+    fs::create_dir_all(&workspace).unwrap();
+    fs::write(&executable, RECURSIVE_GJC_FIXTURE).unwrap();
+    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+    add_fixture(&home, &executable, &temp.path().join("scratch"));
+
+    let root = json_output(&run(
+        &home,
+        &[
+            "run",
+            "ROOT",
+            "--harness",
+            "local.gjc",
+            "--workspace",
+            workspace.to_str().unwrap(),
+            "--enable-delegation",
+            "--foreground",
+        ],
+        &[("BRGR_OWNER_ID", "codex:recursive-root")],
+    ));
+    assert_eq!(root["outcome"], "candidate");
+    let root_task = root["task_id"].as_str().unwrap();
+    let waited = json_output(&run(
+        &home,
+        &["wait", root_task, "--timeout-seconds", "2"],
+        &[("BRGR_OWNER_ID", "codex:recursive-root")],
+    ));
+    assert_eq!(waited["outcome"], "candidate");
+    let store = brgr_store::Store::open(home.join("store")).unwrap();
+    let root_id = root_task.parse().unwrap();
+    let tasks = store.tasks(10).unwrap();
+    assert_eq!(tasks.len(), 3);
+    let child = tasks.iter().find(|task| task.objective == "CHILD").unwrap();
+    let leaf = tasks.iter().find(|task| task.objective == "LEAF").unwrap();
+    let (child_parent, child_attempt, child_depth) =
+        store.delegation_parent(child.task_id).unwrap().unwrap();
+    assert_eq!(child_parent, root_id);
+    assert_eq!(child_depth, 1);
+    let (leaf_parent, _, leaf_depth) = store.delegation_parent(leaf.task_id).unwrap().unwrap();
+    assert_eq!(leaf_parent, child.task_id);
+    assert_eq!(leaf_depth, 2);
+    assert_eq!(child.owner_id.as_str(), format!("worker:{child_attempt}"));
+    assert_eq!(store.unsettled_children(child_attempt).unwrap(), 0);
+    let root_result = json_output(&run(
+        &home,
+        &["result", root_task],
+        &[("BRGR_OWNER_ID", "codex:recursive-root")],
+    ));
+    assert_eq!(root_result["artifacts"][0]["text"], "BRGR_RECURSIVE_OK");
+
+    let unsettled = json_output(&run(
+        &home,
+        &[
+            "run",
+            "UNSETTLED",
+            "--harness",
+            "local.gjc",
+            "--workspace",
+            workspace.to_str().unwrap(),
+            "--enable-delegation",
+            "--foreground",
+        ],
+        &[("BRGR_OWNER_ID", "codex:recursive-root")],
+    ));
+    assert_eq!(unsettled["outcome"], "failed");
+    assert!(
+        unsettled["error"]
+            .as_str()
+            .unwrap()
+            .contains("child task(s) remain")
+    );
+}
+
+#[test]
+fn recursive_worker_uses_sibling_worktrees_from_a_git_parent() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("brgr");
+    let repository = temp.path().join("repo");
+    let executable = temp.path().join("gjc");
+    fs::create_dir_all(&repository).unwrap();
+    seed_git_repo(&repository);
+    fs::write(&executable, RECURSIVE_GJC_FIXTURE).unwrap();
+    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+    add_fixture(&home, &executable, &temp.path().join("scratch"));
+    let root = json_output(&run(
+        &home,
+        &[
+            "run",
+            "ROOT",
+            "--harness",
+            "local.gjc",
+            "--workspace",
+            repository.to_str().unwrap(),
+            "--enable-delegation",
+            "--foreground",
+        ],
+        &[("BRGR_OWNER_ID", "codex:git-recursive")],
+    ));
+    assert_eq!(root["outcome"], "candidate");
+    let store = brgr_store::Store::open(home.join("store")).unwrap();
+    let tasks = store.tasks(10).unwrap();
+    assert_eq!(tasks.len(), 3);
+    let parent = home.canonicalize().unwrap().join("worktrees/repo");
+    assert!(
+        tasks
+            .iter()
+            .all(|task| Path::new(&task.workspace).starts_with(&parent)),
+        "workspaces: {:?}",
+        tasks.iter().map(|task| &task.workspace).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        fs::read_to_string(repository.join("README")).unwrap(),
+        "seed\n"
+    );
+}
+
+#[test]
+fn relative_control_home_is_canonical_before_worker_delegation() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("relative-home");
+    let workspace = temp.path().join("work");
+    let executable = temp.path().join("gjc");
+    fs::create_dir_all(&workspace).unwrap();
+    fs::write(&executable, RECURSIVE_GJC_FIXTURE).unwrap();
+    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+    add_fixture(&home, &executable, &temp.path().join("scratch"));
+    let output = Command::new(brgr())
+        .current_dir(temp.path())
+        .args([
+            "--home",
+            "relative-home",
+            "--json",
+            "run",
+            "ROOT",
+            "--harness",
+            "local.gjc",
+            "--workspace",
+            workspace.to_str().unwrap(),
+            "--enable-delegation",
+            "--foreground",
+        ])
+        .env("BRGR_SESSION_ID", "fixture-session")
+        .env("BRGR_OWNER_ID", "codex:relative-home")
+        .env_remove("CODEX_THREAD_ID")
+        .output()
+        .unwrap();
+    let result = json_output(&output);
+    assert_eq!(result["outcome"], "candidate");
+    assert_eq!(
+        brgr_store::Store::open(home.join("store"))
+            .unwrap()
+            .tasks(10)
+            .unwrap()
+            .len(),
+        3
+    );
+}
+
+struct MessageFixture {
+    _temp: TempDir,
+    home: PathBuf,
+    task: String,
+    attempt: String,
+}
+
+fn start_message_fixture() -> MessageFixture {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("brgr");
+    let workspace = temp.path().join("work");
+    fs::create_dir_all(&workspace).unwrap();
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../testdata/fixtures/gjc")
+        .canonicalize()
+        .unwrap();
+    add_fixture(&home, &fixture, &temp.path().join("scratch"));
+    let launch = json_output(&run(
+        &home,
+        &[
+            "run",
+            "SLOW",
+            "--workspace",
+            workspace.to_str().unwrap(),
+            "--enable-delegation",
+        ],
+        &[("BRGR_OWNER_ID", "codex:message-test")],
+    ));
+    let task = launch["task_id"].as_str().unwrap();
+    let task_id = task.parse().unwrap();
+    let store = brgr_store::Store::open(home.join("store")).unwrap();
+    let attempt = (0..100)
+        .find_map(|_| {
+            let found = store.active_message_attempt(task_id).ok();
+            if found.is_none() {
+                thread::sleep(Duration::from_millis(20));
+            }
+            found
+        })
+        .expect("worker attempt did not become active");
+    MessageFixture {
+        _temp: temp,
+        home,
+        task: task.to_owned(),
+        attempt: attempt.to_string(),
+    }
+}
+
+fn worker_question_roundtrip(
+    home: &Path,
+    task: &str,
+    owner: &[(&str, &str)],
+    worker: &[(&str, &str)],
+) {
+    let question = json_output(&run(
+        home,
+        &[
+            "message",
+            "send",
+            task,
+            "--to",
+            "owner",
+            "--kind",
+            "question",
+            "--body",
+            "Which token?",
+        ],
+        worker,
+    ));
+    let question_id = question["message_id"].as_str().unwrap();
+    let received = json_output(&run(
+        home,
+        &[
+            "message",
+            "wait",
+            task,
+            "--for",
+            "owner",
+            "--timeout-seconds",
+            "2",
+        ],
+        owner,
+    ));
+    assert_eq!(received["message_id"], question_id);
+    assert_eq!(received["body"], "Which token?");
+    json_output(&run(
+        home,
+        &["message", "ack", task, question_id, "--for", "owner"],
+        owner,
+    ));
+    let answer = json_output(&run(
+        home,
+        &[
+            "message",
+            "send",
+            task,
+            "--to",
+            "worker",
+            "--kind",
+            "reply",
+            "--reply-to",
+            question_id,
+            "--body",
+            "TOKEN_OK",
+        ],
+        owner,
+    ));
+    let answer_id = answer["message_id"].as_str().unwrap();
+    let worker_received = json_output(&run(
+        home,
+        &[
+            "message",
+            "wait",
+            task,
+            "--for",
+            "worker",
+            "--timeout-seconds",
+            "2",
+        ],
+        worker,
+    ));
+    assert_eq!(worker_received["message_id"], answer_id);
+    assert_eq!(worker_received["in_reply_to"], question_id);
+    json_output(&run(
+        home,
+        &["message", "ack", task, answer_id, "--for", "worker"],
+        worker,
+    ));
+}
+
+fn assert_message_replay_and_direction(
+    home: &Path,
+    task: &str,
+    owner: &[(&str, &str)],
+    question_id: &str,
+) {
+    assert_eq!(
+        json_output(&run(
+            home,
+            &[
+                "message",
+                "send",
+                task,
+                "--to",
+                "worker",
+                "--kind",
+                "question",
+                "--body",
+                "Confirm receipt?",
+                "--request-id",
+                question_id,
+            ],
+            owner,
+        ))["message_id"],
+        question_id
+    );
+    assert!(
+        !run(
+            home,
+            &[
+                "message",
+                "send",
+                task,
+                "--to",
+                "worker",
+                "--kind",
+                "question",
+                "--body",
+                "Changed replay",
+                "--request-id",
+                question_id,
+            ],
+            owner,
+        )
+        .status
+        .success()
+    );
+    assert!(
+        !run(
+            home,
+            &[
+                "message",
+                "send",
+                task,
+                "--to",
+                "worker",
+                "--kind",
+                "reply",
+                "--body",
+                "Invalid self reply",
+                "--reply-to",
+                question_id,
+            ],
+            owner,
+        )
+        .status
+        .success()
+    );
+}
+
+fn unanswered_message_count(home: &Path, task: &str, attempt: &str) -> u64 {
+    brgr_store::Store::open(home.join("store"))
+        .unwrap()
+        .unsettled_questions(task.parse().unwrap(), attempt.parse().unwrap())
+        .unwrap()
+}
+
+#[test]
+fn owner_message_wait_survives_the_gap_before_attempt_creation() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("brgr");
+    let workspace = temp.path().join("work");
+    let scratch = temp.path().join("scratch");
+    fs::create_dir_all(&workspace).unwrap();
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../testdata/fixtures/gjc")
+        .canonicalize()
+        .unwrap();
+    add_fixture(&home, &fixture, &scratch);
+    let launch = json_output(&run(
+        &home,
+        &["run", "SLOW", "--workspace", workspace.to_str().unwrap()],
+        &[
+            ("BRGR_OWNER_ID", "codex:message-gap"),
+            ("BRGR_TEST_EXIT_BEFORE_TASK_CLAIM", "1"),
+        ],
+    ));
+    let task = launch["task_id"].as_str().unwrap();
+    let started = Instant::now();
+    let wait = run(
+        &home,
+        &[
+            "message",
+            "wait",
+            task,
+            "--for",
+            "owner",
+            "--timeout-seconds",
+            "1",
+        ],
+        &[("BRGR_OWNER_ID", "codex:message-gap")],
+    );
+    assert!(!wait.status.success());
+    assert!(started.elapsed() >= Duration::from_millis(900));
+    assert!(String::from_utf8_lossy(&wait.stderr).contains("before the wait timeout"));
+}
+
+#[test]
+fn owner_and_worker_exchange_questions_and_replies_during_one_attempt() {
+    let fixture = start_message_fixture();
+    let home = &fixture.home;
+    let task = fixture.task.as_str();
+    let attempt_text = fixture.attempt.as_str();
+    let owner = [("BRGR_OWNER_ID", "codex:message-test")];
+    let worker_owner = format!("worker:{attempt_text}");
+    let worker = [
+        ("BRGR_OWNER_ID", worker_owner.as_str()),
+        ("BRGR_SESSION_ID", worker_owner.as_str()),
+        ("BRGR_PARENT_TASK_ID", task),
+        ("BRGR_PARENT_ATTEMPT_ID", attempt_text),
+    ];
+    worker_question_roundtrip(home, task, &owner, &worker);
+
+    let owner_question = json_output(&run(
+        home,
+        &[
+            "message",
+            "send",
+            task,
+            "--to",
+            "worker",
+            "--kind",
+            "question",
+            "--body",
+            "Confirm receipt?",
+            "--request-id",
+            "11111111-1111-4111-8111-111111111111",
+        ],
+        &owner,
+    ));
+    let owner_question_id = owner_question["message_id"].as_str().unwrap();
+    assert_message_replay_and_direction(home, task, &owner, owner_question_id);
+    assert_eq!(unanswered_message_count(home, task, attempt_text), 1);
+    json_output(&run(
+        home,
+        &["message", "ack", task, owner_question_id, "--for", "worker"],
+        &worker,
+    ));
+    let worker_reply = json_output(&run(
+        home,
+        &[
+            "message",
+            "send",
+            task,
+            "--to",
+            "owner",
+            "--kind",
+            "reply",
+            "--reply-to",
+            owner_question_id,
+            "--body",
+            "Confirmed",
+        ],
+        &worker,
+    ));
+    assert_eq!(worker_reply["in_reply_to"], owner_question_id);
+    let owner_messages = json_output(&run(
+        home,
+        &["message", "list", task, "--for", "owner"],
+        &owner,
+    ));
+    assert_eq!(owner_messages.as_array().unwrap().len(), 1);
+    assert_eq!(owner_messages[0]["body"], "Confirmed");
+    let reply_id = worker_reply["message_id"].as_str().unwrap();
+    json_output(&run(
+        home,
+        &["message", "ack", task, reply_id, "--for", "owner"],
+        &owner,
+    ));
+    assert_eq!(unanswered_message_count(home, task, attempt_text), 0);
+    json_output(&run(home, &["cancel", task], &owner));
+    let settled = json_output(&run(
+        home,
+        &["wait", task, "--timeout-seconds", "10"],
+        &owner,
+    ));
+    assert_eq!(settled["outcome"], "cancelled");
+    let stale_send = [
+        "message",
+        "send",
+        task,
+        "--to",
+        "owner",
+        "--kind",
+        "note",
+        "--body",
+        "Stale attempt",
+    ];
+    assert!(!run(home, &stale_send, &worker).status.success());
+}
+
+#[test]
+fn omp_worker_delegates_to_gjc_then_gjc_without_pair_specific_routing() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("brgr");
+    let workspace = temp.path().join("work");
+    let gjc = temp.path().join("gjc");
+    let omp = temp.path().join("omp");
+    fs::create_dir_all(&workspace).unwrap();
+    fs::write(&gjc, RECURSIVE_GJC_FIXTURE).unwrap();
+    let omp_fixture = RECURSIVE_GJC_FIXTURE
+        .replace("gjc v-recursive-fixture", "omp/fixture")
+        .replace(
+            "'--no-mcp' '--model' '--thinking'",
+            "'--no-prewalk' '--no-extensions' '--no-title' '--model=<value>' '--thinking=<value>'",
+        );
+    fs::write(&omp, omp_fixture).unwrap();
+    for executable in [&gjc, &omp] {
+        fs::set_permissions(executable, fs::Permissions::from_mode(0o700)).unwrap();
+        add_fixture(
+            &home,
+            executable,
+            &temp.path().join(format!(
+                "scratch-{}",
+                executable.file_name().unwrap().to_string_lossy()
+            )),
+        );
+    }
+    let root = json_output(&run(
+        &home,
+        &[
+            "run",
+            "ROOT",
+            "--harness",
+            "local.omp",
+            "--workspace",
+            workspace.to_str().unwrap(),
+            "--enable-delegation",
+            "--foreground",
+        ],
+        &[("BRGR_OWNER_ID", "codex:mixed-root")],
+    ));
+    assert_eq!(root["outcome"], "candidate");
+    let store = brgr_store::Store::open(home.join("store")).unwrap();
+    let tasks = store.tasks(10).unwrap();
+    assert_eq!(tasks.len(), 3);
+    let root_task = tasks.iter().find(|task| task.objective == "ROOT").unwrap();
+    assert_eq!(root_task.route.harness_id, "local.omp");
+    assert_eq!(
+        tasks
+            .iter()
+            .filter(|task| task.route.harness_id == "local.gjc")
+            .count(),
+        2
+    );
+}
+
+#[test]
 fn plugin_codex_missing_binary_fails_visibly_without_launching() {
     let temp = TempDir::new().unwrap();
     let home = temp.path().join("brgr");
@@ -1291,6 +1983,40 @@ fn detached_supervisor_exit_before_claim_becomes_one_durable_lost_inbox_item() {
     json_output(&run(&home, &["status", task], &owner));
     let replay = json_output(&run(&home, &["result", task], &owner));
     assert_eq!(replay["result"]["result_id"], result_id);
+}
+
+#[cfg(debug_assertions)]
+#[test]
+fn wait_reconciles_a_crashed_detached_supervisor_to_lost() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("brgr");
+    let workspace = temp.path().join("work");
+    fs::create_dir_all(&workspace).unwrap();
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../testdata/fixtures/gjc")
+        .canonicalize()
+        .unwrap();
+    add_fixture(&home, &fixture, &temp.path().join("scratch"));
+    let owner = [("BRGR_OWNER_ID", "codex:wait-crash")];
+    let launch = json_output(&run(
+        &home,
+        &[
+            "run",
+            "crash before claim",
+            "--workspace",
+            workspace.to_str().unwrap(),
+        ],
+        &[owner[0], ("BRGR_TEST_EXIT_BEFORE_TASK_CLAIM", "1")],
+    ));
+    let task = launch["task_id"].as_str().unwrap();
+    let waited = json_output(&run(
+        &home,
+        &["wait", task, "--timeout-seconds", "8"],
+        &owner,
+    ));
+    assert_eq!(waited["outcome"], "lost");
+    let result = json_output(&run(&home, &["result", task], &owner));
+    assert_eq!(waited["result_id"], result["result"]["result_id"]);
 }
 
 #[cfg(debug_assertions)]

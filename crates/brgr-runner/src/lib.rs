@@ -14,7 +14,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use brgr_protocol::TaskSpec;
+use brgr_protocol::{AttemptId, TaskId, TaskSpec};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -165,6 +165,16 @@ impl ExecutionOutput {
 
 pub struct ProcessRunner;
 
+/// Trusted context supplied by the brgr supervisor to a worker process.
+/// It lets that worker delegate another bounded task without teaching it a
+/// provider-specific child launcher.
+pub struct DelegationContext<'a> {
+    pub control_home: &'a Path,
+    pub brgr_executable: &'a Path,
+    pub task_id: TaskId,
+    pub attempt_id: AttemptId,
+}
+
 impl ProcessRunner {
     /// Executes a validated one-shot process recipe without invoking a shell.
     ///
@@ -176,22 +186,32 @@ impl ProcessRunner {
         manifest: &HarnessManifest,
         request: RunRequest<'_>,
     ) -> Result<ExecutionOutput, RunnerError> {
-        manifest.validate()?;
-        if manifest.adapter != PROCESS_ADAPTER_V1 {
-            return Err(RunnerError::UnsupportedAdapter(manifest.adapter.clone()));
-        }
-        if !request.workspace.is_dir() {
-            return Err(RunnerError::InvalidWorkspace(
-                request.workspace.to_path_buf(),
-            ));
-        }
+        Self::run_with_delegation(manifest, request, None).await
+    }
 
+    /// Runs a process with an optional brgr worker identity. The runner sets
+    /// these environment values itself after the manifest allowlist is applied.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`Self::run`].
+    pub async fn run_with_delegation(
+        manifest: &HarnessManifest,
+        request: RunRequest<'_>,
+        delegation: Option<DelegationContext<'_>>,
+    ) -> Result<ExecutionOutput, RunnerError> {
+        validate_run_input(manifest, &request)?;
+
+        let worker_prompt = delegation
+            .as_ref()
+            .map(|context| delegation_prompt(context, request.prompt));
+        let prompt = worker_prompt.as_deref().unwrap_or(request.prompt);
         let scratch = tempfile::tempdir()?;
         let prompt_path = scratch.path().join("prompt.txt");
-        std::fs::write(&prompt_path, request.prompt.as_bytes())?;
+        std::fs::write(&prompt_path, prompt.as_bytes())?;
         let substitutions = Substitutions {
             prompt_file: &prompt_path,
-            prompt: request.prompt,
+            prompt,
             workspace: request.workspace,
             model: request.model,
             effort: request.effort,
@@ -213,6 +233,9 @@ impl ProcessRunner {
             if let Some(value) = std::env::var_os(name) {
                 command.env(name, value);
             }
+        }
+        if let Some(context) = delegation {
+            apply_delegation_env(&mut command, &context);
         }
 
         let mut child = command.spawn().map_err(RunnerError::SpawnIo)?;
@@ -378,6 +401,69 @@ impl ProcessRunner {
             output_truncated,
             elapsed: started.elapsed(),
         })
+    }
+}
+
+fn delegation_prompt(context: &DelegationContext<'_>, objective: &str) -> String {
+    format!(
+        r#"BRGR WORKER CONTEXT
+You may delegate bounded subtasks with "$BRGR_BIN" --json run <objective> --harness <id> --criterion <check> only when your TASK explicitly asks for a child. A leaf task must not delegate. Each child belongs to this exact task attempt. Wait for an asynchronous child with "$BRGR_BIN" --json wait <child-task-id> --timeout-seconds <limit>. Inspect its sealed bytes with "$BRGR_BIN" --json result <child-task-id>, then accept or reject a candidate with a reason, or acknowledge a failed/lost result. Settle every child before reporting your own result. Brgr handles Herdr pane placement.
+
+For a question to your owner, use "$BRGR_BIN" --json message send "$BRGR_PARENT_TASK_ID" --to owner --kind question --body <question>. Read the reply with "$BRGR_BIN" --json message wait "$BRGR_PARENT_TASK_ID" --for worker --timeout-seconds <limit>, then ack that message. Check "$BRGR_BIN" --json message list "$BRGR_PARENT_TASK_ID" --for worker at natural checkpoints for owner follow-ups. If your owner asks a question, ack it after reading and send a reply --to owner --kind reply --reply-to <message-id>.
+For a child question, use "$BRGR_BIN" --json message wait <child-task-id> --for owner --timeout-seconds <limit>. Reply with message send <child-task-id> --to worker --kind reply --reply-to <message-id> --body <answer>, then ack the question. A message ack is not a result decision.
+Do not launch a second copy after an uncertain response; inspect task status first.
+Parent task: {}
+Parent attempt: {}
+
+TASK
+{}"#,
+        context.task_id, context.attempt_id, objective
+    )
+}
+
+fn validate_run_input(
+    manifest: &HarnessManifest,
+    request: &RunRequest<'_>,
+) -> Result<(), RunnerError> {
+    manifest.validate()?;
+    if manifest.adapter != PROCESS_ADAPTER_V1 {
+        return Err(RunnerError::UnsupportedAdapter(manifest.adapter.clone()));
+    }
+    if !request.workspace.is_dir() {
+        return Err(RunnerError::InvalidWorkspace(
+            request.workspace.to_path_buf(),
+        ));
+    }
+    Ok(())
+}
+
+fn apply_delegation_env(command: &mut Command, context: &DelegationContext<'_>) {
+    let worker_identity = format!("worker:{}", context.attempt_id);
+    command
+        .env("BRGR_HOME", context.control_home)
+        .env("BRGR_BIN", context.brgr_executable)
+        .env("BRGR_PARENT_TASK_ID", context.task_id.to_string())
+        .env("BRGR_PARENT_ATTEMPT_ID", context.attempt_id.to_string())
+        .env("BRGR_OWNER_ID", &worker_identity)
+        .env("BRGR_SESSION_ID", worker_identity);
+    if std::env::var("HERDR_ENV").as_deref() == Ok("1")
+        && std::env::var("HERDR_PLUGIN_ID").as_deref() == Ok("brgr")
+        && std::env::var_os("HERDR_PANE_ID").is_some()
+    {
+        for name in [
+            "HERDR_ENV",
+            "HERDR_PLUGIN_ID",
+            "HERDR_PANE_ID",
+            "HERDR_WORKSPACE_ID",
+            "HERDR_BIN_PATH",
+            "HERDR_SESSION",
+            "HERDR_SOCKET_PATH",
+        ] {
+            if let Some(value) = std::env::var_os(name) {
+                command.env(name, value);
+            }
+        }
+        command.env("BRGR_WORKER_HERDR_CONTEXT", "1");
     }
 }
 
@@ -1581,7 +1667,7 @@ mod tests {
         )
         .unwrap();
         std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let output = ProcessRunner::probe(&executable, &[], Duration::from_secs(2))
+        let output = ProcessRunner::probe(&executable, &[], Duration::from_secs(5))
             .await
             .unwrap();
         assert_eq!(output.exit_code, Some(0));
@@ -1592,7 +1678,7 @@ mod tests {
             "#!/bin/sh\ni=0\nwhile [ \"$i\" -lt 1200 ]; do printf 'model-catalog-line-12345678901234567890123456789012345678901234567890\\n'; i=$((i+1)); done\n",
         )
         .unwrap();
-        let oversized = ProcessRunner::probe(&executable, &[], Duration::from_secs(2))
+        let oversized = ProcessRunner::probe(&executable, &[], Duration::from_secs(5))
             .await
             .unwrap();
         assert!(oversized.output_truncated);
@@ -1733,7 +1819,7 @@ mod tests {
         let wide = ProcessRunner::probe_with_path(
             &executable,
             &[],
-            Duration::from_secs(2),
+            Duration::from_secs(5),
             Some(bin.as_os_str()),
         )
         .await

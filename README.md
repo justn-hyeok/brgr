@@ -15,17 +15,18 @@ Release archives are
 unsigned and not notarized. Read [the unsigned distribution guide](docs/unsigned-distribution.md)
 before sharing or running a downloaded binary.
 
-The v1 managed-run contract is retained, but the broader public v1 acceptance
-gates were never declared complete. The
-[current checklist](docs/v1-readiness-checklist-2026-09-14.md) separates
-personal-use reliability work from public-release gates.
+The v1 managed-run contract is retained. The v2.1.0 release closed the
+[v1 readiness checklist](docs/v1-readiness-checklist-2026-09-14.md) under its
+recorded personal-use scope and evidence limits. v2.2.0 adds recursive worker
+delegation and an attempt-scoped message mailbox. Its verified scope and open
+limits are described below.
 
 ## Herdr plugin
 
 Install the current public v2 plugin from GitHub:
 
 ```bash
-herdr plugin install justn-hyeok/brgr --ref v2.0.2
+herdr plugin install justn-hyeok/brgr --ref v2.2.0
 ```
 
 The plugin builds `brgr` from the pinned Cargo lockfile, so a Rust toolchain is
@@ -93,6 +94,29 @@ after upgrading it. These are route requests; only OMP and GJC expose a
 native model observation, and none expose a verified effort observation.
 
 ## Standalone Codex and CLI
+
+### Recursive workers
+
+v2.2.0 adds a brgr-owned `worker` plugin pane. A managed
+run started from the plugin Codex pane opens that pane beside its parent by
+default. Set `brgr config set-worker-placement tab` to open future workers in
+new tabs; `adjacent` restores the default. The setting is stored at
+`BRGR_HOME/config.toml` and never moves panes already running.
+
+A worker receives `$BRGR_BIN`, its exact task/attempt identity, and a scoped
+owner session. It may call `brgr run` again to create a child; brgr records the
+parent edge and delivers the child result to that worker's inbox. The parent
+must read and accept/reject a candidate (or acknowledge another outcome)
+before its own successful result can become a candidate. `brgr wait TASK`
+waits for a child result without approving it. `brgr message send|list|wait|ack`
+lets each side ask and answer questions on the active attempt; unanswered
+questions block a successful candidate. Standalone runs opt in with
+`--enable-delegation`; plugin workers enable it automatically. See
+[recursive worker contract](docs/recursive-workers.md) for the verified scope
+and remaining gates, including the
+[live OMP → GJC → GJC receipt](docs/live-recursive-bridge-2026-09-23.md) and
+[bidirectional message receipt](docs/live-bidirectional-bridge-2026-09-23.md).
+Earlier v2.1.0 binaries do not contain these commands.
 
 Install the local binary and Codex integration, then start a new Codex session:
 
