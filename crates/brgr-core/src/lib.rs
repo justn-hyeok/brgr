@@ -4,13 +4,20 @@
 //! report observations, but they cannot bypass task revision or attempt state
 //! validation.
 
-use std::{fmt::Write as _, io::Cursor, path::Path, time::Duration};
+use std::{
+    fmt::Write as _,
+    io::Cursor,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use brgr_protocol::{
     AttemptId, AttemptState, Event, EventId, EventKind, ObservationSource, ProtocolError,
     ResultEnvelope, ResultId, RouteObservation, TaskId, TaskSpec, TerminalOutcome,
 };
-use brgr_runner::{ExecutionMode, HarnessManifest, ProcessRunner, RunRequest, RunnerError};
+use brgr_runner::{
+    DelegationContext, ExecutionMode, HarnessManifest, ProcessRunner, RunRequest, RunnerError,
+};
 use brgr_store::{RunnerIdentity, Store, StoreError, UnfinishedAttempt};
 use sha2::{Digest, Sha256};
 
@@ -307,6 +314,12 @@ pub enum CoreError {
 pub struct Supervisor {
     store: Store,
     epoch: u64,
+    delegation_host: Option<DelegationHost>,
+}
+
+struct DelegationHost {
+    control_home: PathBuf,
+    brgr_executable: PathBuf,
 }
 
 /// Independent observation of the original runner incarnation. A numeric PID
@@ -331,7 +344,16 @@ impl Supervisor {
         Ok(Self {
             store: Store::open(store_root)?,
             epoch: (uuid::Uuid::new_v4().as_u64_pair().0 & 0x7fff_ffff_ffff_ffff).max(1),
+            delegation_host: None,
         })
+    }
+
+    /// Gives each worker process its exact parent attempt and brgr entrypoint.
+    pub fn enable_worker_delegation(&mut self, control_home: PathBuf, brgr_executable: PathBuf) {
+        self.delegation_host = Some(DelegationHost {
+            control_home,
+            brgr_executable,
+        });
     }
 
     /// Reconciles only attempts from a previous supervisor incarnation.
@@ -440,6 +462,7 @@ impl Supervisor {
             cancel_path,
             pid_path,
             runner_identity,
+            delegation_host: self.delegation_host.as_ref(),
         };
 
         for number in 1..=spec.budget.max_attempts {
@@ -475,6 +498,7 @@ struct AttemptControl<'a> {
     cancel_path: Option<&'a Path>,
     pid_path: Option<&'a Path>,
     runner_identity: Option<&'a RunnerIdentity>,
+    delegation_host: Option<&'a DelegationHost>,
 }
 
 async fn run_single_attempt(
@@ -539,7 +563,7 @@ async fn run_single_attempt(
         &mut producer_seq,
     )?;
 
-    let execution = ProcessRunner::run(
+    let execution = ProcessRunner::run_with_delegation(
         manifest,
         RunRequest {
             workspace: Path::new(&spec.workspace),
@@ -550,6 +574,12 @@ async fn run_single_attempt(
             cancel_path: control.cancel_path,
             pid_path: control.pid_path,
         },
+        control.delegation_host.map(|host| DelegationContext {
+            control_home: &host.control_home,
+            brgr_executable: &host.brgr_executable,
+            task_id: spec.task_id,
+            attempt_id,
+        }),
     )
     .await;
 
@@ -637,6 +667,15 @@ fn finish_execution(
         }
         Ok(output) if output.succeeded(manifest) && !output.result.is_empty() => {
             transition(store, attempt, AttemptState::Collecting, producer_seq)?;
+            if let Some(reason) = unsettled_worker_reason(store, spec.task_id, attempt_id)? {
+                return Ok(result_for(
+                    spec,
+                    attempt_id,
+                    TerminalOutcome::Failed,
+                    vec![],
+                    Some(reason),
+                ));
+            }
             let observed_model = output.observed_model.clone();
             let artifact = store.seal_artifact_reader(
                 Cursor::new(output.result),
@@ -722,6 +761,24 @@ fn transition(
         payload: serde_json::json!({}),
     })?;
     Ok(())
+}
+
+fn unsettled_worker_reason(
+    store: &Store,
+    task_id: TaskId,
+    attempt_id: AttemptId,
+) -> Result<Option<String>, StoreError> {
+    let children = store.unsettled_children(attempt_id)?;
+    if children > 0 {
+        return Ok(Some(format!(
+            "{children} child task(s) remain undecided or unacknowledged"
+        )));
+    }
+    let questions = store.unsettled_questions(task_id, attempt_id)?;
+    if questions > 0 {
+        return Ok(Some(format!("{questions} question(s) remain unanswered")));
+    }
+    Ok(None)
 }
 
 fn result_for(

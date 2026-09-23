@@ -1,5 +1,21 @@
 # Changelog
 
+## 2.2.0 — 2026-09-23
+
+Add bounded recursive worker delegation across registered process harnesses.
+Each child is bound to its exact parent attempt, and each parent must settle
+its children before producing a candidate. Add an attempt-scoped question,
+reply, and acknowledgment mailbox in both directions; unanswered questions
+block a successful candidate. Herdr opens worker panes beside their caller by
+default, with a control-home setting for separate tabs.
+
+The local Herdr 0.9.0 OMP → GJC → GJC smoke completed a single accepted
+three-level chain with twelve acknowledged messages. The process-worker pane
+is not an interactive GJC TUI. Deep splits can become narrow, and arbitrary
+dirty worktree, cancellation, and restart scenarios are not covered by this
+live receipt. The CLI bridge now handles long waits alongside replies and
+cancel requests, and message wait tolerates the gap before attempt creation.
+
 ## 2.0.2 — 2026-09-15
 
 Add a generated `local.devin` process recipe for Devin CLI. It uses documented

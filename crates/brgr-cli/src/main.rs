@@ -1,5 +1,7 @@
 mod codex_integration;
+mod config;
 mod herdr_plugin;
+mod message;
 mod pane_cleanup;
 mod plugin_bridge;
 mod workspace;
@@ -33,6 +35,7 @@ use brgr_runner::{
 };
 use brgr_store::{RunnerIdentity, Store, StoreError, UnfinishedAttempt};
 use clap::{Args, Parser, Subcommand};
+use config::{Config, WorkerPlacement};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -61,6 +64,15 @@ enum Command {
         #[arg(long)]
         ack: bool,
     },
+    Wait {
+        task: TaskId,
+        #[arg(long, default_value_t = 3_600)]
+        timeout_seconds: u64,
+    },
+    Message {
+        #[command(subcommand)]
+        command: message::MessageCommand,
+    },
     Cancel {
         task: TaskId,
     },
@@ -88,6 +100,10 @@ enum Command {
         command: IntegrateCommand,
     },
     Doctor,
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommand,
+    },
     Plugin {
         #[command(subcommand)]
         command: PluginCommand,
@@ -138,11 +154,21 @@ enum PluginCommand {
         once: bool,
     },
     Codex,
+    #[command(hide = true)]
+    Worker,
+}
+
+#[derive(Subcommand)]
+enum ConfigCommand {
+    Show,
+    SetWorkerPlacement { placement: WorkerPlacement },
 }
 
 #[derive(Args)]
 struct RunArgs {
     objective: String,
+    #[command(flatten)]
+    delegation: DelegationArgs,
     #[arg(long, default_value = "local.gjc")]
     harness: String,
     #[arg(long)]
@@ -164,6 +190,16 @@ struct RunArgs {
 }
 
 #[derive(Args)]
+struct DelegationArgs {
+    #[arg(long, requires = "parent_attempt")]
+    parent_task: Option<TaskId>,
+    #[arg(long, requires = "parent_task")]
+    parent_attempt: Option<AttemptId>,
+    #[arg(long)]
+    enable_delegation: bool,
+}
+
+#[derive(Args)]
 struct ReviseArgs {
     task: TaskId,
     objective: String,
@@ -181,6 +217,8 @@ struct ReviseArgs {
 
 struct StartOptions<'a> {
     source_workspace: &'a Path,
+    parent: Option<(TaskId, AttemptId)>,
+    enable_delegation: bool,
     snapshot: WorkspaceSnapshot,
     pane: PaneDisposition,
     execution: ExecutionDisposition,
@@ -278,6 +316,7 @@ enum HookEvent {
 #[derive(Clone, Debug)]
 struct Paths {
     home: PathBuf,
+    config: PathBuf,
     store: PathBuf,
     registry: PathBuf,
     launches: PathBuf,
@@ -296,7 +335,10 @@ impl Paths {
                 .join("Application Support")
                 .join("brgr")
         };
+        fs::create_dir_all(&home)?;
+        let home = home.canonicalize()?;
         let paths = Self {
+            config: home.join("config.toml"),
             store: home.join("store"),
             registry: home.join("registry"),
             launches: home.join("launches"),
@@ -339,6 +381,8 @@ struct LaunchEnvelope {
     protocol_generation: String,
     keep_pane: bool,
     #[serde(default)]
+    delegation_enabled: bool,
+    #[serde(default)]
     manifest: Option<HarnessManifest>,
     #[serde(default)]
     executable_digest: Option<String>,
@@ -369,6 +413,15 @@ async fn main() -> Result<()> {
             Command::Revise(args) if args.foreground => {
                 plugin_bridge::MAX_BRIDGE_SECONDS.saturating_sub(120)
             }
+            Command::Wait {
+                timeout_seconds, ..
+            }
+            | Command::Message {
+                command:
+                    message::MessageCommand::Wait {
+                        timeout_seconds, ..
+                    },
+            } => *timeout_seconds,
             _ => 3_600,
         };
         return plugin_bridge::client(Path::new(&dir), budget_seconds.saturating_add(120)).await;
@@ -380,6 +433,11 @@ async fn main() -> Result<()> {
         Command::Revise(args) => revise_task(&paths, args, cli.json).await,
         Command::Status { task } => status(&paths, task, cli.json),
         Command::Result { task, ack } => result(&paths, task, ack, cli.json),
+        Command::Wait {
+            task,
+            timeout_seconds,
+        } => wait_for_result(&paths, task, timeout_seconds, cli.json).await,
+        Command::Message { command } => message::run(&paths, command, cli.json).await,
         Command::Cancel { task } => cancel(&paths, task, cli.json),
         Command::Bind { task, session } => bind(&paths, task, session, cli.json),
         Command::Accept { task, reason } => {
@@ -391,10 +449,12 @@ async fn main() -> Result<()> {
         Command::Harness { command } => harness(&paths, command, cli.json).await,
         Command::Integrate { command } => integrate(&paths, command, cli.json),
         Command::Doctor => doctor(&paths, cli.json).await,
+        Command::Config { command } => config_command(&paths, &command, cli.json),
         Command::Plugin { command } => match command {
             PluginCommand::Open { no_focus, codex } => herdr_plugin::open(no_focus, codex).await,
             PluginCommand::Board { once } => herdr_plugin::board(&paths, once).await,
             PluginCommand::Codex => herdr_plugin::codex(&paths).await,
+            PluginCommand::Worker => herdr_plugin::worker(&paths).await,
         },
         Command::Cleanup { command } => cleanup(&paths, command, cli.json),
         Command::Supervise { launch } => supervise(&paths, &launch, cli.json).await,
@@ -479,11 +539,14 @@ fn validate_bridge_host_command(
         }
         Command::Status { .. }
         | Command::Result { .. }
+        | Command::Wait { .. }
+        | Command::Message { .. }
         | Command::Cancel { .. }
         | Command::Bind { .. }
         | Command::Accept { .. }
         | Command::Reject { .. }
         | Command::Doctor
+        | Command::Config { .. }
         | Command::Cleanup { .. }
         | Command::Harness {
             command: HarnessCommand::Status { .. },
@@ -496,6 +559,20 @@ fn validate_bridge_host_command(
             bail!("internal brgr commands are unavailable through the Herdr host bridge")
         }
     }
+}
+
+fn config_command(paths: &Paths, command: &ConfigCommand, json_output: bool) -> Result<()> {
+    let mut config = Config::load(&paths.config)?;
+    if let ConfigCommand::SetWorkerPlacement { placement } = command {
+        config.herdr.worker_placement = *placement;
+        config.save(&paths.config)?;
+    }
+    if json_output {
+        print_value(&serde_json::to_value(&config)?, true);
+    } else {
+        print!("{}", toml::to_string_pretty(&config)?);
+    }
+    Ok(())
 }
 
 fn require_bridge_workspace(candidate: &Path, workspace_root: &Path) -> Result<()> {
@@ -523,7 +600,23 @@ async fn run_task(paths: &Paths, args: RunArgs, json_output: bool) -> Result<()>
         .with_context(|| format!("harness {} is not active and healthy", args.harness))?;
     let task_id = TaskId::new();
     let source_workspace = args.workspace.unwrap_or(env::current_dir()?);
-    let owner_id = owner_from_environment()?;
+    let explicit_parent = args
+        .delegation
+        .parent_task
+        .zip(args.delegation.parent_attempt);
+    let inherited_parent = delegation_parent_from_environment()?;
+    if explicit_parent.is_some()
+        && inherited_parent.is_some()
+        && explicit_parent != inherited_parent
+    {
+        bail!("explicit delegation parent differs from the current worker attempt");
+    }
+    let parent = explicit_parent.or(inherited_parent);
+    let owner_id = if let Some((_, attempt)) = parent {
+        OwnerId::new(format!("worker:{attempt}"))?
+    } else {
+        owner_from_environment()?
+    };
     let criteria = if args.criteria.is_empty() {
         vec![format!("Objective achieved: {}", args.objective)]
     } else {
@@ -565,6 +658,8 @@ async fn run_task(paths: &Paths, args: RunArgs, json_output: bool) -> Result<()>
         &activation,
         StartOptions {
             source_workspace: &source_workspace,
+            parent,
+            enable_delegation: args.delegation.enable_delegation,
             snapshot: if args.allow_clean_head_snapshot {
                 WorkspaceSnapshot::AllowCleanHead
             } else {
@@ -589,6 +684,8 @@ async fn run_task(paths: &Paths, args: RunArgs, json_output: bool) -> Result<()>
 async fn revise_task(paths: &Paths, args: ReviseArgs, json_output: bool) -> Result<()> {
     let store = Store::open(&paths.store)?;
     let previous = store.task(args.task)?;
+    let previous_launch: LaunchEnvelope =
+        serde_json::from_slice(&fs::read(paths.launch(args.task, previous.revision))?)?;
     require_owner(&store, &previous.owner_id)?;
     let result = store.latest_result(args.task)?;
     if result.revision != previous.revision {
@@ -647,6 +744,8 @@ async fn revise_task(paths: &Paths, args: ReviseArgs, json_output: bool) -> Resu
         &activation,
         StartOptions {
             source_workspace: &source_workspace,
+            parent: None,
+            enable_delegation: previous_launch.delegation_enabled,
             snapshot: if args.allow_clean_head_snapshot {
                 WorkspaceSnapshot::AllowCleanHead
             } else {
@@ -679,11 +778,13 @@ async fn start_task(
     activated.validate_task_route(&spec)?;
     let source = options.source_workspace.canonicalize()?;
     let home = paths.home.canonicalize()?;
-    if source.starts_with(&home) || home.starts_with(&source) {
-        bail!("brgr control home and the source workspace must not overlap");
-    }
+    validate_source_home(paths, &source, &home, options.parent, &spec.owner_id)?;
+    let plugin_placement = plugin_worker_placement(paths, &options.execution)?;
     let admission = workspace::acquire_admission_lock(&paths.worktrees, options.source_workspace)?;
     let store = Store::open(&paths.store)?;
+    if let Some((parent_task, parent_attempt)) = options.parent {
+        store.validate_delegation_parent(parent_task, parent_attempt, &spec.owner_id)?;
+    }
     let session = current_session()?;
     match (store.owner_binding(&spec.owner_id)?, session.as_deref()) {
         (Some((bound, _)), Some(current)) if bound == current => {}
@@ -711,22 +812,42 @@ async fn start_task(
         harness_id,
         protocol_generation: "brgr-v1".to_owned(),
         keep_pane: matches!(options.pane, PaneDisposition::Keep),
+        delegation_enabled: options.enable_delegation
+            || plugin_placement.is_some()
+            || options.parent.is_some(),
         manifest: Some(activated.clone()),
         executable_digest: Some(activation.executable_digest.clone()),
     };
     let launch_path = paths.launch(task_id, launch.spec.revision);
     write_json_new(&launch_path, &launch)?;
     let mut store = Store::open(&paths.store)?;
-    let request_digest = Sha256::digest(serde_json::to_vec(&launch.spec)?);
-    let mut request_digest_text = String::with_capacity(64);
-    for byte in request_digest {
-        write!(&mut request_digest_text, "{byte:02x}")?;
+    let request_digest_text = task_request_digest(&launch.spec)?;
+    if let Some((parent_task, parent_attempt)) = options.parent {
+        store.record_child_task(
+            &launch.spec,
+            &request_digest_text,
+            parent_task,
+            parent_attempt,
+        )?;
+    } else {
+        store.record_task(&launch.spec, &request_digest_text)?;
     }
-    store.record_task(&launch.spec, &request_digest_text)?;
     drop(admission);
 
     if matches!(options.execution, ExecutionDisposition::Foreground) {
         return supervise(paths, &launch_path, options.json_output).await;
+    }
+    if let Some(placement) = plugin_placement {
+        return start_herdr_worker(
+            paths,
+            &launch_path,
+            &workspace,
+            &launch,
+            placement,
+            &mut store,
+            options.json_output,
+        )
+        .await;
     }
     if let Err(error) = spawn_supervisor(paths, &launch_path) {
         record_unstarted_terminal(
@@ -748,6 +869,104 @@ async fn start_task(
     });
     print_value(&receipt, options.json_output);
     Ok(())
+}
+
+fn validate_source_home(
+    paths: &Paths,
+    source: &Path,
+    home: &Path,
+    parent: Option<(TaskId, AttemptId)>,
+    owner: &OwnerId,
+) -> Result<()> {
+    let nested_source = if let Some((parent_task_id, parent_attempt_id)) = parent {
+        let store = Store::open(&paths.store)?;
+        store.validate_delegation_parent(parent_task_id, parent_attempt_id, owner)?;
+        let parent = store.task(parent_task_id)?;
+        let parent_workspace = Path::new(&parent.workspace).canonicalize()?;
+        parent_workspace.starts_with(paths.worktrees.canonicalize()?)
+            && source.starts_with(parent_workspace)
+    } else {
+        false
+    };
+    if (source.starts_with(home) && !nested_source) || home.starts_with(source) {
+        bail!("brgr control home and the source workspace must not overlap");
+    }
+    Ok(())
+}
+
+fn task_request_digest(spec: &TaskSpec) -> Result<String> {
+    let request_digest = Sha256::digest(serde_json::to_vec(spec)?);
+    let mut text = String::with_capacity(64);
+    for byte in request_digest {
+        write!(&mut text, "{byte:02x}")?;
+    }
+    Ok(text)
+}
+
+fn plugin_worker_placement(
+    paths: &Paths,
+    execution: &ExecutionDisposition,
+) -> Result<Option<WorkerPlacement>> {
+    if env::var("HERDR_ENV").as_deref() == Ok("1")
+        && env::var("HERDR_PLUGIN_ID").as_deref() == Ok("brgr")
+        && (env::var_os(plugin_bridge::BRIDGE_HOST_HOME_ENV).is_some()
+            || env::var("BRGR_WORKER_HERDR_CONTEXT").as_deref() == Ok("1"))
+        && matches!(execution, ExecutionDisposition::Detached)
+    {
+        Ok(Some(Config::load(&paths.config)?.herdr.worker_placement))
+    } else {
+        Ok(None)
+    }
+}
+
+async fn start_herdr_worker(
+    paths: &Paths,
+    launch_path: &Path,
+    workspace: &Path,
+    launch: &LaunchEnvelope,
+    placement: WorkerPlacement,
+    store: &mut Store,
+    json_output: bool,
+) -> Result<()> {
+    let task_id = launch.spec.task_id;
+    match herdr_plugin::open_worker(paths, launch_path, workspace, placement).await {
+        Ok(pane) => {
+            write_json_atomic(
+                &paths.runs.join(format!("{task_id}.worker-pane.json")),
+                &pane,
+            )
+            .with_context(|| {
+                format!(
+                    "Herdr opened worker pane {} for task {task_id}, but brgr could not persist its receipt; inspect that exact pane and do not repeat the task",
+                    pane.pointer("/result/plugin_pane/pane/pane_id")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("unknown")
+                )
+            })?;
+            print_value(
+                &json!({
+                    "task_id": task_id,
+                    "state": "starting",
+                    "workspace": workspace,
+                    "harness": launch.harness_id,
+                    "revision": launch.spec.revision,
+                    "worker_placement": placement.as_str(),
+                    "worker_pane": pane.pointer("/result/plugin_pane/pane/pane_id"),
+                }),
+                json_output,
+            );
+            Ok(())
+        }
+        Err(error) => {
+            record_unstarted_terminal(
+                store,
+                &launch.spec,
+                TerminalOutcome::Lost,
+                format!("Herdr worker pane launch could not be confirmed: {error}"),
+            )?;
+            Err(error)
+        }
+    }
 }
 
 async fn supervise(paths: &Paths, launch_path: &Path, json_output: bool) -> Result<()> {
@@ -778,6 +997,9 @@ async fn supervise(paths: &Paths, launch_path: &Path, json_output: bool) -> Resu
     let cancel_path = paths.cancel(launch.spec.task_id);
     let pid_path = paths.pid(launch.spec.task_id);
     let mut supervisor = Supervisor::open(&paths.store)?;
+    if launch.delegation_enabled {
+        supervisor.enable_worker_delegation(paths.home.clone(), env::current_exe()?);
+    }
     // Reconcile before publishing our own task receipt. Otherwise a previous
     // crashed attempt without a launch identity could mistake this new process
     // for its original live supervisor and remain unfinished forever.
@@ -1074,6 +1296,48 @@ fn result(paths: &Paths, task: TaskId, ack: bool, json_output: bool) -> Result<(
         json_output,
     );
     Ok(())
+}
+
+async fn wait_for_result(
+    paths: &Paths,
+    task: TaskId,
+    timeout_seconds: u64,
+    json_output: bool,
+) -> Result<()> {
+    if timeout_seconds == 0 || timeout_seconds > plugin_bridge::MAX_BRIDGE_SECONDS - 120 {
+        bail!("wait timeout must be between 1 second and seven days minus the bridge margin");
+    }
+    let store = Store::open(&paths.store)?;
+    let spec = store.task(task)?;
+    require_owner(&store, &spec.owner_id)?;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_seconds);
+    let mut last_reconcile = tokio::time::Instant::now() - Duration::from_secs(1);
+    loop {
+        if last_reconcile.elapsed() >= Duration::from_secs(1) {
+            reconcile_pending(paths)?;
+            last_reconcile = tokio::time::Instant::now();
+        }
+        match store.latest_result(task) {
+            Ok(result) => {
+                print_value(
+                    &json!({
+                        "task_id": task,
+                        "result_id": result.result_id,
+                        "outcome": result.outcome,
+                        "revision": result.revision,
+                    }),
+                    json_output,
+                );
+                return Ok(());
+            }
+            Err(StoreError::TaskNotFound(_)) => {}
+            Err(error) => return Err(error.into()),
+        }
+        if tokio::time::Instant::now() >= deadline {
+            bail!("task {task} did not produce a terminal result before the wait timeout");
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
 }
 
 fn cancel(paths: &Paths, task: TaskId, json_output: bool) -> Result<()> {
@@ -1923,6 +2187,22 @@ fn owner_from_environment() -> Result<OwnerId> {
         .or_else(|| session.map(|id| format!("codex:{id}")))
         .unwrap_or_else(|| "codex:manual".to_owned());
     Ok(OwnerId::new(owner)?)
+}
+
+fn delegation_parent_from_environment() -> Result<Option<(TaskId, AttemptId)>> {
+    match (
+        env::var("BRGR_PARENT_TASK_ID").ok(),
+        env::var("BRGR_PARENT_ATTEMPT_ID").ok(),
+    ) {
+        (None, None) => Ok(None),
+        (Some(task), Some(attempt)) => Ok(Some((
+            task.parse().context("BRGR_PARENT_TASK_ID is invalid")?,
+            attempt
+                .parse()
+                .context("BRGR_PARENT_ATTEMPT_ID is invalid")?,
+        ))),
+        _ => bail!("brgr worker parent identity is incomplete"),
+    }
 }
 
 fn current_session() -> Result<Option<String>> {

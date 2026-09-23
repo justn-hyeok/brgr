@@ -1,6 +1,6 @@
 id = "brgr"
 name = "brgr"
-version = "2.1.0"
+version = "2.2.0"
 min_herdr_version = "0.9.0"
 description = "Managed coding-agent runs with sealed results and explicit decisions"
 platforms = ["macos"]
@@ -37,3 +37,9 @@ id = "codex"
 title = "brgr Codex"
 placement = "tab"
 command = ["target/release/brgr", "plugin", "codex"]
+
+[[panes]]
+id = "worker"
+title = "brgr worker"
+placement = "split"
+command = ["target/release/brgr", "plugin", "worker"]

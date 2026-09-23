@@ -2,6 +2,7 @@
 
 mod artifact;
 mod board;
+mod message;
 
 use std::{
     fmt::Write as _,
@@ -20,6 +21,7 @@ use brgr_protocol::{
     ArtifactRef, AttemptId, AttemptState, Decision, Event, EventId, EventKind, InboxItem, OwnerId,
     ResultEnvelope, ResultId, RouteObservation, SCHEMA_V1, TaskId, TaskSpec,
 };
+pub use message::{MessageDirection, MessageDraft, MessageKind, TaskMessage};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -102,6 +104,29 @@ CREATE TABLE IF NOT EXISTS owner_bindings (
     session_id TEXT NOT NULL,
     binding_epoch INTEGER NOT NULL CHECK (binding_epoch > 0)
 );
+CREATE TABLE IF NOT EXISTS delegation_edges (
+    child_task_id TEXT PRIMARY KEY,
+    parent_task_id TEXT NOT NULL,
+    parent_attempt_id TEXT NOT NULL,
+    depth INTEGER NOT NULL CHECK (depth BETWEEN 1 AND 8),
+    FOREIGN KEY (parent_attempt_id) REFERENCES attempts(attempt_id)
+);
+CREATE TABLE IF NOT EXISTS task_messages (
+    message_id TEXT PRIMARY KEY,
+    task_id TEXT NOT NULL,
+    attempt_id TEXT NOT NULL,
+    direction TEXT NOT NULL CHECK (direction IN ('owner_to_worker', 'worker_to_owner')),
+    kind TEXT NOT NULL CHECK (kind IN ('question', 'reply', 'note')),
+    body TEXT NOT NULL,
+    in_reply_to TEXT,
+    acknowledged INTEGER NOT NULL DEFAULT 0 CHECK (acknowledged IN (0, 1)),
+    FOREIGN KEY (attempt_id) REFERENCES attempts(attempt_id),
+    FOREIGN KEY (in_reply_to) REFERENCES task_messages(message_id)
+);
+CREATE INDEX IF NOT EXISTS task_messages_inbox
+ON task_messages (task_id, attempt_id, direction, acknowledged);
+CREATE UNIQUE INDEX IF NOT EXISTS task_message_one_reply
+ON task_messages (in_reply_to) WHERE kind = 'reply';
 ";
 
 /// The result of an idempotent store mutation.
@@ -195,6 +220,78 @@ impl Store {
         task: &TaskSpec,
         request_digest: &str,
     ) -> Result<WriteOutcome, StoreError> {
+        self.record_task_with_parent(task, request_digest, None)
+    }
+
+    /// Records a child task only while its exact parent attempt is active.
+    /// The parent attempt, not a mutable pane or task name, owns the edge.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a stale parent, wrong child owner, excessive depth,
+    /// conflicting replay, or the same errors as [`Self::record_task`].
+    pub fn record_child_task(
+        &mut self,
+        task: &TaskSpec,
+        request_digest: &str,
+        parent_task_id: TaskId,
+        parent_attempt_id: AttemptId,
+    ) -> Result<WriteOutcome, StoreError> {
+        self.record_task_with_parent(
+            task,
+            request_digest,
+            Some((parent_task_id, parent_attempt_id)),
+        )
+    }
+
+    /// Checks a proposed parent before creating any child worktree. The
+    /// transactional check in `record_child_task` remains authoritative.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a stale parent, wrong owner, excessive depth, or
+    /// a database failure.
+    pub fn validate_delegation_parent(
+        &self,
+        parent_task_id: TaskId,
+        parent_attempt_id: AttemptId,
+        child_owner: &brgr_protocol::OwnerId,
+    ) -> Result<(), StoreError> {
+        let parent: Option<(String, String)> = self
+            .connection
+            .query_row(
+                "SELECT task_id, state FROM attempts WHERE attempt_id = ?1",
+                [parent_attempt_id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        if !parent.is_some_and(|(id, state)| {
+            id == parent_task_id.to_string() && matches!(state.as_str(), "running" | "blocked")
+        }) || child_owner.as_str() != format!("worker:{parent_attempt_id}")
+        {
+            return Err(StoreError::InvalidDelegationParent);
+        }
+        let depth: u32 = self
+            .connection
+            .query_row(
+                "SELECT depth FROM delegation_edges WHERE child_task_id = ?1",
+                [parent_task_id.to_string()],
+                |row| row.get(0),
+            )
+            .optional()?
+            .unwrap_or(0);
+        if depth >= 8 {
+            return Err(StoreError::DelegationDepthExceeded);
+        }
+        Ok(())
+    }
+
+    fn record_task_with_parent(
+        &mut self,
+        task: &TaskSpec,
+        request_digest: &str,
+        parent: Option<(TaskId, AttemptId)>,
+    ) -> Result<WriteOutcome, StoreError> {
         task.validate()?;
         validate_digest(request_digest)?;
         let transaction = self
@@ -218,9 +315,51 @@ impl Store {
                     task.create_request_id.clone(),
                 ));
             }
+            if let Some((parent_task_id, parent_attempt_id)) = parent {
+                let recorded: Option<(String, String)> = transaction
+                    .query_row(
+                        "SELECT parent_task_id, parent_attempt_id FROM delegation_edges WHERE child_task_id = ?1",
+                        [task.task_id.to_string()],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .optional()?;
+                if recorded != Some((parent_task_id.to_string(), parent_attempt_id.to_string())) {
+                    return Err(StoreError::InvalidDelegationParent);
+                }
+            }
             transaction.commit()?;
             return Ok(WriteOutcome::AlreadyApplied);
         }
+
+        let depth = if let Some((parent_task_id, parent_attempt_id)) = parent {
+            let parent_attempt: Option<(String, String)> = transaction
+                .query_row(
+                    "SELECT task_id, state FROM attempts WHERE attempt_id = ?1",
+                    [parent_attempt_id.to_string()],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?;
+            if !parent_attempt.is_some_and(|(id, state)| {
+                id == parent_task_id.to_string() && matches!(state.as_str(), "running" | "blocked")
+            }) || task.owner_id.as_str() != format!("worker:{parent_attempt_id}")
+            {
+                return Err(StoreError::InvalidDelegationParent);
+            }
+            let parent_depth: u32 = transaction
+                .query_row(
+                    "SELECT depth FROM delegation_edges WHERE child_task_id = ?1",
+                    [parent_task_id.to_string()],
+                    |row| row.get(0),
+                )
+                .optional()?
+                .unwrap_or(0);
+            if parent_depth >= 8 {
+                return Err(StoreError::DelegationDepthExceeded);
+            }
+            Some(parent_depth + 1)
+        } else {
+            None
+        };
 
         let spec_json = serde_json::to_string(task)?;
         transaction.execute(
@@ -236,8 +375,67 @@ impl Store {
                 spec_json,
             ],
         )?;
+        if let (Some((parent_task_id, parent_attempt_id)), Some(depth)) = (parent, depth) {
+            transaction.execute(
+                "INSERT INTO delegation_edges (child_task_id, parent_task_id, parent_attempt_id, depth) VALUES (?1, ?2, ?3, ?4)",
+                params![task.task_id.to_string(), parent_task_id.to_string(), parent_attempt_id.to_string(), depth],
+            )?;
+        }
         transaction.commit()?;
         Ok(WriteOutcome::Inserted)
+    }
+
+    /// Returns the stable parent attempt for a child task, when one exists.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database cannot be read or an ID is malformed.
+    pub fn delegation_parent(
+        &self,
+        child_task_id: TaskId,
+    ) -> Result<Option<(TaskId, AttemptId, u32)>, StoreError> {
+        self.connection
+            .query_row(
+                "SELECT parent_task_id, parent_attempt_id, depth FROM delegation_edges WHERE child_task_id = ?1",
+                [child_task_id.to_string()],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, u32>(2)?)),
+            )
+            .optional()?
+            .map(|(task, attempt, depth)| {
+                Ok((
+                    task.parse().map_err(|_| StoreError::InvalidDelegationParent)?,
+                    attempt.parse().map_err(|_| StoreError::InvalidDelegationParent)?,
+                    depth,
+                ))
+            })
+            .transpose()
+    }
+
+    /// Counts children whose latest revision has not been delivered and
+    /// acknowledged by this parent worker.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the metadata query fails.
+    pub fn unsettled_children(&self, parent_attempt_id: AttemptId) -> Result<u64, StoreError> {
+        let count: i64 = self.connection.query_row(
+            "SELECT COUNT(*) FROM delegation_edges e
+             JOIN tasks t ON t.task_id = e.child_task_id
+               AND t.revision = (SELECT MAX(t2.revision) FROM tasks t2 WHERE t2.task_id = e.child_task_id)
+             LEFT JOIN results r ON r.result_id = (
+               SELECT latest.result_id FROM results latest
+               WHERE latest.task_id = t.task_id AND latest.revision = t.revision
+               ORDER BY latest.rowid DESC LIMIT 1
+             )
+             LEFT JOIN inbox_items i ON i.result_id = r.result_id AND i.owner_id = t.owner_id
+             LEFT JOIN decisions d ON d.result_id = r.result_id
+             WHERE e.parent_attempt_id = ?1
+               AND (r.result_id IS NULL OR i.acknowledged IS NULL OR i.acknowledged = 0
+                 OR (json_extract(r.envelope_json, '$.outcome') = 'candidate' AND d.result_id IS NULL))",
+            [parent_attempt_id.to_string()],
+            |row| row.get(0),
+        )?;
+        u64::try_from(count).map_err(|_| StoreError::NumericOverflow)
     }
 
     /// Claims the sole active attempt slot for a task revision.
@@ -255,7 +453,8 @@ impl Store {
         revision: u32,
         attempt_id: AttemptId,
     ) -> Result<(), StoreError> {
-        let transaction = self.connection.unchecked_transaction()?;
+        let transaction =
+            Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
         let spec_json = transaction
             .query_row(
                 "SELECT spec_json FROM tasks WHERE task_id = ?1 AND revision = ?2",
@@ -396,7 +595,8 @@ impl Store {
             return Err(StoreError::InvalidLaunchIntent);
         }
         let epoch = i64::try_from(supervisor_epoch).map_err(|_| StoreError::NumericOverflow)?;
-        let transaction = self.connection.unchecked_transaction()?;
+        let transaction =
+            Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
         let state = transaction
             .query_row(
                 "SELECT state FROM attempts WHERE attempt_id = ?1",
@@ -442,7 +642,8 @@ impl Store {
         identity: &RunnerIdentity,
     ) -> Result<WriteOutcome, StoreError> {
         identity.validate()?;
-        let transaction = self.connection.unchecked_transaction()?;
+        let transaction =
+            Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
         let stored = read_launch_intent(&transaction, attempt_id)?
             .ok_or(StoreError::LaunchIntentNotFound(attempt_id))?;
         if stored.nonce != nonce {
@@ -848,7 +1049,8 @@ impl Store {
         session_id: &str,
         binding_epoch: u64,
     ) -> Result<(), StoreError> {
-        let transaction = self.connection.unchecked_transaction()?;
+        let transaction =
+            Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
         assert_owner_binding(
             &transaction,
             owner_id,
@@ -877,7 +1079,8 @@ impl Store {
     /// Returns an error for missing results, digest/owner mismatches,
     /// conflicting decisions, invalid serialization, or database failure.
     pub fn record_decision(&self, decision: &Decision) -> Result<WriteOutcome, StoreError> {
-        let transaction = self.connection.unchecked_transaction()?;
+        let transaction =
+            Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
         let outcome = record_decision_in_transaction(&transaction, &self.artifacts, decision)?;
         transaction.commit()?;
         Ok(outcome)
@@ -891,7 +1094,8 @@ impl Store {
     /// Returns an error for a missing inbox item, mismatched owner or digest,
     /// conflicting decision, or failed transaction.
     pub fn record_decision_and_ack(&self, decision: &Decision) -> Result<WriteOutcome, StoreError> {
-        let transaction = self.connection.unchecked_transaction()?;
+        let transaction =
+            Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
         let outcome = record_decision_in_transaction(&transaction, &self.artifacts, decision)?;
         let changed = transaction.execute(
             "UPDATE inbox_items SET acknowledged = 1 WHERE owner_id = ?1 AND result_id = ?2",
@@ -1168,7 +1372,8 @@ impl Store {
         }
         let binding_epoch =
             i64::try_from(binding_epoch).map_err(|_| StoreError::NumericOverflow)?;
-        let transaction = self.connection.unchecked_transaction()?;
+        let transaction =
+            Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
         let existing = transaction
             .query_row(
                 "SELECT session_id, binding_epoch FROM owner_bindings WHERE owner_id = ?1",
@@ -1226,7 +1431,8 @@ impl Store {
         if session_id.trim().is_empty() {
             return Err(StoreError::InvalidOwnerBinding);
         }
-        let transaction = self.connection.unchecked_transaction()?;
+        let transaction =
+            Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
         let prior: Option<(String, i64)> = transaction
             .query_row(
                 "SELECT session_id, binding_epoch FROM owner_bindings WHERE owner_id = ?1",
@@ -1648,6 +1854,16 @@ pub enum StoreError {
     IdempotencyConflict(String),
     #[error("request digest must not be empty")]
     InvalidRequestDigest,
+    #[error("delegation parent attempt is stale, mismatched, or owned by another worker")]
+    InvalidDelegationParent,
+    #[error("delegation depth exceeds eight worker edges")]
+    DelegationDepthExceeded,
+    #[error("task message is invalid or exceeds its size limit")]
+    InvalidTaskMessage,
+    #[error("task message {0} does not exist for this recipient")]
+    TaskMessageNotFound(String),
+    #[error("task message {0} conflicts with an earlier request")]
+    TaskMessageConflict(String),
     #[error("attempt {0} does not exist")]
     AttemptNotFound(AttemptId),
     #[error("stored attempt ID is invalid: {0}")]
@@ -2979,6 +3195,144 @@ mod tests {
             .unwrap();
         assert_eq!(forged.result_outcome, None);
         assert_eq!(forged.decision_verdict, None);
+    }
+
+    #[test]
+    fn recursive_delegation_edges_bind_each_child_to_its_live_parent_attempt() {
+        let root = TempDir::new().unwrap();
+        let mut store = Store::open(root.path()).unwrap();
+        let root_task = task();
+        store.record_task(&root_task, "root-digest").unwrap();
+        let root_attempt = AttemptId::new();
+        store
+            .claim_attempt(root_task.task_id, 1, root_attempt)
+            .unwrap();
+        store
+            .compare_and_set_attempt_state(
+                root_attempt,
+                AttemptState::Queued,
+                AttemptState::Starting,
+            )
+            .unwrap();
+        store
+            .compare_and_set_attempt_state(
+                root_attempt,
+                AttemptState::Starting,
+                AttemptState::Running,
+            )
+            .unwrap();
+
+        let mut child = task();
+        child.create_request_id = "request-child".to_owned();
+        child.owner_id = OwnerId::new(format!("worker:{root_attempt}")).unwrap();
+        store
+            .record_child_task(&child, "child-digest", root_task.task_id, root_attempt)
+            .unwrap();
+        assert_eq!(
+            store.delegation_parent(child.task_id).unwrap(),
+            Some((root_task.task_id, root_attempt, 1))
+        );
+        let child_attempt = AttemptId::new();
+        store
+            .claim_attempt(child.task_id, 1, child_attempt)
+            .unwrap();
+        store
+            .compare_and_set_attempt_state(
+                child_attempt,
+                AttemptState::Queued,
+                AttemptState::Starting,
+            )
+            .unwrap();
+        store
+            .compare_and_set_attempt_state(
+                child_attempt,
+                AttemptState::Starting,
+                AttemptState::Running,
+            )
+            .unwrap();
+
+        let mut grandchild = task();
+        grandchild.create_request_id = "request-grandchild".to_owned();
+        grandchild.owner_id = OwnerId::new(format!("worker:{child_attempt}")).unwrap();
+        store
+            .record_child_task(
+                &grandchild,
+                "grandchild-digest",
+                child.task_id,
+                child_attempt,
+            )
+            .unwrap();
+        assert_eq!(
+            store.delegation_parent(grandchild.task_id).unwrap(),
+            Some((child.task_id, child_attempt, 2))
+        );
+        let mut wrong_owner = task();
+        wrong_owner.create_request_id = "request-wrong-owner".to_owned();
+        assert!(matches!(
+            store.record_child_task(&wrong_owner, "wrong-owner", child.task_id, child_attempt),
+            Err(StoreError::InvalidDelegationParent)
+        ));
+        assert!(matches!(
+            store.record_child_task(
+                &wrong_owner,
+                "missing-attempt",
+                child.task_id,
+                AttemptId::new()
+            ),
+            Err(StoreError::InvalidDelegationParent)
+        ));
+        assert!(matches!(
+            store.task(wrong_owner.task_id),
+            Err(StoreError::TaskNotFound(_))
+        ));
+    }
+
+    #[test]
+    fn ninth_delegation_edge_is_rejected_without_recording_a_task() {
+        let root = TempDir::new().unwrap();
+        let mut store = Store::open(root.path()).unwrap();
+        let mut parent = task();
+        store.record_task(&parent, "root").unwrap();
+        let mut parent_attempt = AttemptId::new();
+        for depth in 1..=9 {
+            store
+                .claim_attempt(parent.task_id, 1, parent_attempt)
+                .unwrap();
+            store
+                .compare_and_set_attempt_state(
+                    parent_attempt,
+                    AttemptState::Queued,
+                    AttemptState::Starting,
+                )
+                .unwrap();
+            store
+                .compare_and_set_attempt_state(
+                    parent_attempt,
+                    AttemptState::Starting,
+                    AttemptState::Running,
+                )
+                .unwrap();
+            let mut child = task();
+            child.create_request_id = format!("depth-{depth}");
+            child.owner_id = OwnerId::new(format!("worker:{parent_attempt}")).unwrap();
+            let outcome = store.record_child_task(
+                &child,
+                &format!("digest-{depth}"),
+                parent.task_id,
+                parent_attempt,
+            );
+            if depth == 9 {
+                assert!(matches!(outcome, Err(StoreError::DelegationDepthExceeded)));
+                assert!(matches!(
+                    store.task(child.task_id),
+                    Err(StoreError::TaskNotFound(_))
+                ));
+            } else {
+                outcome.unwrap();
+                parent = child;
+                parent_attempt = AttemptId::new();
+            }
+        }
     }
 
     fn task() -> TaskSpec {

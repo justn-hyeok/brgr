@@ -21,10 +21,11 @@ use tokio::{
     time::{sleep, timeout},
 };
 
-use crate::{Paths, codex_integration, plugin_bridge};
+use crate::{Paths, codex_integration, config::WorkerPlacement, plugin_bridge};
 
 const PLUGIN_ID: &str = "brgr";
 const WORKSPACE_PATH_ENV: &str = "BRGR_PLUGIN_WORKSPACE_CWD";
+const WORKER_LAUNCH_ENV: &str = "BRGR_PLUGIN_WORKER_LAUNCH";
 const HERDR_CALL_DEADLINE: Duration = Duration::from_secs(10);
 
 #[derive(Default, Deserialize)]
@@ -125,6 +126,11 @@ pub async fn open(no_focus: bool, codex: bool) -> Result<()> {
         bail!("HERDR_BIN_PATH is not an absolute Herdr executable");
     }
     let mut command = Command::new(herdr);
+    if let Ok(session) = env::var("HERDR_SESSION")
+        && !session.trim().is_empty()
+    {
+        command.arg("--session").arg(session);
+    }
     command.args([
         "plugin",
         "pane",
@@ -252,6 +258,106 @@ pub async fn codex(paths: &Paths) -> Result<()> {
         let _ = io::stdin().read_line(&mut line);
     }
     result
+}
+
+pub async fn worker(paths: &Paths) -> Result<()> {
+    require_host()?;
+    let launch =
+        PathBuf::from(env::var_os(WORKER_LAUNCH_ENV).context("brgr worker launch path is absent")?);
+    let canonical = launch
+        .canonicalize()
+        .context("brgr worker launch path is unavailable")?;
+    if !canonical.starts_with(paths.launches.canonicalize()?) || !canonical.is_file() {
+        bail!("brgr worker launch path is outside the control home");
+    }
+    println!("brgr worker · {}", canonical.display());
+    crate::supervise(paths, &canonical, true).await
+}
+
+pub async fn open_worker(
+    paths: &Paths,
+    launch: &Path,
+    workspace: &Path,
+    placement: WorkerPlacement,
+) -> Result<serde_json::Value> {
+    require_host()?;
+    let parent_pane = env::var("HERDR_PANE_ID").context("Herdr parent pane id is absent")?;
+    let workspace_id = env::var("HERDR_WORKSPACE_ID").context("Herdr workspace id is absent")?;
+    if parent_pane.trim().is_empty() || workspace_id.trim().is_empty() {
+        bail!("Herdr parent pane or workspace id is empty");
+    }
+    let herdr = PathBuf::from(env::var_os("HERDR_BIN_PATH").context("HERDR_BIN_PATH is absent")?);
+    if !herdr.is_absolute() || !herdr.is_file() {
+        bail!("HERDR_BIN_PATH is not an absolute Herdr executable");
+    }
+    let mut command = Command::new(herdr);
+    if let Ok(session) = env::var("HERDR_SESSION")
+        && !session.trim().is_empty()
+    {
+        command.arg("--session").arg(session);
+    }
+    command.args([
+        "plugin",
+        "pane",
+        "open",
+        "--plugin",
+        PLUGIN_ID,
+        "--entrypoint",
+        "worker",
+        "--placement",
+        if placement == WorkerPlacement::Adjacent {
+            "split"
+        } else {
+            "tab"
+        },
+    ]);
+    if placement == WorkerPlacement::Adjacent {
+        command.args(["--target-pane", &parent_pane, "--direction", "right"]);
+    } else {
+        command.args(["--workspace", &workspace_id]);
+    }
+    command
+        .arg("--cwd")
+        .arg(workspace)
+        .arg("--env")
+        .arg(format!("BRGR_HOME={}", paths.home.display()))
+        .arg("--env")
+        .arg(format!("{WORKER_LAUNCH_ENV}={}", launch.display()))
+        .arg("--no-focus");
+    let output = timeout(HERDR_CALL_DEADLINE, command.kill_on_drop(true).output())
+        .await
+        .context("Herdr worker pane open timed out")??;
+    if !output.status.success() {
+        bail!(
+            "Herdr worker pane could not open: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    if output.stdout.len() > 65_536 {
+        bail!("Herdr worker pane response exceeds 64 KiB");
+    }
+    let receipt: serde_json::Value =
+        serde_json::from_slice(&output.stdout).context("Herdr worker pane response is not JSON")?;
+    if receipt
+        .pointer("/result/type")
+        .and_then(serde_json::Value::as_str)
+        != Some("plugin_pane_opened")
+        || receipt
+            .pointer("/result/plugin_pane/plugin_id")
+            .and_then(serde_json::Value::as_str)
+            != Some(PLUGIN_ID)
+        || receipt
+            .pointer("/result/plugin_pane/entrypoint")
+            .and_then(serde_json::Value::as_str)
+            != Some("worker")
+        || receipt
+            .pointer("/result/plugin_pane/pane/pane_id")
+            .and_then(serde_json::Value::as_str)
+            .is_none()
+    {
+        bail!("Herdr worker pane response has no matching worker identity");
+    }
+    Ok(receipt)
 }
 
 async fn launch_codex(paths: &Paths) -> Result<()> {

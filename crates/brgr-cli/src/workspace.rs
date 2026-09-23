@@ -144,7 +144,7 @@ pub(crate) fn prepare_workspace(
         .find_map(|line| line.strip_prefix("worktree "))
         .map(PathBuf::from)
         .context("git worktree inventory did not contain a primary checkout")?;
-    let repo_name = root
+    let repo_name = primary
         .file_name()
         .and_then(|value| value.to_str())
         .unwrap_or("workspace");

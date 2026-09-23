@@ -11,7 +11,7 @@ use std::{
 
 use anyhow::{Context as _, Result, bail};
 use serde::{Deserialize, Serialize};
-use tokio::{io::AsyncReadExt, process::Child, time::timeout};
+use tokio::{io::AsyncReadExt, process::Child, task::JoinSet, time::timeout};
 
 use crate::{write_json_atomic, write_json_new};
 
@@ -24,6 +24,7 @@ pub const MAX_BRIDGE_SECONDS: u64 = 7 * 24 * 3_600;
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 const KILL_WAIT: Duration = Duration::from_secs(2);
 const MAX_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
+const MAX_ACTIVE_REQUESTS: usize = 64;
 static NEXT_REQUEST: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Serialize, Deserialize)]
@@ -227,15 +228,23 @@ fn load_response(path: &Path, id: &str) -> Result<Option<Response>> {
 }
 
 pub async fn serve(dir: PathBuf, executable: PathBuf, home: PathBuf, workspace: PathBuf) {
+    let mut active = JoinSet::new();
     loop {
-        if let Err(error) = serve_ready(&dir, &executable, &home, &workspace).await {
+        while let Some(completion) = active.try_join_next() {
+            match completion {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => eprintln!("brgr Herdr bridge: {error:#}"),
+                Err(error) => eprintln!("brgr Herdr bridge task failed: {error}"),
+            }
+        }
+        if let Err(error) = dispatch_ready(&dir, &executable, &home, &workspace, &mut active) {
             eprintln!("brgr Herdr bridge: {error:#}");
         }
         tokio::time::sleep(POLL_INTERVAL).await;
     }
 }
 
-async fn serve_ready(dir: &Path, executable: &Path, home: &Path, workspace: &Path) -> Result<()> {
+fn ready_jobs(dir: &Path) -> Result<Vec<(String, PathBuf, bool)>> {
     let mut jobs = Vec::new();
     for entry in fs::read_dir(dir)? {
         let path = entry?.path();
@@ -252,6 +261,46 @@ async fn serve_ready(dir: &Path, executable: &Path, home: &Path, workspace: &Pat
         }
     }
     jobs.sort_by(|left, right| left.0.cmp(&right.0).then(right.2.cmp(&left.2)));
+    Ok(jobs)
+}
+
+fn dispatch_ready(
+    dir: &Path,
+    executable: &Path,
+    home: &Path,
+    workspace: &Path,
+    active: &mut JoinSet<Result<()>>,
+) -> Result<()> {
+    for (id, path, stale_processing) in ready_jobs(dir)? {
+        if active.len() >= MAX_ACTIVE_REQUESTS {
+            break;
+        }
+        if claim_path(dir, &id).exists() {
+            continue;
+        }
+        let dir = dir.to_path_buf();
+        let executable = executable.to_path_buf();
+        let home = home.to_path_buf();
+        let workspace = workspace.to_path_buf();
+        active.spawn(async move {
+            complete_job(
+                &dir,
+                &executable,
+                &home,
+                &workspace,
+                &id,
+                path,
+                stale_processing,
+            )
+            .await
+        });
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+async fn serve_ready(dir: &Path, executable: &Path, home: &Path, workspace: &Path) -> Result<()> {
+    let jobs = ready_jobs(dir)?;
     for (id, path, stale_processing) in jobs {
         if let Err(error) = complete_job(
             dir,
@@ -589,6 +638,51 @@ mod tests {
             serde_json::from_slice(&fs::read(response_path(&dir, "9-9-9")).unwrap()).unwrap();
         assert_eq!(response.id, "9-9-9");
         assert_eq!(response.code, 0);
+    }
+
+    #[tokio::test]
+    async fn slow_wait_does_not_block_a_later_bridge_request() {
+        let root = TempDir::new().unwrap();
+        let dir = root.path().join("bridge");
+        fs::create_dir(&dir).unwrap();
+        let marker = root.path().join("started");
+        let script = write_script(
+            root.path(),
+            "requests.sh",
+            "#!/bin/sh\nif [ \"$1\" = slow ]; then echo started > \"$2\"; exec /bin/sleep 5; fi\nprintf '%s\\n' \"$1\"\n",
+        );
+        let serve = tokio::spawn(serve(
+            dir.clone(),
+            script,
+            root.path().to_path_buf(),
+            root.path().to_path_buf(),
+        ));
+        let slow = sample_request(
+            "6-6-1",
+            root.path(),
+            &["slow", marker.to_str().unwrap()],
+            10,
+        );
+        write_json_new(&request_path(&dir, &slow.id), &slow).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !marker.exists() {
+                tokio::time::sleep(POLL_INTERVAL).await;
+            }
+        })
+        .await
+        .unwrap();
+        let fast = sample_request("6-6-2", root.path(), &["fast"], 2);
+        write_json_new(&request_path(&dir, &fast.id), &fast).unwrap();
+        let response =
+            tokio::time::timeout(Duration::from_secs(2), wait_for_response(&dir, &fast.id, 2))
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(response.code, 0);
+        assert_eq!(response.stdout.trim(), "fast");
+        assert!(!response_path(&dir, &slow.id).exists());
+        serve.abort();
+        let _ = serve.await;
     }
 
     #[tokio::test]
