@@ -26,7 +26,7 @@ limits are described below.
 Install the current public v2 plugin from GitHub:
 
 ```bash
-herdr plugin install justn-hyeok/brgr --ref v2.2.0
+herdr plugin install justn-hyeok/brgr --ref v2.2.1
 ```
 
 The plugin builds `brgr` from the pinned Cargo lockfile, so a Rust toolchain is
@@ -97,9 +97,10 @@ native model observation, and none expose a verified effort observation.
 
 ### Recursive workers
 
-v2.2.0 adds a brgr-owned `worker` plugin pane. A managed
-run started from the plugin Codex pane opens that pane beside its parent by
-default. Set `brgr config set-worker-placement tab` to open future workers in
+v2.2.1 can open the brgr-owned `worker` plugin pane for a detached run from
+any Herdr pane. Run `brgr config set-auto-worker-pane true` once to enable
+automatic panes for ordinary Herdr callers. The brgr plugin Codex pane opens
+worker panes without this setting. Set `brgr config set-worker-placement tab` to open future workers in
 new tabs; `adjacent` restores the default. The setting is stored at
 `BRGR_HOME/config.toml` and never moves panes already running.
 

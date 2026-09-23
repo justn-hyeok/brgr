@@ -39,6 +39,7 @@ pub struct Config {
 #[serde(default, deny_unknown_fields)]
 pub struct HerdrConfig {
     pub worker_placement: WorkerPlacement,
+    pub auto_worker_pane: bool,
 }
 
 impl Config {
@@ -91,6 +92,7 @@ mod tests {
             Config::load(&path).unwrap().herdr.worker_placement,
             WorkerPlacement::Adjacent
         );
+        assert!(!Config::load(&path).unwrap().herdr.auto_worker_pane);
         fs::write(&path, "[herdr]\nworker_placement = 'elsewhere'\n").unwrap();
         assert!(Config::load(&path).is_err());
         fs::write(&path, "[herdr]\nworker_placement = 'tab'\n").unwrap();
@@ -98,6 +100,12 @@ mod tests {
             Config::load(&path).unwrap().herdr.worker_placement,
             WorkerPlacement::Tab
         );
+        fs::write(
+            &path,
+            "[herdr]\nworker_placement = 'tab'\nauto_worker_pane = true\n",
+        )
+        .unwrap();
+        assert!(Config::load(&path).unwrap().herdr.auto_worker_pane);
         let linked = root.path().join("linked.toml");
         std::os::unix::fs::symlink(&path, &linked).unwrap();
         assert!(Config::load(&linked).is_err());

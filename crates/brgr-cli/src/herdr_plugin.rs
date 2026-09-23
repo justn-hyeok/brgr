@@ -280,7 +280,9 @@ pub async fn open_worker(
     workspace: &Path,
     placement: WorkerPlacement,
 ) -> Result<serde_json::Value> {
-    require_host()?;
+    if env::var("HERDR_ENV").as_deref() != Ok("1") {
+        bail!("brgr worker pane requires a Herdr caller");
+    }
     let parent_pane = env::var("HERDR_PANE_ID").context("Herdr parent pane id is absent")?;
     let workspace_id = env::var("HERDR_WORKSPACE_ID").context("Herdr workspace id is absent")?;
     if parent_pane.trim().is_empty() || workspace_id.trim().is_empty() {
