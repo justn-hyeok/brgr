@@ -209,7 +209,12 @@ fn authorized_attempt(
                 .context("worker attempt identity is absent")?
                 .parse()
                 .context("worker attempt identity is invalid")?;
-            if own_task != task || store.active_message_attempt(task)? != own_attempt {
+            let permitted = if require_active {
+                store.active_message_attempt(task)? == own_attempt
+            } else {
+                store.message_attempt_belongs_to_task(task, own_attempt)?
+            };
+            if own_task != task || !permitted {
                 bail!("message target differs from the current worker attempt");
             }
             Ok(own_attempt)

@@ -1,5 +1,15 @@
 # Changelog
 
+## 2.2.2 — 2026-09-24
+
+Preserve a delegated child's exact parent edge when a rejected result is
+revised. The parent attempt must still be active; the revised child may use
+its parent's Git task worktree without crossing the control-home boundary.
+Allow the exact worker attempt to read and acknowledge existing mailbox
+messages after it becomes terminal, while new messages still require an
+active attempt. These fixes do not change task/result wire formats, harness
+routing, or explicit acceptance.
+
 ## 2.2.1 — 2026-09-23
 
 Allow an explicit `herdr.auto_worker_pane` setting to open the brgr worker

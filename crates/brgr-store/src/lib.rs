@@ -299,6 +299,9 @@ impl Store {
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let idempotency =
             record_idempotency(&transaction, &task.create_request_id, request_digest)?;
+        let recorded_parent = recorded_delegation_parent(&transaction, task.task_id)?;
+        let requested_parent =
+            parent.map(|(task_id, attempt_id)| (task_id.to_string(), attempt_id.to_string()));
         if idempotency == WriteOutcome::AlreadyApplied {
             let matches = transaction
                 .query_row(
@@ -315,21 +318,19 @@ impl Store {
                     task.create_request_id.clone(),
                 ));
             }
-            if let Some((parent_task_id, parent_attempt_id)) = parent {
-                let recorded: Option<(String, String)> = transaction
-                    .query_row(
-                        "SELECT parent_task_id, parent_attempt_id FROM delegation_edges WHERE child_task_id = ?1",
-                        [task.task_id.to_string()],
-                        |row| Ok((row.get(0)?, row.get(1)?)),
-                    )
-                    .optional()?;
-                if recorded != Some((parent_task_id.to_string(), parent_attempt_id.to_string())) {
-                    return Err(StoreError::InvalidDelegationParent);
-                }
+            if requested_parent.is_some() && recorded_parent != requested_parent {
+                return Err(StoreError::InvalidDelegationParent);
             }
             transaction.commit()?;
             return Ok(WriteOutcome::AlreadyApplied);
         }
+
+        validate_new_task_parent(
+            &transaction,
+            task.task_id,
+            recorded_parent.as_ref(),
+            requested_parent.as_ref(),
+        )?;
 
         let depth = if let Some((parent_task_id, parent_attempt_id)) = parent {
             let parent_attempt: Option<(String, String)> = transaction
@@ -375,7 +376,9 @@ impl Store {
                 spec_json,
             ],
         )?;
-        if let (Some((parent_task_id, parent_attempt_id)), Some(depth)) = (parent, depth) {
+        if let (Some((parent_task_id, parent_attempt_id)), Some(depth), None) =
+            (parent, depth, recorded_parent)
+        {
             transaction.execute(
                 "INSERT INTO delegation_edges (child_task_id, parent_task_id, parent_attempt_id, depth) VALUES (?1, ?2, ?3, ?4)",
                 params![task.task_id.to_string(), parent_task_id.to_string(), parent_attempt_id.to_string(), depth],
@@ -1578,6 +1581,44 @@ fn decisions_equal_except_id(left: &Decision, right: &Decision) -> bool {
         && left.binding_epoch == right.binding_epoch
         && left.verdict == right.verdict
         && left.reason == right.reason
+}
+
+fn recorded_delegation_parent(
+    transaction: &Transaction<'_>,
+    task_id: TaskId,
+) -> Result<Option<(String, String)>, StoreError> {
+    transaction
+        .query_row(
+            "SELECT parent_task_id, parent_attempt_id FROM delegation_edges WHERE child_task_id = ?1",
+            [task_id.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(StoreError::from)
+}
+
+fn validate_new_task_parent(
+    transaction: &Transaction<'_>,
+    task_id: TaskId,
+    recorded: Option<&(String, String)>,
+    requested: Option<&(String, String)>,
+) -> Result<(), StoreError> {
+    if recorded.is_some() && recorded != requested {
+        return Err(StoreError::InvalidDelegationParent);
+    }
+    if recorded.is_none() && requested.is_some() {
+        let prior_task: Option<i64> = transaction
+            .query_row(
+                "SELECT 1 FROM tasks WHERE task_id = ?1 LIMIT 1",
+                [task_id.to_string()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if prior_task.is_some() {
+            return Err(StoreError::InvalidDelegationParent);
+        }
+    }
+    Ok(())
 }
 
 fn record_idempotency(
@@ -3285,6 +3326,53 @@ mod tests {
             store.task(wrong_owner.task_id),
             Err(StoreError::TaskNotFound(_))
         ));
+    }
+
+    #[test]
+    fn child_revision_keeps_its_parent_edge_and_rejects_unparented_write() {
+        let root = TempDir::new().unwrap();
+        let mut store = Store::open(root.path()).unwrap();
+        let parent = task();
+        store.record_task(&parent, "parent").unwrap();
+        let parent_attempt = AttemptId::new();
+        store
+            .claim_attempt(parent.task_id, 1, parent_attempt)
+            .unwrap();
+        store
+            .compare_and_set_attempt_state(
+                parent_attempt,
+                AttemptState::Queued,
+                AttemptState::Starting,
+            )
+            .unwrap();
+        store
+            .compare_and_set_attempt_state(
+                parent_attempt,
+                AttemptState::Starting,
+                AttemptState::Running,
+            )
+            .unwrap();
+        let mut child = task();
+        child.create_request_id = "child-first".to_owned();
+        child.owner_id = OwnerId::new(format!("worker:{parent_attempt}")).unwrap();
+        store
+            .record_child_task(&child, "child-first", parent.task_id, parent_attempt)
+            .unwrap();
+        let mut revised = child.clone();
+        revised.revision = 2;
+        revised.create_request_id = "child-revised".to_owned();
+        assert!(matches!(
+            store.record_task(&revised, "child-revised"),
+            Err(StoreError::InvalidDelegationParent)
+        ));
+        store
+            .record_child_task(&revised, "child-revised", parent.task_id, parent_attempt)
+            .unwrap();
+        assert_eq!(store.task(child.task_id).unwrap().revision, 2);
+        assert_eq!(
+            store.delegation_parent(child.task_id).unwrap(),
+            Some((parent.task_id, parent_attempt, 1))
+        );
     }
 
     #[test]

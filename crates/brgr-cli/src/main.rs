@@ -697,6 +697,9 @@ async fn run_task(paths: &Paths, args: RunArgs, json_output: bool) -> Result<()>
 async fn revise_task(paths: &Paths, args: ReviseArgs, json_output: bool) -> Result<()> {
     let store = Store::open(&paths.store)?;
     let previous = store.task(args.task)?;
+    let parent = store
+        .delegation_parent(args.task)?
+        .map(|(task, attempt, _depth)| (task, attempt));
     let previous_launch: LaunchEnvelope =
         serde_json::from_slice(&fs::read(paths.launch(args.task, previous.revision))?)?;
     require_owner(&store, &previous.owner_id)?;
@@ -757,7 +760,7 @@ async fn revise_task(paths: &Paths, args: ReviseArgs, json_output: bool) -> Resu
         &activation,
         StartOptions {
             source_workspace: &source_workspace,
-            parent: None,
+            parent,
             enable_delegation: previous_launch.delegation_enabled,
             snapshot: if args.allow_clean_head_snapshot {
                 WorkspaceSnapshot::AllowCleanHead
