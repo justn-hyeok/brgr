@@ -32,6 +32,27 @@
       }
     },
     "acceptance_criteria": { "type": "array", "items": { "type": "string" } },
+    "instructions": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "scope": { "type": "array", "maxItems": 16, "items": { "type": "string", "minLength": 1, "maxLength": 2048 } },
+        "role": { "type": "array", "maxItems": 16, "items": { "type": "string", "minLength": 1, "maxLength": 2048 } },
+        "forward_criteria": { "type": "boolean" }
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "capture_diff": { "type": "boolean" },
+        "capture_logs": { "type": "boolean" },
+        "base_commit": { "type": ["string", "null"], "pattern": "^[0-9a-f]{40}([0-9a-f]{24})?$" },
+        "base_tree": { "type": ["string", "null"], "pattern": "^[0-9a-f]{40}([0-9a-f]{24})?$" },
+        "files": { "type": "array", "maxItems": 8, "items": { "type": "string", "minLength": 1, "maxLength": 1024 } }
+      }
+    },
+    "max_concurrent_children": { "type": ["integer", "null"], "minimum": 1, "maximum": 8 },
     "budget": {
       "type": "object",
       "required": ["deadline_seconds", "max_attempts"],
@@ -42,4 +63,3 @@
     }
   }
 }
-

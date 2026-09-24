@@ -1,12 +1,14 @@
 //! Git-backed task worktree creation. Fail closed; never delete or reset.
 
 use std::{
+    collections::BTreeSet,
     env,
     fmt::Write as _,
-    fs,
-    io::{self, Write},
-    path::{Path, PathBuf},
-    process::Command,
+    fs::{self, File},
+    io::{self, Read as _, Write},
+    os::unix::fs::{MetadataExt as _, PermissionsExt as _},
+    path::{Component, Path, PathBuf},
+    process::{Command, Stdio},
     thread,
     time::{Duration, Instant},
 };
@@ -14,10 +16,400 @@ use std::{
 use anyhow::{Context, Result, bail};
 use brgr_protocol::TaskId;
 use brgr_runner::OMP_ROLE_ADAPTER_V1;
+use serde::Serialize;
 use sha2::{Digest, Sha256};
+use tempfile::{NamedTempFile, tempdir_in};
 
 const GIT_LOCK_ATTEMPTS: u32 = 8;
 const ADMISSION_LOCK_WAIT: Duration = Duration::from_secs(10);
+const MAX_SELECTED_FILES: usize = 32;
+const MAX_SELECTED_FILE_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_SELECTED_TOTAL_BYTES: u64 = 20 * 1024 * 1024;
+
+pub(crate) struct SelectedSnapshot {
+    source: PathBuf,
+    base_revision: String,
+    files: Vec<SelectedFile>,
+}
+
+struct SelectedFile {
+    relative: PathBuf,
+    git_relative: PathBuf,
+    action: SelectedAction,
+}
+
+enum SelectedAction {
+    Copy { contents: Vec<u8>, mode: u32 },
+    Delete,
+}
+
+#[derive(Serialize)]
+pub(crate) struct SnapshotReceipt {
+    task_id: TaskId,
+    revision: u32,
+    source: String,
+    base_revision: String,
+    entries: Vec<SnapshotEntry>,
+}
+
+#[derive(Serialize)]
+struct SnapshotEntry {
+    path: String,
+    action: &'static str,
+    bytes: u64,
+    digest: Option<String>,
+}
+
+impl SelectedSnapshot {
+    pub(crate) fn base_revision(&self) -> &str {
+        &self.base_revision
+    }
+
+    pub(crate) fn receipt(&self, task_id: TaskId, revision: u32) -> SnapshotReceipt {
+        let entries = self
+            .files
+            .iter()
+            .map(|file| {
+                let (action, bytes, digest) = match &file.action {
+                    SelectedAction::Copy { contents, .. } => (
+                        "copy",
+                        u64::try_from(contents.len()).unwrap_or(u64::MAX),
+                        Some(sha256_bytes(contents)),
+                    ),
+                    SelectedAction::Delete => ("delete", 0, None),
+                };
+                SnapshotEntry {
+                    path: file.relative.to_string_lossy().into_owned(),
+                    action,
+                    bytes,
+                    digest,
+                }
+            })
+            .collect();
+        SnapshotReceipt {
+            task_id,
+            revision,
+            source: self.source.to_string_lossy().into_owned(),
+            base_revision: self.base_revision.clone(),
+            entries,
+        }
+    }
+}
+
+pub(crate) fn read_selected_snapshot(
+    source: &Path,
+    selected: &[PathBuf],
+) -> Result<SelectedSnapshot> {
+    if selected.is_empty() || selected.len() > MAX_SELECTED_FILES {
+        bail!("select between 1 and {MAX_SELECTED_FILES} changed files");
+    }
+    let source = source.canonicalize()?;
+    let root_output = Command::new("git")
+        .args(["-C", &lossy(&source), "rev-parse", "--show-toplevel"])
+        .output()?;
+    if !root_output.status.success() {
+        bail!("selected dirty snapshots require a Git workspace");
+    }
+    let root = PathBuf::from(String::from_utf8(root_output.stdout)?.trim()).canonicalize()?;
+    let base_revision = git_stdout(&root, &["rev-parse", "HEAD"])?;
+    let mut seen = BTreeSet::new();
+    let mut total_bytes = 0_u64;
+    let mut files = Vec::with_capacity(selected.len());
+    for relative in selected {
+        validate_selected_path(relative)?;
+        if !seen.insert(relative.clone()) {
+            bail!(
+                "selected snapshot contains a duplicate path: {}",
+                relative.display()
+            );
+        }
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(&source)
+            .args(["status", "--porcelain=v1", "--untracked-files=all", "--"])
+            .arg(relative)
+            .output()?;
+        if !status.status.success() || status.stdout.is_empty() {
+            bail!(
+                "selected path is not an uncommitted change: {}",
+                relative.display()
+            );
+        }
+        let action = read_selected_file(&source, &root, relative, &mut total_bytes)?;
+        let root_relative = source.strip_prefix(&root)?.join(relative);
+        files.push(SelectedFile {
+            relative: relative.clone(),
+            git_relative: root_relative,
+            action,
+        });
+    }
+    Ok(SelectedSnapshot {
+        source,
+        base_revision: base_revision.trim().to_owned(),
+        files,
+    })
+}
+
+fn validate_selected_path(relative: &Path) -> Result<()> {
+    if relative.as_os_str().is_empty()
+        || relative
+            .components()
+            .any(|component| !matches!(component, Component::Normal(name) if name != ".git"))
+    {
+        bail!("snapshot paths must be relative files below the source workspace");
+    }
+    Ok(())
+}
+
+fn read_selected_file(
+    source: &Path,
+    root: &Path,
+    relative: &Path,
+    total_bytes: &mut u64,
+) -> Result<SelectedAction> {
+    let path = source.join(relative);
+    match fs::symlink_metadata(&path) {
+        Ok(before) if before.file_type().is_file() => {
+            if !path.canonicalize()?.starts_with(source) || before.len() > MAX_SELECTED_FILE_BYTES {
+                bail!(
+                    "selected file leaves its source or exceeds 8 MiB: {}",
+                    relative.display()
+                );
+            }
+            *total_bytes = total_bytes
+                .checked_add(before.len())
+                .context("selected snapshot size overflow")?;
+            if *total_bytes > MAX_SELECTED_TOTAL_BYTES {
+                bail!("selected snapshot exceeds 20 MiB");
+            }
+            let file = File::open(&path)?;
+            let opened = file.metadata()?;
+            if before.dev() != opened.dev() || before.ino() != opened.ino() {
+                bail!(
+                    "selected file changed while being opened: {}",
+                    relative.display()
+                );
+            }
+            let mut contents = Vec::new();
+            file.take(MAX_SELECTED_FILE_BYTES + 1)
+                .read_to_end(&mut contents)?;
+            let after = fs::symlink_metadata(&path)?;
+            if contents.len() as u64 != before.len()
+                || before.dev() != after.dev()
+                || before.ino() != after.ino()
+                || before.mtime() != after.mtime()
+                || before.mtime_nsec() != after.mtime_nsec()
+            {
+                bail!(
+                    "selected file changed while being captured: {}",
+                    relative.display()
+                );
+            }
+            Ok(SelectedAction::Copy {
+                contents,
+                mode: before.permissions().mode() & 0o777,
+            })
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            let root_relative = source.strip_prefix(root)?.join(relative);
+            let old = format!("HEAD:{}", root_relative.to_string_lossy());
+            let tracked = Command::new("git")
+                .arg("-C")
+                .arg(root)
+                .args(["cat-file", "-e", &old])
+                .status()?;
+            if !tracked.success() {
+                bail!(
+                    "selected missing file is not a tracked deletion: {}",
+                    relative.display()
+                );
+            }
+            Ok(SelectedAction::Delete)
+        }
+        Ok(_) => bail!(
+            "selected path is not a regular file: {}",
+            relative.display()
+        ),
+        Err(error) => Err(error.into()),
+    }
+}
+
+pub(crate) fn apply_selected_snapshot(target: &Path, snapshot: &SelectedSnapshot) -> Result<()> {
+    let target = target.canonicalize()?;
+    for file in &snapshot.files {
+        let mut parent = target.clone();
+        if let Some(components) = file.relative.parent() {
+            for component in components.components() {
+                parent.push(component.as_os_str());
+                match fs::symlink_metadata(&parent) {
+                    Ok(metadata) if metadata.file_type().is_dir() => {}
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                        fs::create_dir(&parent)?;
+                    }
+                    _ => bail!("snapshot target contains an unsafe parent directory"),
+                }
+            }
+        }
+        if !parent.canonicalize()?.starts_with(&target) {
+            bail!("snapshot target leaves its task worktree");
+        }
+        let destination = target.join(&file.relative);
+        match &file.action {
+            SelectedAction::Copy { contents, mode } => {
+                if let Ok(metadata) = fs::symlink_metadata(&destination)
+                    && !metadata.file_type().is_file()
+                {
+                    bail!(
+                        "snapshot target is not a regular file: {}",
+                        file.relative.display()
+                    );
+                }
+                let mut temporary = NamedTempFile::new_in(&parent)?;
+                temporary.write_all(contents)?;
+                temporary.as_file_mut().sync_all()?;
+                temporary
+                    .as_file_mut()
+                    .set_permissions(fs::Permissions::from_mode(*mode))?;
+                temporary.persist(&destination)?;
+            }
+            SelectedAction::Delete => {
+                let metadata = fs::symlink_metadata(&destination)?;
+                if !metadata.file_type().is_file() {
+                    bail!(
+                        "snapshot deletion target is not regular: {}",
+                        file.relative.display()
+                    );
+                }
+                fs::remove_file(&destination)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Records the selected input state as a Git tree without changing either
+/// checkout's index. Worker diffs use this tree instead of HEAD.
+pub(crate) fn selected_snapshot_tree(
+    target: &Path,
+    snapshot: &SelectedSnapshot,
+    control_dir: &Path,
+) -> Result<String> {
+    let root = PathBuf::from(git_stdout(target, &["rev-parse", "--show-toplevel"])?.trim())
+        .canonicalize()?;
+    let scratch = tempdir_in(control_dir)?;
+    let index = scratch.path().join("snapshot.index");
+    let git = |args: &[&str]| -> Result<String> {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args(args)
+            .env("GIT_INDEX_FILE", &index)
+            .output()?;
+        if !output.status.success() {
+            bail!("selected snapshot Git tree could not be prepared");
+        }
+        Ok(String::from_utf8(output.stdout)?.trim().to_owned())
+    };
+    git(&["read-tree", "HEAD"])?;
+    for file in &snapshot.files {
+        let path = file
+            .git_relative
+            .to_str()
+            .context("snapshot path is not UTF-8")?;
+        match &file.action {
+            SelectedAction::Copy { contents, mode } => {
+                let mut child = Command::new("git")
+                    .arg("-C")
+                    .arg(&root)
+                    .args(["hash-object", "-w", "--path", path, "--stdin"])
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::null())
+                    .spawn()?;
+                child
+                    .stdin
+                    .take()
+                    .context("Git hash input is unavailable")?
+                    .write_all(contents)?;
+                let output = child.wait_with_output()?;
+                if !output.status.success() {
+                    bail!("selected snapshot object could not be written");
+                }
+                let oid = String::from_utf8(output.stdout)?;
+                let mode = if mode & 0o111 == 0 {
+                    "100644"
+                } else {
+                    "100755"
+                };
+                git(&[
+                    "update-index",
+                    "--add",
+                    "--cacheinfo",
+                    &format!("{mode},{},{path}", oid.trim()),
+                ])?;
+            }
+            SelectedAction::Delete => {
+                git(&["update-index", "--force-remove", "--", path])?;
+            }
+        }
+    }
+    let tree = git(&["write-tree"])?;
+    if !matches!(tree.len(), 40 | 64) || !tree.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        bail!("selected snapshot tree identifier is invalid");
+    }
+    // The worker's own index must know about selected new files. Otherwise
+    // `git diff <tree>` treats them as deleted despite their worktree bytes.
+    // Never replace the source checkout's index.
+    let index_path = |workspace: &Path| -> Result<PathBuf> {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(workspace)
+            .args(["rev-parse", "--path-format=absolute", "--git-path", "index"])
+            .output()?;
+        if !output.status.success() {
+            bail!("selected snapshot worktree index is unavailable");
+        }
+        Ok(PathBuf::from(String::from_utf8(output.stdout)?.trim()))
+    };
+    let worker_index = index_path(target)?;
+    if worker_index == index_path(&snapshot.source)? {
+        bail!("selected snapshot would modify the source Git index");
+    }
+    let mut replacement = NamedTempFile::new_in(
+        worker_index
+            .parent()
+            .context("worker Git index has no parent")?,
+    )?;
+    replacement.write_all(&fs::read(&index)?)?;
+    replacement.as_file_mut().sync_all()?;
+    replacement.persist(&worker_index)?;
+    Ok(tree)
+}
+
+pub(crate) fn git_head(workspace: &Path) -> Result<String> {
+    Ok(git_stdout(workspace, &["rev-parse", "HEAD"])?
+        .trim()
+        .to_owned())
+}
+
+pub(crate) fn is_git_workspace(path: &Path) -> Result<bool> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(path)
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .output()?;
+    Ok(output.status.success() && output.stdout == b"true\n")
+}
+
+fn sha256_bytes(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    let mut output = String::with_capacity(71);
+    output.push_str("sha256:");
+    for byte in digest {
+        let _ = write!(output, "{byte:02x}");
+    }
+    output
+}
 
 pub(crate) struct AdmissionLock {
     path: PathBuf,

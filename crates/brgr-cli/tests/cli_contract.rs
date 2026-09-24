@@ -803,6 +803,182 @@ fn rejected_delegated_child_revises_inside_parent_git_worktree() {
 }
 
 #[test]
+fn tree_status_shows_question_and_tree_cancel_stops_both_processes() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("brgr");
+    let workspace = temp.path().join("work");
+    fs::create_dir_all(&workspace).unwrap();
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../testdata/fixtures/gjc")
+        .canonicalize()
+        .unwrap();
+    add_fixture(&home, &fixture, &temp.path().join("scratch"));
+    let root_owner = [("BRGR_OWNER_ID", "codex:tree-cancel")];
+    let root = json_output(&run(
+        &home,
+        &[
+            "run",
+            "SLOW",
+            "--workspace",
+            workspace.to_str().unwrap(),
+            "--enable-delegation",
+        ],
+        &root_owner,
+    ));
+    let root_task = root["task_id"].as_str().unwrap();
+    let store = brgr_store::Store::open(home.join("store")).unwrap();
+    let root_attempt = (0..100)
+        .find_map(|_| {
+            let found = store
+                .active_message_attempt(root_task.parse().unwrap())
+                .ok();
+            if found.is_none() {
+                thread::sleep(Duration::from_millis(20));
+            }
+            found
+        })
+        .expect("root attempt did not become active");
+    let worker_owner = format!("worker:{root_attempt}");
+    let root_attempt_text = root_attempt.to_string();
+    let worker = [
+        ("BRGR_OWNER_ID", worker_owner.as_str()),
+        ("BRGR_SESSION_ID", worker_owner.as_str()),
+        ("BRGR_PARENT_TASK_ID", root_task),
+        ("BRGR_PARENT_ATTEMPT_ID", root_attempt_text.as_str()),
+    ];
+    let child = json_output(&run(
+        &home,
+        &["run", "SLOW", "--workspace", workspace.to_str().unwrap()],
+        &worker,
+    ));
+    let child_task = child["task_id"].as_str().unwrap();
+    for _ in 0..100 {
+        if store
+            .active_message_attempt(child_task.parse().unwrap())
+            .is_ok()
+        {
+            break;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    json_output(&run(
+        &home,
+        &[
+            "message",
+            "send",
+            child_task,
+            "--to",
+            "worker",
+            "--kind",
+            "question",
+            "--body",
+            "Need direction",
+        ],
+        &worker,
+    ));
+    let tree = json_output(&run(&home, &["status", root_task, "--tree"], &root_owner));
+    assert_eq!(tree["nodes"].as_array().unwrap().len(), 2);
+    let child_row = tree["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["task_id"] == child_task)
+        .unwrap();
+    assert_eq!(child_row["waiting_for"], "question");
+    assert!(child_row["remaining_seconds"].as_i64().is_some());
+    let cancelled = json_output(&run(&home, &["cancel", root_task, "--tree"], &root_owner));
+    assert_eq!(cancelled["requested"].as_array().unwrap().len(), 2);
+    let child_terminal = json_output(&run(
+        &home,
+        &["wait", child_task, "--timeout-seconds", "10"],
+        &worker,
+    ));
+    assert_eq!(child_terminal["outcome"], "cancelled", "{child_terminal}");
+    assert_eq!(
+        json_output(&run(
+            &home,
+            &["wait", root_task, "--timeout-seconds", "10"],
+            &root_owner
+        ))["outcome"],
+        "cancelled"
+    );
+}
+
+#[test]
+fn committed_cancellation_intent_stops_running_worker_without_cancel_file() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("brgr");
+    let workspace = temp.path().join("work");
+    fs::create_dir_all(&workspace).unwrap();
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../testdata/fixtures/gjc")
+        .canonicalize()
+        .unwrap();
+    add_fixture(&home, &fixture, &temp.path().join("scratch"));
+    let owner = [("BRGR_OWNER_ID", "codex:cancel-intent")];
+    let task = json_output(&run(
+        &home,
+        &["run", "SLOW", "--workspace", workspace.to_str().unwrap()],
+        &owner,
+    ))["task_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let store = brgr_store::Store::open(home.join("store")).unwrap();
+    let task_id = task.parse().unwrap();
+    for _ in 0..100 {
+        if store.active_message_attempt(task_id).is_ok() {
+            break;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert!(store.active_message_attempt(task_id).is_ok());
+    store.record_cancellation_intents(task_id, false).unwrap();
+    let result = json_output(&run(
+        &home,
+        &["wait", &task, "--timeout-seconds", "10"],
+        &owner,
+    ));
+    assert_eq!(result["outcome"], "cancelled");
+}
+
+#[test]
+fn terminal_tree_cancellation_does_not_cancel_a_later_revision() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("brgr");
+    let workspace = temp.path().join("work");
+    fs::create_dir_all(&workspace).unwrap();
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../testdata/fixtures/gjc")
+        .canonicalize()
+        .unwrap();
+    add_fixture(&home, &fixture, &temp.path().join("scratch"));
+    let owner = [("BRGR_OWNER_ID", "codex:cancel-revision")];
+    let first = json_output(&run(
+        &home,
+        &[
+            "run",
+            "BRGR_FIXTURE_OK",
+            "--workspace",
+            workspace.to_str().unwrap(),
+            "--foreground",
+        ],
+        &owner,
+    ));
+    assert_eq!(first["outcome"], "candidate");
+    let task = first["task_id"].as_str().unwrap();
+    json_output(&run(&home, &["cancel", task, "--tree"], &owner));
+    json_output(&run(&home, &["reject", task, "--reason", "revise"], &owner));
+    let revised = json_output(&run(
+        &home,
+        &["revise", task, "BRGR_FIXTURE_OK", "--foreground"],
+        &owner,
+    ));
+    assert_eq!(revised["outcome"], "candidate");
+    assert_eq!(revised["revision"], 2);
+}
+
+#[test]
 fn relative_control_home_is_canonical_before_worker_delegation() {
     let temp = TempDir::new().unwrap();
     let home = temp.path().join("relative-home");
@@ -1168,6 +1344,322 @@ fn owner_message_wait_survives_the_gap_before_attempt_creation() {
     assert!(!wait.status.success());
     assert!(started.elapsed() >= Duration::from_millis(900));
     assert!(String::from_utf8_lossy(&wait.stderr).contains("before the wait timeout"));
+}
+
+#[test]
+fn worker_receives_criteria_scope_and_role_before_reporting() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("brgr");
+    let workspace = temp.path().join("work");
+    let executable = temp.path().join("gjc");
+    fs::create_dir_all(&workspace).unwrap();
+    fs::write(
+        &executable,
+        "#!/bin/sh\ncase \"$1\" in\n --version) echo 'gjc v-instructions-fixture'; exit 0;;\n --help) printf '%s\\n' '-p, --print' '--mode=<value>' '--no-session' '--no-mcp' '--model' '--thinking'; exit 0;;\nesac\nfor item in \"$@\"; do case \"$item\" in @*) prompt=${item#@};; esac; done\nif /usr/bin/grep -q CHECK_INSTRUCTIONS \"$prompt\"; then\n /usr/bin/grep -q 'snapshot matches' \"$prompt\" || exit 7\n /usr/bin/grep -q 'Only docs' \"$prompt\" || exit 8\n /usr/bin/grep -q 'Act as reviewer' \"$prompt\" || exit 9\nfi\nprintf '%s\\n' '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"INSTRUCTIONS_OK\"}]}}'\nprintf '%s\\n' '{\"type\":\"agent_end\",\"stopReason\":\"completed\"}'\n",
+    )
+    .unwrap();
+    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+    add_fixture(&home, &executable, &temp.path().join("scratch"));
+    let result = json_output(&run(
+        &home,
+        &[
+            "run",
+            "CHECK_INSTRUCTIONS",
+            "--workspace",
+            workspace.to_str().unwrap(),
+            "--criterion",
+            "snapshot matches",
+            "--scope",
+            "Only docs",
+            "--role-instruction",
+            "Act as reviewer",
+            "--foreground",
+        ],
+        &[("BRGR_OWNER_ID", "codex:instructions")],
+    ));
+    assert_eq!(result["outcome"], "candidate");
+    let task = result["task_id"].as_str().unwrap();
+    let detail = json_output(&run(
+        &home,
+        &["result", task],
+        &[("BRGR_OWNER_ID", "codex:instructions")],
+    ));
+    assert_eq!(detail["artifacts"][0]["text"], "INSTRUCTIONS_OK");
+    let stored = brgr_store::Store::open(home.join("store"))
+        .unwrap()
+        .task(task.parse().unwrap())
+        .unwrap();
+    assert_eq!(stored.instructions.scope, ["Only docs"]);
+    assert_eq!(stored.instructions.role, ["Act as reviewer"]);
+}
+
+#[test]
+fn idle_codex_parent_receives_completion_without_another_user_turn() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("brgr");
+    let workspace = temp.path().join("work");
+    let scratch = temp.path().join("scratch");
+    let herdr = temp.path().join("herdr");
+    let agent_state = temp.path().join("agent-state");
+    let prompts = temp.path().join("prompts");
+    fs::create_dir_all(&workspace).unwrap();
+    fs::write(&agent_state, "working").unwrap();
+    fs::write(
+        &herdr,
+        "#!/bin/sh\nif [ \"$1\" = --session ]; then shift 2; fi\ncase \"$1 $2\" in\n 'agent get') state=$(/bin/cat \"$BRGR_TEST_AGENT_STATE\"); printf '{\"result\":{\"agent\":{\"agent\":\"codex\",\"pane_id\":\"w1:p1\",\"agent_status\":\"%s\",\"agent_session\":{\"value\":\"session-a\"}}}}\\n' \"$state\";;\n 'agent prompt') printf '%s\\n' \"$4\" >> \"$BRGR_TEST_PROMPTS\"; printf '{}\\n';;\n *) exit 2;;\nesac\n",
+    )
+    .unwrap();
+    fs::set_permissions(&herdr, fs::Permissions::from_mode(0o700)).unwrap();
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../testdata/fixtures/gjc")
+        .canonicalize()
+        .unwrap();
+    add_fixture(&home, &fixture, &scratch);
+    let envs = [
+        ("CODEX_THREAD_ID", "session-a"),
+        ("BRGR_OWNER_ID", "codex:session-a"),
+        ("BRGR_SESSION_ID", "session-a"),
+        ("HERDR_ENV", "1"),
+        ("HERDR_PANE_ID", "w1:p1"),
+        ("HERDR_WORKSPACE_ID", "w1"),
+        ("HERDR_BIN_PATH", herdr.to_str().unwrap()),
+        ("HERDR_SESSION", "fixture-herdr"),
+        ("BRGR_TEST_AGENT_STATE", agent_state.to_str().unwrap()),
+        ("BRGR_TEST_PROMPTS", prompts.to_str().unwrap()),
+    ];
+    let launch = json_output(&run(
+        &home,
+        &[
+            "run",
+            "BRGR_FIXTURE_OK",
+            "--workspace",
+            workspace.to_str().unwrap(),
+        ],
+        &envs,
+    ));
+    let task = launch["task_id"].as_str().unwrap();
+    let store = brgr_store::Store::open(home.join("store")).unwrap();
+    for _ in 0..100 {
+        if store.latest_result(task.parse().unwrap()).is_ok() {
+            break;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    assert!(store.latest_result(task.parse().unwrap()).is_ok());
+    thread::sleep(Duration::from_millis(700));
+    assert!(!prompts.exists(), "busy Codex parent was prompted");
+    assert_duplicate_notification_dispatcher_exits(&home, task, &envs);
+    fs::write(&agent_state, "idle").unwrap();
+    for _ in 0..100 {
+        if prompts.exists() {
+            break;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    let prompt = fs::read_to_string(&prompts).expect("completion was not delivered");
+    assert!(prompt.contains("FROM BRGR"));
+    assert!(prompt.contains(task));
+    for _ in 0..100 {
+        if store
+            .pending_notifications_for_task(task.parse().unwrap())
+            .unwrap()
+            .is_empty()
+        {
+            break;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        store
+            .pending_notifications_for_task(task.parse().unwrap())
+            .unwrap()
+            .is_empty()
+    );
+    thread::sleep(Duration::from_millis(700));
+    assert_eq!(fs::read_to_string(prompts).unwrap(), prompt);
+}
+
+fn assert_duplicate_notification_dispatcher_exits(home: &Path, task: &str, envs: &[(&str, &str)]) {
+    let mut duplicate = Command::new(brgr())
+        .arg("--home")
+        .arg(home)
+        .arg("__notify")
+        .arg(task)
+        .envs(envs.iter().copied())
+        .spawn()
+        .unwrap();
+    let duplicate_started = Instant::now();
+    while duplicate_started.elapsed() < Duration::from_secs(2) {
+        if duplicate.try_wait().unwrap().is_some() {
+            break;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    if duplicate.try_wait().unwrap().is_none() {
+        duplicate.kill().unwrap();
+        duplicate.wait().unwrap();
+        panic!("duplicate notification dispatcher stayed active");
+    }
+}
+
+#[test]
+fn final_failed_result_does_not_leave_a_notification_dispatcher_running() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("brgr");
+    let workspace = temp.path().join("work");
+    let executable = temp.path().join("gjc");
+    fs::create_dir_all(&workspace).unwrap();
+    fs::write(&executable, "#!/bin/sh\ncase \"$1\" in\n --version) echo 'gjc v-failed-notice-fixture'; exit 0;;\n --help) printf '%s\\n' '-p, --print' '--mode=<value>' '--no-session' '--no-mcp' '--model' '--thinking'; exit 0;;\nesac\nfor item in \"$@\"; do case \"$item\" in @*) prompt=${item#@};; esac; done\nif /usr/bin/grep -q BRGR_FIXTURE_OK \"$prompt\"; then\n printf '%s\\n' '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"BRGR_FIXTURE_OK\"}]}}'\n printf '%s\\n' '{\"type\":\"agent_end\",\"stopReason\":\"completed\"}'\nelse\n exit 7\nfi\n").unwrap();
+    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+    add_fixture(&home, &executable, &temp.path().join("scratch"));
+    let owner = [("BRGR_OWNER_ID", "codex:failed-notice")];
+    let result = json_output(&run(
+        &home,
+        &[
+            "run",
+            "FAIL",
+            "--workspace",
+            workspace.to_str().unwrap(),
+            "--foreground",
+        ],
+        &owner,
+    ));
+    assert_eq!(result["outcome"], "failed");
+    let task = result["task_id"].as_str().unwrap();
+    json_output(&run(&home, &["result", task, "--ack"], &owner));
+    let mut dispatcher = Command::new(brgr())
+        .arg("--home")
+        .arg(&home)
+        .arg("__notify")
+        .arg(task)
+        .spawn()
+        .unwrap();
+    let started = Instant::now();
+    while started.elapsed() < Duration::from_secs(3) {
+        if dispatcher.try_wait().unwrap().is_some() {
+            return;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    dispatcher.kill().unwrap();
+    dispatcher.wait().unwrap();
+    panic!("final failed task kept its notification dispatcher alive");
+}
+
+#[test]
+fn failed_execution_seals_requested_stderr() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("brgr");
+    let workspace = temp.path().join("work");
+    let executable = temp.path().join("gjc");
+    fs::create_dir_all(&workspace).unwrap();
+    fs::write(&executable, r#"#!/bin/sh
+case "$1" in
+ --version) echo 'gjc v-failed-log-fixture'; exit 0;;
+ --help) printf '%s\n' '-p, --print' '--mode=<value>' '--no-session' '--no-mcp' '--model' '--thinking'; exit 0;;
+esac
+for item in "$@"; do case "$item" in @*) prompt=${item#@};; esac; done
+if /usr/bin/grep -q BRGR_FIXTURE_OK "$prompt"; then
+ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"BRGR_FIXTURE_OK"}]}}'
+ printf '%s\n' '{"type":"agent_end","stopReason":"completed"}'
+else
+ printf 'failure diagnostic 23\n' >&2
+ exit 23
+fi
+"#).unwrap();
+    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+    add_fixture(&home, &executable, &temp.path().join("scratch"));
+    let owner = [("BRGR_OWNER_ID", "codex:failed-log")];
+    let result = json_output(&run(
+        &home,
+        &[
+            "run",
+            "FAIL",
+            "--workspace",
+            workspace.to_str().unwrap(),
+            "--capture-logs",
+            "--foreground",
+        ],
+        &owner,
+    ));
+    assert_eq!(result["outcome"], "failed");
+    let detail = json_output(&run(
+        &home,
+        &["result", result["task_id"].as_str().unwrap()],
+        &owner,
+    ));
+    assert_eq!(
+        detail["artifacts"][0]["reference"]["media_type"],
+        "text/x-brgr-stderr"
+    );
+    assert!(
+        detail["artifacts"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("failure diagnostic 23")
+    );
+}
+
+#[test]
+fn transferred_codex_session_receives_undecided_completion() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("brgr");
+    let workspace = temp.path().join("work");
+    let herdr = temp.path().join("herdr");
+    let prompts = temp.path().join("prompts");
+    fs::create_dir_all(&workspace).unwrap();
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../testdata/fixtures/gjc")
+        .canonicalize()
+        .unwrap();
+    add_fixture(&home, &fixture, &temp.path().join("scratch"));
+    let task = json_output(&run(
+        &home,
+        &[
+            "run",
+            "BRGR_FIXTURE_OK",
+            "--workspace",
+            workspace.to_str().unwrap(),
+            "--foreground",
+        ],
+        &[
+            ("CODEX_THREAD_ID", "session-a"),
+            ("BRGR_OWNER_ID", "codex:session-a"),
+            ("BRGR_SESSION_ID", "session-a"),
+        ],
+    ))["task_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    fs::write(
+        &herdr,
+        "#!/bin/sh\nif [ \"$1\" = --session ]; then shift 2; fi\ncase \"$1 $2\" in\n 'agent get') printf '%s\\n' '{\"result\":{\"agent\":{\"agent\":\"codex\",\"pane_id\":\"w1:p2\",\"agent_status\":\"idle\",\"agent_session\":{\"value\":\"session-b\"}}}}';;\n 'agent prompt') printf '%s\\n' \"$4\" >> \"$BRGR_TEST_PROMPTS\"; printf '{}\\n';;\n *) exit 2;;\nesac\n",
+    )
+    .unwrap();
+    fs::set_permissions(&herdr, fs::Permissions::from_mode(0o700)).unwrap();
+    let rebound = json_output(&run(
+        &home,
+        &["bind", &task, "--session", "session-b"],
+        &[
+            ("CODEX_THREAD_ID", "session-b"),
+            ("BRGR_OWNER_ID", "codex:session-a"),
+            ("BRGR_SESSION_ID", "session-b"),
+            ("HERDR_ENV", "1"),
+            ("HERDR_PANE_ID", "w1:p2"),
+            ("HERDR_BIN_PATH", herdr.to_str().unwrap()),
+            ("BRGR_TEST_PROMPTS", prompts.to_str().unwrap()),
+        ],
+    ));
+    assert_eq!(rebound["session_id"], "session-b");
+    for _ in 0..100 {
+        if prompts.exists() {
+            break;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    let prompt = fs::read_to_string(prompts).expect("transferred Codex session was not prompted");
+    assert!(prompt.contains(&task));
+    assert!(prompt.contains("FROM BRGR"));
 }
 
 #[test]
@@ -2008,6 +2500,51 @@ fn unsupported_model_fails_before_task_admission() {
 }
 
 #[test]
+fn missing_write_browser_and_mcp_capabilities_fail_before_task_admission() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("brgr");
+    let workspace = temp.path().join("work");
+    fs::create_dir_all(&workspace).unwrap();
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../testdata/fixtures/gjc")
+        .canonicalize()
+        .unwrap();
+    add_fixture(&home, &fixture, &temp.path().join("scratch"));
+    let owner = [("BRGR_OWNER_ID", "codex:capability-preflight")];
+    for (flag, value, missing) in [
+        ("--requires-write", None, "workspace_write"),
+        ("--requires-browser", None, "browser"),
+        ("--requires-mcp", Some("figma"), "mcp:figma"),
+    ] {
+        let mut args = vec![
+            "run",
+            "BRGR_FIXTURE_OK",
+            "--workspace",
+            workspace.to_str().unwrap(),
+            flag,
+        ];
+        if let Some(value) = value {
+            args.push(value);
+        }
+        let rejected = run(&home, &args, &owner);
+        assert!(!rejected.status.success());
+        assert!(String::from_utf8_lossy(&rejected.stderr).contains(missing));
+    }
+    assert!(
+        fs::read_dir(home.join("launches"))
+            .unwrap()
+            .next()
+            .is_none()
+    );
+    assert!(
+        fs::read_dir(home.join("worktrees"))
+            .unwrap()
+            .next()
+            .is_none()
+    );
+}
+
+#[test]
 fn devin_process_recipe_reaches_owner_acceptance_without_shell_interpolation() {
     let temp = TempDir::new().unwrap();
     let home = temp.path().join("brgr");
@@ -2315,6 +2852,7 @@ fn detached_crash_windows_reconcile_without_duplicate_or_overlapping_attempts() 
         }
         let result_id = terminal["result"]["result_id"].as_str().unwrap();
         let store = brgr_store::Store::open(home.join("store")).unwrap();
+        assert!(store.run_completed(result_id.parse().unwrap()).unwrap());
         let owner_id = brgr_protocol::OwnerId::new("codex:crash-window").unwrap();
         assert_eq!(
             store.inbox(&owner_id, false).unwrap().len(),
@@ -2873,6 +3411,544 @@ fn dirty_source_is_rejected_before_creating_a_task_worktree() {
     assert!(branches.status.success());
     assert!(String::from_utf8_lossy(&branches.stdout).trim().is_empty());
 }
+
+#[test]
+fn selected_dirty_files_are_copied_without_touching_other_source_changes() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("brgr");
+    let repository = temp.path().join("repo");
+    fs::create_dir_all(&repository).unwrap();
+    seed_git_repo(&repository);
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../testdata/fixtures/gjc")
+        .canonicalize()
+        .unwrap();
+    add_fixture(&home, &fixture, &temp.path().join("scratch"));
+    fs::write(repository.join("README"), "selected edit\n").unwrap();
+    fs::write(repository.join("selected.txt"), "new selected file\n").unwrap();
+    fs::write(repository.join("private-note.txt"), "keep at source\n").unwrap();
+    let owner = [("BRGR_OWNER_ID", "codex:selected-dirty")];
+    let result = json_output(&run(
+        &home,
+        &[
+            "run",
+            "BRGR_FIXTURE_OK",
+            "--workspace",
+            repository.to_str().unwrap(),
+            "--snapshot-path",
+            "README",
+            "--snapshot-path",
+            "selected.txt",
+            "--foreground",
+        ],
+        &owner,
+    ));
+    assert_eq!(result["outcome"], "candidate");
+    let task = result["task_id"].as_str().unwrap();
+    let task_workspace = brgr_store::Store::open(home.join("store"))
+        .unwrap()
+        .task(task.parse().unwrap())
+        .unwrap()
+        .workspace;
+    assert_eq!(
+        fs::read_to_string(Path::new(&task_workspace).join("README")).unwrap(),
+        "selected edit\n"
+    );
+    assert_eq!(
+        fs::read_to_string(Path::new(&task_workspace).join("selected.txt")).unwrap(),
+        "new selected file\n"
+    );
+    assert!(!Path::new(&task_workspace).join("private-note.txt").exists());
+    assert_eq!(
+        fs::read_to_string(repository.join("README")).unwrap(),
+        "selected edit\n"
+    );
+    assert_eq!(
+        fs::read_to_string(repository.join("private-note.txt")).unwrap(),
+        "keep at source\n"
+    );
+    let receipt: Value = serde_json::from_slice(
+        &fs::read(home.join("runs").join(format!("{task}-r1.snapshot.json"))).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(receipt["entries"].as_array().unwrap().len(), 2);
+    assert_eq!(receipt["entries"][1]["path"], "selected.txt");
+    let rejected = run(
+        &home,
+        &[
+            "run",
+            "bad path",
+            "--workspace",
+            repository.to_str().unwrap(),
+            "--snapshot-path",
+            "../secret",
+        ],
+        &owner,
+    );
+    assert!(!rejected.status.success());
+}
+
+#[test]
+fn selected_tracked_deletion_is_reproduced_in_task_worktree() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("brgr");
+    let repository = temp.path().join("repo");
+    fs::create_dir_all(&repository).unwrap();
+    seed_git_repo(&repository);
+    fs::write(repository.join("remove.txt"), "tracked\n").unwrap();
+    assert!(
+        Command::new("git")
+            .args(["-C", repository.to_str().unwrap(), "add", "remove.txt"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        Command::new("git")
+            .args([
+                "-C",
+                repository.to_str().unwrap(),
+                "commit",
+                "-m",
+                "add deletion fixture"
+            ])
+            .status()
+            .unwrap()
+            .success()
+    );
+    fs::remove_file(repository.join("remove.txt")).unwrap();
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../testdata/fixtures/gjc")
+        .canonicalize()
+        .unwrap();
+    add_fixture(&home, &fixture, &temp.path().join("scratch"));
+    let result = json_output(&run(
+        &home,
+        &[
+            "run",
+            "BRGR_FIXTURE_OK",
+            "--workspace",
+            repository.to_str().unwrap(),
+            "--snapshot-path",
+            "remove.txt",
+            "--foreground",
+        ],
+        &[("BRGR_OWNER_ID", "codex:selected-delete")],
+    ));
+    assert_eq!(result["outcome"], "candidate");
+    let task = result["task_id"].as_str().unwrap();
+    let workspace = brgr_store::Store::open(home.join("store"))
+        .unwrap()
+        .task(task.parse().unwrap())
+        .unwrap()
+        .workspace;
+    assert!(!Path::new(&workspace).join("remove.txt").exists());
+    let receipt: Value = serde_json::from_slice(
+        &fs::read(home.join("runs").join(format!("{task}-r1.snapshot.json"))).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(receipt["entries"][0]["action"], "delete");
+}
+
+fn integration_conflict_preserves_owner_edit(
+    home: &Path,
+    repository: &Path,
+    task: &str,
+    owner: &[(&str, &str)],
+) {
+    let subdirectory = repository.join("subdirectory");
+    fs::create_dir(&subdirectory).unwrap();
+    let partial = run(
+        home,
+        &["apply", task, "--workspace", subdirectory.to_str().unwrap()],
+        owner,
+    );
+    assert!(!partial.status.success());
+    assert!(String::from_utf8_lossy(&partial.stderr).contains("repository root"));
+    fs::write(repository.join("README"), "conflicting owner edit\n").unwrap();
+    assert!(
+        !run(
+            home,
+            &["apply", task, "--workspace", repository.to_str().unwrap()],
+            owner,
+        )
+        .status
+        .success()
+    );
+    assert_eq!(
+        fs::read_to_string(repository.join("README")).unwrap(),
+        "conflicting owner edit\n"
+    );
+    fs::write(repository.join("README"), "seed\n").unwrap();
+}
+
+fn assert_png_artifact_exports(home: &Path, output: &Path, task: &str, owner: &[(&str, &str)]) {
+    json_output(&run(
+        home,
+        &[
+            "artifact",
+            "export",
+            task,
+            "5",
+            "--output",
+            output.to_str().unwrap(),
+        ],
+        owner,
+    ));
+    assert_eq!(fs::read(output).unwrap(), b"PNG_BYTES");
+}
+
+fn assert_tree_waits_for_owner_approval(home: &Path, task: &str, owner: &[(&str, &str)]) {
+    let status = json_output(&run(home, &["status", task, "--tree"], owner));
+    assert_eq!(status["nodes"][0]["waiting_for"], "approval");
+}
+
+fn configure_misleading_external_diff(repository: &Path, script: &Path) {
+    fs::write(script, "#!/bin/sh\nprintf 'NOT_A_PATCH\\n'\n").unwrap();
+    fs::set_permissions(script, fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(
+        Command::new("git")
+            .arg("-C")
+            .arg(repository)
+            .args(["config", "diff.external"])
+            .arg(script)
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        Command::new("git")
+            .arg("-C")
+            .arg(repository)
+            .args(["config", "diff.noprefix", "true"])
+            .status()
+            .unwrap()
+            .success()
+    );
+}
+
+fn assert_sealed_patch_ignores_external_driver(detail: &Value) {
+    let patch = detail["artifacts"][1]["text"].as_str().unwrap();
+    assert!(patch.contains("diff --git"));
+    assert!(!patch.contains("NOT_A_PATCH"));
+}
+
+#[test]
+fn sealed_evidence_is_reviewed_before_separate_conflict_checked_integration() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("brgr");
+    let repository = temp.path().join("repo");
+    let executable = temp.path().join("gjc");
+    fs::create_dir_all(&repository).unwrap();
+    seed_git_repo(&repository);
+    configure_misleading_external_diff(&repository, &temp.path().join("external-diff"));
+    fs::write(
+        &executable,
+        "#!/bin/sh\ncase \"$1\" in\n --version) echo 'gjc v-evidence-fixture'; exit 0;;\n --help) printf '%s\\n' '-p, --print' '--mode=<value>' '--no-session' '--no-mcp' '--model' '--thinking'; exit 0;;\nesac\nfor item in \"$@\"; do case \"$item\" in @*) prompt=${item#@};; esac; done\nif /usr/bin/grep -q EVIDENCE_TASK \"$prompt\"; then\n printf 'changed\\n' > README\n printf 'report\\n' > report.md\n printf 'PNG_BYTES' > screen.png\n printf 'worker log\\n' >&2\nfi\nprintf '%s\\n' '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"EVIDENCE_OK\"}]}}'\nprintf '%s\\n' '{\"type\":\"agent_end\",\"stopReason\":\"completed\"}'\n",
+    )
+    .unwrap();
+    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+    add_fixture(&home, &executable, &temp.path().join("scratch"));
+    let owner = [("BRGR_OWNER_ID", "codex:evidence")];
+    let outcome = json_output(&run(
+        &home,
+        &[
+            "run",
+            "EVIDENCE_TASK",
+            "--workspace",
+            repository.to_str().unwrap(),
+            "--capture-diff",
+            "--capture-logs",
+            "--evidence-file",
+            "report.md",
+            "--evidence-file",
+            "screen.png",
+            "--foreground",
+        ],
+        &owner,
+    ));
+    assert_eq!(outcome["outcome"], "candidate");
+    let task = outcome["task_id"].as_str().unwrap();
+    let detail = json_output(&run(&home, &["result", task], &owner));
+    assert_eq!(detail["artifacts"].as_array().unwrap().len(), 6);
+    assert_sealed_patch_ignores_external_driver(&detail);
+    assert_tree_waits_for_owner_approval(&home, task, &owner);
+    assert_eq!(
+        detail["artifacts"][1]["reference"]["media_type"],
+        "text/x-diff"
+    );
+    assert_eq!(
+        detail["artifacts"][5]["reference"]["media_type"],
+        "image/png"
+    );
+    assert!(detail["artifacts"][5]["text"].is_null());
+    assert_png_artifact_exports(&home, &temp.path().join("export.png"), task, &owner);
+    integration_conflict_preserves_owner_edit(&home, &repository, task, &owner);
+    let check = json_output(&run(
+        &home,
+        &["apply", task, "--workspace", repository.to_str().unwrap()],
+        &owner,
+    ));
+    assert_eq!(check["status"], "ready");
+    assert_eq!(
+        fs::read_to_string(repository.join("README")).unwrap(),
+        "seed\n"
+    );
+    assert!(
+        !run(
+            &home,
+            &[
+                "apply",
+                task,
+                "--workspace",
+                repository.to_str().unwrap(),
+                "--execute"
+            ],
+            &owner,
+        )
+        .status
+        .success()
+    );
+    json_output(&run(&home, &["accept", task], &owner));
+    let applied = json_output(&run(
+        &home,
+        &[
+            "apply",
+            task,
+            "--workspace",
+            repository.to_str().unwrap(),
+            "--execute",
+        ],
+        &owner,
+    ));
+    assert_eq!(applied["status"], "applied");
+    assert_eq!(
+        fs::read_to_string(repository.join("README")).unwrap(),
+        "changed\n"
+    );
+}
+
+#[test]
+fn selected_input_is_excluded_from_worker_patch_and_source_edit_survives_apply() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("brgr");
+    let repository = temp.path().join("repo");
+    let executable = temp.path().join("gjc");
+    fs::create_dir_all(&repository).unwrap();
+    seed_git_repo(&repository);
+    fs::write(repository.join("worker.txt"), "base\n").unwrap();
+    fs::write(repository.join(".gitattributes"), "*.txt text eol=crlf\n").unwrap();
+    assert!(
+        Command::new("git")
+            .arg("-C")
+            .arg(&repository)
+            .args(["add", "worker.txt", ".gitattributes"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        Command::new("git")
+            .arg("-C")
+            .arg(&repository)
+            .args(["commit", "-m", "worker fixture"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    fs::write(repository.join("README"), "selected source edit\n").unwrap();
+    fs::write(repository.join("selected.txt"), b"new source file\r\n").unwrap();
+    fs::write(&executable, "#!/bin/sh\ncase \"$1\" in\n --version) echo 'gjc v-snapshot-patch-fixture'; exit 0;;\n --help) printf '%s\\n' '-p, --print' '--mode=<value>' '--no-session' '--no-mcp' '--model' '--thinking'; exit 0;;\nesac\nprintf 'worker edit\\n' > worker.txt\nprintf '%s\\n' '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"OK\"}]}}'\nprintf '%s\\n' '{\"type\":\"agent_end\",\"stopReason\":\"completed\"}'\n").unwrap();
+    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+    add_fixture(&home, &executable, &temp.path().join("scratch"));
+    let owner = [("BRGR_OWNER_ID", "codex:snapshot-patch")];
+    let result = json_output(&run(
+        &home,
+        &[
+            "run",
+            "worker patch",
+            "--workspace",
+            repository.to_str().unwrap(),
+            "--snapshot-path",
+            "README",
+            "--snapshot-path",
+            "selected.txt",
+            "--capture-diff",
+            "--foreground",
+        ],
+        &owner,
+    ));
+    assert_eq!(result["outcome"], "candidate");
+    let task = result["task_id"].as_str().unwrap();
+    let detail = json_output(&run(&home, &["result", task], &owner));
+    let patch = detail["artifacts"][1]["text"].as_str().unwrap();
+    assert!(patch.contains("worker.txt"));
+    assert!(!patch.contains("README"));
+    assert!(!patch.contains("selected.txt"));
+    json_output(&run(&home, &["accept", task], &owner));
+    let applied = json_output(&run(
+        &home,
+        &[
+            "apply",
+            task,
+            "--workspace",
+            repository.to_str().unwrap(),
+            "--execute",
+        ],
+        &owner,
+    ));
+    assert_eq!(applied["status"], "applied");
+    assert_eq!(
+        fs::read_to_string(repository.join("README")).unwrap(),
+        "selected source edit\n"
+    );
+    assert_eq!(
+        fs::read_to_string(repository.join("selected.txt")).unwrap(),
+        "new source file\r\n"
+    );
+    assert_eq!(
+        fs::read_to_string(repository.join("worker.txt")).unwrap(),
+        "worker edit\r\n"
+    );
+}
+
+#[test]
+fn committed_worker_change_uses_the_task_start_commit_for_diff_and_apply() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("brgr");
+    let repository = temp.path().join("repo");
+    let executable = temp.path().join("gjc");
+    fs::create_dir_all(&repository).unwrap();
+    seed_git_repo(&repository);
+    fs::write(&executable, "#!/bin/sh\ncase \"$1\" in\n --version) echo 'gjc v-commit-fixture'; exit 0;;\n --help) printf '%s\\n' '-p, --print' '--mode=<value>' '--no-session' '--no-mcp' '--model' '--thinking'; exit 0;;\nesac\nprintf 'committed worker edit\\n' > README\n/usr/bin/git add README\n/usr/bin/git -c user.name=Worker -c user.email=worker@example.test commit -m worker-edit >/dev/null\nprintf '%s\\n' '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"OK\"}]}}'\nprintf '%s\\n' '{\"type\":\"agent_end\",\"stopReason\":\"completed\"}'\n").unwrap();
+    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+    add_fixture(&home, &executable, &temp.path().join("scratch"));
+    let owner = [("BRGR_OWNER_ID", "codex:committed-patch")];
+    let result = json_output(&run(
+        &home,
+        &[
+            "run",
+            "commit the change",
+            "--workspace",
+            repository.to_str().unwrap(),
+            "--capture-diff",
+            "--foreground",
+        ],
+        &owner,
+    ));
+    assert_eq!(result["outcome"], "candidate");
+    let task = result["task_id"].as_str().unwrap();
+    let detail = json_output(&run(&home, &["result", task], &owner));
+    assert!(
+        detail["artifacts"][1]["text"]
+            .as_str()
+            .unwrap()
+            .contains("committed worker edit")
+    );
+    json_output(&run(&home, &["accept", task], &owner));
+    let applied = json_output(&run(
+        &home,
+        &[
+            "apply",
+            task,
+            "--workspace",
+            repository.to_str().unwrap(),
+            "--execute",
+        ],
+        &owner,
+    ));
+    assert_eq!(applied["status"], "applied");
+    assert_eq!(
+        fs::read_to_string(repository.join("README")).unwrap(),
+        "committed worker edit\n"
+    );
+}
+
+#[test]
+fn subdirectory_snapshot_uses_repository_relative_paths() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("brgr");
+    let repository = temp.path().join("repo");
+    let subdirectory = repository.join("sub");
+    let executable = temp.path().join("gjc");
+    fs::create_dir_all(&subdirectory).unwrap();
+    seed_git_repo(&repository);
+    fs::write(subdirectory.join("a"), "base\n").unwrap();
+    assert!(
+        Command::new("git")
+            .arg("-C")
+            .arg(&repository)
+            .args(["add", "sub/a"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        Command::new("git")
+            .arg("-C")
+            .arg(&repository)
+            .args(["commit", "-m", "sub fixture"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        Command::new("git")
+            .arg("-C")
+            .arg(&repository)
+            .args(["config", "diff.relative", "true"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    fs::write(subdirectory.join("a"), "selected sub edit\n").unwrap();
+    fs::write(&executable, "#!/bin/sh\ncase \"$1\" in\n --version) echo 'gjc v-subdir-fixture'; exit 0;;\n --help) printf '%s\\n' '-p, --print' '--mode=<value>' '--no-session' '--no-mcp' '--model' '--thinking'; exit 0;;\nesac\nprintf 'worker root edit\\n' > ../README\nprintf '%s\\n' '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"OK\"}]}}'\nprintf '%s\\n' '{\"type\":\"agent_end\",\"stopReason\":\"completed\"}'\n").unwrap();
+    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+    add_fixture(&home, &executable, &temp.path().join("scratch"));
+    let owner = [("BRGR_OWNER_ID", "codex:subdir-snapshot")];
+    let result = json_output(&run(
+        &home,
+        &[
+            "run",
+            "subdir snapshot",
+            "--workspace",
+            subdirectory.to_str().unwrap(),
+            "--snapshot-path",
+            "a",
+            "--capture-diff",
+            "--foreground",
+        ],
+        &owner,
+    ));
+    assert_eq!(result["outcome"], "candidate");
+    let task = result["task_id"].as_str().unwrap();
+    let detail = json_output(&run(&home, &["result", task], &owner));
+    let patch = detail["artifacts"][1]["text"].as_str().unwrap();
+    assert!(patch.contains("README"), "sealed patch: {patch}");
+    assert!(!patch.contains("sub/a"));
+    json_output(&run(&home, &["accept", task], &owner));
+    let applied = json_output(&run(
+        &home,
+        &[
+            "apply",
+            task,
+            "--workspace",
+            repository.to_str().unwrap(),
+            "--execute",
+        ],
+        &owner,
+    ));
+    assert_eq!(applied["status"], "applied");
+    assert_eq!(
+        fs::read_to_string(subdirectory.join("a")).unwrap(),
+        "selected sub edit\n"
+    );
+    assert_eq!(
+        fs::read_to_string(repository.join("README")).unwrap(),
+        "worker root edit\n"
+    );
+}
+
 fn seed_git_repo(repository: &Path) {
     assert!(
         Command::new("git")

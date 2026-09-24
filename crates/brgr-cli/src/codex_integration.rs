@@ -53,6 +53,22 @@ accept or reject it before the parent reports completion. Use
 `brgr message send|wait|ack` for questions in either direction. Each child
 remains bound to the exact parent attempt; never replace that edge with a
 direct harness CLI call.
+Pass explicit `--criterion`, `--scope`, and `--role-instruction` when the worker
+needs those instructions. Use repeated `--snapshot-path RELATIVE_FILE` only
+for the current uncommitted files the worker must see; inspect the snapshot
+receipt and keep source changes untouched. State write, browser, or MCP needs
+with `--requires-write`, `--requires-browser`, or `--requires-mcp NAME`. A
+capability rejection is a routing failure; do not silently remove the need.
+Request reviewable evidence with `--capture-diff`, `--capture-logs`, and
+`--evidence-file RELATIVE_FILE`. Inspect `brgr result TASK`, export binary
+artifacts with `brgr artifact export TASK INDEX --output PATH`, and distinguish
+result acceptance from `brgr apply TASK --workspace PATH`: the latter checks
+for conflicts and only changes code with explicit `--execute` after acceptance.
+Use `brgr status TASK --tree` to see remaining time and waits, and
+`brgr cancel TASK --tree` when the whole delegation subtree must stop.
+An exact `FROM BRGR` completion callback carries a stable `completion_id`.
+Treat repeated IDs as one notice, inspect the sealed result, and decide or
+acknowledge it; the callback itself is never acceptance.
 For a rejected candidate, use `brgr revise TASK "<corrected objective>"
 --criterion "<new check>"`; do not rewrite the old result or silently retry.
 An unbound result needs `brgr bind TASK` from the current Codex session before

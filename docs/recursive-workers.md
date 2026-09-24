@@ -68,6 +68,12 @@ records the v2.2.1 caller path using a deterministic fixture.
   restart recovery, and concurrent admissions across a nested chain. The
   current fixture covers clean Git worktrees and existing crash-window tests;
   live nested Herdr/model execution is covered only for the recorded runs.
+- The v2.3.0 completion loop adds selected-file dirty snapshots, explicit
+  capability admission, sealed evidence, separate conflict-checked integration,
+  a bounded subtree cancel, and exact-session Herdr completion callbacks.
+  See [completion loop plan](completion-loop-plan.md). Fake-Herdr fixtures
+  cover callback retry and recipient identity; a fresh real Codex pane wake
+  has not yet been run for this branch.
 
 Herdr owns terminal layout and observed pane state. brgr owns task identity,
 attempts, sealed artifacts, inboxes, and decisions. Neither a pane returning

@@ -453,6 +453,9 @@ mod tests {
                 deadline_seconds: 10,
                 max_attempts: 1,
             },
+            instructions: brgr_protocol::TaskInstructions::default(),
+            evidence: brgr_protocol::EvidenceSpec::default(),
+            max_concurrent_children: None,
         };
         store.record_task(&task, "matrix-request-digest").unwrap();
         store.claim_attempt(task_id, 1, attempt_id).unwrap();
@@ -645,6 +648,9 @@ mod tests {
                 deadline_seconds: 10,
                 max_attempts: 1,
             },
+            instructions: brgr_protocol::TaskInstructions::default(),
+            evidence: brgr_protocol::EvidenceSpec::default(),
+            max_concurrent_children: None,
         };
         store.record_task(&task, "cleanup-request-digest").unwrap();
         store.claim_attempt(task_id, 1, attempt_id).unwrap();
