@@ -700,6 +700,109 @@ fn recursive_worker_uses_sibling_worktrees_from_a_git_parent() {
 }
 
 #[test]
+fn rejected_delegated_child_revises_inside_parent_git_worktree() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("brgr");
+    let repository = temp.path().join("repo");
+    fs::create_dir_all(&repository).unwrap();
+    seed_git_repo(&repository);
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../testdata/fixtures/gjc")
+        .canonicalize()
+        .unwrap();
+    add_fixture(&home, &fixture, &temp.path().join("scratch"));
+    let root_owner = [("BRGR_OWNER_ID", "codex:git-revise")];
+    let root = json_output(&run(
+        &home,
+        &[
+            "run",
+            "SLOW",
+            "--workspace",
+            repository.to_str().unwrap(),
+            "--enable-delegation",
+            "--deadline-seconds",
+            "20",
+        ],
+        &root_owner,
+    ));
+    let root_task = root["task_id"].as_str().unwrap();
+    let root_id = root_task.parse().unwrap();
+    let store = brgr_store::Store::open(home.join("store")).unwrap();
+    let root_attempt = (0..200)
+        .find_map(|_| {
+            let found = store.active_message_attempt(root_id).ok();
+            if found.is_none() {
+                thread::sleep(Duration::from_millis(25));
+            }
+            found
+        })
+        .expect("root attempt did not become active");
+    let parent_workspace = store.task(root_id).unwrap().workspace;
+    assert!(Path::new(&parent_workspace).starts_with(home.canonicalize().unwrap()));
+    let worker_owner = format!("worker:{root_attempt}");
+    let root_attempt_text = root_attempt.to_string();
+    let worker = [
+        ("BRGR_OWNER_ID", worker_owner.as_str()),
+        ("BRGR_SESSION_ID", worker_owner.as_str()),
+        ("BRGR_PARENT_TASK_ID", root_task),
+        ("BRGR_PARENT_ATTEMPT_ID", root_attempt_text.as_str()),
+    ];
+    let child = json_output(&run(
+        &home,
+        &[
+            "run",
+            "BRGR_FIXTURE_OK",
+            "--workspace",
+            &parent_workspace,
+            "--foreground",
+        ],
+        &worker,
+    ));
+    assert_eq!(child["outcome"], "candidate");
+    let child_task = child["task_id"].as_str().unwrap();
+    assert_eq!(
+        json_output(&run(
+            &home,
+            &["reject", child_task, "--reason", "revise fixture"],
+            &worker
+        ))["verdict"],
+        "rejected"
+    );
+    let revised = json_output(&run(
+        &home,
+        &[
+            "revise",
+            child_task,
+            "BRGR_FIXTURE_OK",
+            "--workspace",
+            &parent_workspace,
+            "--foreground",
+        ],
+        &worker,
+    ));
+    assert_eq!(revised["outcome"], "candidate");
+    assert_eq!(revised["revision"], 2);
+    let child_id = child_task.parse().unwrap();
+    assert_eq!(
+        store.delegation_parent(child_id).unwrap(),
+        Some((root_id, root_attempt, 1))
+    );
+    assert_eq!(store.unsettled_children(root_attempt).unwrap(), 1);
+    assert_eq!(
+        json_output(&run(&home, &["accept", child_task], &worker))["verdict"],
+        "accepted"
+    );
+    assert_eq!(store.unsettled_children(root_attempt).unwrap(), 0);
+    json_output(&run(&home, &["cancel", root_task], &root_owner));
+    let terminal = json_output(&run(
+        &home,
+        &["wait", root_task, "--timeout-seconds", "10"],
+        &root_owner,
+    ));
+    assert_eq!(terminal["outcome"], "cancelled");
+}
+
+#[test]
 fn relative_control_home_is_canonical_before_worker_delegation() {
     let temp = TempDir::new().unwrap();
     let home = temp.path().join("relative-home");
@@ -948,6 +1051,85 @@ fn unanswered_message_count(home: &Path, task: &str, attempt: &str) -> u64 {
         .unwrap()
 }
 
+fn terminal_worker_can_read_and_ack_existing_message(
+    home: &Path,
+    task: &str,
+    owner: &[(&str, &str)],
+    worker: &[(&str, &str)],
+) {
+    let pending = json_output(&run(
+        home,
+        &[
+            "message",
+            "send",
+            task,
+            "--to",
+            "worker",
+            "--kind",
+            "note",
+            "--body",
+            "Read after exit",
+        ],
+        owner,
+    ));
+    let message_id = pending["message_id"].as_str().unwrap();
+    json_output(&run(home, &["cancel", task], owner));
+    let settled = json_output(&run(
+        home,
+        &["wait", task, "--timeout-seconds", "10"],
+        owner,
+    ));
+    assert_eq!(settled["outcome"], "cancelled");
+    let unread = json_output(&run(
+        home,
+        &["message", "list", task, "--for", "worker"],
+        worker,
+    ));
+    assert_eq!(unread[0]["message_id"], message_id);
+    json_output(&run(
+        home,
+        &["message", "ack", task, message_id, "--for", "worker"],
+        worker,
+    ));
+    let remaining = json_output(&run(
+        home,
+        &["message", "list", task, "--for", "worker"],
+        worker,
+    ));
+    assert_eq!(remaining.as_array().unwrap().len(), 0);
+    let other_attempt = brgr_protocol::AttemptId::new().to_string();
+    let mut wrong_worker = worker.to_vec();
+    wrong_worker.push(("BRGR_PARENT_ATTEMPT_ID", other_attempt.as_str()));
+    assert!(
+        !run(
+            home,
+            &["message", "list", task, "--for", "worker"],
+            &wrong_worker,
+        )
+        .status
+        .success()
+    );
+    assert!(
+        !run(
+            home,
+            &[
+                "message",
+                "send",
+                task,
+                "--to",
+                "owner",
+                "--kind",
+                "note",
+                "--body",
+                "Stale attempt"
+            ],
+            worker,
+        )
+        .status
+        .success()
+    );
+}
+
 #[test]
 fn owner_message_wait_survives_the_gap_before_attempt_creation() {
     let temp = TempDir::new().unwrap();
@@ -1061,25 +1243,7 @@ fn owner_and_worker_exchange_questions_and_replies_during_one_attempt() {
         &owner,
     ));
     assert_eq!(unanswered_message_count(home, task, attempt_text), 0);
-    json_output(&run(home, &["cancel", task], &owner));
-    let settled = json_output(&run(
-        home,
-        &["wait", task, "--timeout-seconds", "10"],
-        &owner,
-    ));
-    assert_eq!(settled["outcome"], "cancelled");
-    let stale_send = [
-        "message",
-        "send",
-        task,
-        "--to",
-        "owner",
-        "--kind",
-        "note",
-        "--body",
-        "Stale attempt",
-    ];
-    assert!(!run(home, &stale_send, &worker).status.success());
+    terminal_worker_can_read_and_ack_existing_message(home, task, &owner, &worker);
 }
 
 #[test]

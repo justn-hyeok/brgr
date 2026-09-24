@@ -142,6 +142,28 @@ impl Store {
         raw.parse().map_err(|_| StoreError::InvalidAttemptId(raw))
     }
 
+    /// Confirms that an attempt belongs to the requested task, including after
+    /// the attempt has become terminal.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database lookup fails.
+    pub fn message_attempt_belongs_to_task(
+        &self,
+        task_id: TaskId,
+        attempt_id: AttemptId,
+    ) -> Result<bool, StoreError> {
+        let found: Option<i64> = self
+            .connection
+            .query_row(
+                "SELECT 1 FROM attempts WHERE task_id = ?1 AND attempt_id = ?2",
+                params![task_id.to_string(), attempt_id.to_string()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(found.is_some())
+    }
+
     /// Returns the exact active attempt that can exchange new messages.
     ///
     /// # Errors
