@@ -26,7 +26,7 @@ limits are described below.
 Install the current public v2 plugin from GitHub:
 
 ```bash
-herdr plugin install justn-hyeok/brgr --ref v2.2.2
+herdr plugin install justn-hyeok/brgr --ref v2.3.0
 ```
 
 The plugin builds `brgr` from the pinned Cargo lockfile, so a Rust toolchain is
@@ -118,6 +118,29 @@ and remaining gates, including the
 [live OMP → GJC → GJC receipt](docs/live-recursive-bridge-2026-09-23.md) and
 [bidirectional message receipt](docs/live-bidirectional-bridge-2026-09-23.md).
 Earlier v2.1.0 binaries do not contain these commands.
+
+### Completion loop (v2.3.0)
+
+A Herdr Codex owner receives a stable completion callback when an exact
+recorded pane and session become idle; busy or transferred sessions retain a
+durable pending notification. A task can carry explicit criteria, scope, and
+role instructions. Repeated `--snapshot-path RELATIVE_FILE` captures selected
+uncommitted regular files or tracked deletions in the worker worktree while
+preserving the source. The captured input is staged only in the worker index;
+the source index and files are unchanged. Use `--requires-write`, `--requires-browser`,
+`--requires-mcp NAME`, or `--require-capability NAME` to reject unsupported
+routes before worker admission.
+
+`--capture-diff`, `--capture-logs`, and `--evidence-file RELATIVE_FILE` seal
+bounded review artifacts. `brgr artifact export TASK INDEX --output PATH`
+exports binary evidence. `brgr apply TASK --workspace PATH` checks a sealed
+tracked-file diff; `--execute` applies it only after an explicit accepted
+result. Untracked worker output needs explicit evidence export or staging by the
+worker before diff capture. The integration target must be the repository root
+at the task's starting commit. `brgr status TASK --tree` shows time and question/approval waits;
+`brgr cancel TASK --tree` records cancellation for the subtree before stopping
+its active processes. See [the completion loop plan](docs/completion-loop-plan.md)
+for the current scope and limits.
 
 Install the local binary and Codex integration, then start a new Codex session:
 

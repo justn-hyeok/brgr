@@ -3,6 +3,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     ffi::OsStr,
+    fmt::Write as _,
     io::{Read as _, Seek as _, SeekFrom},
     os::unix::{fs::MetadataExt, process::CommandExt},
     path::{Path, PathBuf},
@@ -14,7 +15,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use brgr_protocol::{AttemptId, TaskId, TaskSpec};
+use brgr_protocol::{AttemptId, TaskId, TaskInstructions, TaskSpec};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -131,6 +132,8 @@ pub enum CapabilityStatus {
 pub struct RunRequest<'a> {
     pub workspace: &'a Path,
     pub prompt: &'a str,
+    pub criteria: Option<&'a [String]>,
+    pub instructions: Option<&'a TaskInstructions>,
     pub model: Option<&'a str>,
     pub effort: Option<&'a str>,
     pub deadline: Duration,
@@ -202,10 +205,11 @@ impl ProcessRunner {
     ) -> Result<ExecutionOutput, RunnerError> {
         validate_run_input(manifest, &request)?;
 
+        let task_prompt = render_task_prompt(&request);
         let worker_prompt = delegation
             .as_ref()
-            .map(|context| delegation_prompt(context, request.prompt));
-        let prompt = worker_prompt.as_deref().unwrap_or(request.prompt);
+            .map(|context| delegation_prompt(context, &task_prompt));
+        let prompt = worker_prompt.as_deref().unwrap_or(&task_prompt);
         let scratch = tempfile::tempdir()?;
         let prompt_path = scratch.path().join("prompt.txt");
         std::fs::write(&prompt_path, prompt.as_bytes())?;
@@ -402,6 +406,40 @@ impl ProcessRunner {
             elapsed: started.elapsed(),
         })
     }
+}
+
+fn render_task_prompt(request: &RunRequest<'_>) -> String {
+    let criteria = request.criteria.unwrap_or_default();
+    let instructions = request.instructions;
+    if criteria.is_empty() && instructions.is_none_or(TaskInstructions::is_empty) {
+        return request.prompt.to_owned();
+    }
+    let mut rendered = format!(
+        "OBJECTIVE\n{}\n\nTASK WORKSPACE\n{}",
+        request.prompt,
+        request.workspace.display()
+    );
+    if !criteria.is_empty() {
+        rendered.push_str("\n\nACCEPTANCE CRITERIA");
+        for (index, criterion) in criteria.iter().enumerate() {
+            let _ = write!(rendered, "\n{}. {criterion}", index + 1);
+        }
+    }
+    if let Some(instructions) = instructions {
+        if !instructions.scope.is_empty() {
+            rendered.push_str("\n\nSCOPE");
+            for item in &instructions.scope {
+                let _ = write!(rendered, "\n- {item}");
+            }
+        }
+        if !instructions.role.is_empty() {
+            rendered.push_str("\n\nROLE INSTRUCTIONS");
+            for item in &instructions.role {
+                let _ = write!(rendered, "\n- {item}");
+            }
+        }
+    }
+    rendered
 }
 
 fn delegation_prompt(context: &DelegationContext<'_>, objective: &str) -> String {
@@ -1306,6 +1344,8 @@ mod tests {
         let request = RunRequest {
             workspace: workspace.path(),
             prompt,
+            criteria: None,
+            instructions: None,
             model: None,
             effort: None,
             deadline: Duration::from_secs(2),
@@ -1365,6 +1405,9 @@ mod tests {
                 deadline_seconds: 2,
                 max_attempts: 1,
             },
+            instructions: TaskInstructions::default(),
+            evidence: brgr_protocol::EvidenceSpec::default(),
+            max_concurrent_children: None,
         };
         assert!(matches!(
             manifest.validate_task_route(&task),
@@ -1398,6 +1441,8 @@ mod tests {
             RunRequest {
                 workspace: workspace.path(),
                 prompt: "bounded",
+                criteria: None,
+                instructions: None,
                 model: None,
                 effort: None,
                 deadline: Duration::from_millis(250),
@@ -1424,6 +1469,8 @@ mod tests {
             RunRequest {
                 workspace: workspace.path(),
                 prompt: "hello",
+                criteria: None,
+                instructions: None,
                 model: None,
                 effort: None,
                 deadline: Duration::from_secs(2),
@@ -1447,6 +1494,8 @@ mod tests {
             RunRequest {
                 workspace: workspace.path(),
                 prompt: "hello",
+                criteria: None,
+                instructions: None,
                 model: None,
                 effort: None,
                 deadline: Duration::from_secs(2),
@@ -1538,6 +1587,8 @@ mod tests {
         let request = RunRequest {
             workspace: workspace.path(),
             prompt: "ignored",
+            criteria: None,
+            instructions: None,
             model: None,
             effort: None,
             deadline: Duration::from_secs(1),
@@ -1576,6 +1627,8 @@ mod tests {
             RunRequest {
                 workspace: workspace.path(),
                 prompt: "ignored",
+                criteria: None,
+                instructions: None,
                 model: None,
                 effort: None,
                 deadline: Duration::from_secs(10),
@@ -1615,6 +1668,8 @@ mod tests {
             RunRequest {
                 workspace: workspace.path(),
                 prompt: "SLOW",
+                criteria: None,
+                instructions: None,
                 model: None,
                 effort: None,
                 deadline: Duration::from_secs(10),

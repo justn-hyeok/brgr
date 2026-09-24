@@ -1,6 +1,10 @@
 //! Versioned protocol types shared by every brgr component.
 
-use std::{fmt, str::FromStr};
+use std::{
+    fmt,
+    path::{Component, Path},
+    str::FromStr,
+};
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -126,6 +130,44 @@ pub struct AttemptBudget {
     pub max_attempts: u8,
 }
 
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct TaskInstructions {
+    pub scope: Vec<String>,
+    pub role: Vec<String>,
+    pub forward_criteria: bool,
+}
+
+impl TaskInstructions {
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.scope.is_empty() && self.role.is_empty() && !self.forward_criteria
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct EvidenceSpec {
+    pub capture_diff: bool,
+    pub capture_logs: bool,
+    pub files: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_commit: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_tree: Option<String>,
+}
+
+impl EvidenceSpec {
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        !self.capture_diff
+            && !self.capture_logs
+            && self.files.is_empty()
+            && self.base_commit.is_none()
+            && self.base_tree.is_none()
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct TaskSpec {
     pub schema: String,
@@ -140,6 +182,12 @@ pub struct TaskSpec {
     pub artifact_contract: ArtifactContract,
     pub acceptance_criteria: Vec<String>,
     pub budget: AttemptBudget,
+    #[serde(default, skip_serializing_if = "TaskInstructions::is_empty")]
+    pub instructions: TaskInstructions,
+    #[serde(default, skip_serializing_if = "EvidenceSpec::is_empty")]
+    pub evidence: EvidenceSpec,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_concurrent_children: Option<u8>,
 }
 
 impl TaskSpec {
@@ -182,6 +230,46 @@ impl TaskSpec {
                 .any(|criterion| criterion.trim().is_empty())
         {
             return Err(ProtocolError::InvalidAcceptanceCriteria);
+        }
+        if self.instructions.scope.len() > 16
+            || self.instructions.role.len() > 16
+            || self
+                .instructions
+                .scope
+                .iter()
+                .chain(&self.instructions.role)
+                .any(|entry| entry.trim().is_empty() || entry.len() > 2_048)
+        {
+            return Err(ProtocolError::InvalidTaskInstructions);
+        }
+        if self.evidence.base_commit.as_ref().is_some_and(|commit| {
+            !self.evidence.capture_diff
+                || !matches!(commit.len(), 40 | 64)
+                || !commit
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        }) || self.evidence.base_tree.as_ref().is_some_and(|tree| {
+            !self.evidence.capture_diff
+                || !matches!(tree.len(), 40 | 64)
+                || !tree
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        }) || self.evidence.files.len() > 8
+            || self.evidence.files.iter().any(|path| {
+                path.is_empty()
+                    || path.len() > 1_024
+                    || Path::new(path).components().any(
+                        |component| !matches!(component, Component::Normal(name) if name != ".git"),
+                    )
+            })
+        {
+            return Err(ProtocolError::InvalidEvidenceSpec);
+        }
+        if self
+            .max_concurrent_children
+            .is_some_and(|limit| limit == 0 || limit > 8)
+        {
+            return Err(ProtocolError::InvalidChildLimit);
         }
         if self.artifact_contract.max_bytes == 0 || self.budget.deadline_seconds == 0 {
             return Err(ProtocolError::InvalidBudget);
@@ -315,6 +403,12 @@ pub enum ProtocolError {
     EmptyRouteSelector,
     #[error("at least one nonempty acceptance criterion is required")]
     InvalidAcceptanceCriteria,
+    #[error("scope and role instructions must be bounded and nonempty")]
+    InvalidTaskInstructions,
+    #[error("requested evidence paths must be bounded and nonempty")]
+    InvalidEvidenceSpec,
+    #[error("concurrent child limit must be between 1 and 8")]
+    InvalidChildLimit,
     #[error("artifact and deadline limits must be positive")]
     InvalidBudget,
     #[error("v1 permits one initial attempt and at most one retry")]
@@ -350,6 +444,9 @@ mod tests {
                 deadline_seconds: 3_600,
                 max_attempts: 2,
             },
+            instructions: TaskInstructions::default(),
+            evidence: EvidenceSpec::default(),
+            max_concurrent_children: None,
         };
 
         task.validate().unwrap();
@@ -383,6 +480,9 @@ mod tests {
                 deadline_seconds: 1,
                 max_attempts: 3,
             },
+            instructions: TaskInstructions::default(),
+            evidence: EvidenceSpec::default(),
+            max_concurrent_children: None,
         };
 
         assert_eq!(task.validate(), Err(ProtocolError::InvalidAttemptCount));

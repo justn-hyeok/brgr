@@ -1,5 +1,23 @@
 # Changelog
 
+## 2.3.0 — 2026-09-24
+
+Complete the managed delegation loop. Exact Herdr Codex panes receive durable
+completion notifications after they become idle, including session transfer;
+the owner still verifies and explicitly decides each result. Worker prompts can
+carry acceptance criteria, scope, and role instructions. Selected uncommitted
+files can be copied into isolated task worktrees without changing the source.
+
+Capability requirements now fail before task admission when the registered
+harness cannot support the requested work. Bounded diff, log, and file evidence
+can be sealed and exported; requested logs survive failed and cancelled runs.
+Accepted tracked-file patches require a separate conflict-checked apply. Tree
+status exposes waits and remaining time, and
+subtree cancellation prevents new children and stops active process workers.
+Retrying children retain their concurrency slots. These additions preserve the
+explicit decision boundary and do not introduce implicit harness or model
+fallback.
+
 ## 2.2.2 — 2026-09-24
 
 Preserve a delegated child's exact parent edge when a rejected result is

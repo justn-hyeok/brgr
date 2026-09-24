@@ -3,6 +3,8 @@
 mod artifact;
 mod board;
 mod message;
+mod notification;
+mod tree;
 
 use std::{
     fmt::Write as _,
@@ -22,9 +24,11 @@ use brgr_protocol::{
     ResultEnvelope, ResultId, RouteObservation, SCHEMA_V1, TaskId, TaskSpec,
 };
 pub use message::{MessageDirection, MessageDraft, MessageKind, TaskMessage};
+pub use notification::{NotificationTarget, PendingNotification};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+pub use tree::SubtreeNode;
 
 const SCHEMA: &str = r"
 PRAGMA foreign_keys = ON;
@@ -43,6 +47,11 @@ CREATE TABLE IF NOT EXISTS attempts (
     revision INTEGER NOT NULL,
     state TEXT NOT NULL,
     FOREIGN KEY (task_id, revision) REFERENCES tasks(task_id, revision)
+);
+CREATE TABLE IF NOT EXISTS attempt_clocks (
+    attempt_id TEXT PRIMARY KEY,
+    started_at INTEGER NOT NULL,
+    FOREIGN KEY (attempt_id) REFERENCES attempts(attempt_id)
 );
 CREATE TABLE IF NOT EXISTS launch_intents (
     attempt_id TEXT PRIMARY KEY,
@@ -111,6 +120,19 @@ CREATE TABLE IF NOT EXISTS delegation_edges (
     depth INTEGER NOT NULL CHECK (depth BETWEEN 1 AND 8),
     FOREIGN KEY (parent_attempt_id) REFERENCES attempts(attempt_id)
 );
+CREATE INDEX IF NOT EXISTS delegation_edges_parent ON delegation_edges (parent_task_id);
+CREATE TABLE IF NOT EXISTS cancellation_intents (
+    task_id TEXT PRIMARY KEY,
+    revision INTEGER NOT NULL,
+    requested_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS task_run_completions (
+    task_id TEXT NOT NULL,
+    revision INTEGER NOT NULL,
+    result_id TEXT NOT NULL UNIQUE,
+    completed_at INTEGER NOT NULL,
+    PRIMARY KEY (task_id, revision)
+);
 CREATE TABLE IF NOT EXISTS task_messages (
     message_id TEXT PRIMARY KEY,
     task_id TEXT NOT NULL,
@@ -127,6 +149,31 @@ CREATE INDEX IF NOT EXISTS task_messages_inbox
 ON task_messages (task_id, attempt_id, direction, acknowledged);
 CREATE UNIQUE INDEX IF NOT EXISTS task_message_one_reply
 ON task_messages (in_reply_to) WHERE kind = 'reply';
+CREATE TABLE IF NOT EXISTS owner_surfaces (
+    owner_id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    binding_epoch INTEGER NOT NULL,
+    pane_id TEXT NOT NULL,
+    herdr_session TEXT,
+    herdr_bin TEXT NOT NULL,
+    FOREIGN KEY (owner_id) REFERENCES owner_bindings(owner_id)
+);
+CREATE TABLE IF NOT EXISTS completion_notifications (
+    result_id TEXT PRIMARY KEY,
+    task_id TEXT NOT NULL,
+    owner_id TEXT NOT NULL,
+    resolved INTEGER NOT NULL DEFAULT 0 CHECK (resolved IN (0, 1)),
+    delivered_session TEXT,
+    delivered_epoch INTEGER,
+    delivered_pane TEXT,
+    claim_token TEXT,
+    claim_until INTEGER NOT NULL DEFAULT 0,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    FOREIGN KEY (result_id) REFERENCES results(result_id)
+);
+CREATE INDEX IF NOT EXISTS completion_notifications_owner
+ON completion_notifications (owner_id, resolved, delivered_session);
 ";
 
 /// The result of an idempotent store mutation.
@@ -271,6 +318,9 @@ impl Store {
         {
             return Err(StoreError::InvalidDelegationParent);
         }
+        if self.cancellation_requested(parent_task_id)? {
+            return Err(StoreError::DelegationParentCancelled);
+        }
         let depth: u32 = self
             .connection
             .query_row(
@@ -282,6 +332,12 @@ impl Store {
             .unwrap_or(0);
         if depth >= 8 {
             return Err(StoreError::DelegationDepthExceeded);
+        }
+        let parent_spec = self.task_for_attempt(parent_attempt_id)?;
+        if self.active_child_count(parent_attempt_id)?
+            >= u64::from(parent_spec.max_concurrent_children.unwrap_or(2))
+        {
+            return Err(StoreError::ConcurrentChildLimit);
         }
         Ok(())
     }
@@ -332,35 +388,7 @@ impl Store {
             requested_parent.as_ref(),
         )?;
 
-        let depth = if let Some((parent_task_id, parent_attempt_id)) = parent {
-            let parent_attempt: Option<(String, String)> = transaction
-                .query_row(
-                    "SELECT task_id, state FROM attempts WHERE attempt_id = ?1",
-                    [parent_attempt_id.to_string()],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
-                )
-                .optional()?;
-            if !parent_attempt.is_some_and(|(id, state)| {
-                id == parent_task_id.to_string() && matches!(state.as_str(), "running" | "blocked")
-            }) || task.owner_id.as_str() != format!("worker:{parent_attempt_id}")
-            {
-                return Err(StoreError::InvalidDelegationParent);
-            }
-            let parent_depth: u32 = transaction
-                .query_row(
-                    "SELECT depth FROM delegation_edges WHERE child_task_id = ?1",
-                    [parent_task_id.to_string()],
-                    |row| row.get(0),
-                )
-                .optional()?
-                .unwrap_or(0);
-            if parent_depth >= 8 {
-                return Err(StoreError::DelegationDepthExceeded);
-            }
-            Some(parent_depth + 1)
-        } else {
-            None
-        };
+        let depth = validated_parent_depth(&transaction, task, parent)?;
 
         let spec_json = serde_json::to_string(task)?;
         transaction.execute(
@@ -519,6 +547,11 @@ impl Store {
         );
         match inserted {
             Ok(_) => {
+                transaction.execute(
+                    "INSERT INTO attempt_clocks (attempt_id, started_at)
+                     VALUES (?1, CAST(strftime('%s','now') AS INTEGER))",
+                    [attempt_id.to_string()],
+                )?;
                 transaction.commit()?;
                 Ok(())
             }
@@ -810,7 +843,21 @@ impl Store {
         owner_id: &OwnerId,
         result: &ResultEnvelope,
     ) -> Result<WriteOutcome, StoreError> {
-        self.commit_terminal_result_guarded(owner_id, result, None)
+        self.commit_terminal_result_guarded(owner_id, result, None, false)
+    }
+
+    /// Commits the terminal result and the supervisor's final retry decision
+    /// in one transaction.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a conflicting result or completion marker, or a database failure.
+    pub fn commit_terminal_result_final(
+        &mut self,
+        owner_id: &OwnerId,
+        result: &ResultEnvelope,
+    ) -> Result<WriteOutcome, StoreError> {
+        self.commit_terminal_result_guarded(owner_id, result, None, true)
     }
 
     /// Reads separately committed native route evidence for one result.
@@ -857,7 +904,7 @@ impl Store {
         if result.outcome != brgr_protocol::TerminalOutcome::Lost {
             return Err(StoreError::RecoveryRequiresLost);
         }
-        self.commit_terminal_result_guarded(&observed.task.owner_id, result, Some(observed))
+        self.commit_terminal_result_guarded(&observed.task.owner_id, result, Some(observed), true)
     }
 
     fn commit_terminal_result_guarded(
@@ -865,6 +912,7 @@ impl Store {
         owner_id: &OwnerId,
         result: &ResultEnvelope,
         observed: Option<&UnfinishedAttempt>,
+        complete_run: bool,
     ) -> Result<WriteOutcome, StoreError> {
         validate_terminal_result(result)?;
         let envelope_json = serde_json::to_string(result)?;
@@ -890,6 +938,9 @@ impl Store {
                     result.result_id,
                     observation.as_ref(),
                 )?;
+                if complete_run {
+                    insert_run_completion(&transaction, result)?;
+                }
                 transaction.commit()?;
                 return Ok(WriteOutcome::AlreadyApplied);
             }
@@ -931,6 +982,18 @@ impl Store {
             params![owner_id.as_str(), result.result_id.to_string()],
         )?;
         transaction.execute(
+            "INSERT INTO completion_notifications (result_id, task_id, owner_id)
+             VALUES (?1, ?2, ?3)",
+            params![
+                result.result_id.to_string(),
+                result.task_id.to_string(),
+                owner_id.as_str(),
+            ],
+        )?;
+        if complete_run {
+            insert_run_completion(&transaction, result)?;
+        }
+        transaction.execute(
             "UPDATE attempts SET state = ?1 WHERE attempt_id = ?2 AND state = ?3",
             params![
                 state_name(AttemptState::Terminal),
@@ -938,26 +1001,7 @@ impl Store {
                 state_name(current),
             ],
         )?;
-        let terminal_event = Event {
-            schema: SCHEMA_V1.to_owned(),
-            event_id: EventId::new(),
-            attempt_id: result.attempt_id,
-            producer: "brgr.terminal".to_owned(),
-            producer_seq: 1,
-            kind: EventKind::Terminal,
-            payload: serde_json::json!({"result_id": result.result_id}),
-        };
-        transaction.execute(
-            "INSERT INTO events (event_id, attempt_id, producer, producer_seq, event_json)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![
-                terminal_event.event_id.to_string(),
-                terminal_event.attempt_id.to_string(),
-                terminal_event.producer,
-                1_i64,
-                serde_json::to_string(&terminal_event)?,
-            ],
-        )?;
+        insert_terminal_event(&transaction, result)?;
         transaction.commit()?;
         Ok(WriteOutcome::Inserted)
     }
@@ -1028,7 +1072,9 @@ impl Store {
     ///
     /// Returns an error if that owner has no matching inbox item.
     pub fn acknowledge(&self, owner_id: &OwnerId, result_id: ResultId) -> Result<(), StoreError> {
-        let changed = self.connection.execute(
+        let transaction =
+            Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
+        let changed = transaction.execute(
             "UPDATE inbox_items SET acknowledged = 1
              WHERE owner_id = ?1 AND result_id = ?2",
             params![owner_id.as_str(), result_id.to_string()],
@@ -1036,6 +1082,12 @@ impl Store {
         if changed == 0 {
             return Err(StoreError::InboxItemNotFound);
         }
+        transaction.execute(
+            "UPDATE completion_notifications SET resolved = 1,
+               claim_token = NULL, claim_until = 0 WHERE result_id = ?1",
+            [result_id.to_string()],
+        )?;
+        transaction.commit()?;
         Ok(())
     }
 
@@ -1067,6 +1119,11 @@ impl Store {
         if changed == 0 {
             return Err(StoreError::InboxItemNotFound);
         }
+        transaction.execute(
+            "UPDATE completion_notifications SET resolved = 1,
+               claim_token = NULL, claim_until = 0 WHERE result_id = ?1",
+            [result_id.to_string()],
+        )?;
         transaction.commit()?;
         Ok(())
     }
@@ -1107,6 +1164,11 @@ impl Store {
         if changed != 1 {
             return Err(StoreError::InboxItemNotFound);
         }
+        transaction.execute(
+            "UPDATE completion_notifications SET resolved = 1,
+               claim_token = NULL, claim_until = 0 WHERE result_id = ?1",
+            [decision.result_id.to_string()],
+        )?;
         transaction.commit()?;
         Ok(outcome)
     }
@@ -1459,6 +1521,16 @@ impl Store {
                binding_epoch = excluded.binding_epoch",
             params![owner_id.as_str(), session_id, epoch],
         )?;
+        transaction.execute(
+            "UPDATE completion_notifications SET delivered_session = NULL,
+               delivered_epoch = NULL, delivered_pane = NULL,
+               claim_token = NULL, claim_until = 0
+             WHERE owner_id = ?1 AND resolved = 0
+               AND EXISTS (SELECT 1 FROM inbox_items i
+                   WHERE i.result_id = completion_notifications.result_id
+                     AND i.owner_id = ?1 AND i.acknowledged = 0)",
+            [owner_id.as_str()],
+        )?;
         transaction.commit()?;
         u64::try_from(epoch).map_err(|_| StoreError::NumericOverflow)
     }
@@ -1621,6 +1693,64 @@ fn validate_new_task_parent(
     Ok(())
 }
 
+fn validated_parent_depth(
+    transaction: &Transaction<'_>,
+    task: &TaskSpec,
+    parent: Option<(TaskId, AttemptId)>,
+) -> Result<Option<u32>, StoreError> {
+    let Some((parent_task_id, parent_attempt_id)) = parent else {
+        return Ok(None);
+    };
+    let parent_attempt: Option<(String, String)> = transaction
+        .query_row(
+            "SELECT task_id, state FROM attempts WHERE attempt_id = ?1",
+            [parent_attempt_id.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    if !parent_attempt.is_some_and(|(id, state)| {
+        id == parent_task_id.to_string() && matches!(state.as_str(), "running" | "blocked")
+    }) || task.owner_id.as_str() != format!("worker:{parent_attempt_id}")
+    {
+        return Err(StoreError::InvalidDelegationParent);
+    }
+    let cancelling: Option<i64> = transaction
+        .query_row(
+            "SELECT 1 FROM cancellation_intents WHERE task_id = ?1
+             AND revision = (SELECT revision FROM attempts WHERE attempt_id = ?2)",
+            params![parent_task_id.to_string(), parent_attempt_id.to_string()],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if cancelling.is_some() {
+        return Err(StoreError::DelegationParentCancelled);
+    }
+    let parent_spec_json: String = transaction.query_row(
+        "SELECT t.spec_json FROM attempts a JOIN tasks t
+         ON t.task_id = a.task_id AND t.revision = a.revision
+         WHERE a.attempt_id = ?1",
+        [parent_attempt_id.to_string()],
+        |row| row.get(0),
+    )?;
+    let parent_spec: TaskSpec = serde_json::from_str(&parent_spec_json)?;
+    let active_children = tree::active_child_count(transaction, parent_attempt_id)?;
+    if active_children >= i64::from(parent_spec.max_concurrent_children.unwrap_or(2)) {
+        return Err(StoreError::ConcurrentChildLimit);
+    }
+    let parent_depth: u32 = transaction
+        .query_row(
+            "SELECT depth FROM delegation_edges WHERE child_task_id = ?1",
+            [parent_task_id.to_string()],
+            |row| row.get(0),
+        )
+        .optional()?
+        .unwrap_or(0);
+    if parent_depth >= 8 {
+        return Err(StoreError::DelegationDepthExceeded);
+    }
+    Ok(Some(parent_depth + 1))
+}
+
 fn record_idempotency(
     transaction: &Transaction<'_>,
     request_id: &str,
@@ -1675,6 +1805,58 @@ fn read_launch_intent(
         })
     })
     .transpose()
+}
+
+fn insert_terminal_event(
+    transaction: &Transaction<'_>,
+    result: &ResultEnvelope,
+) -> Result<(), StoreError> {
+    let terminal_event = Event {
+        schema: SCHEMA_V1.to_owned(),
+        event_id: EventId::new(),
+        attempt_id: result.attempt_id,
+        producer: "brgr.terminal".to_owned(),
+        producer_seq: 1,
+        kind: EventKind::Terminal,
+        payload: serde_json::json!({"result_id": result.result_id}),
+    };
+    transaction.execute(
+        "INSERT INTO events (event_id, attempt_id, producer, producer_seq, event_json)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![
+            terminal_event.event_id.to_string(),
+            terminal_event.attempt_id.to_string(),
+            terminal_event.producer,
+            1_i64,
+            serde_json::to_string(&terminal_event)?,
+        ],
+    )?;
+    Ok(())
+}
+
+fn insert_run_completion(
+    transaction: &Transaction<'_>,
+    result: &ResultEnvelope,
+) -> Result<(), StoreError> {
+    transaction.execute(
+        "INSERT OR IGNORE INTO task_run_completions
+         (task_id, revision, result_id, completed_at)
+         VALUES (?1, ?2, ?3, CAST(strftime('%s','now') AS INTEGER))",
+        params![
+            result.task_id.to_string(),
+            result.revision,
+            result.result_id.to_string(),
+        ],
+    )?;
+    let recorded: String = transaction.query_row(
+        "SELECT result_id FROM task_run_completions WHERE task_id = ?1 AND revision = ?2",
+        params![result.task_id.to_string(), result.revision],
+        |row| row.get(0),
+    )?;
+    if recorded != result.result_id.to_string() {
+        return Err(StoreError::InvalidNotification);
+    }
+    Ok(())
 }
 
 fn validate_recovery_observation(
@@ -1899,6 +2081,18 @@ pub enum StoreError {
     InvalidDelegationParent,
     #[error("delegation depth exceeds eight worker edges")]
     DelegationDepthExceeded,
+    #[error("parent task has a cancellation request")]
+    DelegationParentCancelled,
+    #[error("parent task reached its concurrent child limit")]
+    ConcurrentChildLimit,
+    #[error("task subtree exceeds the supported size limit")]
+    SubtreeTooLarge,
+    #[error("Codex owner surface is invalid")]
+    InvalidOwnerSurface,
+    #[error("completion notification data is invalid")]
+    InvalidNotification,
+    #[error("completion notification claim or owner binding is stale")]
+    NotificationClaimStale,
     #[error("task message is invalid or exceeds its size limit")]
     InvalidTaskMessage,
     #[error("task message {0} does not exist for this recipient")]
@@ -2007,6 +2201,20 @@ pub enum StoreError {
     InvalidArtifactReference,
     #[error("artifact digest or size does not match its sealed reference")]
     ArtifactIntegrityMismatch,
+}
+
+impl StoreError {
+    #[must_use]
+    pub fn is_retryable_database_contention(&self) -> bool {
+        matches!(
+            self,
+            Self::Database(rusqlite::Error::SqliteFailure(error, _))
+                if matches!(
+                    error.code,
+                    rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+                )
+        )
+    }
 }
 
 #[cfg(test)]
@@ -2309,6 +2517,87 @@ mod tests {
             )
             .unwrap();
         assert_eq!(store.pending_for_session("session-a").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn completion_delivery_claims_once_and_retargets_after_session_transfer() {
+        let root = TempDir::new().unwrap();
+        let mut store = Store::open(root.path()).unwrap();
+        let task = task();
+        let attempt = AttemptId::new();
+        store.record_task(&task, "completion-delivery").unwrap();
+        store.create_attempt(task.task_id, 1, attempt).unwrap();
+        store.bind_owner(&task.owner_id, "session-a", 1).unwrap();
+        store
+            .register_owner_surface(
+                &task.owner_id,
+                "session-a",
+                1,
+                "w1:p1",
+                Some("test-session"),
+                "/bin/herdr",
+            )
+            .unwrap();
+        let result = sealed_result(&store, &task, attempt);
+        store
+            .commit_terminal_result(&task.owner_id, &result)
+            .unwrap();
+        let pending = store.pending_notifications_for_task(task.task_id).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].result_id, result.result_id);
+        let first = store
+            .claim_notification(result.result_id, "claim-a", 100, 20)
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.pane_id, "w1:p1");
+        assert!(
+            store
+                .claim_notification(result.result_id, "other", 101, 20)
+                .unwrap()
+                .is_none()
+        );
+        store
+            .mark_notification_delivered(&first, "claim-a")
+            .unwrap();
+        assert!(
+            store
+                .pending_notifications_for_task(task.task_id)
+                .unwrap()
+                .is_empty()
+        );
+
+        assert_eq!(store.rebind_owner(&task.owner_id, "session-b").unwrap(), 2);
+        assert!(
+            store
+                .claim_notification(result.result_id, "claim-b", 200, 20)
+                .unwrap()
+                .is_none()
+        );
+        store
+            .register_owner_surface(&task.owner_id, "session-b", 2, "w2:p4", None, "/bin/herdr")
+            .unwrap();
+        let second = store
+            .claim_notification(result.result_id, "claim-b", 200, 20)
+            .unwrap()
+            .unwrap();
+        assert_eq!(second.session_id, "session-b");
+        assert_eq!(second.pane_id, "w2:p4");
+        assert!(matches!(
+            store.mark_notification_delivered(&first, "claim-a"),
+            Err(StoreError::NotificationClaimStale)
+        ));
+        store
+            .mark_notification_delivered(&second, "claim-b")
+            .unwrap();
+        store
+            .acknowledge_bound(&task.owner_id, result.result_id, "session-b", 2)
+            .unwrap();
+        assert!(
+            store
+                .pending_notifications_for_task(task.task_id)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -3376,6 +3665,120 @@ mod tests {
     }
 
     #[test]
+    fn subtree_cancellation_blocks_new_children_and_bounds_concurrency() {
+        let root = TempDir::new().unwrap();
+        let mut store = Store::open(root.path()).unwrap();
+        let mut parent = task();
+        parent.max_concurrent_children = Some(1);
+        store.record_task(&parent, "tree-parent").unwrap();
+        let attempt = AttemptId::new();
+        store.claim_attempt(parent.task_id, 1, attempt).unwrap();
+        store
+            .compare_and_set_attempt_state(attempt, AttemptState::Queued, AttemptState::Starting)
+            .unwrap();
+        store
+            .compare_and_set_attempt_state(attempt, AttemptState::Starting, AttemptState::Running)
+            .unwrap();
+        let mut child = task();
+        child.owner_id = OwnerId::new(format!("worker:{attempt}")).unwrap();
+        child.create_request_id = "first-child".to_owned();
+        store
+            .record_child_task(&child, "first-child", parent.task_id, attempt)
+            .unwrap();
+        let mut second = task();
+        second.owner_id = child.owner_id.clone();
+        second.create_request_id = "second-child".to_owned();
+        assert!(matches!(
+            store.validate_delegation_parent(parent.task_id, attempt, &second.owner_id),
+            Err(StoreError::ConcurrentChildLimit)
+        ));
+        let nodes = store
+            .record_cancellation_intents(parent.task_id, true)
+            .unwrap();
+        assert_eq!(nodes.len(), 2);
+        assert_eq!(nodes[0].task_id, child.task_id);
+        assert!(store.cancellation_requested(parent.task_id).unwrap());
+        assert!(store.cancellation_requested(child.task_id).unwrap());
+        assert!(matches!(
+            store.record_child_task(&second, "second-child", parent.task_id, attempt),
+            Err(StoreError::DelegationParentCancelled)
+        ));
+        assert!(
+            store
+                .latest_attempt_clock(parent.task_id)
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn retrying_child_still_occupies_its_parent_concurrency_slot() {
+        let root = TempDir::new().unwrap();
+        let mut store = Store::open(root.path()).unwrap();
+        let mut parent = task();
+        parent.max_concurrent_children = Some(1);
+        store.record_task(&parent, "retry-parent").unwrap();
+        let parent_attempt = AttemptId::new();
+        store
+            .claim_attempt(parent.task_id, 1, parent_attempt)
+            .unwrap();
+        store
+            .compare_and_set_attempt_state(
+                parent_attempt,
+                AttemptState::Queued,
+                AttemptState::Starting,
+            )
+            .unwrap();
+        store
+            .compare_and_set_attempt_state(
+                parent_attempt,
+                AttemptState::Starting,
+                AttemptState::Running,
+            )
+            .unwrap();
+        let mut child = task();
+        child.owner_id = OwnerId::new(format!("worker:{parent_attempt}")).unwrap();
+        child.create_request_id = "retry-child".to_owned();
+        store
+            .record_child_task(&child, "retry-child", parent.task_id, parent_attempt)
+            .unwrap();
+        let first_attempt = AttemptId::new();
+        store
+            .claim_attempt(child.task_id, 1, first_attempt)
+            .unwrap();
+        let failed = ResultEnvelope {
+            outcome: TerminalOutcome::Failed,
+            artifacts: vec![],
+            error: Some("transient spawn failure".to_owned()),
+            ..result(&child, first_attempt)
+        };
+        store
+            .commit_terminal_result(&child.owner_id, &failed)
+            .unwrap();
+        store.grant_pre_spawn_retry(first_attempt).unwrap();
+        assert_eq!(store.active_child_count(parent_attempt).unwrap(), 1);
+        assert!(matches!(
+            store.validate_delegation_parent(parent.task_id, parent_attempt, &child.owner_id),
+            Err(StoreError::ConcurrentChildLimit)
+        ));
+        let second_attempt = AttemptId::new();
+        store
+            .claim_attempt(child.task_id, 1, second_attempt)
+            .unwrap();
+        assert_eq!(store.active_child_count(parent_attempt).unwrap(), 1);
+        let final_failed = ResultEnvelope {
+            attempt_id: second_attempt,
+            result_id: ResultId::new(),
+            ..failed
+        };
+        store
+            .commit_terminal_result_final(&child.owner_id, &final_failed)
+            .unwrap();
+        assert!(store.run_completed(final_failed.result_id).unwrap());
+        assert_eq!(store.active_child_count(parent_attempt).unwrap(), 0);
+    }
+
+    #[test]
     fn ninth_delegation_edge_is_rejected_without_recording_a_task() {
         let root = TempDir::new().unwrap();
         let mut store = Store::open(root.path()).unwrap();
@@ -3447,6 +3850,9 @@ mod tests {
                 deadline_seconds: 30,
                 max_attempts: 2,
             },
+            instructions: brgr_protocol::TaskInstructions::default(),
+            evidence: brgr_protocol::EvidenceSpec::default(),
+            max_concurrent_children: None,
         }
     }
 

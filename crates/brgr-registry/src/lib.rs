@@ -321,6 +321,8 @@ impl Registry {
             brgr_runner::RunRequest {
                 workspace: &workspace,
                 prompt,
+                criteria: None,
+                instructions: None,
                 model,
                 effort,
                 deadline: Duration::from_mins(1),
@@ -2102,6 +2104,8 @@ mod tests {
             brgr_runner::RunRequest {
                 workspace: root.path(),
                 prompt: "second result",
+                criteria: None,
+                instructions: None,
                 model: None,
                 effort: None,
                 deadline: Duration::from_secs(2),
@@ -2168,6 +2172,8 @@ mod tests {
             brgr_runner::RunRequest {
                 workspace: root.path(),
                 prompt: "second",
+                criteria: None,
+                instructions: None,
                 model: None,
                 effort: None,
                 deadline: Duration::from_secs(2),

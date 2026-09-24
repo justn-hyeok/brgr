@@ -1,12 +1,16 @@
 mod codex_integration;
 mod config;
+mod evidence;
 mod herdr_plugin;
 mod message;
+mod notification;
 mod pane_cleanup;
 mod plugin_bridge;
+mod tree_status;
 mod workspace;
 
 use std::{
+    collections::BTreeSet,
     env,
     fmt::Write as _,
     fs::{self, OpenOptions},
@@ -25,15 +29,15 @@ use anyhow::{Context, Result, bail};
 use brgr_core::{ExecutionObservation, Supervisor, TaskRevision};
 use brgr_protocol::{
     ArtifactContract, AttemptBudget, AttemptId, AttemptState, Decision, DecisionId,
-    DecisionVerdict, OwnerId, ResultEnvelope, ResultId, Route, SCHEMA_V1, TaskId, TaskSpec,
-    TerminalOutcome,
+    DecisionVerdict, EvidenceSpec, OwnerId, ResultEnvelope, ResultId, Route, SCHEMA_V1, TaskId,
+    TaskInstructions, TaskSpec, TerminalOutcome,
 };
 use brgr_registry::{ActivationReceipt, Health, Registry};
 use brgr_runner::{
     ExecutionMode, HarnessManifest, LaunchSpec, MANIFEST_SCHEMA_V1, PROCESS_ADAPTER_V1, ProbeSpec,
     ResultSource, ResultSpec,
 };
-use brgr_store::{RunnerIdentity, Store, StoreError, UnfinishedAttempt};
+use brgr_store::{RunnerIdentity, Store, StoreError, SubtreeNode, UnfinishedAttempt};
 use clap::{Args, Parser, Subcommand};
 use config::{Config, WorkerPlacement};
 use serde::{Deserialize, Serialize};
@@ -58,11 +62,17 @@ enum Command {
     Revise(ReviseArgs),
     Status {
         task: Option<TaskId>,
+        #[arg(long)]
+        tree: bool,
     },
     Result {
         task: TaskId,
         #[arg(long)]
         ack: bool,
+    },
+    Artifact {
+        #[command(subcommand)]
+        command: ArtifactCommand,
     },
     Wait {
         task: TaskId,
@@ -75,6 +85,8 @@ enum Command {
     },
     Cancel {
         task: TaskId,
+        #[arg(long)]
+        tree: bool,
     },
     Bind {
         task: TaskId,
@@ -90,6 +102,13 @@ enum Command {
         task: TaskId,
         #[arg(long)]
         reason: String,
+    },
+    Apply {
+        task: TaskId,
+        #[arg(long)]
+        workspace: PathBuf,
+        #[arg(long)]
+        execute: bool,
     },
     Harness {
         #[command(subcommand)]
@@ -119,6 +138,10 @@ enum Command {
     #[command(name = "__hook", hide = true)]
     Hook {
         event: HookEvent,
+    },
+    #[command(name = "__notify", hide = true)]
+    Notify {
+        task: TaskId,
     },
     #[command(name = "__omp-run", hide = true)]
     OmpRun {
@@ -170,6 +193,16 @@ enum ConfigCommand {
     },
 }
 
+#[derive(Subcommand)]
+enum ArtifactCommand {
+    Export {
+        task: TaskId,
+        index: usize,
+        #[arg(long)]
+        output: PathBuf,
+    },
+}
+
 #[derive(Args)]
 struct RunArgs {
     objective: String,
@@ -183,16 +216,34 @@ struct RunArgs {
     effort: Option<String>,
     #[arg(long = "criterion")]
     criteria: Vec<String>,
+    #[arg(long = "scope")]
+    scopes: Vec<String>,
+    #[arg(long = "role-instruction")]
+    role_instructions: Vec<String>,
+    #[command(flatten)]
+    capabilities: CapabilityArgs,
+    #[command(flatten)]
+    evidence: EvidenceArgs,
     #[arg(long, default_value_t = 3_600)]
     deadline_seconds: u64,
+    #[arg(long)]
+    max_children: Option<u8>,
     #[arg(long)]
     workspace: Option<PathBuf>,
     #[arg(long)]
     allow_clean_head_snapshot: bool,
+    #[arg(long = "snapshot-path", conflicts_with = "allow_clean_head_snapshot")]
+    snapshot_paths: Vec<PathBuf>,
     #[arg(long, hide = true)]
     foreground: bool,
     #[arg(long)]
     keep_pane: bool,
+}
+
+impl RunArgs {
+    fn forwards_criteria(&self) -> bool {
+        !self.criteria.is_empty() || !self.scopes.is_empty() || !self.role_instructions.is_empty()
+    }
 }
 
 #[derive(Args)]
@@ -211,18 +262,130 @@ struct ReviseArgs {
     objective: String,
     #[arg(long = "criterion")]
     criteria: Vec<String>,
+    #[arg(long = "scope")]
+    scopes: Vec<String>,
+    #[arg(long = "role-instruction")]
+    role_instructions: Vec<String>,
+    #[command(flatten)]
+    capabilities: CapabilityArgs,
+    #[command(flatten)]
+    evidence: EvidenceArgs,
+    #[arg(long)]
+    max_children: Option<u8>,
     #[arg(long)]
     workspace: Option<PathBuf>,
     #[arg(long)]
     allow_clean_head_snapshot: bool,
+    #[arg(long = "snapshot-path", conflicts_with = "allow_clean_head_snapshot")]
+    snapshot_paths: Vec<PathBuf>,
     #[arg(long, hide = true)]
     foreground: bool,
     #[arg(long)]
     keep_pane: bool,
 }
 
+impl ReviseArgs {
+    fn forwards_criteria(&self) -> bool {
+        !self.criteria.is_empty() || !self.scopes.is_empty() || !self.role_instructions.is_empty()
+    }
+}
+
+#[derive(Args, Default)]
+struct CapabilityArgs {
+    #[arg(long)]
+    requires_write: bool,
+    #[arg(long)]
+    requires_browser: bool,
+    #[arg(long = "requires-mcp")]
+    requires_mcp: Vec<String>,
+    #[arg(long = "require-capability")]
+    required: Vec<String>,
+}
+
+impl CapabilityArgs {
+    fn required_names(&self) -> Result<Vec<String>> {
+        let mut names = BTreeSet::new();
+        names.insert("completion".to_owned());
+        if self.requires_write {
+            names.insert("workspace_write".to_owned());
+        }
+        if self.requires_browser {
+            names.insert("browser".to_owned());
+        }
+        for server in &self.requires_mcp {
+            names.insert(format!("mcp:{server}"));
+        }
+        names.extend(self.required.iter().cloned());
+        if names.iter().any(|name| {
+            name.is_empty()
+                || name.len() > 128
+                || !name.bytes().all(|byte| {
+                    byte.is_ascii_alphanumeric() || matches!(byte, b':' | b'.' | b'_' | b'-')
+                })
+        }) {
+            bail!("required capability names must be bounded ASCII identifiers");
+        }
+        Ok(names.into_iter().collect())
+    }
+}
+
+#[derive(Args, Default)]
+struct EvidenceArgs {
+    #[arg(long)]
+    capture_diff: bool,
+    #[arg(long)]
+    capture_logs: bool,
+    #[arg(long = "evidence-file")]
+    files: Vec<PathBuf>,
+}
+
+impl EvidenceArgs {
+    fn spec(&self) -> EvidenceSpec {
+        EvidenceSpec {
+            capture_diff: self.capture_diff,
+            capture_logs: self.capture_logs,
+            base_commit: None,
+            base_tree: None,
+            files: self
+                .files
+                .iter()
+                .map(|path| path.to_string_lossy().into_owned())
+                .collect(),
+        }
+    }
+
+    fn extend_task(&self, task: &mut TaskSpec) {
+        task.evidence.capture_diff |= self.capture_diff;
+        task.evidence.capture_logs |= self.capture_logs;
+        task.evidence.files.extend(self.spec().files);
+        task.evidence.files.sort();
+        task.evidence.files.dedup();
+        if !task.evidence.is_empty() {
+            task.artifact_contract.max_bytes =
+                task.artifact_contract.max_bytes.max(8 * 1024 * 1024);
+        }
+    }
+
+    fn artifact_limit(&self, base: u64) -> u64 {
+        if self.spec().is_empty() {
+            base
+        } else {
+            base.max(8 * 1024 * 1024)
+        }
+    }
+}
+
+fn acceptance_criteria(objective: &str, criteria: Vec<String>) -> Vec<String> {
+    if criteria.is_empty() {
+        vec![format!("Objective achieved: {objective}")]
+    } else {
+        criteria
+    }
+}
+
 struct StartOptions<'a> {
     source_workspace: &'a Path,
+    snapshot_paths: &'a [PathBuf],
     parent: Option<(TaskId, AttemptId)>,
     enable_delegation: bool,
     snapshot: WorkspaceSnapshot,
@@ -411,7 +574,10 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     if !matches!(
         &cli.command,
-        Command::Plugin { .. } | Command::Supervise { .. } | Command::Hook { .. }
+        Command::Plugin { .. }
+            | Command::Supervise { .. }
+            | Command::Hook { .. }
+            | Command::Notify { .. }
     ) && let Some(dir) = env::var_os(plugin_bridge::BRIDGE_DIR_ENV)
     {
         let budget_seconds = match &cli.command {
@@ -437,14 +603,15 @@ async fn main() -> Result<()> {
     match cli.command {
         Command::Run(args) => run_task(&paths, args, cli.json).await,
         Command::Revise(args) => revise_task(&paths, args, cli.json).await,
-        Command::Status { task } => status(&paths, task, cli.json),
+        Command::Status { task, tree } => status(&paths, task, tree, cli.json),
         Command::Result { task, ack } => result(&paths, task, ack, cli.json),
+        Command::Artifact { command } => evidence::artifact_command(&paths, command, cli.json),
         Command::Wait {
             task,
             timeout_seconds,
         } => wait_for_result(&paths, task, timeout_seconds, cli.json).await,
         Command::Message { command } => message::run(&paths, command, cli.json).await,
-        Command::Cancel { task } => cancel(&paths, task, cli.json),
+        Command::Cancel { task, tree } => cancel(&paths, task, tree, cli.json),
         Command::Bind { task, session } => bind(&paths, task, session, cli.json),
         Command::Accept { task, reason } => {
             decide(&paths, task, DecisionVerdict::Accepted, reason, cli.json)
@@ -452,6 +619,11 @@ async fn main() -> Result<()> {
         Command::Reject { task, reason } => {
             decide(&paths, task, DecisionVerdict::Rejected, reason, cli.json)
         }
+        Command::Apply {
+            task,
+            workspace,
+            execute,
+        } => evidence::apply_result(&paths, task, &workspace, execute, cli.json),
         Command::Harness { command } => harness(&paths, command, cli.json).await,
         Command::Integrate { command } => integrate(&paths, command, cli.json),
         Command::Doctor => doctor(&paths, cli.json).await,
@@ -471,6 +643,7 @@ async fn main() -> Result<()> {
             }
             Ok(())
         }
+        Command::Notify { task } => notification::deliver_pending(&paths, task).await,
         Command::OmpRun {
             prompt_file,
             workspace,
@@ -558,10 +731,17 @@ fn validate_bridge_host_command(
             command: HarnessCommand::Status { .. },
         }
         | Command::Supervise { .. } => Ok(()),
+        Command::Artifact {
+            command: ArtifactCommand::Export { output, .. },
+        } => require_bridge_workspace(output.parent().unwrap_or(current_dir), &workspace_root),
+        Command::Apply { workspace, .. } => require_bridge_workspace(workspace, &workspace_root),
         Command::Harness { .. } | Command::Integrate { .. } => bail!(
             "this brgr command is unavailable through the Herdr host bridge; run it explicitly outside the plugin Codex pane"
         ),
-        Command::Plugin { .. } | Command::Hook { .. } | Command::OmpRun { .. } => {
+        Command::Plugin { .. }
+        | Command::Hook { .. }
+        | Command::Notify { .. }
+        | Command::OmpRun { .. } => {
             bail!("internal brgr commands are unavailable through the Herdr host bridge")
         }
     }
@@ -612,6 +792,7 @@ async fn run_task(paths: &Paths, args: RunArgs, json_output: bool) -> Result<()>
         .load_healthy_with_receipt(&args.harness)
         .with_context(|| format!("harness {} is not active and healthy", args.harness))?;
     let task_id = TaskId::new();
+    let forward_criteria = args.forwards_criteria();
     let source_workspace = args.workspace.unwrap_or(env::current_dir()?);
     let explicit_parent = args
         .delegation
@@ -630,11 +811,7 @@ async fn run_task(paths: &Paths, args: RunArgs, json_output: bool) -> Result<()>
     } else {
         owner_from_environment()?
     };
-    let criteria = if args.criteria.is_empty() {
-        vec![format!("Objective achieved: {}", args.objective)]
-    } else {
-        args.criteria
-    };
+    let criteria = acceptance_criteria(&args.objective, args.criteria);
     let spec = TaskSpec {
         schema: SCHEMA_V1.to_owned(),
         task_id,
@@ -648,16 +825,23 @@ async fn run_task(paths: &Paths, args: RunArgs, json_output: bool) -> Result<()>
             requested_model: args.model,
             requested_effort: args.effort,
         },
-        required_capabilities: vec!["completion".to_owned()],
+        required_capabilities: args.capabilities.required_names()?,
         artifact_contract: ArtifactContract {
             media_type: activated.result.media_type.clone(),
-            max_bytes: activated.result.max_bytes,
+            max_bytes: args.evidence.artifact_limit(activated.result.max_bytes),
         },
         acceptance_criteria: criteria,
         budget: AttemptBudget {
             deadline_seconds: args.deadline_seconds,
             max_attempts: 2,
         },
+        instructions: TaskInstructions {
+            scope: args.scopes,
+            role: args.role_instructions,
+            forward_criteria,
+        },
+        evidence: args.evidence.spec(),
+        max_concurrent_children: args.max_children,
     };
     spec.validate()?;
     activated.validate_task_route(&spec)?;
@@ -671,6 +855,7 @@ async fn run_task(paths: &Paths, args: RunArgs, json_output: bool) -> Result<()>
         &activation,
         StartOptions {
             source_workspace: &source_workspace,
+            snapshot_paths: &args.snapshot_paths,
             parent,
             enable_delegation: args.delegation.enable_delegation,
             snapshot: if args.allow_clean_head_snapshot {
@@ -717,20 +902,32 @@ async fn revise_task(paths: &Paths, args: ReviseArgs, json_output: bool) -> Resu
         .revision
         .checked_add(1)
         .context("revision overflow")?;
+    let forward_criteria = args.forwards_criteria();
     let source_workspace = args
         .workspace
         .unwrap_or_else(|| PathBuf::from(&previous.workspace));
-    let criteria = if args.criteria.is_empty() {
-        vec![format!("Objective achieved: {}", args.objective)]
-    } else {
-        args.criteria
-    };
+    let criteria = acceptance_criteria(&args.objective, args.criteria);
     let mut replacement = previous.clone();
     replacement.revision = next_revision;
     replacement.create_request_id = format!("revise-{}-{next_revision}", args.task);
     replacement.objective = args.objective;
     replacement.workspace = source_workspace.to_string_lossy().into_owned();
     replacement.acceptance_criteria = criteria;
+    let requested = args.capabilities.required_names()?;
+    replacement.required_capabilities.extend(requested);
+    replacement.required_capabilities.sort();
+    replacement.required_capabilities.dedup();
+    if !args.scopes.is_empty() {
+        replacement.instructions.scope = args.scopes;
+    }
+    if !args.role_instructions.is_empty() {
+        replacement.instructions.role = args.role_instructions;
+    }
+    replacement.instructions.forward_criteria |= forward_criteria;
+    args.evidence.extend_task(&mut replacement);
+    if args.max_children.is_some() {
+        replacement.max_concurrent_children = args.max_children;
+    }
     let replacement = TaskRevision::new(previous)?
         .revise(replacement)?
         .spec()
@@ -760,6 +957,7 @@ async fn revise_task(paths: &Paths, args: ReviseArgs, json_output: bool) -> Resu
         &activation,
         StartOptions {
             source_workspace: &source_workspace,
+            snapshot_paths: &args.snapshot_paths,
             parent,
             enable_delegation: previous_launch.delegation_enabled,
             snapshot: if args.allow_clean_head_snapshot {
@@ -795,6 +993,9 @@ async fn start_task(
     let source = options.source_workspace.canonicalize()?;
     let home = paths.home.canonicalize()?;
     validate_source_home(paths, &source, &home, options.parent, &spec.owner_id)?;
+    if spec.evidence.capture_diff && !workspace::is_git_workspace(&source)? {
+        bail!("--capture-diff requires a Git workspace before task admission");
+    }
     let plugin_placement = plugin_worker_placement(paths, &options.execution)?;
     let admission = workspace::acquire_admission_lock(&paths.worktrees, options.source_workspace)?;
     let store = Store::open(&paths.store)?;
@@ -814,15 +1015,9 @@ async fn start_task(
     }
     let task_id = spec.task_id;
     let harness_id = spec.route.harness_id.clone();
-    let workspace = workspace::prepare_workspace(
-        &paths.worktrees,
-        options.source_workspace,
-        task_id,
-        spec.revision,
-        &activated.adapter,
-        matches!(options.snapshot, WorkspaceSnapshot::AllowCleanHead),
-    )?;
+    let workspace = prepare_task_workspace(paths, &mut spec, &activated.adapter, &options)?;
     spec.workspace = workspace.to_string_lossy().into_owned();
+    spec.validate()?;
     let launch = LaunchEnvelope {
         spec,
         harness_id,
@@ -849,6 +1044,7 @@ async fn start_task(
         store.record_task(&launch.spec, &request_digest_text)?;
     }
     drop(admission);
+    notification::register_and_spawn(paths, &store, &launch.spec, session.as_deref());
 
     if matches!(options.execution, ExecutionDisposition::Foreground) {
         return supervise(paths, &launch_path, options.json_output).await;
@@ -885,6 +1081,55 @@ async fn start_task(
     });
     print_value(&receipt, options.json_output);
     Ok(())
+}
+
+fn prepare_task_workspace(
+    paths: &Paths,
+    spec: &mut TaskSpec,
+    adapter: &str,
+    options: &StartOptions<'_>,
+) -> Result<PathBuf> {
+    spec.evidence.base_commit = None;
+    spec.evidence.base_tree = None;
+    let selected = if options.snapshot_paths.is_empty() {
+        None
+    } else {
+        Some(workspace::read_selected_snapshot(
+            options.source_workspace,
+            options.snapshot_paths,
+        )?)
+    };
+    let workspace = workspace::prepare_workspace(
+        &paths.worktrees,
+        options.source_workspace,
+        spec.task_id,
+        spec.revision,
+        adapter,
+        matches!(options.snapshot, WorkspaceSnapshot::AllowCleanHead) || selected.is_some(),
+    )?;
+    if spec.evidence.capture_diff {
+        spec.evidence.base_commit = Some(workspace::git_head(&workspace)?);
+    }
+    if let Some(snapshot) = selected {
+        if workspace::git_head(&workspace)? != snapshot.base_revision() {
+            bail!("source HEAD changed while the selected snapshot was prepared");
+        }
+        workspace::apply_selected_snapshot(&workspace, &snapshot)?;
+        if spec.evidence.capture_diff {
+            spec.evidence.base_tree = Some(workspace::selected_snapshot_tree(
+                &workspace,
+                &snapshot,
+                &paths.runs,
+            )?);
+        }
+        write_json_atomic(
+            &paths
+                .runs
+                .join(format!("{}-r{}.snapshot.json", spec.task_id, spec.revision)),
+            &serde_json::to_value(snapshot.receipt(spec.task_id, spec.revision))?,
+        )?;
+    }
+    Ok(workspace)
 }
 
 fn validate_source_home(
@@ -1085,7 +1330,8 @@ fn reconcile_pending(paths: &Paths) -> Result<()> {
     let mut store = Store::open(&paths.store)?;
     for task in store.unstarted_tasks()? {
         if unstarted_admission_is_stale(paths, &task)? {
-            let cancelled = paths.cancel(task.task_id).exists();
+            let cancelled = paths.cancel(task.task_id).exists()
+                || store.cancellation_requested(task.task_id)?;
             record_unstarted_terminal(
                 &mut store,
                 &task,
@@ -1184,7 +1430,7 @@ fn record_unstarted_terminal(
             vec![]
         },
     };
-    store.commit_terminal_result(&task.owner_id, &result)?;
+    store.commit_terminal_result_final(&task.owner_id, &result)?;
     Ok(true)
 }
 
@@ -1243,9 +1489,15 @@ fn ps_field(pid: &str, field: &str) -> Result<String> {
     Ok(text)
 }
 
-fn status(paths: &Paths, task: Option<TaskId>, json_output: bool) -> Result<()> {
+fn status(paths: &Paths, task: Option<TaskId>, tree: bool, json_output: bool) -> Result<()> {
     reconcile_pending(paths)?;
     let store = Store::open(&paths.store)?;
+    if tree {
+        let root = task.context("--tree requires a task ID")?;
+        let spec = store.task(root)?;
+        require_owner(&store, &spec.owner_id)?;
+        return tree_status::show(&store, root, json_output);
+    }
     if let Some(task_id) = task {
         let spec = store.task(task_id)?;
         require_owner(&store, &spec.owner_id)?;
@@ -1295,9 +1547,12 @@ fn result(paths: &Paths, task: TaskId, ack: bool, json_output: bool) -> Result<(
         .iter()
         .map(|reference| {
             let bytes = store.read_artifact(reference, spec.artifact_contract.max_bytes)?;
+            let text = (reference.media_type.starts_with("text/")
+                || reference.media_type == "application/json")
+                .then(|| String::from_utf8_lossy(&bytes).into_owned());
             Ok::<_, anyhow::Error>(json!({
                 "reference": reference,
-                "text": String::from_utf8_lossy(&bytes),
+                "text": text,
             }))
         })
         .collect::<Result<Vec<_>>>()?;
@@ -1358,36 +1613,63 @@ async fn wait_for_result(
     }
 }
 
-fn cancel(paths: &Paths, task: TaskId, json_output: bool) -> Result<()> {
+fn cancel(paths: &Paths, task: TaskId, tree: bool, json_output: bool) -> Result<()> {
     let store = Store::open(&paths.store)?;
     let spec = store.task(task)?;
     require_owner(&store, &spec.owner_id)?;
-    let state = match store.attempt_state(task) {
-        Ok(state) => state,
-        Err(StoreError::TaskNotFound(_)) => AttemptState::Queued,
-        Err(error) => return Err(error.into()),
+    let nodes = if tree {
+        store.subtree(task)?
+    } else {
+        vec![SubtreeNode {
+            task_id: task,
+            parent_task_id: None,
+            depth: 0,
+        }]
     };
-    if state == AttemptState::Terminal {
+    let mut active = Vec::new();
+    for node in &nodes {
+        let child = store.task(node.task_id)?;
+        if !task_needs_cancel(&store, node.task_id)? {
+            continue;
+        }
+        let launch: LaunchEnvelope =
+            serde_json::from_slice(&fs::read(paths.launch(node.task_id, child.revision))?)?;
+        if launch
+            .manifest
+            .as_ref()
+            .map_or(child.route.harness_id == "local.omp-herdr", |manifest| {
+                manifest.adapter == brgr_runner::OMP_ROLE_ADAPTER_V1
+            })
+        {
+            bail!("Herdr-backed OMP cancellation is not certified; use the process adapter");
+        }
+        active.push(node.task_id);
+    }
+    if active.is_empty() && !tree {
         bail!("task {task} is already terminal");
     }
-    let launch: LaunchEnvelope =
-        serde_json::from_slice(&fs::read(paths.launch(task, spec.revision))?)?;
-    let legacy_omp = launch.manifest.as_ref().map_or(
-        matches!(
-            spec.route.harness_id.as_str(),
-            "local.omp" | "local.omp-herdr"
-        ),
-        |manifest| manifest.adapter == brgr_runner::OMP_ROLE_ADAPTER_V1,
-    );
-    if legacy_omp {
-        bail!("Herdr-backed OMP cancellation is not certified; use the process adapter");
+    let recorded = store.record_cancellation_intents(task, tree)?;
+    let mut requested = Vec::new();
+    for node in &recorded {
+        if task_needs_cancel(&store, node.task_id)? {
+            fs::write(paths.cancel(node.task_id), b"cancel\n")?;
+            requested.push(node.task_id);
+        }
     }
-    fs::write(paths.cancel(task), b"cancel\n")?;
     print_value(
-        &json!({"task_id": task, "state": "cancel_requested"}),
+        &json!({"task_id": task, "state": "cancel_requested", "tree": tree,
+        "requested": requested}),
         json_output,
     );
     Ok(())
+}
+
+fn task_needs_cancel(store: &Store, task: TaskId) -> Result<bool> {
+    match store.attempt_state(task) {
+        Ok(AttemptState::Terminal) => Ok(false),
+        Ok(_) | Err(StoreError::TaskNotFound(_)) => Ok(true),
+        Err(error) => Err(error.into()),
+    }
 }
 
 fn bind(paths: &Paths, task: TaskId, session: Option<String>, json_output: bool) -> Result<()> {
@@ -1406,6 +1688,13 @@ fn bind(paths: &Paths, task: TaskId, session: Option<String>, json_output: bool)
         bail!("requested session does not match the current Codex session");
     }
     let epoch = store.rebind_owner(&spec.owner_id, &session)?;
+    if notification::register_current_surface(&store, &spec.owner_id, &session)? {
+        for pending in store.pending_notification_tasks_for_session(&session)? {
+            if let Err(error) = notification::spawn_for_task(paths, pending) {
+                eprintln!("brgr completion notification remains queued: {error}");
+            }
+        }
+    }
     print_value(
         &json!({"owner_id": spec.owner_id, "session_id": session, "binding_epoch": epoch}),
         json_output,
@@ -1732,6 +2021,13 @@ fn hook(paths: &Paths, event: HookEvent) -> Result<()> {
     if event == HookEvent::SessionStart {
         let epoch = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
         store.bind_owner(&owner, &session_id, epoch.max(1))?;
+    }
+    if notification::register_current_surface(&store, &owner, &session_id)? {
+        for task in store.pending_notification_tasks_for_session(&session_id)? {
+            if let Err(error) = notification::spawn_for_task(paths, task) {
+                eprintln!("brgr completion notification remains queued: {error}");
+            }
+        }
     }
     let pending = store.pending_for_session(&session_id)?;
     if pending.is_empty() {

@@ -6,17 +6,23 @@
 
 use std::{
     fmt::Write as _,
-    io::Cursor,
+    future::Future,
+    io::{Cursor, Read as _},
+    os::unix::process::CommandExt as _,
     path::{Path, PathBuf},
-    time::Duration,
+    process::{Command, Stdio},
+    sync::mpsc,
+    thread,
+    time::{Duration, Instant},
 };
 
 use brgr_protocol::{
-    AttemptId, AttemptState, Event, EventId, EventKind, ObservationSource, ProtocolError,
-    ResultEnvelope, ResultId, RouteObservation, TaskId, TaskSpec, TerminalOutcome,
+    ArtifactRef, AttemptId, AttemptState, Event, EventId, EventKind, ObservationSource,
+    ProtocolError, ResultEnvelope, ResultId, RouteObservation, TaskId, TaskSpec, TerminalOutcome,
 };
 use brgr_runner::{
-    DelegationContext, ExecutionMode, HarnessManifest, ProcessRunner, RunRequest, RunnerError,
+    DelegationContext, ExecutionMode, ExecutionOutput, HarnessManifest, ProcessRunner, RunRequest,
+    RunnerError,
 };
 use brgr_store::{RunnerIdentity, Store, StoreError, UnfinishedAttempt};
 use sha2::{Digest, Sha256};
@@ -531,23 +537,10 @@ async fn run_single_attempt(
         AttemptState::Starting,
         &mut producer_seq,
     )?;
-    if control.cancel_path.is_some_and(Path::exists) {
-        transition(
-            store,
-            &mut attempt,
-            AttemptState::CancelRequested,
-            &mut producer_seq,
-        )?;
-        let result = result_for(
-            spec,
-            attempt_id,
-            TerminalOutcome::Cancelled,
-            vec![],
-            Some("cancelled before process spawn".to_owned()),
-        );
-        attempt.record_terminal(result.clone())?;
-        store.commit_terminal_result(&spec.owner_id, &result)?;
-        return Ok((result, false));
+    if control.cancel_path.is_some_and(Path::exists)
+        || store.cancellation_requested(spec.task_id)?
+    {
+        return cancel_before_spawn(store, spec, attempt_id, &mut attempt, &mut producer_seq);
     }
     let launch_nonce = uuid::Uuid::new_v4().to_string();
     store.record_launch_intent(attempt_id, &launch_nonce, epoch)?;
@@ -563,23 +556,33 @@ async fn run_single_attempt(
         &mut producer_seq,
     )?;
 
-    let execution = ProcessRunner::run_with_delegation(
-        manifest,
-        RunRequest {
-            workspace: Path::new(&spec.workspace),
-            prompt: &spec.objective,
-            model: spec.route.requested_model.as_deref(),
-            effort: spec.route.requested_effort.as_deref(),
-            deadline: Duration::from_secs(spec.budget.deadline_seconds),
-            cancel_path: control.cancel_path,
-            pid_path: control.pid_path,
-        },
-        control.delegation_host.map(|host| DelegationContext {
-            control_home: &host.control_home,
-            brgr_executable: &host.brgr_executable,
-            task_id: spec.task_id,
-            attempt_id,
-        }),
+    let execution = await_with_cancellation(
+        ProcessRunner::run_with_delegation(
+            manifest,
+            RunRequest {
+                workspace: Path::new(&spec.workspace),
+                prompt: &spec.objective,
+                criteria: spec
+                    .instructions
+                    .forward_criteria
+                    .then_some(spec.acceptance_criteria.as_slice()),
+                instructions: Some(&spec.instructions),
+                model: spec.route.requested_model.as_deref(),
+                effort: spec.route.requested_effort.as_deref(),
+                deadline: Duration::from_secs(spec.budget.deadline_seconds),
+                cancel_path: control.cancel_path,
+                pid_path: control.pid_path,
+            },
+            control.delegation_host.map(|host| DelegationContext {
+                control_home: &host.control_home,
+                brgr_executable: &host.brgr_executable,
+                task_id: spec.task_id,
+                attempt_id,
+            }),
+        ),
+        store,
+        spec.task_id,
+        control.cancel_path,
     )
     .await;
 
@@ -598,13 +601,59 @@ async fn run_single_attempt(
     crash_at("after_seal_before_commit");
 
     attempt.record_terminal(result.clone())?;
-    store.commit_terminal_result(&spec.owner_id, &result)?;
+    if retryable && number < spec.budget.max_attempts {
+        store.commit_terminal_result(&spec.owner_id, &result)?;
+    } else {
+        store.commit_terminal_result_final(&spec.owner_id, &result)?;
+    }
     #[cfg(debug_assertions)]
     crash_at("after_terminal_commit");
     if retryable {
         store.grant_pre_spawn_retry(attempt_id)?;
     }
     Ok((result, retryable))
+}
+
+fn cancel_before_spawn(
+    store: &mut Store,
+    spec: &TaskSpec,
+    attempt_id: AttemptId,
+    attempt: &mut Attempt,
+    producer_seq: &mut u64,
+) -> Result<(ResultEnvelope, bool), SupervisorError> {
+    transition(store, attempt, AttemptState::CancelRequested, producer_seq)?;
+    let result = result_for(
+        spec,
+        attempt_id,
+        TerminalOutcome::Cancelled,
+        vec![],
+        Some("cancelled before process spawn".to_owned()),
+    );
+    attempt.record_terminal(result.clone())?;
+    store.commit_terminal_result_final(&spec.owner_id, &result)?;
+    Ok((result, false))
+}
+
+async fn await_with_cancellation<F: Future>(
+    future: F,
+    store: &mut Store,
+    task: TaskId,
+    cancel_path: Option<&Path>,
+) -> F::Output {
+    tokio::pin!(future);
+    loop {
+        tokio::select! {
+            biased;
+            result = &mut future => break result,
+            () = tokio::time::sleep(Duration::from_millis(250)) => {
+                if store.cancellation_requested(task).unwrap_or(false)
+                    && let Some(path) = cancel_path
+                {
+                    let _ = std::fs::write(path, b"cancel\n");
+                }
+            }
+        }
+    }
 }
 
 #[cfg(debug_assertions)]
@@ -641,12 +690,13 @@ fn finish_execution(
     if manifest.launch.mode == ExecutionMode::DelegatedExternal
         && !matches!(&execution, Ok(output) if !output.cancelled && output.succeeded(manifest) && !output.result.is_empty())
     {
-        let mut result = result_for(
+        let mut result = terminal_with_requested_logs(
+            store,
             spec,
             attempt_id,
             TerminalOutcome::Lost,
-            vec![],
-            Some("Herdr-backed OMP wrapper did not provide a valid final result".to_owned()),
+            "Herdr-backed OMP wrapper did not provide a valid final result".to_owned(),
+            execution.as_ref().ok(),
         );
         result.unresolved_effects.push(
             "The separately launched OMP worker may still be running or may have caused external effects"
@@ -657,36 +707,53 @@ fn finish_execution(
     match execution {
         Ok(output) if output.cancelled => {
             transition(store, attempt, AttemptState::CancelRequested, producer_seq)?;
-            Ok(result_for(
+            Ok(terminal_with_requested_logs(
+                store,
                 spec,
                 attempt_id,
                 TerminalOutcome::Cancelled,
-                vec![],
-                Some("cancellation requested by owner".to_owned()),
+                "cancellation requested by owner".to_owned(),
+                Some(&output),
             ))
         }
         Ok(output) if output.succeeded(manifest) && !output.result.is_empty() => {
             transition(store, attempt, AttemptState::Collecting, producer_seq)?;
             if let Some(reason) = unsettled_worker_reason(store, spec.task_id, attempt_id)? {
-                return Ok(result_for(
+                return Ok(terminal_with_requested_logs(
+                    store,
                     spec,
                     attempt_id,
                     TerminalOutcome::Failed,
-                    vec![],
-                    Some(reason),
+                    reason,
+                    Some(&output),
                 ));
             }
             let observed_model = output.observed_model.clone();
+            let extra = match seal_requested_evidence(store, spec, &output) {
+                Ok(extra) => extra,
+                Err(reason) => {
+                    return Ok(terminal_with_requested_logs(
+                        store,
+                        spec,
+                        attempt_id,
+                        TerminalOutcome::Failed,
+                        reason,
+                        Some(&output),
+                    ));
+                }
+            };
             let artifact = store.seal_artifact_reader(
                 Cursor::new(output.result),
                 &spec.artifact_contract.media_type,
                 spec.artifact_contract.max_bytes,
             )?;
+            let mut artifacts = vec![artifact];
+            artifacts.extend(extra);
             let mut result = result_for(
                 spec,
                 attempt_id,
                 TerminalOutcome::Candidate,
-                vec![artifact],
+                artifacts,
                 None,
             );
             if let Some(model) = observed_model {
@@ -699,24 +766,14 @@ fn finish_execution(
             }
             Ok(result)
         }
-        Ok(output) => {
-            let reason = if output.timed_out {
-                "attempt deadline elapsed".to_owned()
-            } else if output.output_truncated {
-                "process output exceeded the configured limit".to_owned()
-            } else if output.result.is_empty() {
-                "process produced no result artifact".to_owned()
-            } else {
-                format!("process exited with status {:?}", output.exit_code)
-            };
-            Ok(result_for(
-                spec,
-                attempt_id,
-                TerminalOutcome::Failed,
-                vec![],
-                Some(reason),
-            ))
-        }
+        Ok(output) => Ok(terminal_with_requested_logs(
+            store,
+            spec,
+            attempt_id,
+            TerminalOutcome::Failed,
+            execution_failure_reason(&output),
+            Some(&output),
+        )),
         Err(error) => Ok(result_for(
             spec,
             attempt_id,
@@ -725,6 +782,242 @@ fn finish_execution(
             Some(error.to_string()),
         )),
     }
+}
+
+fn execution_failure_reason(output: &ExecutionOutput) -> String {
+    if output.timed_out {
+        "attempt deadline elapsed".to_owned()
+    } else if output.output_truncated {
+        "process output exceeded the configured limit".to_owned()
+    } else if output.result.is_empty() {
+        "process produced no result artifact".to_owned()
+    } else {
+        format!("process exited with status {:?}", output.exit_code)
+    }
+}
+
+fn terminal_with_requested_logs(
+    store: &Store,
+    spec: &TaskSpec,
+    attempt_id: AttemptId,
+    outcome: TerminalOutcome,
+    reason: String,
+    output: Option<&ExecutionOutput>,
+) -> ResultEnvelope {
+    let (artifacts, error) = match output.map(|output| seal_requested_logs(store, spec, output)) {
+        Some(Ok(artifacts)) => (artifacts, reason),
+        Some(Err(log_error)) => (
+            vec![],
+            format!("{reason}; requested logs unavailable: {log_error}"),
+        ),
+        None => (vec![], reason),
+    };
+    result_for(spec, attempt_id, outcome, artifacts, Some(error))
+}
+
+fn seal_requested_evidence(
+    store: &Store,
+    spec: &TaskSpec,
+    output: &ExecutionOutput,
+) -> Result<Vec<ArtifactRef>, String> {
+    if spec.evidence.is_empty() {
+        return Ok(Vec::new());
+    }
+    let limit = spec.artifact_contract.max_bytes.min(8 * 1024 * 1024);
+    let remaining =
+        Duration::from_secs(spec.budget.deadline_seconds).saturating_sub(output.elapsed);
+    if remaining.is_zero() {
+        return Err("evidence collection exceeded the attempt deadline".to_owned());
+    }
+    let mut artifacts = Vec::new();
+    let mut total = 0_u64;
+    if spec.evidence.capture_diff {
+        let patch = bounded_git_diff(
+            Path::new(&spec.workspace),
+            spec.evidence
+                .base_tree
+                .as_deref()
+                .or(spec.evidence.base_commit.as_deref())
+                .unwrap_or("HEAD"),
+            limit,
+            remaining,
+        )?;
+        if patch.is_empty() {
+            return Err("requested Git diff is empty".to_owned());
+        }
+        let reference = store
+            .seal_artifact_reader(Cursor::new(patch), "text/x-diff", limit)
+            .map_err(|error| error.to_string())?;
+        push_evidence(&mut artifacts, &mut total, reference)?;
+    }
+    for reference in seal_requested_logs(store, spec, output)? {
+        push_evidence(&mut artifacts, &mut total, reference)?;
+    }
+    let workspace = Path::new(&spec.workspace)
+        .canonicalize()
+        .map_err(|error| error.to_string())?;
+    for relative in &spec.evidence.files {
+        let path = workspace.join(relative);
+        let canonical = path.canonicalize().map_err(|error| error.to_string())?;
+        if !canonical.starts_with(&workspace) {
+            return Err(format!(
+                "requested evidence leaves the task workspace: {relative}"
+            ));
+        }
+        let media_type = evidence_media_type(Path::new(relative));
+        let reference = store
+            .seal_artifact_path(&path, media_type, limit)
+            .map_err(|error| error.to_string())?;
+        push_evidence(&mut artifacts, &mut total, reference)?;
+    }
+    Ok(artifacts)
+}
+
+fn seal_requested_logs(
+    store: &Store,
+    spec: &TaskSpec,
+    output: &ExecutionOutput,
+) -> Result<Vec<ArtifactRef>, String> {
+    if !spec.evidence.capture_logs {
+        return Ok(Vec::new());
+    }
+    let limit = spec.artifact_contract.max_bytes.min(8 * 1024 * 1024);
+    let mut artifacts = Vec::new();
+    let mut total = 0_u64;
+    for (bytes, media_type) in [
+        (&output.stdout, "text/x-brgr-stdout"),
+        (&output.stderr, "text/x-brgr-stderr"),
+    ] {
+        if !bytes.is_empty() {
+            let reference = store
+                .seal_artifact_reader(Cursor::new(bytes), media_type, limit)
+                .map_err(|error| error.to_string())?;
+            push_evidence(&mut artifacts, &mut total, reference)?;
+        }
+    }
+    Ok(artifacts)
+}
+
+fn push_evidence(
+    artifacts: &mut Vec<ArtifactRef>,
+    total: &mut u64,
+    reference: ArtifactRef,
+) -> Result<(), String> {
+    *total = total
+        .checked_add(reference.bytes)
+        .ok_or("evidence size overflow")?;
+    if *total > 32 * 1024 * 1024 {
+        return Err("requested evidence exceeds 32 MiB in total".to_owned());
+    }
+    artifacts.push(reference);
+    Ok(())
+}
+
+fn evidence_media_type(path: &Path) -> &'static str {
+    match path.extension().and_then(|extension| extension.to_str()) {
+        Some("png") => "image/png",
+        Some("jpg" | "jpeg") => "image/jpeg",
+        Some("webp") => "image/webp",
+        Some("md") => "text/markdown",
+        Some("json") => "application/json",
+        Some("diff" | "patch") => "text/x-diff",
+        Some("log" | "txt") => "text/plain",
+        _ => "application/octet-stream",
+    }
+}
+
+fn bounded_git_diff(
+    workspace: &Path,
+    base_tree: &str,
+    max_bytes: u64,
+    deadline: Duration,
+) -> Result<Vec<u8>, String> {
+    bounded_git_diff_with_executable(Path::new("git"), workspace, base_tree, max_bytes, deadline)
+}
+
+fn bounded_git_diff_with_executable(
+    executable: &Path,
+    workspace: &Path,
+    base_tree: &str,
+    max_bytes: u64,
+    deadline: Duration,
+) -> Result<Vec<u8>, String> {
+    let mut child = Command::new(executable)
+        .arg("-C")
+        .arg(workspace)
+        .args([
+            "-c",
+            "core.fsmonitor=false",
+            "-c",
+            "diff.noprefix=false",
+            "-c",
+            "diff.relative=false",
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--no-relative",
+            "--binary",
+            "--src-prefix=a/",
+            "--dst-prefix=b/",
+            base_tree,
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .process_group(0)
+        .spawn()
+        .map_err(|error| error.to_string())?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or("Git diff stream is unavailable")?;
+    let (sender, receiver) = mpsc::sync_channel(1);
+    let reader = thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let read = stdout.take(max_bytes + 1).read_to_end(&mut bytes);
+        let _ = sender.send(read.map(|_| bytes));
+    });
+    let started = Instant::now();
+    let bytes = match receiver.recv_timeout(deadline) {
+        Ok(Ok(bytes)) => bytes,
+        Ok(Err(error)) => {
+            stop_git_diff(&mut child);
+            let _ = reader.join();
+            return Err(error.to_string());
+        }
+        Err(_) => {
+            stop_git_diff(&mut child);
+            let _ = reader.join();
+            return Err("Git diff exceeded the remaining attempt deadline".to_owned());
+        }
+    };
+    if bytes.len() as u64 > max_bytes {
+        stop_git_diff(&mut child);
+        let _ = reader.join();
+        return Err("requested Git diff exceeds 8 MiB".to_owned());
+    }
+    loop {
+        if let Some(status) = child.try_wait().map_err(|error| error.to_string())? {
+            let _ = reader.join();
+            if !status.success() {
+                return Err("requested Git diff could not be read".to_owned());
+            }
+            return Ok(bytes);
+        }
+        if started.elapsed() >= deadline {
+            stop_git_diff(&mut child);
+            let _ = reader.join();
+            return Err("Git diff exceeded the remaining attempt deadline".to_owned());
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn stop_git_diff(child: &mut std::process::Child) {
+    let _ = Command::new("/bin/kill")
+        .args(["-KILL", &format!("-{}", child.id())])
+        .status();
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 fn transition(
@@ -836,6 +1129,27 @@ mod tests {
     };
     use std::{collections::BTreeMap, path::PathBuf};
 
+    #[test]
+    fn bounded_diff_stops_a_stalled_collector() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = tempfile::tempdir().unwrap();
+        let slow = root.path().join("slow-git");
+        std::fs::write(&slow, "#!/bin/sh\n/bin/sleep 5\nprintf 'late patch'\n").unwrap();
+        std::fs::set_permissions(&slow, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let started = Instant::now();
+        let error = bounded_git_diff_with_executable(
+            &slow,
+            root.path(),
+            "HEAD",
+            1_024,
+            Duration::from_millis(150),
+        )
+        .unwrap_err();
+        assert!(error.contains("deadline"));
+        assert!(started.elapsed() < Duration::from_secs(3));
+    }
+
     fn task_spec(task_id: TaskId, revision: u32) -> TaskSpec {
         TaskSpec {
             schema: SCHEMA_V1.to_owned(),
@@ -860,6 +1174,9 @@ mod tests {
                 deadline_seconds: 30,
                 max_attempts: 2,
             },
+            instructions: brgr_protocol::TaskInstructions::default(),
+            evidence: brgr_protocol::EvidenceSpec::default(),
+            max_concurrent_children: None,
         }
     }
 
