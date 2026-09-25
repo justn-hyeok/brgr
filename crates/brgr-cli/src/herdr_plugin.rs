@@ -21,7 +21,11 @@ use tokio::{
     time::{sleep, timeout},
 };
 
-use crate::{Paths, codex_integration, config::WorkerPlacement, plugin_bridge};
+use crate::{
+    Paths, codex_integration,
+    config::{Config, WorkerPlacement, validate_codex_executable},
+    plugin_bridge,
+};
 
 const PLUGIN_ID: &str = "brgr";
 const WORKSPACE_PATH_ENV: &str = "BRGR_PLUGIN_WORKSPACE_CWD";
@@ -369,14 +373,22 @@ async fn launch_codex(paths: &Paths) -> Result<()> {
     codex_integration::install(&paths.home)
         .context("brgr could not install its Codex integration")?;
     let executable = env::current_exe()?;
-    let path = plugin_path_value(&executable, env::var_os("PATH"))?;
+    let configured_codex = Config::load(&paths.config)?.herdr.codex_executable;
+    if let Some(codex) = &configured_codex {
+        validate_codex_executable(codex)?;
+    }
+    let path = plugin_path_value(
+        &executable,
+        configured_codex.as_deref(),
+        env::var_os("PATH"),
+    )?;
     let path_text = path.to_str().context("Codex PATH is not UTF-8")?;
     let bridge_dir = Builder::new()
         .prefix("brgr-plugin-bridge-")
         .tempdir()
         .context("brgr could not create its private Codex bridge")?;
     fs::set_permissions(bridge_dir.path(), fs::Permissions::from_mode(0o700))?;
-    let mut child = Command::new("codex")
+    let mut child = Command::new(configured_codex.as_deref().unwrap_or(Path::new("codex")))
         .arg("-C")
         .arg(&workspace)
         .arg("--add-dir")
@@ -406,7 +418,7 @@ async fn launch_codex(paths: &Paths) -> Result<()> {
         .stderr(Stdio::inherit())
         .kill_on_drop(true)
         .spawn()
-        .context("brgr could not start Codex")?;
+        .context("brgr could not start Codex; configure its absolute path with `brgr config set-codex-executable PATH` when Herdr's PATH omits it")?;
     let mut bridge = tokio::spawn(plugin_bridge::serve(
         bridge_dir.path().to_path_buf(),
         executable,
@@ -428,11 +440,18 @@ async fn launch_codex(paths: &Paths) -> Result<()> {
     }
     Ok(())
 }
-fn plugin_path_value(executable: &Path, previous: Option<OsString>) -> Result<OsString> {
+fn plugin_path_value(
+    executable: &Path,
+    codex_executable: Option<&Path>,
+    previous: Option<OsString>,
+) -> Result<OsString> {
     let binary_dir = executable
         .parent()
         .context("brgr executable has no parent directory")?;
     let mut binary_paths = vec![binary_dir.to_path_buf()];
+    if let Some(codex_dir) = codex_executable.and_then(Path::parent) {
+        binary_paths.push(codex_dir.to_path_buf());
+    }
     if let Some(previous) = previous {
         binary_paths.extend(env::split_paths(&previous));
     }
@@ -524,10 +543,18 @@ mod tests {
     #[test]
     fn plugin_path_puts_brgr_directory_first() {
         let executable = Path::new("/opt/brgr/bin/brgr");
-        let path = plugin_path_value(executable, Some(OsString::from("/usr/bin:/bin"))).unwrap();
+        let path =
+            plugin_path_value(executable, None, Some(OsString::from("/usr/bin:/bin"))).unwrap();
         let path = path.to_str().unwrap();
         assert!(path.starts_with("/opt/brgr/bin:"));
         assert!(path.contains("/usr/bin"));
+        let configured = plugin_path_value(
+            executable,
+            Some(Path::new("/opt/node/bin/codex")),
+            Some(OsString::from("/usr/bin:/bin")),
+        )
+        .unwrap();
+        assert!(configured.to_str().unwrap().contains("/opt/node/bin"));
     }
 
     #[test]

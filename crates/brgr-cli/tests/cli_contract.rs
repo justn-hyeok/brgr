@@ -454,7 +454,7 @@ fn plugin_worker_placement_respects_config_and_reaches_owner_decision() {
     fs::create_dir_all(&workspace).unwrap();
     fs::write(
         &fake_herdr,
-        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$BRGR_TEST_HERDR_ARGS\"\nprintf '%s\\n' '{\"result\":{\"type\":\"plugin_pane_opened\",\"plugin_pane\":{\"plugin_id\":\"brgr\",\"entrypoint\":\"worker\",\"pane\":{\"pane_id\":\"w1:p2\"}}}}'\n",
+        "#!/bin/sh\nif [ \"$1\" = --session ]; then\n case \"$3 $4\" in 'agent get'|'pane report-agent-session') exit 7;; esac\nelse\n case \"$1 $2\" in 'agent get'|'pane report-agent-session') exit 7;; esac\nfi\nprintf '%s\\n' \"$@\" > \"$BRGR_TEST_HERDR_ARGS\"\nprintf '%s\\n' '{\"result\":{\"type\":\"plugin_pane_opened\",\"plugin_pane\":{\"plugin_id\":\"brgr\",\"entrypoint\":\"worker\",\"pane\":{\"pane_id\":\"w1:p2\"}}}}'\n",
     )
     .unwrap();
     fs::set_permissions(&fake_herdr, fs::Permissions::from_mode(0o700)).unwrap();
@@ -1479,6 +1479,218 @@ fn idle_codex_parent_receives_completion_without_another_user_turn() {
     assert_eq!(fs::read_to_string(prompts).unwrap(), prompt);
 }
 
+#[test]
+fn missing_herdr_codex_session_is_reported_from_exact_bound_pane() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("brgr");
+    let workspace = temp.path().join("work");
+    let herdr = temp.path().join("herdr");
+    let reported = temp.path().join("reported-session");
+    fs::create_dir_all(&workspace).unwrap();
+    fs::write(&herdr, r#"#!/bin/sh
+case "$1 $2" in
+ 'agent get')
+  if [ -s "$BRGR_TEST_SESSION_FILE" ]; then
+   printf '{"result":{"agent":{"agent":"codex","pane_id":"w1:p1","agent_status":"working","agent_session":{"value":"%s"}}}}\n' "$(/bin/cat "$BRGR_TEST_SESSION_FILE")"
+  else
+   printf '%s\n' '{"result":{"agent":{"agent":"codex","pane_id":"w1:p1","agent_status":"working"}}}'
+  fi;;
+ 'pane report-agent-session')
+  test "$3" = w1:p1 || exit 7
+  while [ "$#" -gt 0 ]; do
+   if [ "$1" = --source ]; then test "$2" = herdr:codex || exit 8; fi
+   if [ "$1" = --agent-session-id ]; then printf '%s' "$2" > "$BRGR_TEST_SESSION_FILE"; fi
+   shift
+  done
+  printf '%s\n' '{}';;
+ *) exit 9;;
+esac
+"#).unwrap();
+    fs::set_permissions(&herdr, fs::Permissions::from_mode(0o700)).unwrap();
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../testdata/fixtures/gjc")
+        .canonicalize()
+        .unwrap();
+    add_fixture(&home, &fixture, &temp.path().join("scratch"));
+    let envs = [
+        ("CODEX_THREAD_ID", "session-a"),
+        ("BRGR_OWNER_ID", "codex:session-a"),
+        ("BRGR_SESSION_ID", "session-a"),
+        ("HERDR_ENV", "1"),
+        ("HERDR_PANE_ID", "w1:p1"),
+        ("HERDR_BIN_PATH", herdr.to_str().unwrap()),
+        ("BRGR_TEST_SESSION_FILE", reported.to_str().unwrap()),
+    ];
+    let result = json_output(&run(
+        &home,
+        &[
+            "run",
+            "BRGR_FIXTURE_OK",
+            "--workspace",
+            workspace.to_str().unwrap(),
+            "--foreground",
+        ],
+        &envs,
+    ));
+    assert_eq!(result["outcome"], "candidate");
+    for _ in 0..100 {
+        if reported.exists() {
+            break;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(fs::read_to_string(&reported).unwrap(), "session-a");
+    let task = result["task_id"].as_str().unwrap();
+    json_output(&run(&home, &["accept", task], &envs));
+}
+
+#[test]
+fn unavailable_herdr_does_not_hide_the_codex_inbox_hook() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("brgr");
+    let workspace = temp.path().join("work");
+    let herdr = temp.path().join("herdr");
+    fs::create_dir_all(&workspace).unwrap();
+    fs::write(&herdr, "#!/bin/sh\nexec /bin/sleep 3\n").unwrap();
+    fs::set_permissions(&herdr, fs::Permissions::from_mode(0o700)).unwrap();
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../testdata/fixtures/gjc")
+        .canonicalize()
+        .unwrap();
+    add_fixture(&home, &fixture, &temp.path().join("scratch"));
+    let owner = [
+        ("BRGR_OWNER_ID", "codex:hook-fallback"),
+        ("BRGR_SESSION_ID", "hook-fallback"),
+    ];
+    let result = json_output(&run(
+        &home,
+        &[
+            "run",
+            "BRGR_FIXTURE_OK",
+            "--workspace",
+            workspace.to_str().unwrap(),
+            "--foreground",
+        ],
+        &owner,
+    ));
+    let task = result["task_id"].as_str().unwrap();
+    let (output, elapsed) = invoke_hook_with_herdr(&home, &herdr, "user-prompt-submit");
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "slow Herdr delayed the inbox hook: {elapsed:?}"
+    );
+    assert!(output.status.success());
+    let surfaced: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(
+        surfaced["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap()
+            .contains(task)
+    );
+    let (stop, stop_elapsed) = invoke_hook_with_herdr(&home, &herdr, "stop");
+    assert!(stop_elapsed < Duration::from_secs(2));
+    assert_eq!(
+        serde_json::from_slice::<Value>(&stop.stdout).unwrap()["decision"],
+        "block"
+    );
+    json_output(&run(&home, &["accept", task], &owner));
+}
+
+#[test]
+fn slow_herdr_registration_cannot_leave_an_unclaimed_task() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("brgr");
+    let workspace = temp.path().join("work");
+    let herdr = temp.path().join("herdr");
+    let reported = temp.path().join("reported-session");
+    fs::create_dir_all(&workspace).unwrap();
+    fs::write(&herdr, r#"#!/bin/sh
+case "$1 $2" in
+ 'agent get')
+  if [ -s "$BRGR_TEST_SESSION_FILE" ]; then
+   printf '{"result":{"agent":{"agent":"codex","pane_id":"w1:p1","agent_status":"working","agent_session":{"value":"%s"}}}}\n' "$(/bin/cat "$BRGR_TEST_SESSION_FILE")"
+  else
+   /bin/sleep 3
+   printf '%s\n' '{"result":{"agent":{"agent":"codex","pane_id":"w1:p1","agent_status":"working"}}}'
+  fi;;
+ 'pane report-agent-session')
+  /bin/sleep 3
+  while [ "$#" -gt 0 ]; do
+   if [ "$1" = --agent-session-id ]; then printf '%s' "$2" > "$BRGR_TEST_SESSION_FILE"; fi
+   shift
+  done
+  printf '%s\n' '{}';;
+ *) exit 9;;
+esac
+"#).unwrap();
+    fs::set_permissions(&herdr, fs::Permissions::from_mode(0o700)).unwrap();
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../testdata/fixtures/gjc")
+        .canonicalize()
+        .unwrap();
+    add_fixture(&home, &fixture, &temp.path().join("scratch"));
+    let envs = [
+        ("CODEX_THREAD_ID", "session-a"),
+        ("BRGR_OWNER_ID", "codex:session-a"),
+        ("BRGR_SESSION_ID", "session-a"),
+        ("HERDR_ENV", "1"),
+        ("HERDR_PANE_ID", "w1:p1"),
+        ("HERDR_BIN_PATH", herdr.to_str().unwrap()),
+        ("BRGR_TEST_SESSION_FILE", reported.to_str().unwrap()),
+    ];
+    let started = Instant::now();
+    let launch = json_output(&run(
+        &home,
+        &["run", "SLOW", "--workspace", workspace.to_str().unwrap()],
+        &envs,
+    ));
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "task admission waited for Herdr"
+    );
+    let task = launch["task_id"].as_str().unwrap();
+    thread::sleep(Duration::from_millis(5_500));
+    let status = json_output(&run(&home, &["status", task], &envs));
+    assert_ne!(status["state"], "terminal", "{status}");
+    json_output(&run(&home, &["cancel", task], &envs));
+    let terminal = json_output(&run(
+        &home,
+        &["wait", task, "--timeout-seconds", "10"],
+        &envs,
+    ));
+    assert_eq!(terminal["outcome"], "cancelled");
+    json_output(&run(&home, &["result", task, "--ack"], &envs));
+    thread::sleep(Duration::from_millis(800));
+}
+
+fn invoke_hook_with_herdr(
+    home: &Path,
+    herdr: &Path,
+    event: &str,
+) -> (std::process::Output, Duration) {
+    let started = Instant::now();
+    let mut child = Command::new(brgr())
+        .arg("--home")
+        .arg(home)
+        .args(["__hook", event])
+        .env("HERDR_ENV", "1")
+        .env("HERDR_PANE_ID", "w1:p1")
+        .env("HERDR_BIN_PATH", herdr)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"{\"session_id\":\"hook-fallback\"}")
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    (output, started.elapsed())
+}
+
 fn assert_duplicate_notification_dispatcher_exits(home: &Path, task: &str, envs: &[(&str, &str)]) {
     let mut duplicate = Command::new(brgr())
         .arg("--home")
@@ -1818,6 +2030,71 @@ fn plugin_codex_missing_binary_fails_visibly_without_launching() {
 }
 
 #[test]
+fn plugin_codex_uses_configured_executable_with_minimal_herdr_path() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("brgr");
+    let workspace = temp.path().join("work");
+    let fake_bin = temp.path().join("bin");
+    let executable = fake_bin.join("codex");
+    let observed_path = temp.path().join("codex-path.txt");
+    fs::create_dir_all(&workspace).unwrap();
+    fs::create_dir_all(&fake_bin).unwrap();
+    fs::write(
+        &executable,
+        "#!/bin/sh\nprintf '%s\\n' \"$PATH\" > \"$BRGR_TEST_CODEX_PATH\"\n/bin/sleep 0.2\n",
+    )
+    .unwrap();
+    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+    let configured = json_output(&run(
+        &home,
+        &[
+            "config",
+            "set-codex-executable",
+            executable.to_str().unwrap(),
+        ],
+        &[],
+    ));
+    assert_eq!(
+        configured["herdr"]["codex_executable"],
+        executable.to_str().unwrap()
+    );
+    let context = json!({"workspace_id":"w1", "workspace_cwd":workspace});
+    let launched = Command::new(brgr())
+        .args(["plugin", "codex"])
+        .env("HERDR_ENV", "1")
+        .env("HERDR_PLUGIN_ID", "brgr")
+        .env("HERDR_PLUGIN_CONTEXT_JSON", context.to_string())
+        .env("BRGR_HOME", &home)
+        .env("CODEX_HOME", temp.path().join("codex-home"))
+        .env("BRGR_TEST_CODEX_PATH", &observed_path)
+        .env("PATH", "/usr/bin:/bin")
+        .output()
+        .unwrap();
+    assert!(
+        launched.status.success(),
+        "{}",
+        String::from_utf8_lossy(&launched.stderr)
+    );
+    let passed_path = fs::read_to_string(observed_path).unwrap();
+    assert!(
+        passed_path
+            .split(':')
+            .any(|entry| entry == fake_bin.to_str().unwrap())
+    );
+    let cleared = json_output(&run(&home, &["config", "clear-codex-executable"], &[]));
+    assert!(cleared["herdr"]["codex_executable"].is_null());
+    assert!(
+        !run(
+            &home,
+            &["config", "set-codex-executable", "relative/codex"],
+            &[]
+        )
+        .status
+        .success()
+    );
+}
+
+#[test]
 fn plugin_open_surfaces_herdr_launch_failure() {
     let temp = TempDir::new().unwrap();
     let home = temp.path().join("brgr");
@@ -2129,7 +2406,11 @@ fn herdr_unknown_model_stops_before_git_worktree_and_task_admission() {
         &[("PATH", &path), ("BRGR_OWNER_ID", "codex:herdr-preflight")],
     );
     assert!(!denied.status.success());
-    assert!(String::from_utf8_lossy(&denied.stderr).contains("absent from the current catalog"));
+    assert!(
+        String::from_utf8_lossy(&denied.stderr).contains("absent from the current catalog"),
+        "{}",
+        String::from_utf8_lossy(&denied.stderr)
+    );
     assert_eq!(fs::read_dir(home.join("launches")).unwrap().count(), 0);
     assert_eq!(fs::read_dir(home.join("worktrees")).unwrap().count(), 0);
 }

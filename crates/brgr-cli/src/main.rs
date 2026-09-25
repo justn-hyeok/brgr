@@ -184,6 +184,10 @@ enum PluginCommand {
 #[derive(Subcommand)]
 enum ConfigCommand {
     Show,
+    SetCodexExecutable {
+        executable: PathBuf,
+    },
+    ClearCodexExecutable,
     SetWorkerPlacement {
         placement: WorkerPlacement,
     },
@@ -612,7 +616,7 @@ async fn main() -> Result<()> {
         } => wait_for_result(&paths, task, timeout_seconds, cli.json).await,
         Command::Message { command } => message::run(&paths, command, cli.json).await,
         Command::Cancel { task, tree } => cancel(&paths, task, tree, cli.json),
-        Command::Bind { task, session } => bind(&paths, task, session, cli.json),
+        Command::Bind { task, session } => bind(&paths, task, session, cli.json).await,
         Command::Accept { task, reason } => {
             decide(&paths, task, DecisionVerdict::Accepted, reason, cli.json)
         }
@@ -637,7 +641,7 @@ async fn main() -> Result<()> {
         Command::Cleanup { command } => cleanup(&paths, command, cli.json),
         Command::Supervise { launch } => supervise(&paths, &launch, cli.json).await,
         Command::Hook { event } => {
-            if hook(&paths, event).is_err() {
+            if hook(&paths, event).await.is_err() {
                 eprintln!("brgr hook could not read the inbox; run `brgr doctor`");
                 println!("{{}}");
             }
@@ -751,6 +755,15 @@ fn config_command(paths: &Paths, command: &ConfigCommand, json_output: bool) -> 
     let mut config = Config::load(&paths.config)?;
     match command {
         ConfigCommand::Show => {}
+        ConfigCommand::SetCodexExecutable { executable } => {
+            config::validate_codex_executable(executable)?;
+            config.herdr.codex_executable = Some(executable.clone());
+            config.save(&paths.config)?;
+        }
+        ConfigCommand::ClearCodexExecutable => {
+            config.herdr.codex_executable = None;
+            config.save(&paths.config)?;
+        }
         ConfigCommand::SetWorkerPlacement { placement } => {
             config.herdr.worker_placement = *placement;
             config.save(&paths.config)?;
@@ -1044,7 +1057,7 @@ async fn start_task(
         store.record_task(&launch.spec, &request_digest_text)?;
     }
     drop(admission);
-    notification::register_and_spawn(paths, &store, &launch.spec, session.as_deref());
+    notification::spawn_registration_and_delivery(paths, &launch.spec, session.as_deref());
 
     if matches!(options.execution, ExecutionDisposition::Foreground) {
         return supervise(paths, &launch_path, options.json_output).await;
@@ -1672,7 +1685,12 @@ fn task_needs_cancel(store: &Store, task: TaskId) -> Result<bool> {
     }
 }
 
-fn bind(paths: &Paths, task: TaskId, session: Option<String>, json_output: bool) -> Result<()> {
+async fn bind(
+    paths: &Paths,
+    task: TaskId,
+    session: Option<String>,
+    json_output: bool,
+) -> Result<()> {
     let store = Store::open(&paths.store)?;
     let spec = store.task(task)?;
     if let Ok(explicit_owner) = env::var("BRGR_OWNER_ID")
@@ -1688,7 +1706,15 @@ fn bind(paths: &Paths, task: TaskId, session: Option<String>, json_output: bool)
         bail!("requested session does not match the current Codex session");
     }
     let epoch = store.rebind_owner(&spec.owner_id, &session)?;
-    if notification::register_current_surface(&store, &spec.owner_id, &session)? {
+    let surface_ready =
+        match notification::register_current_surface(&store, &spec.owner_id, &session).await {
+            Ok(ready) => ready,
+            Err(error) => {
+                eprintln!("brgr completion notification remains queued: {error}");
+                false
+            }
+        };
+    if surface_ready {
         for pending in store.pending_notification_tasks_for_session(&session)? {
             if let Err(error) = notification::spawn_for_task(paths, pending) {
                 eprintln!("brgr completion notification remains queued: {error}");
@@ -2007,7 +2033,7 @@ fn cleanup(paths: &Paths, command: CleanupCommand, json_output: bool) -> Result<
     Ok(())
 }
 
-fn hook(paths: &Paths, event: HookEvent) -> Result<()> {
+async fn hook(paths: &Paths, event: HookEvent) -> Result<()> {
     let mut input = String::new();
     io::stdin().read_to_string(&mut input)?;
     let input: HookInput = serde_json::from_str(&input).unwrap_or(HookInput { session_id: None });
@@ -2022,7 +2048,27 @@ fn hook(paths: &Paths, event: HookEvent) -> Result<()> {
         let epoch = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
         store.bind_owner(&owner, &session_id, epoch.max(1))?;
     }
-    if notification::register_current_surface(&store, &owner, &session_id)? {
+    let surface_ready = if event == HookEvent::Stop {
+        false
+    } else {
+        match tokio::time::timeout(
+            Duration::from_millis(500),
+            notification::register_current_surface(&store, &owner, &session_id),
+        )
+        .await
+        {
+            Ok(Ok(ready)) => ready,
+            Ok(Err(error)) => {
+                eprintln!("brgr completion notification remains queued: {error}");
+                false
+            }
+            Err(_) => {
+                eprintln!("brgr completion notification remains queued: Herdr lookup timed out");
+                false
+            }
+        }
+    };
+    if surface_ready {
         for task in store.pending_notification_tasks_for_session(&session_id)? {
             if let Err(error) = notification::spawn_for_task(paths, task) {
                 eprintln!("brgr completion notification remains queued: {error}");
