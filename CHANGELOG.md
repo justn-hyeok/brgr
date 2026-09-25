@@ -1,5 +1,16 @@
 # Changelog
 
+## 2.3.1 — 2026-09-25
+
+Allow the Herdr plugin's Codex pane to use an explicitly configured absolute
+Codex executable when the Herdr server has a minimal `PATH`. Before delivering
+a completion notification, brgr verifies the exact Codex pane and reports its
+bound session to Herdr when native session metadata is absent. Registration
+runs after task supervision starts, so a slow Herdr socket cannot make a task
+look unclaimed. Herdr lookup in Codex hooks now has a short budget and never
+hides inbox or Stop-hook output when the socket is slow or unavailable. No
+owner decision or harness fallback occurs implicitly.
+
 ## 2.3.0 — 2026-09-24
 
 Complete the managed delegation loop. Exact Herdr Codex panes receive durable

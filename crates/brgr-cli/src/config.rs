@@ -2,7 +2,7 @@ use std::{
     fs::{self, File},
     io::{Read as _, Write as _},
     os::unix::fs::PermissionsExt as _,
-    path::Path,
+    path::{Path, PathBuf},
 };
 
 use anyhow::{Context as _, Result, bail};
@@ -40,6 +40,18 @@ pub struct Config {
 pub struct HerdrConfig {
     pub worker_placement: WorkerPlacement,
     pub auto_worker_pane: bool,
+    pub codex_executable: Option<PathBuf>,
+}
+
+pub fn validate_codex_executable(path: &Path) -> Result<()> {
+    if !path.is_absolute() {
+        bail!("Codex executable must be an absolute path");
+    }
+    let metadata = fs::metadata(path).context("configured Codex executable is unavailable")?;
+    if !metadata.is_file() || metadata.permissions().mode() & 0o111 == 0 {
+        bail!("configured Codex executable is not an executable file");
+    }
+    Ok(())
 }
 
 impl Config {
@@ -93,6 +105,13 @@ mod tests {
             WorkerPlacement::Adjacent
         );
         assert!(!Config::load(&path).unwrap().herdr.auto_worker_pane);
+        assert!(
+            Config::load(&path)
+                .unwrap()
+                .herdr
+                .codex_executable
+                .is_none()
+        );
         fs::write(&path, "[herdr]\nworker_placement = 'elsewhere'\n").unwrap();
         assert!(Config::load(&path).is_err());
         fs::write(&path, "[herdr]\nworker_placement = 'tab'\n").unwrap();

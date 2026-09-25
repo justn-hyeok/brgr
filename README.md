@@ -26,13 +26,25 @@ limits are described below.
 Install the current public v2 plugin from GitHub:
 
 ```bash
-herdr plugin install justn-hyeok/brgr --ref v2.3.0
+herdr plugin install justn-hyeok/brgr --ref v2.3.1
 ```
 
 The plugin builds `brgr` from the pinned Cargo lockfile, so a Rust toolchain is
 required for installation. For local development, build with `cargo build
 --release --locked -p brgr-cli` and run `herdr plugin link .` from this checkout.
 The manifest is [herdr-plugin.toml](herdr-plugin.toml).
+
+If the Herdr server's `PATH` does not contain `codex` (for example, with a
+shell-managed Node installation), configure its absolute executable path from
+your shell before opening the plugin Codex pane:
+
+```bash
+brgr config set-codex-executable "$(command -v codex)"
+```
+
+`brgr config clear-codex-executable` restores `PATH` lookup. When Herdr has not
+yet reported the pane's Codex session ID, brgr verifies the exact Codex pane
+and reports the bound session before delivering a completion notification.
 
 Herdr exposes three workspace actions: **Open brgr status** opens a live,
 read-only board of the latest 20 tasks; **Open Codex for brgr** starts a new

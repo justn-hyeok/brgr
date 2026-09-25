@@ -21,7 +21,7 @@ const POLL_INTERVAL: Duration = Duration::from_millis(500);
 const MAX_LIFETIME: Duration = Duration::from_hours(24);
 const HERDR_TIMEOUT: Duration = Duration::from_secs(5);
 
-pub fn register_current_surface(
+pub async fn register_current_surface(
     store: &Store,
     owner_id: &OwnerId,
     session_id: &str,
@@ -47,30 +47,97 @@ pub fn register_current_surface(
     let binary = binary
         .to_str()
         .context("Herdr executable path is not UTF-8")?;
+    let herdr_session = env::var("HERDR_SESSION").ok();
+    let agent = recorded_agent(binary, herdr_session.as_deref(), &pane).await?;
+    if agent.get("agent").and_then(Value::as_str) != Some("codex")
+        || agent.get("pane_id").and_then(Value::as_str) != Some(pane.as_ref())
+    {
+        bail!("recorded Herdr pane is not the current Codex agent");
+    }
+    match agent
+        .pointer("/agent_session/value")
+        .and_then(Value::as_str)
+    {
+        Some(observed) if observed == session_id => {}
+        Some(_) => bail!("recorded Herdr Codex session differs from the owner binding"),
+        None => {
+            let mut report = surface_command(binary, herdr_session.as_deref());
+            report.args([
+                "pane",
+                "report-agent-session",
+                &pane,
+                "--source",
+                "herdr:codex",
+                "--agent",
+                "codex",
+                "--agent-session-id",
+                session_id,
+            ]);
+            let output = timeout(HERDR_TIMEOUT, report.kill_on_drop(true).output())
+                .await
+                .context("Herdr Codex session report timed out")??;
+            if !output.status.success() {
+                bail!("Herdr did not accept the Codex session report");
+            }
+            let reported = recorded_agent(binary, herdr_session.as_deref(), &pane).await?;
+            if reported.get("agent").and_then(Value::as_str) != Some("codex")
+                || reported.get("pane_id").and_then(Value::as_str) != Some(pane.as_ref())
+                || reported
+                    .pointer("/agent_session/value")
+                    .and_then(Value::as_str)
+                    != Some(session_id)
+            {
+                bail!("Herdr did not bind the exact Codex session to the pane");
+            }
+        }
+    }
     store.register_owner_surface(
         owner_id,
         session_id,
         epoch,
         &pane,
-        env::var("HERDR_SESSION").ok().as_deref(),
+        herdr_session.as_deref(),
         binary,
     )?;
     Ok(true)
 }
 
-pub fn register_and_spawn(paths: &Paths, store: &Store, task: &TaskSpec, session: Option<&str>) {
-    let Some(session) = session else {
+pub fn spawn_registration_and_delivery(paths: &Paths, task: &TaskSpec, session: Option<&str>) {
+    if session.is_none()
+        || env::var("HERDR_ENV").as_deref() != Ok("1")
+        || !task.owner_id.as_str().starts_with("codex:")
+        || env::var_os("HERDR_PANE_ID").is_none()
+        || env::var_os("HERDR_BIN_PATH").is_none()
+    {
         return;
-    };
-    match register_current_surface(store, &task.owner_id, session) {
-        Ok(true) => {
-            if let Err(error) = spawn_for_task(paths, task.task_id) {
-                eprintln!("brgr completion notification remains queued: {error}");
-            }
-        }
-        Ok(false) => {}
-        Err(error) => eprintln!("brgr parent surface could not be recorded: {error}"),
     }
+    if let Err(error) = spawn_for_task(paths, task.task_id) {
+        eprintln!("brgr completion notification remains queued: {error}");
+    }
+}
+
+async fn recorded_agent(binary: &str, herdr_session: Option<&str>, pane: &str) -> Result<Value> {
+    let mut get = surface_command(binary, herdr_session);
+    get.args(["agent", "get", pane]);
+    let output = timeout(HERDR_TIMEOUT, get.kill_on_drop(true).output())
+        .await
+        .context("Herdr Codex pane lookup timed out")??;
+    if !output.status.success() || output.stdout.len() > 65_536 {
+        bail!("recorded Codex pane is unavailable");
+    }
+    let state: Value = serde_json::from_slice(&output.stdout)?;
+    state
+        .pointer("/result/agent")
+        .cloned()
+        .context("Herdr did not return a Codex agent")
+}
+
+fn surface_command(binary: &str, herdr_session: Option<&str>) -> tokio::process::Command {
+    let mut command = tokio::process::Command::new(binary);
+    if let Some(session) = herdr_session {
+        command.arg("--session").arg(session);
+    }
+    command
 }
 
 pub fn spawn_for_task(paths: &Paths, task: TaskId) -> Result<()> {
@@ -110,17 +177,7 @@ pub async fn deliver_pending(paths: &Paths, task: TaskId) -> Result<()> {
     // lock after a crash, so a later hook may resume the durable queue.
     let _lock = lock;
     let started = Instant::now();
-    let store = loop {
-        match Store::open(&paths.store) {
-            Ok(store) => break store,
-            Err(error)
-                if error.is_retryable_database_contention() && started.elapsed() < MAX_LIFETIME =>
-            {
-                sleep(POLL_INTERVAL).await;
-            }
-            Err(error) => return Err(error.into()),
-        }
-    };
+    let store = registered_store(paths, task, started).await?;
     while started.elapsed() < MAX_LIFETIME {
         let pending = match store.pending_notifications_for_task(task) {
             Ok(pending) => pending,
@@ -197,6 +254,25 @@ pub async fn deliver_pending(paths: &Paths, task: TaskId) -> Result<()> {
         sleep(POLL_INTERVAL).await;
     }
     Ok(())
+}
+
+async fn registered_store(paths: &Paths, task: TaskId, started: Instant) -> Result<Store> {
+    let store = loop {
+        match Store::open(&paths.store) {
+            Ok(store) => break store,
+            Err(error)
+                if error.is_retryable_database_contention() && started.elapsed() < MAX_LIFETIME =>
+            {
+                sleep(POLL_INTERVAL).await;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    };
+    let spec = store.task(task)?;
+    if let Some((session, _)) = store.owner_binding(&spec.owner_id)? {
+        register_current_surface(&store, &spec.owner_id, &session).await?;
+    }
+    Ok(store)
 }
 
 async fn try_deliver(target: &NotificationTarget) -> Result<()> {
