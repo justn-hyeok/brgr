@@ -26,6 +26,18 @@
       }
     },
     "error": { "type": ["string", "null"] },
+    "route_observation": {
+      "$comment": "Only present in bytes written by an unreleased intermediate v1 build; current results commit route evidence separately.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["model", "model_source", "effort", "effort_source"],
+      "properties": {
+        "model": { "type": ["string", "null"] },
+        "model_source": { "enum": ["harness_jsonl", "unavailable"] },
+        "effort": { "type": ["string", "null"] },
+        "effort_source": { "enum": ["harness_jsonl", "unavailable"] }
+      }
+    },
     "unresolved_effects": { "type": "array", "items": { "type": "string" } }
   }
 }
