@@ -1077,7 +1077,7 @@ where
     R: AsyncRead + Unpin,
 {
     if source == ResultSource::JsonlAssistantFinal {
-        read_jsonl_semantic(reader, limit, overflow).await
+        read_jsonl_semantic(reader, limit, JSONL_TRANSPORT_LIMIT_BYTES, overflow).await
     } else {
         capture_bounded(reader, limit, overflow).await
     }
@@ -1088,6 +1088,7 @@ where
 async fn read_jsonl_semantic<R>(
     mut reader: R,
     result_limit: u64,
+    transport_limit: u64,
     overflow: Arc<AtomicBool>,
 ) -> Result<(Vec<u8>, bool), std::io::Error>
 where
@@ -1106,7 +1107,7 @@ where
         }
         for byte in &chunk[..count] {
             raw_bytes = raw_bytes.saturating_add(1);
-            if raw_bytes > JSONL_TRANSPORT_LIMIT_BYTES {
+            if raw_bytes > transport_limit {
                 overflow.store(true, Ordering::Relaxed);
                 return Ok((retained, true));
             }
@@ -1539,9 +1540,14 @@ mod tests {
         let (mut writer, reader) = tokio::io::duplex(8192);
         let writer_task = tokio::spawn(async move { writer.write_all(&raw).await.unwrap() });
         let overflow = Arc::new(AtomicBool::new(false));
-        let (semantic, truncated) = read_jsonl_semantic(reader, 1_048_576, Arc::clone(&overflow))
-            .await
-            .unwrap();
+        let (semantic, truncated) = read_jsonl_semantic(
+            reader,
+            1_048_576,
+            JSONL_TRANSPORT_LIMIT_BYTES,
+            Arc::clone(&overflow),
+        )
+        .await
+        .unwrap();
         writer_task.await.unwrap();
 
         assert!(!truncated);
@@ -1553,6 +1559,121 @@ mod tests {
                 .unwrap()
                 .as_deref(),
             Some("openai-codex/gpt-5.6-luna")
+        );
+    }
+
+    /// The published contract in the README bounds raw JSONL transport at
+    /// 64 MiB. Behavior is exercised against a small injected bound below, so
+    /// this locks the value the production capture path actually passes.
+    #[test]
+    fn jsonl_transport_limit_matches_the_published_bound() {
+        assert_eq!(JSONL_TRANSPORT_LIMIT_BYTES, 64 * 1024 * 1024);
+    }
+
+    #[tokio::test]
+    async fn jsonl_transport_limit_truncates_without_retaining_the_raw_stream() {
+        use tokio::io::AsyncWriteExt as _;
+
+        // A small injected bound keeps the test deterministic and cheap; the
+        // production value is locked separately.
+        const TRANSPORT: u64 = 256 * 1024;
+
+        // Update events are discarded by retention, so anything retained here
+        // would be raw transport rather than evidence worth sealing.
+        let update = format!(
+            "{}\n",
+            json!({"type": "message_update", "delta": "x".repeat(8192)})
+        );
+        let line_bytes = u64::try_from(update.len()).unwrap();
+        let over_limit = TRANSPORT.saturating_add(line_bytes);
+        let (mut writer, reader) = tokio::io::duplex(8192);
+        let writer_task = tokio::spawn(async move {
+            let mut written = 0_u64;
+            while written < over_limit {
+                if writer.write_all(update.as_bytes()).await.is_err() {
+                    // Capture stopped at the limit and dropped its end.
+                    break;
+                }
+                written = written.saturating_add(line_bytes);
+            }
+            written
+        });
+        let overflow = Arc::new(AtomicBool::new(false));
+        let (semantic, truncated) =
+            read_jsonl_semantic(reader, 1_048_576, TRANSPORT, Arc::clone(&overflow))
+                .await
+                .unwrap();
+        let written = writer_task.await.unwrap();
+
+        assert!(truncated);
+        assert!(overflow.load(Ordering::Relaxed));
+        assert!(
+            semantic.is_empty(),
+            "retained {} bytes of a discarded raw stream",
+            semantic.len()
+        );
+        assert!(
+            written > TRANSPORT / 2,
+            "writer stopped too early to exercise the transport limit"
+        );
+    }
+
+    #[tokio::test]
+    async fn jsonl_stream_just_under_the_transport_limit_keeps_its_final_evidence() {
+        use tokio::io::AsyncWriteExt as _;
+
+        const TRANSPORT: u64 = 256 * 1024;
+
+        let update = format!(
+            "{}\n",
+            json!({"type": "message_update", "delta": "x".repeat(8192)})
+        );
+        let tail = format!(
+            "{}\n{}\n",
+            json!({
+                "type": "message_end",
+                "message": {
+                    "role": "assistant",
+                    "provider": "openai-codex",
+                    "model": "gpt-5.6-luna",
+                    "content": [{"type": "text", "text": "READY"}],
+                },
+            }),
+            json!({"type": "agent_end", "stopReason": "completed"})
+        );
+        let line_bytes = u64::try_from(update.len()).unwrap();
+        let tail_bytes = u64::try_from(tail.len()).unwrap();
+        let (mut writer, reader) = tokio::io::duplex(8192);
+        let writer_task = tokio::spawn(async move {
+            let mut written = 0_u64;
+            while written
+                .saturating_add(line_bytes)
+                .saturating_add(tail_bytes)
+                <= TRANSPORT
+            {
+                writer.write_all(update.as_bytes()).await.unwrap();
+                written = written.saturating_add(line_bytes);
+            }
+            writer.write_all(tail.as_bytes()).await.unwrap();
+            written
+        });
+        let overflow = Arc::new(AtomicBool::new(false));
+        let (semantic, truncated) =
+            read_jsonl_semantic(reader, 1_048_576, TRANSPORT, Arc::clone(&overflow))
+                .await
+                .unwrap();
+        let written = writer_task.await.unwrap();
+
+        assert!(!truncated);
+        assert!(!overflow.load(Ordering::Relaxed));
+        assert_eq!(extract_jsonl_assistant_final(&semantic).unwrap(), b"READY");
+        assert!(
+            written > TRANSPORT / 2,
+            "stream stopped too early to approach the transport limit"
+        );
+        assert!(
+            u64::try_from(semantic.len()).unwrap() < JSONL_METADATA_SLACK_BYTES,
+            "retention grew with the stream instead of the evidence"
         );
     }
 
@@ -1568,7 +1689,10 @@ mod tests {
                 .unwrap();
         });
         let overflow = Arc::new(AtomicBool::new(false));
-        let (semantic, truncated) = read_jsonl_semantic(reader, 1024, overflow).await.unwrap();
+        let (semantic, truncated) =
+            read_jsonl_semantic(reader, 1024, JSONL_TRANSPORT_LIMIT_BYTES, overflow)
+                .await
+                .unwrap();
         writer_task.await.unwrap();
 
         assert!(!truncated);
@@ -1712,6 +1836,11 @@ mod tests {
         ));
     }
 
+    /// Long enough that machine load cannot fire it. Used wherever the deadline
+    /// is incidental to what a probe test asserts; a test whose subject *is* the
+    /// deadline keeps its own tight one.
+    const INCIDENTAL_PROBE_DEADLINE: Duration = Duration::from_secs(30);
+
     #[tokio::test]
     async fn file_backed_probe_captures_full_help_and_flags_oversize() {
         let root = tempfile::tempdir().unwrap();
@@ -1722,9 +1851,10 @@ mod tests {
         )
         .unwrap();
         std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let output = ProcessRunner::probe(&executable, &[], Duration::from_secs(5))
+        let output = ProcessRunner::probe(&executable, &[], INCIDENTAL_PROBE_DEADLINE)
             .await
             .unwrap();
+        assert!(!output.timed_out);
         assert_eq!(output.exit_code, Some(0));
         assert!(output.stdout.len() > 512);
         assert!(!output.output_truncated);
@@ -1733,9 +1863,10 @@ mod tests {
             "#!/bin/sh\ni=0\nwhile [ \"$i\" -lt 1200 ]; do printf 'model-catalog-line-12345678901234567890123456789012345678901234567890\\n'; i=$((i+1)); done\n",
         )
         .unwrap();
-        let oversized = ProcessRunner::probe(&executable, &[], Duration::from_secs(5))
+        let oversized = ProcessRunner::probe(&executable, &[], INCIDENTAL_PROBE_DEADLINE)
             .await
             .unwrap();
+        assert!(!oversized.timed_out);
         assert!(oversized.output_truncated);
         assert_eq!(oversized.stdout.len(), 65_536);
     }
@@ -1758,8 +1889,10 @@ mod tests {
             .await
             .unwrap();
         assert!(flooded.output_truncated);
-        assert!(!flooded.timed_out);
-        assert!(flooded.elapsed < Duration::from_secs(2));
+        assert!(
+            !flooded.timed_out,
+            "the deadline fired before the output watchdog stopped the flood"
+        );
         // The watchdog is a sampled soft limit, not an OS-enforced disk quota.
         // A fixed byte ceiling is scheduler-dependent on fast CI machines;
         // instead prove the process group is gone and the file stops growing.
@@ -1772,9 +1905,10 @@ mod tests {
             "#!/bin/sh\n/bin/mv stdout moved\n/bin/ln -s /etc/passwd stdout\nprintf 'SAFE_PROBE'\n",
         )
         .unwrap();
-        let replaced = ProcessRunner::probe(&executable, &[], Duration::from_secs(2))
+        let replaced = ProcessRunner::probe(&executable, &[], INCIDENTAL_PROBE_DEADLINE)
             .await
             .unwrap();
+        assert!(!replaced.timed_out);
         assert_eq!(replaced.stdout, b"SAFE_PROBE");
         assert!(!replaced.output_truncated);
     }
@@ -1874,18 +2008,19 @@ mod tests {
         let wide = ProcessRunner::probe_with_path(
             &executable,
             &[],
-            Duration::from_secs(5),
+            INCIDENTAL_PROBE_DEADLINE,
             Some(bin.as_os_str()),
         )
         .await
         .unwrap();
+        assert!(!wide.timed_out, "the probe deadline fired under load");
         assert_eq!(wide.exit_code, Some(0));
         assert_eq!(wide.stdout, b"ok\n");
 
         let narrow = ProcessRunner::probe_with_path(
             &executable,
             &[],
-            Duration::from_secs(2),
+            INCIDENTAL_PROBE_DEADLINE,
             Some(OsStr::new("/usr/bin:/bin")),
         )
         .await
