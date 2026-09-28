@@ -15,5 +15,10 @@ tempfile.workspace = true
 thiserror.workspace = true
 uuid.workspace = true
 
+[[bench]]
+name = "board_scale"
+harness = false
+test = false
+
 [lints]
 workspace = true

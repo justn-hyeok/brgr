@@ -11,7 +11,7 @@ use std::{
     fs,
     io::Read,
     path::{Path, PathBuf},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 #[cfg(unix)]
@@ -31,7 +31,6 @@ use sha2::{Digest, Sha256};
 pub use tree::SubtreeNode;
 
 const SCHEMA: &str = r"
-PRAGMA foreign_keys = ON;
 CREATE TABLE IF NOT EXISTS tasks (
     task_id TEXT NOT NULL,
     revision INTEGER NOT NULL,
@@ -174,7 +173,43 @@ CREATE TABLE IF NOT EXISTS completion_notifications (
 );
 CREATE INDEX IF NOT EXISTS completion_notifications_owner
 ON completion_notifications (owner_id, resolved, delivered_session);
+CREATE INDEX IF NOT EXISTS results_task_revision ON results (task_id, revision);
+CREATE INDEX IF NOT EXISTS attempts_task_revision ON attempts (task_id, revision);
 ";
+
+/// Identifies the exact [`SCHEMA`] a store was last initialized with, so an
+/// ordinary command no longer opens a write transaction just to re-apply an
+/// unchanged schema.
+///
+/// Derived from the schema text rather than hand-maintained. A hand-bumped
+/// constant can be forgotten, and the previous unconditional
+/// `CREATE ... IF NOT EXISTS` batch self-healed on every open; deriving the
+/// stamp keeps that property, because any edit to `SCHEMA` changes it and every
+/// store with a different stamp re-applies the batch. `user_version` is a
+/// signed 32-bit field, and `0` is reserved for a store written before the
+/// stamp existed.
+fn schema_version() -> i64 {
+    schema_stamp(SCHEMA)
+}
+
+/// Folds a schema's text into the `user_version` field. Never silently falls
+/// back: a stamp that does not track the text would make every store skip a new
+/// object forever.
+fn schema_stamp(schema: &str) -> i64 {
+    let digest = sha256(schema.as_bytes());
+    let hex = digest
+        .strip_prefix("sha256:")
+        .expect("sha256 renders a prefixed digest");
+    let head = i64::from_str_radix(&hex[..8], 16).expect("a digest's leading bytes are hex");
+    (head & 0x7fff_ffff).max(1)
+}
+
+/// Total time [`retry_busy`] may spend re-attempting an operation that failed
+/// only because another process held a lock. Bounded so a contended command
+/// fails with a reason instead of hanging.
+const BUSY_RETRY_BUDGET: Duration = Duration::from_secs(10);
+const BUSY_RETRY_BACKOFF: Duration = Duration::from_millis(2);
+const BUSY_RETRY_BACKOFF_CAP: Duration = Duration::from_millis(250);
 
 /// The result of an idempotent store mutation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -245,15 +280,30 @@ impl Store {
         let database_path = root.join("brgr.sqlite3");
         let connection = Connection::open(&database_path)?;
         connection.busy_timeout(Duration::from_secs(5))?;
-        connection.pragma_update(None, "journal_mode", "WAL")?;
-        connection.pragma_update(None, "synchronous", "FULL")?;
-        connection.execute_batch(SCHEMA)?;
+        retry_busy(|| initialize_connection(&connection))?;
         private_file(&database_path)?;
         let artifacts = ArtifactStore::open(root)?;
         Ok(Self {
             connection,
             artifacts,
         })
+    }
+
+    /// Begins a write transaction that takes its reserved lock at `BEGIN`.
+    ///
+    /// A `DEFERRED` transaction that reads before it writes fails with
+    /// `SQLITE_BUSY_SNAPSHOT` once another writer commits inside that window,
+    /// and `busy_timeout` does not cover that code. `IMMEDIATE` makes the
+    /// contention visible at `BEGIN`, where the busy handler applies.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the transaction cannot be started.
+    fn write_transaction(&self) -> Result<Transaction<'_>, StoreError> {
+        Ok(Transaction::new_unchecked(
+            &self.connection,
+            TransactionBehavior::Immediate,
+        )?)
     }
 
     /// Records a task revision, enforcing its create-request digest.
@@ -348,11 +398,18 @@ impl Store {
         request_digest: &str,
         parent: Option<(TaskId, AttemptId)>,
     ) -> Result<WriteOutcome, StoreError> {
+        retry_busy(|| self.record_task_with_parent_once(task, request_digest, parent))
+    }
+
+    fn record_task_with_parent_once(
+        &mut self,
+        task: &TaskSpec,
+        request_digest: &str,
+        parent: Option<(TaskId, AttemptId)>,
+    ) -> Result<WriteOutcome, StoreError> {
         task.validate()?;
         validate_digest(request_digest)?;
-        let transaction = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let transaction = self.write_transaction()?;
         let idempotency =
             record_idempotency(&transaction, &task.create_request_id, request_digest)?;
         let recorded_parent = recorded_delegation_parent(&transaction, task.task_id)?;
@@ -479,6 +536,15 @@ impl Store {
     ///
     /// Returns an error when the task is missing or an active attempt exists.
     pub fn claim_attempt(
+        &self,
+        task_id: TaskId,
+        revision: u32,
+        attempt_id: AttemptId,
+    ) -> Result<(), StoreError> {
+        retry_busy(|| self.claim_attempt_once(task_id, revision, attempt_id))
+    }
+
+    fn claim_attempt_once(
         &self,
         task_id: TaskId,
         revision: u32,
@@ -907,7 +973,21 @@ impl Store {
         self.commit_terminal_result_guarded(&observed.task.owner_id, result, Some(observed), true)
     }
 
+    /// Lock contention here is the most expensive failure in brgr: the harness
+    /// has already run, and a raw busy error leaves the attempt unfinished until
+    /// recovery settles it as `Lost` with unresolved effects, which no later
+    /// attempt on that revision can supersede.
     fn commit_terminal_result_guarded(
+        &mut self,
+        owner_id: &OwnerId,
+        result: &ResultEnvelope,
+        observed: Option<&UnfinishedAttempt>,
+        complete_run: bool,
+    ) -> Result<WriteOutcome, StoreError> {
+        retry_busy(|| self.commit_terminal_result_once(owner_id, result, observed, complete_run))
+    }
+
+    fn commit_terminal_result_once(
         &mut self,
         owner_id: &OwnerId,
         result: &ResultEnvelope,
@@ -918,7 +998,9 @@ impl Store {
         let envelope_json = serde_json::to_string(result)?;
         let digest = sha256(envelope_json.as_bytes());
         let observation = serialize_route_observation(result.route_observation.as_ref())?;
-        let transaction = self.connection.transaction()?;
+        // Terminal commit reads the attempt before it writes, so it goes through
+        // the same immediate begin as every other write path.
+        let transaction = self.write_transaction()?;
 
         if let Some(observed) = observed {
             validate_recovery_observation(&transaction, observed)?;
@@ -1139,6 +1221,10 @@ impl Store {
     /// Returns an error for missing results, digest/owner mismatches,
     /// conflicting decisions, invalid serialization, or database failure.
     pub fn record_decision(&self, decision: &Decision) -> Result<WriteOutcome, StoreError> {
+        retry_busy(|| self.record_decision_once(decision))
+    }
+
+    fn record_decision_once(&self, decision: &Decision) -> Result<WriteOutcome, StoreError> {
         let transaction =
             Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
         let outcome = record_decision_in_transaction(&transaction, &self.artifacts, decision)?;
@@ -1154,6 +1240,13 @@ impl Store {
     /// Returns an error for a missing inbox item, mismatched owner or digest,
     /// conflicting decision, or failed transaction.
     pub fn record_decision_and_ack(&self, decision: &Decision) -> Result<WriteOutcome, StoreError> {
+        retry_busy(|| self.record_decision_and_ack_once(decision))
+    }
+
+    fn record_decision_and_ack_once(
+        &self,
+        decision: &Decision,
+    ) -> Result<WriteOutcome, StoreError> {
         let transaction =
             Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
         let outcome = record_decision_in_transaction(&transaction, &self.artifacts, decision)?;
@@ -1277,6 +1370,66 @@ impl Store {
         )?;
         let rows = statement.query_map([bounded], |row| row.get::<_, String>(0))?;
         rows.map(|row| Ok(serde_json::from_str(&row?)?)).collect()
+    }
+
+    /// Resolves the task revisions whose id starts with `prefix`.
+    ///
+    /// A brgr-owned worktree directory is named after a short task-id prefix, so
+    /// recovering the task it belongs to needs a prefix lookup. More than one
+    /// match is returned rather than guessed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a non-hexadecimal prefix, invalid stored data, or a
+    /// database failure.
+    pub fn task_revisions_with_prefix(
+        &self,
+        prefix: &str,
+        revision: u32,
+    ) -> Result<Vec<TaskSpec>, StoreError> {
+        if prefix.is_empty() || !prefix.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(StoreError::InvalidTaskPrefix);
+        }
+        // Stored ids are lowercase, so the range bounds have to be too.
+        let prefix = prefix.to_ascii_lowercase();
+        let prefix = prefix.as_str();
+        let mut statement = self.connection.prepare(
+            "SELECT spec_json FROM tasks
+             WHERE task_id >= ?1 AND task_id < ?2 AND revision = ?3
+             ORDER BY task_id",
+        )?;
+        // A half-open range on the primary key beats LIKE: it uses the index and
+        // cannot be widened by a wildcard inside the prefix.
+        let upper = prefix_upper_bound(prefix);
+        let rows = statement.query_map(params![prefix, upper, revision], |row| {
+            row.get::<_, String>(0)
+        })?;
+        rows.map(|row| Ok(serde_json::from_str(&row?)?)).collect()
+    }
+
+    /// Returns the decision recorded against one task revision's result.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid stored data or a database failure.
+    pub fn decision_for_revision(
+        &self,
+        task_id: TaskId,
+        revision: u32,
+    ) -> Result<Option<Decision>, StoreError> {
+        let json: Option<String> = self
+            .connection
+            .query_row(
+                "SELECT d.decision_json FROM decisions d
+                 JOIN results r ON r.result_id = d.result_id
+                 WHERE r.task_id = ?1 AND r.revision = ?2
+                 ORDER BY r.rowid DESC LIMIT 1",
+                params![task_id.to_string(), revision],
+                |row| row.get(0),
+            )
+            .optional()?;
+        json.map(|json| Ok(serde_json::from_str(&json)?))
+            .transpose()
     }
 
     /// Lists latest task revisions whose owner is currently bound to a session.
@@ -2056,6 +2209,87 @@ fn private_directory(path: &Path) -> Result<(), StoreError> {
     Ok(())
 }
 
+/// Applies the per-connection pragmas and, only when the stored schema is
+/// behind, the idempotent DDL batch.
+///
+/// `foreign_keys` and `synchronous` are per-connection and are always set.
+/// `journal_mode` is persistent, and re-declaring it takes a lock that
+/// `busy_timeout` does not cover, so it is only written when it differs.
+fn initialize_connection(connection: &Connection) -> Result<(), StoreError> {
+    connection.pragma_update(None, "foreign_keys", "ON")?;
+    connection.pragma_update(None, "synchronous", "FULL")?;
+    let journal_mode: String = connection.query_row("PRAGMA journal_mode", [], |row| row.get(0))?;
+    if !journal_mode.eq_ignore_ascii_case("wal") {
+        connection.pragma_update(None, "journal_mode", "WAL")?;
+    }
+    let stamp = schema_version();
+    let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    // Any difference, in either direction, re-applies the idempotent batch.
+    if version != stamp {
+        connection.execute_batch(SCHEMA)?;
+        connection.pragma_update(None, "user_version", stamp)?;
+    }
+    Ok(())
+}
+
+/// Retries an operation that failed only because another process held a lock.
+///
+/// Store mutations are idempotent and a failed transaction has already rolled
+/// back, so replaying one cannot apply it twice. Anything that is not lock
+/// contention is returned on its first occurrence.
+///
+/// The whole retry loop is bounded by one budget rather than an attempt count,
+/// because each attempt may itself wait out `busy_timeout` before failing; a
+/// per-attempt count would let the worst case grow with that timeout.
+fn retry_busy<T>(operation: impl FnMut() -> Result<T, StoreError>) -> Result<T, StoreError> {
+    retry_busy_within(BUSY_RETRY_BUDGET, operation)
+}
+
+/// [`retry_busy`] with an explicit budget, so a test can exercise the loop
+/// without waiting out the production one.
+fn retry_busy_within<T>(
+    budget: Duration,
+    mut operation: impl FnMut() -> Result<T, StoreError>,
+) -> Result<T, StoreError> {
+    let deadline = Instant::now() + budget;
+    let mut delay = BUSY_RETRY_BACKOFF;
+    loop {
+        match operation() {
+            Err(error) if is_lock_contention(&error) => {
+                let now = Instant::now();
+                if now >= deadline {
+                    return Err(error);
+                }
+                std::thread::sleep(delay.min(deadline - now));
+                delay = delay.saturating_mul(2).min(BUSY_RETRY_BACKOFF_CAP);
+            }
+            outcome => return outcome,
+        }
+    }
+}
+
+/// Reports whether an error is transient lock contention rather than a rejected
+/// write. `SQLITE_BUSY_SNAPSHOT` reports the same primary code.
+fn is_lock_contention(error: &StoreError) -> bool {
+    matches!(
+        error,
+        StoreError::Database(rusqlite::Error::SqliteFailure(failure, _))
+            if matches!(
+                failure.code,
+                rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+            )
+    )
+}
+
+/// Returns the exclusive upper bound of a lowercase-hexadecimal prefix range.
+///
+/// `g` sorts above every hex digit under the default `BINARY` collation, so
+/// `prefix || "g"` is greater than every id starting with `prefix` and less than
+/// every id that starts with a higher prefix. This needs no digit carry.
+fn prefix_upper_bound(prefix: &str) -> String {
+    format!("{prefix}g")
+}
+
 fn private_file(path: &Path) -> Result<(), StoreError> {
     #[cfg(unix)]
     fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
@@ -2135,6 +2369,8 @@ pub enum StoreError {
     AttemptBudgetExhausted { task_id: TaskId, revision: u32 },
     #[error("task list limit is invalid")]
     InvalidTaskLimit,
+    #[error("task id prefix must be nonempty hexadecimal")]
+    InvalidTaskPrefix,
     #[error("numeric value exceeds SQLite integer range")]
     NumericOverflow,
     #[error("stored attempt state is invalid: {0}")]
@@ -3052,8 +3288,12 @@ mod tests {
         let result = sealed_result(&store, &task, attempt_id);
         let blocker = Connection::open(root.path().join("brgr.sqlite3")).unwrap();
         blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
+        // The un-retried body is asserted directly: every public entry point
+        // wraps it in `retry_busy`, which would wait out the whole retry budget
+        // against a blocker that never releases. Retry behavior is covered by
+        // `retry_busy_gives_up_only_after_its_budget`.
         assert!(matches!(
-            store.commit_terminal_result(&task.owner_id, &result),
+            store.commit_terminal_result_once(&task.owner_id, &result, None, false),
             Err(StoreError::Database(_))
         ));
         assert!(store.inbox(&task.owner_id, false).unwrap().is_empty());
@@ -3981,5 +4221,291 @@ mod tests {
             })
             .unwrap();
         assert!(store.inbox(&task.owner_id, false).unwrap().is_empty());
+    }
+
+    #[test]
+    fn open_sets_per_connection_pragmas_and_records_the_schema_version() {
+        let root = TempDir::new().unwrap();
+        let store = Store::open(root.path()).unwrap();
+
+        // `foreign_keys` moved out of the versioned DDL batch, so it has to be
+        // re-declared on every connection rather than only on a first open.
+        let foreign_keys: i64 = store
+            .connection
+            .query_row("PRAGMA foreign_keys", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(foreign_keys, 1);
+        let journal_mode: String = store
+            .connection
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .unwrap();
+        assert!(journal_mode.eq_ignore_ascii_case("wal"));
+        let version: i64 = store
+            .connection
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, schema_version());
+
+        drop(store);
+        let reopened = Store::open(root.path()).unwrap();
+        let foreign_keys: i64 = reopened
+            .connection
+            .query_row("PRAGMA foreign_keys", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            foreign_keys, 1,
+            "reopen skipped the DDL and lost enforcement"
+        );
+    }
+
+    #[test]
+    fn a_store_written_before_the_version_gate_gains_indexes_without_losing_rows() {
+        let root = TempDir::new().unwrap();
+        let mut store = Store::open(root.path()).unwrap();
+        let task = task();
+        let attempt_id = AttemptId::new();
+        store.record_task(&task, "digest-migrate").unwrap();
+        store
+            .create_attempt(task.task_id, task.revision, attempt_id)
+            .unwrap();
+        let result = sealed_result(&store, &task, attempt_id);
+        store
+            .commit_terminal_result(&task.owner_id, &result)
+            .unwrap();
+
+        // Recreate a store from before the indexes and the version marker.
+        store
+            .connection
+            .execute_batch(
+                "DROP INDEX results_task_revision;
+                 DROP INDEX attempts_task_revision;
+                 PRAGMA user_version = 0;",
+            )
+            .unwrap();
+        assert!(!index_names(&store.connection).contains(&"results_task_revision".to_owned()));
+        drop(store);
+
+        let reopened = Store::open(root.path()).unwrap();
+        let indexes = index_names(&reopened.connection);
+        assert!(indexes.contains(&"results_task_revision".to_owned()));
+        assert!(indexes.contains(&"attempts_task_revision".to_owned()));
+        let version: i64 = reopened
+            .connection
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, schema_version());
+        assert_eq!(reopened.inbox(&task.owner_id, false).unwrap().len(), 1);
+        assert_eq!(
+            reopened.latest_result(task.task_id).unwrap().result_id,
+            result.result_id
+        );
+    }
+
+    #[test]
+    fn per_task_result_reads_use_the_task_revision_index() {
+        let root = TempDir::new().unwrap();
+        let store = Store::open(root.path()).unwrap();
+        let plan: String = store
+            .connection
+            .query_row(
+                "EXPLAIN QUERY PLAN SELECT envelope_json FROM results
+                 WHERE task_id = ?1 AND revision = ?2 ORDER BY rowid DESC LIMIT 1",
+                params!["task", 1],
+                |row| row.get(3),
+            )
+            .unwrap();
+        assert!(
+            plan.contains("results_task_revision"),
+            "per-task result read fell back to a table scan: {plan}"
+        );
+    }
+
+    /// Opening an already-initialized store must not block on a live writer.
+    ///
+    /// This pins the property, not the optimization: the earlier per-open
+    /// pragma and DDL batch also satisfied it, and its contention effect was
+    /// measured at roughly one failed admission in fifty rather than anything a
+    /// deterministic test can observe. `benches/concurrent_admission.rs` is
+    /// where that cost is reported.
+    #[test]
+    fn opening_an_initialized_store_needs_no_write_lock() {
+        let root = TempDir::new().unwrap();
+        let first = Store::open(root.path()).unwrap();
+        let blocker = Connection::open(root.path().join("brgr.sqlite3")).unwrap();
+        blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
+
+        let started = Instant::now();
+        let second = Store::open(root.path());
+        assert!(
+            second.is_ok(),
+            "opening a store took a write lock: {:?}",
+            second.err()
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "opening a store waited on the write lock for {:?}",
+            started.elapsed()
+        );
+
+        blocker.execute_batch("ROLLBACK").unwrap();
+        drop(second);
+        drop(first);
+    }
+
+    /// A write transaction that reads before it takes its lock leaves a window
+    /// in which another process can commit, which WAL reports as
+    /// `SQLITE_BUSY_SNAPSHOT` — a code `busy_timeout` does not cover. This is
+    /// the deterministic gate for that: it fails if `write_transaction` is ever
+    /// changed back to a deferred begin.
+    #[test]
+    fn a_write_transaction_takes_its_lock_at_begin() {
+        let root = TempDir::new().unwrap();
+        let store = Store::open(root.path()).unwrap();
+        let other = Connection::open(root.path().join("brgr.sqlite3")).unwrap();
+        other.busy_timeout(Duration::ZERO).unwrap();
+
+        let transaction = store.write_transaction().unwrap();
+        let blocked = other.execute_batch("BEGIN IMMEDIATE; CREATE TABLE probe(x); COMMIT;");
+        assert!(
+            blocked.is_err(),
+            "another writer committed between this transaction's begin and its first write"
+        );
+        assert!(is_lock_contention(&StoreError::Database(
+            blocked.unwrap_err()
+        )));
+        transaction.commit().unwrap();
+    }
+
+    /// A hand-maintained version constant could be left behind by a schema
+    /// edit, and a store stamped with the stale value would then skip the new
+    /// objects forever while a freshly created store got them — a bug that only
+    /// reproduces on someone else's machine.
+    #[test]
+    fn a_stale_schema_stamp_reapplies_the_batch_even_when_it_is_nonzero() {
+        let root = TempDir::new().unwrap();
+        let store = Store::open(root.path()).unwrap();
+        store
+            .connection
+            .execute_batch(
+                "DROP INDEX results_task_revision;
+                 DROP INDEX one_active_attempt_per_revision;
+                 PRAGMA user_version = 2;",
+            )
+            .unwrap();
+        drop(store);
+
+        let reopened = Store::open(root.path()).unwrap();
+        let indexes = index_names(&reopened.connection);
+        assert!(indexes.contains(&"results_task_revision".to_owned()));
+        assert!(
+            indexes.contains(&"one_active_attempt_per_revision".to_owned()),
+            "the sole enforcement of one active attempt per revision was lost"
+        );
+        let version: i64 = reopened
+            .connection
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, schema_version());
+    }
+
+    /// The stamp has to change whenever the schema text does, or the self-healing
+    /// above cannot notice an edit.
+    #[test]
+    fn the_schema_stamp_is_derived_from_the_schema_text() {
+        assert_eq!(schema_version(), schema_version());
+        assert_ne!(schema_version(), 0, "0 is reserved for an unstamped store");
+        assert!(
+            schema_version() > 0,
+            "user_version is a signed 32-bit field"
+        );
+        assert_ne!(
+            schema_version(),
+            schema_stamp(&format!(
+                "{SCHEMA}\nCREATE INDEX IF NOT EXISTS later ON tasks (owner_id);"
+            )),
+            "the stamp does not change with the schema text, so a new object \
+             would be skipped by every existing store"
+        );
+    }
+
+    #[test]
+    fn retry_busy_replays_contention_and_passes_other_errors_through() {
+        let mut attempts = 0;
+        // Contention that clears is replayed until it succeeds.
+        let outcome = retry_busy(|| {
+            attempts += 1;
+            if attempts < 3 {
+                return Err(StoreError::Database(rusqlite::Error::SqliteFailure(
+                    rusqlite::ffi::Error::new(517),
+                    None,
+                )));
+            }
+            Ok(attempts)
+        })
+        .unwrap();
+        assert_eq!(outcome, 3);
+
+        // A rejected write is returned on its first occurrence, never replayed.
+        let mut calls = 0;
+        let error = retry_busy(|| {
+            calls += 1;
+            Err::<(), _>(StoreError::InvalidTaskLimit)
+        })
+        .unwrap_err();
+        assert!(matches!(error, StoreError::InvalidTaskLimit));
+        assert_eq!(calls, 1);
+    }
+
+    #[test]
+    fn retry_busy_gives_up_only_after_its_budget() {
+        let budget = Duration::from_millis(80);
+        let start = Instant::now();
+        let mut calls = 0;
+        let error = retry_busy_within(budget, || {
+            calls += 1;
+            Err::<(), _>(StoreError::Database(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(5),
+                None,
+            )))
+        })
+        .unwrap_err();
+        assert!(is_lock_contention(&error));
+        assert!(calls > 1, "contention was not retried at all");
+        let elapsed = start.elapsed();
+        assert!(elapsed >= budget, "gave up before its budget: {elapsed:?}");
+        assert!(
+            elapsed < budget * 4,
+            "retry overran its budget: {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn only_lock_contention_is_retried() {
+        let busy = StoreError::Database(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(5),
+            None,
+        ));
+        assert!(is_lock_contention(&busy));
+        let snapshot = StoreError::Database(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(517),
+            None,
+        ));
+        assert!(is_lock_contention(&snapshot));
+        let full = StoreError::Database(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(13),
+            None,
+        ));
+        assert!(!is_lock_contention(&full));
+        assert!(!is_lock_contention(&StoreError::InvalidTaskLimit));
+    }
+
+    fn index_names(connection: &Connection) -> Vec<String> {
+        let mut statement = connection
+            .prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name IS NOT NULL")
+            .unwrap();
+        let rows = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap();
+        rows.map(Result::unwrap).collect()
     }
 }
