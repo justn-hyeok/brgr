@@ -8,6 +8,7 @@ mod pane_cleanup;
 mod plugin_bridge;
 mod tree_status;
 mod workspace;
+mod worktree_prune;
 
 use std::{
     collections::BTreeSet,
@@ -48,8 +49,10 @@ use tempfile::NamedTempFile;
 #[derive(Parser)]
 #[command(name = "brgr", version, about = "Durable local agent task bridge")]
 struct Cli {
+    /// Control home holding the private registry, store, and worktrees.
     #[arg(long, global = true, env = "BRGR_HOME")]
     home: Option<PathBuf>,
+    /// Emit one machine-readable JSON receipt instead of human output.
     #[arg(long, global = true)]
     json: bool,
     #[command(subcommand)]
@@ -58,91 +61,117 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Start a bounded fresh run and seal its result for owner review.
     Run(RunArgs),
+    /// Start a new revision of a task without rewriting its prior results.
     Revise(ReviseArgs),
+    /// Show managed tasks, or one task's attempt and result state.
     Status {
         task: Option<TaskId>,
+        /// Include the delegation tree beneath the task.
         #[arg(long)]
         tree: bool,
     },
+    /// Show a task's sealed result, optionally acknowledging a failed one.
     Result {
         task: TaskId,
         #[arg(long)]
         ack: bool,
     },
+    /// Export a sealed result artifact to a file.
     Artifact {
         #[command(subcommand)]
         command: ArtifactCommand,
     },
+    /// Block until a task reaches a terminal result.
     Wait {
         task: TaskId,
         #[arg(long, default_value_t = 3_600)]
         timeout_seconds: u64,
     },
+    /// Send or list messages between an owner and a managed task.
     Message {
         #[command(subcommand)]
         command: message::MessageCommand,
     },
+    /// Stop an owned in-flight run and settle it as a terminal result.
     Cancel {
         task: TaskId,
+        /// Also cancel the delegated children beneath the task.
         #[arg(long)]
         tree: bool,
     },
+    /// Claim a task for the current owner session before reading or deciding.
     Bind {
         task: TaskId,
         #[arg(long)]
         session: Option<String>,
     },
+    /// Record an explicit acceptance of a task's sealed candidate result.
     Accept {
         task: TaskId,
         #[arg(long, default_value = "acceptance criteria verified")]
         reason: String,
     },
+    /// Record an explicit rejection with a reason, keeping the result intact.
     Reject {
         task: TaskId,
         #[arg(long)]
         reason: String,
     },
+    /// Integrate a candidate's sealed Git diff into a matching workspace.
     Apply {
         task: TaskId,
+        /// Repository root to integrate into; must match the task's base.
         #[arg(long)]
         workspace: PathBuf,
+        /// Write the diff instead of only checking that it would apply.
         #[arg(long)]
         execute: bool,
     },
+    /// Register, contract-test, activate, and inspect local harnesses.
     Harness {
         #[command(subcommand)]
         command: HarnessCommand,
     },
+    /// Install, inspect, or remove brgr-owned Codex integration entries.
     Integrate {
         #[command(subcommand)]
         command: IntegrateCommand,
     },
+    /// Probe every registered harness, the Codex integration, and the store.
     Doctor,
+    /// Show or change local brgr configuration.
     Config {
         #[command(subcommand)]
         command: ConfigCommand,
     },
+    /// Herdr plugin entrypoints; these require the brgr plugin host.
     Plugin {
         #[command(subcommand)]
         command: PluginCommand,
     },
+    /// Report, and with --apply remove, settled task worktrees and branches.
+    Prune {
+        /// Remove instead of only reporting. Every check still applies.
+        #[arg(long)]
+        apply: bool,
+        /// Also remove a worktree holding ignored files such as `.env` or a
+        /// build cache. Those are invisible to git's own clean check.
+        #[arg(long)]
+        include_ignored: bool,
+    },
+    /// Inspect or retry the close of a pane brgr recorded as its own.
     Cleanup {
         #[command(subcommand)]
         command: CleanupCommand,
     },
     #[command(name = "__supervise", hide = true)]
-    Supervise {
-        launch: PathBuf,
-    },
+    Supervise { launch: PathBuf },
     #[command(name = "__hook", hide = true)]
-    Hook {
-        event: HookEvent,
-    },
+    Hook { event: HookEvent },
     #[command(name = "__notify", hide = true)]
-    Notify {
-        task: TaskId,
-    },
+    Notify { task: TaskId },
     #[command(name = "__omp-run", hide = true)]
     OmpRun {
         #[arg(long)]
@@ -166,16 +195,19 @@ enum Command {
 
 #[derive(Subcommand)]
 enum PluginCommand {
+    /// Open the read-only task board, or a worktree-bound Codex pane.
     Open {
         #[arg(long)]
         no_focus: bool,
         #[arg(long)]
         codex: bool,
     },
+    /// Render the read-only task board, refreshing until interrupted.
     Board {
         #[arg(long)]
         once: bool,
     },
+    /// Launch a Codex pane wired to the plugin's binary and host bridge.
     Codex,
     #[command(hide = true)]
     Worker,
@@ -415,21 +447,25 @@ enum ExecutionDisposition {
 
 #[derive(Clone, Copy, Subcommand)]
 enum CleanupCommand {
+    /// Report whether an owned pane was closed or deliberately retained.
     Status { task: TaskId },
+    /// Retry a pending close of a pane brgr recorded as its own.
     Run { task: TaskId },
 }
 
 #[derive(Subcommand)]
 enum HarnessCommand {
+    /// Probe, contract-test, scratch-run, and activate one approved executable.
     Add(AddHarnessArgs),
-    Draft {
-        executable: PathBuf,
-    },
+    /// Print a candidate manifest for an executable without registering it.
+    Draft { executable: PathBuf },
+    /// Run the manifest contract test without starting a paid scratch run.
     Test {
         executable: Option<PathBuf>,
         #[arg(long)]
         manifest: Option<PathBuf>,
     },
+    /// Activate a contract-tested manifest with an authorized scratch run.
     Activate {
         executable: Option<PathBuf>,
         #[arg(long)]
@@ -443,6 +479,7 @@ enum HarnessCommand {
         #[arg(long)]
         effort: Option<String>,
     },
+    /// Report whether one registered harness is still healthy.
     Status {
         #[arg(default_value = "local.gjc")]
         harness: String,
@@ -466,6 +503,7 @@ struct AddHarnessArgs {
 
 #[derive(Subcommand)]
 enum IntegrateCommand {
+    /// Manage the brgr-owned Codex hooks and skill.
     Codex {
         #[command(subcommand)]
         command: CodexCommand,
@@ -632,6 +670,10 @@ async fn main() -> Result<()> {
         Command::Integrate { command } => integrate(&paths, command, cli.json),
         Command::Doctor => doctor(&paths, cli.json).await,
         Command::Config { command } => config_command(&paths, &command, cli.json),
+        Command::Prune {
+            apply,
+            include_ignored,
+        } => prune(&paths, apply, include_ignored, cli.json),
         Command::Plugin { command } => match command {
             PluginCommand::Open { no_focus, codex } => herdr_plugin::open(no_focus, codex).await,
             PluginCommand::Board { once } => herdr_plugin::board(&paths, once).await,
@@ -739,7 +781,7 @@ fn validate_bridge_host_command(
             command: ArtifactCommand::Export { output, .. },
         } => require_bridge_workspace(output.parent().unwrap_or(current_dir), &workspace_root),
         Command::Apply { workspace, .. } => require_bridge_workspace(workspace, &workspace_root),
-        Command::Harness { .. } | Command::Integrate { .. } => bail!(
+        Command::Harness { .. } | Command::Integrate { .. } | Command::Prune { .. } => bail!(
             "this brgr command is unavailable through the Herdr host bridge; run it explicitly outside the plugin Codex pane"
         ),
         Command::Plugin { .. }
@@ -2627,6 +2669,60 @@ fn write_json_new(path: &Path, value: &impl Serialize) -> Result<()> {
     Ok(())
 }
 
+/// Reports, and with `apply` removes, task worktrees whose revision is decided.
+///
+/// Nothing in the store is removed: a worktree is a rebuildable checkout, while
+/// a sealed result and its decision are the durable record brgr exists to keep.
+fn prune(paths: &Paths, apply: bool, include_ignored: bool, json_output: bool) -> Result<()> {
+    let store = Store::open(&paths.store)?;
+    let entries = worktree_prune::prune(&paths.worktrees, &store, apply, include_ignored)?;
+    let worktrees: Vec<serde_json::Value> = entries
+        .iter()
+        .map(|entry| {
+            let mut row = json!({
+                "worktree": entry.worktree,
+                "task_slug": entry.slug,
+                "status": entry.outcome.code(),
+            });
+            if let Some(reason) = entry.outcome.reason() {
+                row["reason"] = json!(reason);
+            }
+            if let Some(owner) = &entry.owner {
+                // Pruning is not owner-scoped, so the owner is reported rather
+                // than silently acted on.
+                row["owner_id"] = json!(owner);
+            }
+            if !entry.ignored.is_empty() {
+                row["ignored_paths"] = json!(entry.ignored);
+            }
+            row
+        })
+        .collect();
+    let count = |code: &str| {
+        entries
+            .iter()
+            .filter(|entry| entry.outcome.code() == code)
+            .count()
+    };
+    // A checkout whose branch git kept is still reclaimed: its directory is gone
+    // and will never be enumerated again, so counting it as kept would report
+    // that nothing happened.
+    let removed = count("removed") + count("removed_branch_kept");
+    print_value(
+        &json!({
+            "applied": apply,
+            "removed": removed,
+            "removed_keeping_branch": count("removed_branch_kept"),
+            "removable": count("removable"),
+            "kept": count("kept"),
+            "worktrees": worktrees,
+            "note": "sealed results, decisions, artifacts, and task rows are never removed",
+        }),
+        json_output,
+    );
+    Ok(())
+}
+
 fn print_value(value: &serde_json::Value, json_output: bool) {
     if json_output {
         println!("{value}");
@@ -2690,6 +2786,15 @@ mod tests {
         assert!(
             validate_bridge_host_command(&integrate.command, root.path(), root.path()).is_err()
         );
+
+        // Pruning removes worktrees and branches in a repository brgr does not
+        // own, so it stays outside the plugin Codex pane even in report mode.
+        for argv in [vec!["brgr", "prune"], vec!["brgr", "prune", "--apply"]] {
+            let prune = Cli::try_parse_from(argv).unwrap();
+            assert!(
+                validate_bridge_host_command(&prune.command, root.path(), root.path()).is_err()
+            );
+        }
     }
 
     #[test]
