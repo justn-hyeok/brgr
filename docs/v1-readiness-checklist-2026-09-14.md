@@ -2,7 +2,9 @@
 
 이 문서는 **내 macOS에서 믿고 쓰기**와 **공개 v1 릴리스 완료**를 별도로 판정한다. 현재 우선순위는 전자다. 오류를 절대 내지 않는다는 뜻이 아니라, 실제 작업에서 성공을 확인할 수 있고 실패가 보존·설명되며 재시작이나 취소 뒤에 같은 작업을 잘못 중복 실행하지 않는다는 뜻이다. 모든 하네스와 새 컴퓨터를 검증할 필요는 없지만, 실제 사용할 하네스는 각각 확인해야 한다.
 
-공개 v1의 이전 증거 기준은 2026-09-14 태그 `v1.0.7`, main `f7eb7d27831f6e88cb42e88171eb0a8025d6ec22`다. `v1.0.8`은 문서 배포였고 `v1.0.9`는 아래 개인 사용 신뢰성 수정을 포함한다. **공개 v1 판정은 여전히 NO-GO**다. 아래 `[x]`는 적힌 범위만 증명하며, 공개 릴리스용 빈 칸은 같은 최종 릴리스 SHA에서 통과해야 한다. 옛 SHA의 체크 수를 현재 진행률로 쓰지 않는다.
+공개 v1의 이전 증거 기준은 2026-09-14 태그 `v1.0.7`, main `f7eb7d27831f6e88cb42e88171eb0a8025d6ec22`다. `v1.0.8`은 문서 배포였고 `v1.0.9`는 아래 개인 사용 신뢰성 수정을 포함한다. 아래 `[x]`는 적힌 범위만 증명하며, 공개 릴리스용 빈 칸은 같은 최종 릴리스 SHA에서 통과해야 한다. 옛 SHA의 체크 수를 현재 진행률로 쓰지 않는다.
+
+**현재 공개 v1 판정: NO-GO.** 2026-09-21에 아래 게이트를 모두 닫았으나, 2026-09-28 측정에서 그 SHA에 P0 동시성 결함이 있었음이 드러나 2-4, 2-5, 최종 GO 판정을 다시 열었다. 근거는 [2026-09-28 재개 기록](#2026-09-28-게이트-재개-기록)에 있다. 개인 사용 GO는 관찰된 단일 세션 경로로 범위가 한정돼 있었으므로 그대로 유지한다.
 
 범위: 신뢰한 로컬 실행 파일, Apple Silicon macOS 15+, 서명·공증 없는 배포. Herdr는 선택적 화면 어댑터다. provider 측 undo, 세션 재사용, 실행 중 지시 변경, 적대적 동일 사용자 격리, Intel/Linux/Windows 및 Apple Developer ID 서명·공증은 v1 대상이 아니다. 지원하지 않는 요청은 조용히 대체하지 않고 거절해야 한다.
 
@@ -98,11 +100,11 @@
 
 ### 2. 장애·최종 품질·배포 (안전 P0, 출시 P1)
 
-- [x] ENOSPC를 아티팩트 봉인과 SQLite 커밋 양쪽에 주입하고, 동시 cancel/reconcile 및 재시작을 검사한다. 봉인 측은 errno 28 리더(`seal_reports_enospc_without_publishing_a_partial_artifact`), 커밋 측은 `SQLITE_FULL`(`sqlite_full_keeps_terminal_result_retriable_without_partial_commit`) 결정적 회귀로 확인 — 둘 다 부분 커밋 없이 재시도 가능. cancel/reconcile·재시작은 기존 crash-window 5종 + busy/rollback 회귀로 커버. 불완전한 참조·중복 inbox·겹친 재시도 없음. 실제 물리 디스크 가득 채우기 카오스는 범위 밖.
+- [ ] ENOSPC를 아티팩트 봉인과 SQLite 커밋 양쪽에 주입하고, 동시 cancel/reconcile 및 재시작을 검사한다. **2026-09-28 재개:** ENOSPC 양쪽은 유효하나 동시성 부분은 증명되지 않았다 — 대체 증거인 busy/rollback 회귀는 단일 커넥션에 `busy_timeout(Duration::ZERO)`를 걸어 확인한 것이어서 여러 프로세스의 경합을 관찰할 수 없었다. 봉인 측은 errno 28 리더(`seal_reports_enospc_without_publishing_a_partial_artifact`), 커밋 측은 `SQLITE_FULL`(`sqlite_full_keeps_terminal_result_retriable_without_partial_commit`) 결정적 회귀로 확인 — 둘 다 부분 커밋 없이 재시도 가능. cancel/reconcile·재시작은 기존 crash-window 5종 + busy/rollback 회귀로 커버. 불완전한 참조·중복 inbox·겹친 재시도 없음. 실제 물리 디스크 가득 채우기 카오스는 범위 밖.
 - [x] OMP+Herdr의 spawn 영수증→첫 agent 조회 사이에서 pane/terminal/session을 교체한 재현 테스트를 실행한다. `omp_second_read_rejects_replaced_session_or_reused_pane`(main.rs): 세션 교체·pane 재사용 모두 fail-closed. synthetic mismatch + 함수 단위 + R3 정상 실행 증거와 결합. [revision 재생 증거](herdr-revision-replay-evidence-2026-09-14.md).
 - [x] **다운로드한 동일 공개 바이너리**로 네 하네스의 최저-effort fresh run→봉인→inbox→결정을 다시 묶는다. 공개 `v2.0.2` 바이너리(archive 체크섬 OK)에서 GJC·OMP·Cursor 3종 scratch→fresh→봉인→accept, digest 일치. Command Code는 공개 `v1.0.7` 재실행 기록으로 커버. provider 측 모델·effort 관측 불가를 명시적으로 유지. [재실행 증거](gates-public-binary-rerun-2026-09-21.md).
 - [x] 별도 깨끗한 macOS 15 arm64 환경에서 archive·체크섬·SBOM·설치·Gatekeeper의 앱별 허용 경로·fixture 실행을 확인한다. 동일 머신 격리 디렉토리에서 수행: archive·SBOM 체크섬 OK, spctl rejected(무서명 예상), 차단 없이 실행, fixture 봉인→accept(task `6653a6fe…`). 전역 보안 해제·quarantine 제거 없음. [증거](gate-24-cleanmac-evidence-2026-09-21.md).
-- [x] 최종 코드와 음성 경로를 작성자가 아닌 리뷰어가 **같은 릴리스 SHA**에서 G1–G4 전체 범위로 검토하고, 남은 P0/P1이 0건임을 확인한다. Owner가 외부 리뷰를 명시적으로 패스(2026-09-21) — 개인 사용 범위에서는 CI(fmt·clippy·179 테스트) + 결정적 회귀로 대체. 공개 배포 시 재심의.
+- [ ] 최종 코드와 음성 경로를 작성자가 아닌 리뷰어가 **같은 릴리스 SHA**에서 G1–G4 전체 범위로 검토하고, 남은 P0/P1이 0건임을 확인한다. **2026-09-28 재개:** owner 패스의 대체 증거(CI + 결정적 회귀)가 실제 P0을 놓쳤음이 관측됐다. 이 게이트가 바로 그 결함을 잡을 게이트였다. Owner가 외부 리뷰를 명시적으로 패스(2026-09-21) — 개인 사용 범위에서는 CI(fmt·clippy·179 테스트) + 결정적 회귀로 대체. 공개 배포 시 재심의.
 
 ### 3. 기존 OMP 콜백 이행 (중복·오인 방지 P0)
 
@@ -117,6 +119,69 @@
 
 ## GO 판정
 
-- [x] 위 필수 게이트가 **하나의 최종 릴리스 SHA**와 검증 가능한 영수증으로 닫히고 P0/P1이 남지 않는다. 작업 브랜치 HEAD에서 locked all-feature tests 179/0, doc tests OK, fmt OK, all-target clippy `-D warnings` OK, release build OK, 공개 `v2.0.2` 자산(archive·SBOM 체크섬, fixture smoke) 검증 통과. 2-5 외부 리뷰는 owner 패스로 대체(개인 사용 범위).
+- [ ] 위 필수 게이트가 **하나의 최종 릴리스 SHA**와 검증 가능한 영수증으로 닫히고 P0/P1이 남지 않는다. **2026-09-28 재개:** 이 선언 시점의 코드에 P0이 1건, P1이 2건 있었다. 작업 브랜치 HEAD에서 locked all-feature tests 179/0, doc tests OK, fmt OK, all-target clippy `-D warnings` OK, release build OK, 공개 `v2.0.2` 자산(archive·SBOM 체크섬, fixture smoke) 검증 통과. 2-5 외부 리뷰는 owner 패스로 대체(개인 사용 범위).
 
 이 문서는 작업 목록이다. 체크되지 않은 경로를 “완료”나 임의의 퍼센트로 환산하지 않는다.
+
+
+## 2026-09-28 게이트 재개 기록
+
+2026-09-21에 닫은 게이트 셋을 같은 코드에서 재측정해 다음을 관측했다. 이 문서의 규칙대로 **명령의 종료 코드가 아니라 관찰된 결과**만 적는다.
+
+- **P0 — 동시 admission이 raw SQLite 오류로 실패.** 1초 harness를 병렬 실행하면 폭마다 실패가 났다: 2병렬 1/2, 4병렬 2/4, 8병렬 3/8. 별개 workspace 8병렬에서는 5/8까지 관측됐다. 사용자에게 보인 것은 `Error: database operation failed: database is locked`이고, harness는 이미 실행을 끝낸 뒤였다. 원인은 둘이었다. 쓰기 경로 9곳 중 8곳이 DEFERRED 트랜잭션이어서 WAL에서 `SQLITE_BUSY_SNAPSHOT`(확장 코드 517)을 냈고 — `busy_timeout`은 이 코드를 처리하지 않는다 — 나머지 `SQLITE_BUSY`(5)는 `Store::open`이 매 호출마다 `PRAGMA journal_mode` 쓰기와 스키마 DDL 배치를 실행한 데서 났다. 결과·결정·inbox는 유실되지 않았고 다음 `brgr status`가 회수했으므로 내구성 계약은 지켜졌다. 깨진 것은 호출자 계약이다.
+  - 이 결함은 이 저장소의 CI 오라클 자체를 흔들고 있었다. `concurrent_git_worktree_admissions_keep_distinct_identities`가 전체 워크스페이스 스위트 4회 중 2회 실패했고, 단독 실행에서는 통과했다.
+- **P1 — board 투영이 O(N²).** 저장 태스크 100/400/1,600/6,400에서 2.08ms/14.20ms/132.13ms/3.26s. Herdr 플러그인은 이 질의를 2초마다 갱신하므로 6,400 태스크에서 이미 갱신 주기를 넘겼다. `results`·`attempts`에 `(task_id, revision)` 인덱스가 없어 두 CTE가 전체 테이블을 훑었다.
+- **P1 — 태스크마다 worktree와 브랜치가 영구 누적.** worktree 제거 경로가 코드베이스에 0건이었다. 4 MiB 저장소에서 태스크당 4,004 KiB(작업 트리 전체 사본)와, brgr이 소유하지 않는 사용자 저장소의 `brgr/task-*` 브랜치 1개 및 `git worktree list` 항목 1개가 남았다. SQLite 행은 태스크당 약 9 KiB였으므로 실제 누적 비용은 DB가 아니라 worktree였다.
+- **공개 스키마 불일치.** `schemas/result-v1.json`이 `additionalProperties: false`인데 `route_observation`을 기술하지 않아, brgr 자신이 읽고 다시 직렬화하는 legacy 바이트를 공표된 스키마가 거부하는 상태였다. `schemas/`를 Rust 타입과 대조하는 검사가 없었다.
+
+재개 판정의 근거는 이것이다. 2-4의 동시성 항목은 대체 증거가 그 결함을 **관찰할 수 없는** 검사였고, 2-5는 그것을 잡을 유일한 남은 게이트였는데 패스됐다. 따라서 "P0/P1 0건"은 검증된 사실이 아니라 검사 범위의 공백이었다.
+
+### 2-5의 필요성이 같은 날 다시 실증됐다
+
+위 수정을 작성자가 자기 검증한 뒤, 작성자가 아닌 리뷰어(모델 기반 다중 에이전트)가 `crates/` 전체를 검토해 15건을 보고했다. 그중 3건은 수정 자체가 만든 **데이터 손실 경로**였고 작성자 검증은 전부 놓쳤다.
+
+- `git worktree remove`가 gitignore된 파일을 삭제한다. `git status --porcelain`은 `--ignored` 없이 실행되므로 `.env`·자격증명·빌드 캐시가 git의 clean 검사에 보이지 않는다. 직접 재현 확인: `status --porcelain`은 비었고 `--ignored`는 `!! .env`를 보였으며 `worktree remove`가 exit 0으로 `.env`를 삭제했다. 새 prune 모듈의 핵심 안전 주장이 거짓이었다.
+- `Path::is_dir`이 symlink를 따라가고 git이 인자를 정규화하므로, worktrees 밖의 사용자 체크아웃을 파괴할 수 있었다.
+- 빈 디렉터리 정리가 brgr 자신의 `.locks`(프로세스 간 admission lock)를 삭제했다. 아무것도 prune되지 않은 실행에서도 그랬다.
+
+추가로 `commit_terminal_result`가 `IMMEDIATE`로 바뀌면서 쓰기 락이 아티팩트 해싱 앞으로 이동해, 경합이 `busy_timeout`을 넘으면 완료된 유료 실행이 `Lost`+미해결 효과로 영구 복구 불가가 되는 경로가 생겼다. 쓰기 경로에 재시도를 적용해 닫았다.
+
+**이것이 2-5를 대체하지 않는다.** 모델 리뷰를 사람 리뷰어의 대체 증거로 쓰면 2026-09-21의 논리를 반복하는 것이다. 이 라운드는 "닫기 전에 잡을 수 있는 것을 먼저 잡은 단계"로만 기록한다.
+
+### 부하 민감 테스트 — 강화했으나 수정으로 검증되지 않음
+
+전체 워크스페이스 스위트 9회 중 1회 `probe_with_path_can_hide_an_env_interpreter`가 실패했다(단독 5/5 통과). 세 probe 테스트의 마감을 분류해, 마감이 주제가 아닌 다섯 곳을 30초로 올리고 `timed_out` 단정을 추가했다. `probe_stops_a_flood_before_its_deadline_…`은 마감이 주제이므로 2초를 유지하되, 부하 의존적인 `elapsed < 2s` 단정은 `!timed_out`과 중복이므로 제거했다.
+
+**이것이 플레이크를 고쳤다는 증거는 없다.** 18코어 머신에 40-way CPU 부하를 걸고 수정 전후를 각각 3회 돌렸으나 양쪽 모두 통과했다. 원래 관측을 요청 시 재현하지 못했으므로, 이 항목은 "마감 결합을 제거한 강화"로만 기록하고 **알려진 부하 민감 테스트로 열어 둔다.** `yes` 루프는 순수 CPU 부하이고 probe 경로는 프로세스 생성과 파일시스템이 지배하므로, 재현에는 다른 종류의 부하가 필요할 가능성이 있다.
+
+### 이번에 정정한 측정값
+
+- 병렬 실행 효율로 처음 보고한 76~91%는 **git이 아닌 작업 공간**에서 측정한 값이었다. 그 경로는 `acquire_admission_lock`과 `prepare_workspace`를 단축해 admission lock도 worktree도 만들지 않는다. git 저장소 기준 실측은 공유 저장소 8병렬에서 49%, 실행별 저장소에서 65%다.
+- 동시 admission 게이트는 `Store::open` 수정을 고정하지 못한다. 되돌려도 통과했고, 실제 효과는 48회 중 1회 실패를 막는 간헐적 크기다. `write_transaction`의 `IMMEDIATE` 변경은 `a_write_transaction_takes_its_lock_at_begin`이 결정적으로 고정한다(되돌리면 실패함을 확인).
+
+위 네 항목은 모두 수정하고 회귀 검사를 붙였다. 2-4와 2-5를 다시 닫으려면 다음이 필요하다.
+
+- [ ] 2-4 동시성: 다중 **프로세스** 경합을 관찰하는 검사에서 실패 0건. 현재 게이트는 `cargo test -p brgr-cli --test concurrency`(8병렬 admission 전부 sealed result 도달)이며, `cargo bench -p brgr-cli --bench concurrent_admission`이 병렬 효율과 실패율을 같이 보고한다. 동시 cancel/reconcile과 재시작도 같은 다중 프로세스 형태로 확인해야 한다.
+- [ ] 2-5 검토: 아래 **2-5 재정의**의 네 항목을 모두 통과한다.
+
+### 2-5 재정의 — 사람 한 명이 아니라 절차로
+
+원래 문구("작성자가 아닌 리뷰어가 같은 릴리스 SHA에서 G1–G4 전체 범위로 검토")는 1인 프로젝트에서 **영구히 체크할 수 없다.** 그리고 2026-09-21에 이를 CI로 대체한 것이 등가가 아니었음이 실증됐다. 무엇이 등가인지에 대해 이제 증거가 있다.
+
+| 검사 수단 | 2026-09-28에 찾은 결함 수 |
+|---|---|
+| CI (fmt·clippy·테스트) | **0** |
+| 측정(벤치) | 2 (board O(N²), worktree 누적) |
+| 작성자 아닌 리뷰어의 전체 코드 검토 | 4 (데이터 손실 3 + 락 회귀 1) |
+| 작성자의 리뷰 주장 독립 재현 | 2 (수정 자체가 넣은 버그) |
+
+따라서 2-5를 사람의 신원이 아니라 절차로 정의한다. 네 항목 전부가 충족돼야 닫힌다.
+
+- [ ] **(a) 비작성자 검토**: 해당 변경을 작성하지 않은 리뷰어가 diff가 아니라 **crate 전체**를 릴리스 SHA에서 검토한다.
+- [ ] **(b) 처분 기록**: 모든 발견을 수정하거나, 동의하지 않는 이유를 이 문서에 명시해 기각한다. 침묵으로 넘기지 않는다.
+- [ ] **(c) 독립 재현**: 작성자가 각 발견의 근거를 직접 재현한 뒤 수용한다. 재현하지 못한 항목은 "미재현"으로 남기고 수정의 근거로 쓰지 않는다.
+- [ ] **(d) 측정 뒷받침**: 문서에 적힌 모든 성능·용량 주장에 저장소 안의 벤치가 대응한다.
+
+**영구 잔여 위험:** 사람 리뷰어가 없다. 이건 닫을 수 없는 항목이므로 체크박스로 두지 않고, 릴리스 노트에 **수용된 한계**로 명시한다. 영구히 비어 있는 체크박스는 체크리스트 전체를 거짓말로 만든다.
+
+이 절차는 2026-09-28의 수정분(커밋되지 않은 작업 트리)에 대해 이미 한 바퀴 돌았다: (a) 비작성자 리뷰어가 `crates/` 전체를 검토해 15건 보고, (b) 14건 수정·1건(prune의 owner 범위 제한) 이유를 밝혀 기각 — 근거는 이 문서의 "적대적 동일 사용자 격리는 v1 대상이 아니다"이고 대신 receipt에 owner를 노출했다, (c) 데이터 손실 3건과 게이트 무효 주장을 직접 재현하고 probe 플레이크 1건은 미재현으로 기록, (d) board와 병렬 효율 주장에 벤치 대응. **다만 이것은 릴리스 SHA가 아닌 작업 트리에 대한 것이므로 2-5는 닫히지 않는다.** 커밋 후 릴리스 SHA에서 다시 돌려야 한다.

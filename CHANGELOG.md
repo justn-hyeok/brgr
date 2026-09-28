@@ -1,5 +1,59 @@
 # Changelog
 
+## 2.4.0 — unreleased
+
+Fix a P0 defect in which concurrent admissions failed with a raw
+`database is locked` error after their harness had already run. Eight of nine
+store write paths used deferred transactions, which report
+`SQLITE_BUSY_SNAPSHOT` in WAL mode and are not covered by `busy_timeout`; they
+now take an immediate lock. `Store::open` also wrote `PRAGMA journal_mode` and
+re-applied the schema batch on every command, so simultaneous opens contended
+before doing any work; the journal mode is now only written when it differs and
+the DDL batch is gated on `PRAGMA user_version`. Lock contention that survives
+either change is retried with bounded backoff. Sealed results, decisions, and
+inbox items were never lost by the defect, and the fix adds no new behavior to
+that path.
+
+Add `(task_id, revision)` indexes on `results` and `attempts`. The Herdr board
+projection joined both tables without one, which made a two-second refresh cost
+3.26s at 6,400 stored tasks; it now costs 11.5ms, and its per-task cost falls
+rather than grows as the store fills. Existing stores gain the indexes on the
+next open and keep every row. The schema stamp is derived from the schema text
+instead of a hand-maintained constant, so adding an object can no longer be
+forgotten and silently skipped by every existing store.
+
+Add `brgr prune`, which reports and with `--apply` removes task worktrees whose
+revision carries a recorded owner decision, together with the `brgr/task-*`
+branch each one created. Nothing in the store is removed: a worktree costs the
+size of the checkout while a task's rows cost about 9 KiB.
+
+Removal uses `git worktree remove` and `git branch -d` without forcing, but git
+is not the only safety authority. Its clean check runs `git status --porcelain`
+without `--ignored`, so an ignored `.env`, credential, or build cache is
+invisible to it and would be deleted silently; prune checks the ignored set
+itself and keeps the worktree unless `--include-ignored` is passed. A candidate
+must also be a real directory rather than a symlink, a worktree git has
+registered for its repository, a name the worktree layout could have produced,
+and outside the current working directory. A checkout whose branch git declines
+to delete reports `removed_branch_kept` and counts as reclaimed. Report and
+apply run the same checks, so `removable` in one is removed by the next. The
+command is rejected through the Herdr host bridge.
+
+Document every CLI subcommand and global option in `--help`, which previously
+listed thirteen commands with no descriptions. Describe the legacy
+`route_observation` field in `schemas/result-v1.json`, which a closed schema
+rejected although brgr still reads and re-serializes those bytes.
+
+New coverage: an eight-way concurrent admission gate over a real Git repository
+(a non-Git workspace takes no admission lock and creates no worktree, so it
+cannot observe this contention), a deterministic gate that fails if a write
+transaction stops taking its lock at `BEGIN`, structural drift checks
+between `schemas/` and the serialized wire types, the 64 MiB JSONL transport
+bound, store schema migration and index plans, and prune's keep-and-report
+behavior. New benches report board projection cost against stored task count
+and concurrent admission efficiency against failure rate. CI gains a
+`cargo-deny` supply-chain job.
+
 ## 2.3.1 — 2026-09-25
 
 Allow the Herdr plugin's Codex pane to use an explicitly configured absolute
@@ -66,6 +120,17 @@ is not an interactive GJC TUI. Deep splits can become narrow, and arbitrary
 dirty worktree, cancellation, and restart scenarios are not covered by this
 live receipt. The CLI bridge now handles long waits alongside replies and
 cancel requests, and message wait tolerates the gap before attempt creation.
+
+## 2.1.0 — 2026-09-22
+
+Declared every remaining public v1 readiness gate closed and added regression
+coverage for ENOSPC seal/commit behavior, OMP identity-swap fail-closed,
+duplicate-completion idempotent replay, delegated cancel/deadline `lost` paths,
+and the pane-cleanup status matrix. A flaky bridge timing test was fixed. No
+execution contract, adapter behavior, wire format, or store migration changed.
+
+That gate declaration did not hold: see the 2.2.0 entry and the
+[reopening record](docs/v1-readiness-checklist-2026-09-14.md#2026-09-28-게이트-재개-기록).
 
 ## 2.0.2 — 2026-09-15
 
