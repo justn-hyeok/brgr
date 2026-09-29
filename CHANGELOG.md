@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.6.0 — 2026-09-30
 
 Pane mode now waits for a newly split pane's shell before starting the agent.
 Herdr refuses an agent until the pane shows its prompt, and a slow shell
