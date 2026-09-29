@@ -11,7 +11,9 @@ use std::{
 };
 
 use crate::omp_adapter::omp_process_manifest;
-use crate::{LaunchEnvelope, Paths, ProcessReceipt, print_value, workspace, write_json_atomic};
+use crate::{
+    Claimant, LaunchEnvelope, Paths, ProcessReceipt, print_value, workspace, write_json_atomic,
+};
 use anyhow::{Context, Result, bail};
 use brgr_core::{ExecutionObservation, Supervisor};
 use brgr_protocol::{
@@ -20,6 +22,7 @@ use brgr_protocol::{
 use brgr_registry::Registry;
 use brgr_runner::HarnessManifest;
 use brgr_store::{RunnerIdentity, Store, StoreError, UnfinishedAttempt};
+use serde::Deserialize;
 
 pub(crate) async fn supervise(paths: &Paths, launch_path: &Path, json_output: bool) -> Result<()> {
     let launch: LaunchEnvelope = serde_json::from_slice(&fs::read(launch_path)?)?;
@@ -149,6 +152,30 @@ pub(crate) fn reconcile_pending(paths: &Paths) -> Result<()> {
     Ok(())
 }
 
+/// How long a detached supervisor has to claim a task it was spawned for.
+const SUPERVISOR_CLAIM_GRACE: Duration = Duration::from_secs(5);
+/// How long a Herdr worker pane has to claim its task. Herdr must open the pane
+/// and start `brgr plugin worker` in it first, which a busy machine can stretch
+/// well past the detached supervisor's window; a task reaped before then is
+/// recorded lost while its worker is still on the way.
+const WORKER_PANE_CLAIM_GRACE: Duration = Duration::from_mins(1);
+
+/// The claim window for a launch envelope. An unreadable envelope gets the
+/// short window, as before.
+fn claim_grace(launch: &[u8]) -> Duration {
+    #[derive(Deserialize)]
+    struct Placement {
+        #[serde(default)]
+        claimant: Claimant,
+    }
+    match serde_json::from_slice::<Placement>(launch) {
+        Ok(Placement {
+            claimant: Claimant::WorkerPane,
+        }) => WORKER_PANE_CLAIM_GRACE,
+        _ => SUPERVISOR_CLAIM_GRACE,
+    }
+}
+
 pub(crate) fn unstarted_admission_is_stale(paths: &Paths, task: &TaskSpec) -> Result<bool> {
     if !workspace::workspace_is_present(&task.workspace) {
         return Ok(true);
@@ -160,11 +187,8 @@ pub(crate) fn unstarted_admission_is_stale(paths: &Paths, task: &TaskSpec) -> Re
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(true),
         Err(error) => return Err(error.into()),
     };
-    if !metadata
-        .modified()?
-        .elapsed()
-        .is_ok_and(|age| age >= Duration::from_secs(5))
-    {
+    let grace = fs::read(&launch_path).map_or(SUPERVISOR_CLAIM_GRACE, |bytes| claim_grace(&bytes));
+    if !metadata.modified()?.elapsed().is_ok_and(|age| age >= grace) {
         return Ok(false);
     }
     let receipt = fs::read(paths.supervisor(task.task_id))
@@ -282,4 +306,28 @@ pub(crate) fn ps_field(pid: &str, field: &str) -> Result<String> {
         bail!("process {pid} has no {field} identity");
     }
     Ok(text)
+}
+
+#[cfg(test)]
+mod claim_grace_tests {
+    use super::*;
+
+    #[test]
+    fn a_worker_pane_launch_gets_the_long_claim_window() {
+        assert_eq!(
+            claim_grace(br#"{"claimant":"worker_pane","spec":{}}"#),
+            WORKER_PANE_CLAIM_GRACE
+        );
+        assert_eq!(
+            claim_grace(br#"{"claimant":"supervisor"}"#),
+            SUPERVISOR_CLAIM_GRACE
+        );
+        // Envelopes written before the field existed, and unreadable ones,
+        // keep the short window they always had.
+        assert_eq!(
+            claim_grace(br#"{"pane_mode":false}"#),
+            SUPERVISOR_CLAIM_GRACE
+        );
+        assert_eq!(claim_grace(b"not json"), SUPERVISOR_CLAIM_GRACE);
+    }
 }

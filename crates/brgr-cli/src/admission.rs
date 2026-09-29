@@ -11,7 +11,7 @@ use crate::cli::{DelegationArgs, ReviseArgs, RunArgs};
 use crate::harness_commands::{recertify_action_fallback, require_healthy_harness};
 use crate::supervision::{record_unstarted_terminal, spawn_supervisor, supervise};
 use crate::{
-    LaunchEnvelope, Paths, config, current_session, delegation_parent_from_environment,
+    Claimant, LaunchEnvelope, Paths, config, current_session, delegation_parent_from_environment,
     herdr_plugin, notification, owner_from_environment, plugin_bridge, print_value, require_owner,
     workspace, write_json_atomic, write_json_new,
 };
@@ -329,6 +329,13 @@ pub(crate) async fn start_task(
         manifest: Some(activated.clone()),
         executable_digest: Some(activation.executable_digest.clone()),
         pane_mode,
+        claimant: if plugin_placement.is_some()
+            && !matches!(options.execution, ExecutionDisposition::Foreground)
+        {
+            Claimant::WorkerPane
+        } else {
+            Claimant::Supervisor
+        },
     };
     let launch_path = paths.launch(task_id, launch.spec.revision);
     write_json_new(&launch_path, &launch)?;
