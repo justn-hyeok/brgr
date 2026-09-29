@@ -9,11 +9,15 @@ mode, which `busy_timeout` does not cover. 2.2.0 converted ten store write paths
 to an immediate begin; `commit_terminal_result_guarded` was the one it missed,
 and it is the most expensive place to fail, because the harness has already run
 and recovery settles an unfinished attempt as `Lost` with unresolved effects that
-no later attempt on that revision can supersede. It now begins immediately, and
-`a_write_transaction_takes_its_lock_at_begin` fails if either path that goes
-through `Store::write_transaction` regresses. The other fourteen write
-transactions construct their immediate begin inline and are not covered by that
-test.
+no later attempt on that revision can supersede. It now begins immediately.
+
+Every write transaction in the store crate now begins through one helper, so
+`a_write_transaction_takes_its_lock_at_begin` covers all sixteen rather than the
+two that happened to use it, and
+`every_write_transaction_begins_through_one_helper` fails if a new one is built
+inline. That second test exists because the first version of these notes claimed
+the gate covered every path while it covered two: a bench binds a performance
+claim to a measurement, and nothing bound this coverage claim to anything.
 
 `Store::open` also wrote `PRAGMA journal_mode` and re-applied the schema batch on
 every command, so simultaneous opens contended before doing any work; the journal

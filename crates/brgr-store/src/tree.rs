@@ -1,5 +1,5 @@
 use brgr_protocol::{AttemptId, TaskId, TaskSpec};
-use rusqlite::{Connection, OptionalExtension as _, Transaction, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension as _, params};
 
 use super::{Store, StoreError};
 
@@ -33,8 +33,7 @@ impl Store {
         include_descendants: bool,
     ) -> Result<Vec<SubtreeNode>, StoreError> {
         self.task(root)?;
-        let transaction =
-            Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
+        let transaction = self.write_transaction()?;
         let nodes = if include_descendants {
             query_subtree(&transaction, root)?
         } else {
