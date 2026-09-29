@@ -80,7 +80,12 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tempfile::NamedTempFile;
 
-const PROBE_DEADLINE: Duration = Duration::from_secs(5);
+/// How long a version, help, or model-catalog probe may take. It only bounds a
+/// hung CLI; a healthy one answers in about a second. Five seconds was short
+/// enough that an ordinary stall on a busy machine (a scan of freshly written
+/// executables, a parallel build) reported a working harness as timed out and
+/// refused the run.
+const PROBE_DEADLINE: Duration = Duration::from_secs(15);
 
 #[derive(Clone, Debug)]
 pub struct Registry {
@@ -2000,7 +2005,7 @@ mod tests {
         fs::write(
             &executable,
             format!(
-                "#!/bin/sh\nif [ -f '{0}' ]; then\n  case \"$(/bin/cat '{0}')\" in\n    sleep) /bin/sleep 30;;\n    fail) exit 3;;\n  esac\nfi\ncase \"$1\" in\n  --version) echo 1.0;;\n  --help) echo '  --prompt-file <path>';;\n  --prompt-file) /bin/cat \"$2\";;\nesac\n",
+                "#!/bin/sh\nif [ -f '{0}' ]; then\n  case \"$(/bin/cat '{0}')\" in\n    stall) /bin/sleep 6;;\n    sleep) /bin/sleep 30;;\n    fail) exit 3;;\n  esac\nfi\ncase \"$1\" in\n  --version) echo 1.0;;\n  --help) echo '  --prompt-file <path>';;\n  --prompt-file) /bin/cat \"$2\";;\nesac\n",
                 sidecar.display(),
             ),
         )
@@ -2036,6 +2041,13 @@ mod tests {
             Health::Healthy
         );
 
+        // A slow probe is not a hung one: a multi-second stall, which a busy
+        // machine produces, must not fail a working harness.
+        fs::write(&sidecar, "stall").unwrap();
+        assert_eq!(
+            registry.health_probed(&draft.id).await.unwrap(),
+            Health::Healthy
+        );
         fs::write(&sidecar, "sleep").unwrap();
         assert_eq!(
             registry.health_probed(&draft.id).await.unwrap(),

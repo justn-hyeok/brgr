@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+A harness's version, help, and model-catalog probes may now take 15 seconds
+instead of 5 before brgr reports the harness timed out. The limit only exists
+to catch a hung CLI, and a healthy one answers in about a second, but an
+ordinary stall on a busy machine pushed a working harness past five seconds;
+`brgr run` then refused the task as `timed_out`, or rejected a valid model
+request with a catalog-probe failure instead of checking it. The same stall
+made a contract test fail intermittently after fresh builds.
+
 ## 2.7.0 — 2026-09-30
 
 `brgr prune` now reclaims the worktrees of failed, cancelled, and lost runs.
