@@ -204,9 +204,21 @@ fn schema_stamp(schema: &str) -> i64 {
     (head & 0x7fff_ffff).max(1)
 }
 
+/// How long `SQLite` itself waits for a lock before reporting busy. This is the
+/// dominant term in any contended store operation: a retry loop on top of it
+/// multiplies this wait, it does not replace it.
+const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Total time [`retry_busy`] may spend re-attempting an operation that failed
 /// only because another process held a lock. Bounded so a contended command
 /// fails with a reason instead of hanging.
+///
+/// Only paths that hold no cross-process lock of their own may use this. Waiting
+/// here while holding one converts a single failure into two: measured on
+/// 2026-09-29, a retrying task admission held the repository admission lock for
+/// 17.5s and still failed, while a second admission gave up after 10.2s with
+/// `another admission is in progress` — a misleading error for a store problem.
+/// Without the retry the holder failed in about 5s and released the lock.
 const BUSY_RETRY_BUDGET: Duration = Duration::from_secs(10);
 const BUSY_RETRY_BACKOFF: Duration = Duration::from_millis(2);
 const BUSY_RETRY_BACKOFF_CAP: Duration = Duration::from_millis(250);
@@ -279,8 +291,12 @@ impl Store {
         private_directory(root)?;
         let database_path = root.join("brgr.sqlite3");
         let connection = Connection::open(&database_path)?;
-        connection.busy_timeout(Duration::from_secs(5))?;
-        retry_busy(|| initialize_connection(&connection))?;
+        connection.busy_timeout(BUSY_TIMEOUT)?;
+        // Deliberately not retried. `Store::open` runs inside the cross-process
+        // admission lock, and a caller that waits there keeps every other
+        // admission out; see [`retry_busy`] for why that trade is wrong. An
+        // initialized store writes nothing here, so there is nothing to wait for.
+        initialize_connection(&connection)?;
         private_file(&database_path)?;
         let artifacts = ArtifactStore::open(root)?;
         Ok(Self {
@@ -392,16 +408,12 @@ impl Store {
         Ok(())
     }
 
+    /// Deliberately not retried, for the reason given on [`BUSY_RETRY_BUDGET`]:
+    /// task admission runs inside the repository admission lock, so waiting here
+    /// blocks every other admission on the same repository and turns one failure
+    /// into two. It relies on `busy_timeout` alone and fails fast enough to
+    /// release that lock.
     fn record_task_with_parent(
-        &mut self,
-        task: &TaskSpec,
-        request_digest: &str,
-        parent: Option<(TaskId, AttemptId)>,
-    ) -> Result<WriteOutcome, StoreError> {
-        retry_busy(|| self.record_task_with_parent_once(task, request_digest, parent))
-    }
-
-    fn record_task_with_parent_once(
         &mut self,
         task: &TaskSpec,
         request_digest: &str,
@@ -4350,6 +4362,35 @@ mod tests {
         blocker.execute_batch("ROLLBACK").unwrap();
         drop(second);
         drop(first);
+    }
+
+    /// Task admission runs inside the repository admission lock, so it must give
+    /// that lock back rather than wait for the store. With a retry loop here a
+    /// contended holder occupied the lock for 17.5s and still failed, while a
+    /// second admission gave up at 10.2s blaming the wrong thing. This fails if a
+    /// retry is put back on the admission path.
+    #[test]
+    fn task_admission_fails_fast_instead_of_retrying_under_the_admission_lock() {
+        let root = TempDir::new().unwrap();
+        let mut store = Store::open(root.path()).unwrap();
+        // Zero makes the wait observable: any time spent here is a retry loop,
+        // not SQLite's own busy handler.
+        store.connection.busy_timeout(Duration::ZERO).unwrap();
+        let blocker = Connection::open(root.path().join("brgr.sqlite3")).unwrap();
+        blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
+
+        let started = Instant::now();
+        let error = store
+            .record_task(&task(), "contended-admission")
+            .unwrap_err();
+        let elapsed = started.elapsed();
+        blocker.execute_batch("ROLLBACK").unwrap();
+
+        assert!(is_lock_contention(&error), "unexpected error: {error}");
+        assert!(
+            elapsed < BUSY_RETRY_BACKOFF * 8,
+            "admission waited {elapsed:?} while holding the admission lock"
+        );
     }
 
     /// A write transaction that reads before it takes its lock leaves a window

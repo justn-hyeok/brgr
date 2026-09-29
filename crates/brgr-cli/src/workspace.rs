@@ -21,7 +21,19 @@ use sha2::{Digest, Sha256};
 use tempfile::{NamedTempFile, tempdir_in};
 
 const GIT_LOCK_ATTEMPTS: u32 = 8;
-const ADMISSION_LOCK_WAIT: Duration = Duration::from_secs(10);
+
+/// How long a second admission on the same repository waits before reporting
+/// that one is already in progress.
+///
+/// This has to exceed the worst case a holder can spend inside the lock, or a
+/// slow-but-progressing admission makes waiters fail for a reason that is not
+/// theirs. The holder does up to three store writes there, each able to wait out
+/// `SQLite`'s five-second busy timeout, so ten seconds was not enough: measured on
+/// 2026-09-29, a contended holder occupied the lock for 17.5s while a waiter gave
+/// up at 10.2s with `another admission is in progress`. Store operations under
+/// this lock are no longer retried, which bounds the holder at roughly the busy
+/// timeout per write, and this margin covers the rest.
+const ADMISSION_LOCK_WAIT: Duration = Duration::from_secs(45);
 const MAX_SELECTED_FILES: usize = 32;
 const MAX_SELECTED_FILE_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_SELECTED_TOTAL_BYTES: u64 = 20 * 1024 * 1024;
