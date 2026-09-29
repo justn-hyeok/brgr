@@ -2,8 +2,14 @@
 
 mod artifact;
 mod board;
+mod contention;
+mod delegation;
+#[cfg(test)]
+mod fixtures;
 mod message;
 mod notification;
+mod owner;
+mod schema;
 mod tree;
 
 use std::{
@@ -11,7 +17,6 @@ use std::{
     fs,
     io::Read,
     path::{Path, PathBuf},
-    time::{Duration, Instant},
 };
 
 #[cfg(unix)]
@@ -23,214 +28,16 @@ use brgr_protocol::{
     ArtifactRef, AttemptId, AttemptState, Decision, Event, EventId, EventKind, InboxItem, OwnerId,
     ResultEnvelope, ResultId, RouteObservation, SCHEMA_V1, TaskId, TaskSpec,
 };
+use contention::{BUSY_TIMEOUT, retry_busy};
+use delegation::{recorded_delegation_parent, validate_new_task_parent, validated_parent_depth};
 pub use message::{MessageDirection, MessageDraft, MessageKind, TaskMessage};
 pub use notification::{NotificationTarget, PendingNotification};
+use owner::assert_owner_binding;
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
+use schema::initialize_connection;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 pub use tree::SubtreeNode;
-
-const SCHEMA: &str = r"
-CREATE TABLE IF NOT EXISTS tasks (
-    task_id TEXT NOT NULL,
-    revision INTEGER NOT NULL,
-    owner_id TEXT NOT NULL,
-    create_request_id TEXT NOT NULL UNIQUE,
-    request_digest TEXT NOT NULL,
-    spec_json TEXT NOT NULL,
-    PRIMARY KEY (task_id, revision)
-);
-CREATE TABLE IF NOT EXISTS attempts (
-    attempt_id TEXT PRIMARY KEY,
-    task_id TEXT NOT NULL,
-    revision INTEGER NOT NULL,
-    state TEXT NOT NULL,
-    FOREIGN KEY (task_id, revision) REFERENCES tasks(task_id, revision)
-);
-CREATE TABLE IF NOT EXISTS attempt_clocks (
-    attempt_id TEXT PRIMARY KEY,
-    started_at INTEGER NOT NULL,
-    FOREIGN KEY (attempt_id) REFERENCES attempts(attempt_id)
-);
-CREATE TABLE IF NOT EXISTS launch_intents (
-    attempt_id TEXT PRIMARY KEY,
-    launch_nonce TEXT NOT NULL UNIQUE,
-    supervisor_epoch INTEGER NOT NULL CHECK (supervisor_epoch > 0),
-    runner_identity_json TEXT,
-    FOREIGN KEY (attempt_id) REFERENCES attempts(attempt_id)
-);
-CREATE UNIQUE INDEX IF NOT EXISTS one_active_attempt_per_revision
-ON attempts (task_id, revision) WHERE state <> 'terminal';
-CREATE TABLE IF NOT EXISTS results (
-    result_id TEXT PRIMARY KEY,
-    attempt_id TEXT NOT NULL UNIQUE,
-    task_id TEXT NOT NULL,
-    revision INTEGER NOT NULL,
-    result_digest TEXT NOT NULL,
-    envelope_json TEXT NOT NULL,
-    FOREIGN KEY (attempt_id) REFERENCES attempts(attempt_id),
-    FOREIGN KEY (task_id, revision) REFERENCES tasks(task_id, revision)
-);
-CREATE TABLE IF NOT EXISTS route_observations (
-    result_id TEXT PRIMARY KEY,
-    observation_digest TEXT NOT NULL,
-    observation_json TEXT NOT NULL,
-    FOREIGN KEY (result_id) REFERENCES results(result_id)
-);
-CREATE TABLE IF NOT EXISTS pre_spawn_retry_grants (
-    attempt_id TEXT PRIMARY KEY,
-    FOREIGN KEY (attempt_id) REFERENCES results(attempt_id)
-);
-CREATE TABLE IF NOT EXISTS inbox_items (
-    owner_id TEXT NOT NULL,
-    result_id TEXT NOT NULL,
-    acknowledged INTEGER NOT NULL DEFAULT 0 CHECK (acknowledged IN (0, 1)),
-    PRIMARY KEY (owner_id, result_id),
-    FOREIGN KEY (result_id) REFERENCES results(result_id)
-);
-CREATE TABLE IF NOT EXISTS decisions (
-    decision_id TEXT PRIMARY KEY,
-    result_id TEXT NOT NULL UNIQUE,
-    decision_json TEXT NOT NULL,
-    FOREIGN KEY (result_id) REFERENCES results(result_id)
-);
-CREATE TABLE IF NOT EXISTS idempotency_requests (
-    request_id TEXT PRIMARY KEY,
-    request_digest TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS events (
-    event_id TEXT PRIMARY KEY,
-    attempt_id TEXT NOT NULL,
-    producer TEXT NOT NULL,
-    producer_seq INTEGER NOT NULL,
-    event_json TEXT NOT NULL,
-    UNIQUE (attempt_id, producer, producer_seq),
-    FOREIGN KEY (attempt_id) REFERENCES attempts(attempt_id)
-);
-CREATE TABLE IF NOT EXISTS owner_bindings (
-    owner_id TEXT PRIMARY KEY,
-    session_id TEXT NOT NULL,
-    binding_epoch INTEGER NOT NULL CHECK (binding_epoch > 0)
-);
-CREATE TABLE IF NOT EXISTS delegation_edges (
-    child_task_id TEXT PRIMARY KEY,
-    parent_task_id TEXT NOT NULL,
-    parent_attempt_id TEXT NOT NULL,
-    depth INTEGER NOT NULL CHECK (depth BETWEEN 1 AND 8),
-    FOREIGN KEY (parent_attempt_id) REFERENCES attempts(attempt_id)
-);
-CREATE INDEX IF NOT EXISTS delegation_edges_parent ON delegation_edges (parent_task_id);
-CREATE TABLE IF NOT EXISTS cancellation_intents (
-    task_id TEXT PRIMARY KEY,
-    revision INTEGER NOT NULL,
-    requested_at INTEGER NOT NULL
-);
-CREATE TABLE IF NOT EXISTS task_run_completions (
-    task_id TEXT NOT NULL,
-    revision INTEGER NOT NULL,
-    result_id TEXT NOT NULL UNIQUE,
-    completed_at INTEGER NOT NULL,
-    PRIMARY KEY (task_id, revision)
-);
-CREATE TABLE IF NOT EXISTS task_messages (
-    message_id TEXT PRIMARY KEY,
-    task_id TEXT NOT NULL,
-    attempt_id TEXT NOT NULL,
-    direction TEXT NOT NULL CHECK (direction IN ('owner_to_worker', 'worker_to_owner')),
-    kind TEXT NOT NULL CHECK (kind IN ('question', 'reply', 'note')),
-    body TEXT NOT NULL,
-    in_reply_to TEXT,
-    acknowledged INTEGER NOT NULL DEFAULT 0 CHECK (acknowledged IN (0, 1)),
-    FOREIGN KEY (attempt_id) REFERENCES attempts(attempt_id),
-    FOREIGN KEY (in_reply_to) REFERENCES task_messages(message_id)
-);
-CREATE INDEX IF NOT EXISTS task_messages_inbox
-ON task_messages (task_id, attempt_id, direction, acknowledged);
-CREATE UNIQUE INDEX IF NOT EXISTS task_message_one_reply
-ON task_messages (in_reply_to) WHERE kind = 'reply';
-CREATE TABLE IF NOT EXISTS owner_surfaces (
-    owner_id TEXT PRIMARY KEY,
-    session_id TEXT NOT NULL,
-    binding_epoch INTEGER NOT NULL,
-    pane_id TEXT NOT NULL,
-    herdr_session TEXT,
-    herdr_bin TEXT NOT NULL,
-    FOREIGN KEY (owner_id) REFERENCES owner_bindings(owner_id)
-);
-CREATE TABLE IF NOT EXISTS completion_notifications (
-    result_id TEXT PRIMARY KEY,
-    task_id TEXT NOT NULL,
-    owner_id TEXT NOT NULL,
-    resolved INTEGER NOT NULL DEFAULT 0 CHECK (resolved IN (0, 1)),
-    delivered_session TEXT,
-    delivered_epoch INTEGER,
-    delivered_pane TEXT,
-    claim_token TEXT,
-    claim_until INTEGER NOT NULL DEFAULT 0,
-    attempts INTEGER NOT NULL DEFAULT 0,
-    last_error TEXT,
-    FOREIGN KEY (result_id) REFERENCES results(result_id)
-);
-CREATE INDEX IF NOT EXISTS completion_notifications_owner
-ON completion_notifications (owner_id, resolved, delivered_session);
-CREATE INDEX IF NOT EXISTS results_task_revision ON results (task_id, revision);
-CREATE INDEX IF NOT EXISTS attempts_task_revision ON attempts (task_id, revision);
-";
-
-/// Identifies the exact [`SCHEMA`] a store was last initialized with, so an
-/// ordinary command no longer opens a write transaction just to re-apply an
-/// unchanged schema.
-///
-/// Derived from the schema text rather than hand-maintained. A hand-bumped
-/// constant can be forgotten, and the previous unconditional
-/// `CREATE ... IF NOT EXISTS` batch self-healed on every open; deriving the
-/// stamp keeps that property, because any edit to `SCHEMA` changes it and every
-/// store with a different stamp re-applies the batch. `user_version` is a
-/// signed 32-bit field, and `0` is reserved for a store written before the
-/// stamp existed.
-fn schema_version() -> i64 {
-    schema_stamp(SCHEMA)
-}
-
-/// Folds a schema's text into the `user_version` field. Never silently falls
-/// back: a stamp that does not track the text would make every store skip a new
-/// object forever.
-fn schema_stamp(schema: &str) -> i64 {
-    let digest = sha256(schema.as_bytes());
-    let hex = digest
-        .strip_prefix("sha256:")
-        .expect("sha256 renders a prefixed digest");
-    let head = i64::from_str_radix(&hex[..8], 16).expect("a digest's leading bytes are hex");
-    (head & 0x7fff_ffff).max(1)
-}
-
-/// How long `SQLite` itself waits for a lock before reporting busy. This is the
-/// dominant term in any contended store operation: a retry loop on top of it
-/// multiplies this wait, it does not replace it.
-const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
-
-/// Total time [`retry_busy`] may spend re-attempting an operation that failed
-/// only because another process held a lock. Bounded so a contended command
-/// fails with a reason instead of hanging.
-///
-/// Only paths that hold no cross-process lock of their own may use this. Waiting
-/// here while holding one converts a single failure into two: measured on
-/// 2026-09-29, a retrying task admission held the repository admission lock for
-/// 17.5s and still failed, while a second admission gave up after 10.2s with
-/// `another admission is in progress` — a misleading error for a store problem.
-/// Without the retry the holder failed in about 5s and released the lock.
-///
-/// The wait is a blocking sleep, and the retried paths are reached from async code
-/// in `brgr-core`, so a contended write occupies a runtime worker. That is not
-/// this loop's doing: `busy_timeout` blocks the thread inside `SQLite` for up to
-/// five seconds per attempt whether or not a retry follows, so every store call
-/// from async code already holds a worker. Moving store work off the runtime is a
-/// change to how the store is called, not to this budget, and is tracked in the
-/// readiness checklist rather than papered over here. The budget bounds how much
-/// this loop can add to it.
-const BUSY_RETRY_BUDGET: Duration = Duration::from_secs(10);
-const BUSY_RETRY_BACKOFF: Duration = Duration::from_millis(2);
-const BUSY_RETRY_BACKOFF_CAP: Duration = Duration::from_millis(250);
 
 /// The result of an idempotent store mutation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -388,57 +195,6 @@ impl Store {
         )
     }
 
-    /// Checks a proposed parent before creating any child worktree. The
-    /// transactional check in `record_child_task` remains authoritative.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error for a stale parent, wrong owner, excessive depth, or
-    /// a database failure.
-    pub fn validate_delegation_parent(
-        &self,
-        parent_task_id: TaskId,
-        parent_attempt_id: AttemptId,
-        child_owner: &brgr_protocol::OwnerId,
-    ) -> Result<(), StoreError> {
-        let parent: Option<(String, String)> = self
-            .connection
-            .query_row(
-                "SELECT task_id, state FROM attempts WHERE attempt_id = ?1",
-                [parent_attempt_id.to_string()],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()?;
-        if !parent.is_some_and(|(id, state)| {
-            id == parent_task_id.to_string() && matches!(state.as_str(), "running" | "blocked")
-        }) || child_owner.as_str() != format!("worker:{parent_attempt_id}")
-        {
-            return Err(StoreError::InvalidDelegationParent);
-        }
-        if self.cancellation_requested(parent_task_id)? {
-            return Err(StoreError::DelegationParentCancelled);
-        }
-        let depth: u32 = self
-            .connection
-            .query_row(
-                "SELECT depth FROM delegation_edges WHERE child_task_id = ?1",
-                [parent_task_id.to_string()],
-                |row| row.get(0),
-            )
-            .optional()?
-            .unwrap_or(0);
-        if depth >= 8 {
-            return Err(StoreError::DelegationDepthExceeded);
-        }
-        let parent_spec = self.task_for_attempt(parent_attempt_id)?;
-        if self.active_child_count(parent_attempt_id)?
-            >= u64::from(parent_spec.max_concurrent_children.unwrap_or(2))
-        {
-            return Err(StoreError::ConcurrentChildLimit);
-        }
-        Ok(())
-    }
-
     /// Deliberately not retried, for the reason given on [`BUSY_RETRY_BUDGET`]:
     /// task admission runs inside the repository admission lock, so waiting here
     /// blocks every other admission on the same repository and turns one failure
@@ -514,59 +270,6 @@ impl Store {
         }
         transaction.commit()?;
         Ok(WriteOutcome::Inserted)
-    }
-
-    /// Returns the stable parent attempt for a child task, when one exists.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the database cannot be read or an ID is malformed.
-    pub fn delegation_parent(
-        &self,
-        child_task_id: TaskId,
-    ) -> Result<Option<(TaskId, AttemptId, u32)>, StoreError> {
-        self.connection
-            .query_row(
-                "SELECT parent_task_id, parent_attempt_id, depth FROM delegation_edges WHERE child_task_id = ?1",
-                [child_task_id.to_string()],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, u32>(2)?)),
-            )
-            .optional()?
-            .map(|(task, attempt, depth)| {
-                Ok((
-                    task.parse().map_err(|_| StoreError::InvalidDelegationParent)?,
-                    attempt.parse().map_err(|_| StoreError::InvalidDelegationParent)?,
-                    depth,
-                ))
-            })
-            .transpose()
-    }
-
-    /// Counts children whose latest revision has not been delivered and
-    /// acknowledged by this parent worker.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the metadata query fails.
-    pub fn unsettled_children(&self, parent_attempt_id: AttemptId) -> Result<u64, StoreError> {
-        let count: i64 = self.connection.query_row(
-            "SELECT COUNT(*) FROM delegation_edges e
-             JOIN tasks t ON t.task_id = e.child_task_id
-               AND t.revision = (SELECT MAX(t2.revision) FROM tasks t2 WHERE t2.task_id = e.child_task_id)
-             LEFT JOIN results r ON r.result_id = (
-               SELECT latest.result_id FROM results latest
-               WHERE latest.task_id = t.task_id AND latest.revision = t.revision
-               ORDER BY latest.rowid DESC LIMIT 1
-             )
-             LEFT JOIN inbox_items i ON i.result_id = r.result_id AND i.owner_id = t.owner_id
-             LEFT JOIN decisions d ON d.result_id = r.result_id
-             WHERE e.parent_attempt_id = ?1
-               AND (r.result_id IS NULL OR i.acknowledged IS NULL OR i.acknowledged = 0
-                 OR (json_extract(r.envelope_json, '$.outcome') = 'candidate' AND d.result_id IS NULL))",
-            [parent_attempt_id.to_string()],
-            |row| row.get(0),
-        )?;
-        u64::try_from(count).map_err(|_| StoreError::NumericOverflow)
     }
 
     /// Claims the sole active attempt slot for a task revision.
@@ -1660,145 +1363,6 @@ impl Store {
             Err(error) => Err(StoreError::Database(error)),
         }
     }
-
-    /// Initially binds an owner to an explicit session epoch without inferring
-    /// focus. A late hook cannot replace a different session; use
-    /// `rebind_owner` for an explicit transfer.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when another session is already bound or persistence
-    /// fails.
-    pub fn bind_owner(
-        &self,
-        owner_id: &OwnerId,
-        session_id: &str,
-        binding_epoch: u64,
-    ) -> Result<WriteOutcome, StoreError> {
-        if session_id.trim().is_empty() || binding_epoch == 0 {
-            return Err(StoreError::InvalidOwnerBinding);
-        }
-        let binding_epoch =
-            i64::try_from(binding_epoch).map_err(|_| StoreError::NumericOverflow)?;
-        let transaction = self.write_transaction()?;
-        let existing = transaction
-            .query_row(
-                "SELECT session_id, binding_epoch FROM owner_bindings WHERE owner_id = ?1",
-                [owner_id.as_str()],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
-            )
-            .optional()?;
-        if let Some((stored_session, _stored_epoch)) = existing {
-            if stored_session == session_id {
-                return Ok(WriteOutcome::AlreadyApplied);
-            }
-            return Err(StoreError::OwnerBindingConflict);
-        }
-        transaction.execute(
-            "INSERT INTO owner_bindings (owner_id, session_id, binding_epoch)
-             VALUES (?1, ?2, ?3)
-             ON CONFLICT(owner_id) DO UPDATE SET
-               session_id = excluded.session_id,
-               binding_epoch = excluded.binding_epoch",
-            params![owner_id.as_str(), session_id, binding_epoch],
-        )?;
-        transaction.commit()?;
-        Ok(WriteOutcome::Inserted)
-    }
-
-    /// Reads the current cooperative session binding for an owner.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if persistence or epoch conversion fails.
-    pub fn owner_binding(&self, owner_id: &OwnerId) -> Result<Option<(String, u64)>, StoreError> {
-        self.connection
-            .query_row(
-                "SELECT session_id, binding_epoch FROM owner_bindings WHERE owner_id = ?1",
-                [owner_id.as_str()],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
-            )
-            .optional()?
-            .map(|(session, epoch)| {
-                Ok((
-                    session,
-                    u64::try_from(epoch).map_err(|_| StoreError::NumericOverflow)?,
-                ))
-            })
-            .transpose()
-    }
-
-    /// Explicitly transfers an owner to a new session with a larger epoch.
-    /// Existing inbox items and decisions remain under the same owner ID.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error for an empty session, epoch overflow, or DB failure.
-    pub fn rebind_owner(&self, owner_id: &OwnerId, session_id: &str) -> Result<u64, StoreError> {
-        if session_id.trim().is_empty() {
-            return Err(StoreError::InvalidOwnerBinding);
-        }
-        let transaction = self.write_transaction()?;
-        let prior: Option<(String, i64)> = transaction
-            .query_row(
-                "SELECT session_id, binding_epoch FROM owner_bindings WHERE owner_id = ?1",
-                [owner_id.as_str()],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()?;
-        if let Some((stored_session, epoch)) = &prior
-            && stored_session == session_id
-        {
-            return u64::try_from(*epoch).map_err(|_| StoreError::NumericOverflow);
-        }
-        let epoch = prior.map_or(Ok(1_i64), |(_, epoch)| {
-            epoch.checked_add(1).ok_or(StoreError::NumericOverflow)
-        })?;
-        transaction.execute(
-            "INSERT INTO owner_bindings (owner_id, session_id, binding_epoch)
-             VALUES (?1, ?2, ?3)
-             ON CONFLICT(owner_id) DO UPDATE SET
-               session_id = excluded.session_id,
-               binding_epoch = excluded.binding_epoch",
-            params![owner_id.as_str(), session_id, epoch],
-        )?;
-        transaction.execute(
-            "UPDATE completion_notifications SET delivered_session = NULL,
-               delivered_epoch = NULL, delivered_pane = NULL,
-               claim_token = NULL, claim_until = 0
-             WHERE owner_id = ?1 AND resolved = 0
-               AND EXISTS (SELECT 1 FROM inbox_items i
-                   WHERE i.result_id = completion_notifications.result_id
-                     AND i.owner_id = ?1 AND i.acknowledged = 0)",
-            [owner_id.as_str()],
-        )?;
-        transaction.commit()?;
-        u64::try_from(epoch).map_err(|_| StoreError::NumericOverflow)
-    }
-}
-
-fn assert_owner_binding(
-    transaction: &Transaction<'_>,
-    owner_id: &OwnerId,
-    session_id: Option<&str>,
-    binding_epoch: Option<u64>,
-) -> Result<(), StoreError> {
-    let Some((bound_session, bound_epoch)) = transaction
-        .query_row(
-            "SELECT session_id, binding_epoch FROM owner_bindings WHERE owner_id = ?1",
-            [owner_id.as_str()],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
-        )
-        .optional()?
-    else {
-        return Err(StoreError::OwnerUnbound(owner_id.clone()));
-    };
-    if session_id != Some(bound_session.as_str())
-        || binding_epoch != u64::try_from(bound_epoch).ok()
-    {
-        return Err(StoreError::OwnerBindingConflict);
-    }
-    Ok(())
 }
 
 fn record_decision_in_transaction(
@@ -1894,102 +1458,6 @@ fn decisions_equal_except_id(left: &Decision, right: &Decision) -> bool {
         && left.binding_epoch == right.binding_epoch
         && left.verdict == right.verdict
         && left.reason == right.reason
-}
-
-fn recorded_delegation_parent(
-    transaction: &Transaction<'_>,
-    task_id: TaskId,
-) -> Result<Option<(String, String)>, StoreError> {
-    transaction
-        .query_row(
-            "SELECT parent_task_id, parent_attempt_id FROM delegation_edges WHERE child_task_id = ?1",
-            [task_id.to_string()],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .optional()
-        .map_err(StoreError::from)
-}
-
-fn validate_new_task_parent(
-    transaction: &Transaction<'_>,
-    task_id: TaskId,
-    recorded: Option<&(String, String)>,
-    requested: Option<&(String, String)>,
-) -> Result<(), StoreError> {
-    if recorded.is_some() && recorded != requested {
-        return Err(StoreError::InvalidDelegationParent);
-    }
-    if recorded.is_none() && requested.is_some() {
-        let prior_task: Option<i64> = transaction
-            .query_row(
-                "SELECT 1 FROM tasks WHERE task_id = ?1 LIMIT 1",
-                [task_id.to_string()],
-                |row| row.get(0),
-            )
-            .optional()?;
-        if prior_task.is_some() {
-            return Err(StoreError::InvalidDelegationParent);
-        }
-    }
-    Ok(())
-}
-
-fn validated_parent_depth(
-    transaction: &Transaction<'_>,
-    task: &TaskSpec,
-    parent: Option<(TaskId, AttemptId)>,
-) -> Result<Option<u32>, StoreError> {
-    let Some((parent_task_id, parent_attempt_id)) = parent else {
-        return Ok(None);
-    };
-    let parent_attempt: Option<(String, String)> = transaction
-        .query_row(
-            "SELECT task_id, state FROM attempts WHERE attempt_id = ?1",
-            [parent_attempt_id.to_string()],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .optional()?;
-    if !parent_attempt.is_some_and(|(id, state)| {
-        id == parent_task_id.to_string() && matches!(state.as_str(), "running" | "blocked")
-    }) || task.owner_id.as_str() != format!("worker:{parent_attempt_id}")
-    {
-        return Err(StoreError::InvalidDelegationParent);
-    }
-    let cancelling: Option<i64> = transaction
-        .query_row(
-            "SELECT 1 FROM cancellation_intents WHERE task_id = ?1
-             AND revision = (SELECT revision FROM attempts WHERE attempt_id = ?2)",
-            params![parent_task_id.to_string(), parent_attempt_id.to_string()],
-            |row| row.get(0),
-        )
-        .optional()?;
-    if cancelling.is_some() {
-        return Err(StoreError::DelegationParentCancelled);
-    }
-    let parent_spec_json: String = transaction.query_row(
-        "SELECT t.spec_json FROM attempts a JOIN tasks t
-         ON t.task_id = a.task_id AND t.revision = a.revision
-         WHERE a.attempt_id = ?1",
-        [parent_attempt_id.to_string()],
-        |row| row.get(0),
-    )?;
-    let parent_spec: TaskSpec = serde_json::from_str(&parent_spec_json)?;
-    let active_children = tree::active_child_count(transaction, parent_attempt_id)?;
-    if active_children >= i64::from(parent_spec.max_concurrent_children.unwrap_or(2)) {
-        return Err(StoreError::ConcurrentChildLimit);
-    }
-    let parent_depth: u32 = transaction
-        .query_row(
-            "SELECT depth FROM delegation_edges WHERE child_task_id = ?1",
-            [parent_task_id.to_string()],
-            |row| row.get(0),
-        )
-        .optional()?
-        .unwrap_or(0);
-    if parent_depth >= 8 {
-        return Err(StoreError::DelegationDepthExceeded);
-    }
-    Ok(Some(parent_depth + 1))
 }
 
 fn record_idempotency(
@@ -2297,126 +1765,6 @@ fn private_directory(path: &Path) -> Result<(), StoreError> {
     Ok(())
 }
 
-/// Applies the per-connection pragmas and, only when the stored schema is
-/// behind, the idempotent DDL batch.
-///
-/// `foreign_keys` and `synchronous` are per-connection and are always set.
-/// `journal_mode` is persistent, and re-declaring it takes a lock that
-/// `busy_timeout` does not cover, so it is only written when it differs.
-fn initialize_connection(connection: &Connection) -> Result<(), StoreError> {
-    connection.pragma_update(None, "foreign_keys", "ON")?;
-    connection.pragma_update(None, "synchronous", "FULL")?;
-    let journal_mode: String = connection.query_row("PRAGMA journal_mode", [], |row| row.get(0))?;
-    if !journal_mode.eq_ignore_ascii_case("wal") {
-        connection.pragma_update(None, "journal_mode", "WAL")?;
-    }
-    let stamp = schema_version();
-    let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-    if version == stamp {
-        return Ok(());
-    }
-
-    // A different stamp means a build with different schema text opened this store,
-    // which is not the same as something being absent. Applying the batch on that
-    // signal alone made two builds rewrite `user_version` past each other, so a
-    // read-only command such as `brgr status` needed the write lock and failed
-    // after 16.8s against a held one — the contention the stamp exists to avoid.
-    // Check first; write only when an object really is missing.
-    let missing = missing_schema_objects(connection)?;
-    if !missing.is_empty() {
-        connection.execute_batch(SCHEMA)?;
-        connection.pragma_update(None, "user_version", stamp)?;
-    } else if version == 0 {
-        // Written before the stamp existed: record it once so ordinary opens stop
-        // re-checking. A build that disagrees only on the digest leaves it alone.
-        connection.pragma_update(None, "user_version", stamp)?;
-    }
-    Ok(())
-}
-
-/// Names every table and index [`SCHEMA`] declares that the store does not have.
-///
-/// Read-only, and one query rather than one per object.
-fn missing_schema_objects(connection: &Connection) -> Result<Vec<String>, StoreError> {
-    let mut statement =
-        connection.prepare("SELECT name FROM sqlite_master WHERE name IS NOT NULL")?;
-    let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
-    let present = rows.collect::<Result<Vec<_>, _>>()?;
-    Ok(declared_schema_objects(SCHEMA)
-        .into_iter()
-        .filter(|name| !present.iter().any(|existing| existing == name))
-        .map(str::to_owned)
-        .collect())
-}
-
-/// Reads the object names out of the schema text instead of keeping a second list
-/// beside it, for the same reason the stamp is derived rather than hand-written: a
-/// parallel list is a thing to forget.
-fn declared_schema_objects(schema: &str) -> Vec<&str> {
-    schema
-        .lines()
-        .filter_map(|line| {
-            let line = line.trim();
-            let rest = line
-                .strip_prefix("CREATE TABLE IF NOT EXISTS ")
-                .or_else(|| line.strip_prefix("CREATE UNIQUE INDEX IF NOT EXISTS "))
-                .or_else(|| line.strip_prefix("CREATE INDEX IF NOT EXISTS "))?;
-            rest.split(|character: char| character.is_whitespace() || character == '(')
-                .next()
-                .filter(|name| !name.is_empty())
-        })
-        .collect()
-}
-
-/// Retries an operation that failed only because another process held a lock.
-///
-/// Store mutations are idempotent and a failed transaction has already rolled
-/// back, so replaying one cannot apply it twice. Anything that is not lock
-/// contention is returned on its first occurrence.
-///
-/// The whole retry loop is bounded by one budget rather than an attempt count,
-/// because each attempt may itself wait out `busy_timeout` before failing; a
-/// per-attempt count would let the worst case grow with that timeout.
-fn retry_busy<T>(operation: impl FnMut() -> Result<T, StoreError>) -> Result<T, StoreError> {
-    retry_busy_within(BUSY_RETRY_BUDGET, operation)
-}
-
-/// [`retry_busy`] with an explicit budget, so a test can exercise the loop
-/// without waiting out the production one.
-fn retry_busy_within<T>(
-    budget: Duration,
-    mut operation: impl FnMut() -> Result<T, StoreError>,
-) -> Result<T, StoreError> {
-    let deadline = Instant::now() + budget;
-    let mut delay = BUSY_RETRY_BACKOFF;
-    loop {
-        match operation() {
-            Err(error) if is_lock_contention(&error) => {
-                let now = Instant::now();
-                if now >= deadline {
-                    return Err(error);
-                }
-                std::thread::sleep(delay.min(deadline - now));
-                delay = delay.saturating_mul(2).min(BUSY_RETRY_BACKOFF_CAP);
-            }
-            outcome => return outcome,
-        }
-    }
-}
-
-/// Reports whether an error is transient lock contention rather than a rejected
-/// write. `SQLITE_BUSY_SNAPSHOT` reports the same primary code.
-fn is_lock_contention(error: &StoreError) -> bool {
-    matches!(
-        error,
-        StoreError::Database(rusqlite::Error::SqliteFailure(failure, _))
-            if matches!(
-                failure.code,
-                rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
-            )
-    )
-}
-
 /// Returns the exclusive upper bound of a lowercase-hexadecimal prefix range.
 ///
 /// `g` sorts above every hex digit under the default `BINARY` collation, so
@@ -2593,9 +1941,30 @@ impl StoreError {
 
 #[cfg(test)]
 mod tests {
+    use std::time::{Duration, Instant};
+
+    use super::fixtures::{result, sealed_result, task};
+
+    /// Every source file the write-path guards read. Checked against the modules
+    /// `lib.rs` declares, so a new module cannot quietly escape them.
+    const SCANNED: [(&str, &str); 11] = [
+        ("lib.rs", include_str!("lib.rs")),
+        ("artifact.rs", include_str!("artifact.rs")),
+        ("board.rs", include_str!("board.rs")),
+        ("contention.rs", include_str!("contention.rs")),
+        ("delegation.rs", include_str!("delegation.rs")),
+        ("fixtures.rs", include_str!("fixtures.rs")),
+        ("message.rs", include_str!("message.rs")),
+        ("notification.rs", include_str!("notification.rs")),
+        ("owner.rs", include_str!("owner.rs")),
+        ("schema.rs", include_str!("schema.rs")),
+        ("tree.rs", include_str!("tree.rs")),
+    ];
+
+    use super::contention::{BUSY_RETRY_BACKOFF, is_lock_contention};
     use brgr_protocol::{
-        ArtifactContract, AttemptBudget, DecisionId, DecisionVerdict, EventId, EventKind,
-        ObservationSource, Route, SCHEMA_V1, TerminalOutcome,
+        ArtifactContract, DecisionId, DecisionVerdict, EventId, EventKind, ObservationSource,
+        SCHEMA_V1, TerminalOutcome,
     };
     use tempfile::TempDir;
 
@@ -4204,66 +3573,6 @@ mod tests {
         }
     }
 
-    fn task() -> TaskSpec {
-        TaskSpec {
-            schema: SCHEMA_V1.to_owned(),
-            task_id: TaskId::new(),
-            revision: 1,
-            create_request_id: "request-1".to_owned(),
-            owner_id: OwnerId::new("codex:test-owner").unwrap(),
-            objective: "Store one bounded result".to_owned(),
-            workspace: "/tmp/brgr-test".to_owned(),
-            route: Route {
-                harness_id: "local.fixture".to_owned(),
-                requested_model: None,
-                requested_effort: None,
-            },
-            required_capabilities: vec!["completion".to_owned()],
-            artifact_contract: ArtifactContract {
-                media_type: "text/plain".to_owned(),
-                max_bytes: 1_024,
-            },
-            acceptance_criteria: vec!["result is sealed".to_owned()],
-            budget: AttemptBudget {
-                deadline_seconds: 30,
-                max_attempts: 2,
-            },
-            instructions: brgr_protocol::TaskInstructions::default(),
-            evidence: brgr_protocol::EvidenceSpec::default(),
-            max_concurrent_children: None,
-        }
-    }
-
-    fn result(task: &TaskSpec, attempt_id: AttemptId) -> ResultEnvelope {
-        ResultEnvelope {
-            schema: SCHEMA_V1.to_owned(),
-            task_id: task.task_id,
-            revision: task.revision,
-            attempt_id,
-            result_id: ResultId::new(),
-            outcome: TerminalOutcome::Candidate,
-            artifacts: vec![],
-            error: None,
-            legacy_embedded_route_observation: None,
-            route_observation: None,
-            unresolved_effects: vec![],
-        }
-    }
-
-    fn sealed_result(store: &Store, task: &TaskSpec, attempt_id: AttemptId) -> ResultEnvelope {
-        let mut envelope = result(task, attempt_id);
-        envelope.artifacts.push(
-            store
-                .seal_artifact_reader(
-                    std::io::Cursor::new(b"reviewable report"),
-                    &task.artifact_contract.media_type,
-                    task.artifact_contract.max_bytes,
-                )
-                .unwrap(),
-        );
-        envelope
-    }
-
     #[test]
     fn native_route_receipt_commits_atomically_without_changing_result_digest() {
         let root = TempDir::new().unwrap();
@@ -4362,84 +3671,6 @@ mod tests {
     }
 
     #[test]
-    fn open_sets_per_connection_pragmas_and_records_the_schema_version() {
-        let root = TempDir::new().unwrap();
-        let store = Store::open(root.path()).unwrap();
-
-        // `foreign_keys` moved out of the versioned DDL batch, so it has to be
-        // re-declared on every connection rather than only on a first open.
-        let foreign_keys: i64 = store
-            .connection
-            .query_row("PRAGMA foreign_keys", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!(foreign_keys, 1);
-        let journal_mode: String = store
-            .connection
-            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
-            .unwrap();
-        assert!(journal_mode.eq_ignore_ascii_case("wal"));
-        let version: i64 = store
-            .connection
-            .query_row("PRAGMA user_version", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!(version, schema_version());
-
-        drop(store);
-        let reopened = Store::open(root.path()).unwrap();
-        let foreign_keys: i64 = reopened
-            .connection
-            .query_row("PRAGMA foreign_keys", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!(
-            foreign_keys, 1,
-            "reopen skipped the DDL and lost enforcement"
-        );
-    }
-
-    #[test]
-    fn a_store_written_before_the_version_gate_gains_indexes_without_losing_rows() {
-        let root = TempDir::new().unwrap();
-        let mut store = Store::open(root.path()).unwrap();
-        let task = task();
-        let attempt_id = AttemptId::new();
-        store.record_task(&task, "digest-migrate").unwrap();
-        store
-            .create_attempt(task.task_id, task.revision, attempt_id)
-            .unwrap();
-        let result = sealed_result(&store, &task, attempt_id);
-        store
-            .commit_terminal_result(&task.owner_id, &result)
-            .unwrap();
-
-        // Recreate a store from before the indexes and the version marker.
-        store
-            .connection
-            .execute_batch(
-                "DROP INDEX results_task_revision;
-                 DROP INDEX attempts_task_revision;
-                 PRAGMA user_version = 0;",
-            )
-            .unwrap();
-        assert!(!index_names(&store.connection).contains(&"results_task_revision".to_owned()));
-        drop(store);
-
-        let reopened = Store::open(root.path()).unwrap();
-        let indexes = index_names(&reopened.connection);
-        assert!(indexes.contains(&"results_task_revision".to_owned()));
-        assert!(indexes.contains(&"attempts_task_revision".to_owned()));
-        let version: i64 = reopened
-            .connection
-            .query_row("PRAGMA user_version", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!(version, schema_version());
-        assert_eq!(reopened.inbox(&task.owner_id, false).unwrap().len(), 1);
-        assert_eq!(
-            reopened.latest_result(task.task_id).unwrap().result_id,
-            result.result_id
-        );
-    }
-
-    #[test]
     fn per_task_result_reads_use_the_task_revision_index() {
         let root = TempDir::new().unwrap();
         let store = Store::open(root.path()).unwrap();
@@ -4456,38 +3687,6 @@ mod tests {
             plan.contains("results_task_revision"),
             "per-task result read fell back to a table scan: {plan}"
         );
-    }
-
-    /// Opening an already-initialized store must not block on a live writer.
-    ///
-    /// This pins the property, not the optimization: the earlier per-open
-    /// pragma and DDL batch also satisfied it, and its contention effect was
-    /// measured at roughly one failed admission in fifty rather than anything a
-    /// deterministic test can observe. `benches/concurrent_admission.rs` is
-    /// where that cost is reported.
-    #[test]
-    fn opening_an_initialized_store_needs_no_write_lock() {
-        let root = TempDir::new().unwrap();
-        let first = Store::open(root.path()).unwrap();
-        let blocker = Connection::open(root.path().join("brgr.sqlite3")).unwrap();
-        blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
-
-        let started = Instant::now();
-        let second = Store::open(root.path());
-        assert!(
-            second.is_ok(),
-            "opening a store took a write lock: {:?}",
-            second.err()
-        );
-        assert!(
-            started.elapsed() < Duration::from_secs(1),
-            "opening a store waited on the write lock for {:?}",
-            started.elapsed()
-        );
-
-        blocker.execute_batch("ROLLBACK").unwrap();
-        drop(second);
-        drop(first);
     }
 
     /// A terminal commit must not hold the store's write lock across artifact
@@ -4624,12 +3823,23 @@ mod tests {
             ("release_notification_claim", false),
         ];
 
-        let sources: [(&str, &str); 4] = [
-            ("lib.rs", include_str!("lib.rs")),
-            ("message.rs", include_str!("message.rs")),
-            ("notification.rs", include_str!("notification.rs")),
-            ("tree.rs", include_str!("tree.rs")),
-        ];
+        // A module added without being listed here would silently stop being
+        // covered, which is the failure mode these guards exist to prevent.
+        let declared: Vec<&str> = include_str!("lib.rs")
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("mod "))
+            .filter_map(|rest| rest.strip_suffix(';'))
+            .collect();
+        for module in &declared {
+            assert!(
+                SCANNED
+                    .iter()
+                    .any(|(name, _)| *name == format!("{module}.rs")),
+                "module {module} is not scanned by the write-path guards; add it to SCANNED"
+            );
+        }
+
+        let sources = SCANNED;
         // Assembled at runtime so this test's own text is not a match.
         let explicit = format!("self.{}()?", "write_transaction");
         let implicit = format!("self.{}\n", "connection");
@@ -4703,14 +3913,7 @@ mod tests {
         let behaviour = format!("transaction_{}", "with_behavior");
         let deferred = format!(".connection.{}()", "transaction");
 
-        let sources: [(&str, &str); 6] = [
-            ("lib.rs", include_str!("lib.rs")),
-            ("board.rs", include_str!("board.rs")),
-            ("artifact.rs", include_str!("artifact.rs")),
-            ("message.rs", include_str!("message.rs")),
-            ("notification.rs", include_str!("notification.rs")),
-            ("tree.rs", include_str!("tree.rs")),
-        ];
+        let sources = SCANNED;
 
         let mut constructions = Vec::new();
         for (name, source) in sources {
@@ -4763,224 +3966,5 @@ mod tests {
             blocked.unwrap_err()
         )));
         transaction.commit().unwrap();
-    }
-
-    /// Two builds whose schema text differs must not rewrite `user_version` past
-    /// each other on every open.
-    ///
-    /// The stamp is derived from the schema text, so a build with one extra object
-    /// carries a different one. Applying the batch on that signal alone turned a
-    /// read-only command into one that needs the write lock: measured on
-    /// 2026-09-29, `brgr status` against a held lock failed after 16.8s. The
-    /// mismatch is now checked read-only first.
-    #[test]
-    fn a_stamp_from_another_build_does_not_make_an_open_take_the_write_lock() {
-        let root = TempDir::new().unwrap();
-        let first = Store::open(root.path()).unwrap();
-        // What the other build's stamp looks like: different, nonzero, and with
-        // every declared object still in place.
-        first
-            .connection
-            .pragma_update(None, "user_version", 4_242)
-            .unwrap();
-        drop(first);
-
-        let blocker = Connection::open(root.path().join("brgr.sqlite3")).unwrap();
-        blocker.busy_timeout(Duration::ZERO).unwrap();
-        blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
-
-        let started = Instant::now();
-        let reopened = Store::open(root.path());
-        let elapsed = started.elapsed();
-        blocker.execute_batch("ROLLBACK").unwrap();
-
-        assert!(
-            reopened.is_ok(),
-            "a foreign stamp made the open take the write lock: {:?}",
-            reopened.err()
-        );
-        assert!(
-            elapsed < Duration::from_secs(1),
-            "the open waited {elapsed:?} on the write lock"
-        );
-        // The disagreement is left alone rather than fought over.
-        let version: i64 = reopened
-            .unwrap()
-            .connection
-            .query_row("PRAGMA user_version", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!(version, 4_242);
-    }
-
-    /// The read-only check has to name what is actually absent, or the self-healing
-    /// above degrades into never applying the batch.
-    #[test]
-    fn the_declared_objects_are_read_from_the_schema_text() {
-        let declared = declared_schema_objects(SCHEMA);
-        for expected in [
-            "tasks",
-            "attempts",
-            "results",
-            "decisions",
-            "inbox_items",
-            "one_active_attempt_per_revision",
-            "results_task_revision",
-            "attempts_task_revision",
-        ] {
-            assert!(
-                declared.contains(&expected),
-                "{expected} is declared by SCHEMA but not recognised: {declared:?}"
-            );
-        }
-
-        let root = TempDir::new().unwrap();
-        let store = Store::open(root.path()).unwrap();
-        assert!(
-            missing_schema_objects(&store.connection)
-                .unwrap()
-                .is_empty(),
-            "a freshly initialized store is missing a declared object"
-        );
-        store
-            .connection
-            .execute_batch("DROP INDEX results_task_revision;")
-            .unwrap();
-        assert_eq!(
-            missing_schema_objects(&store.connection).unwrap(),
-            vec!["results_task_revision".to_owned()]
-        );
-    }
-
-    /// A hand-maintained version constant could be left behind by a schema
-    /// edit, and a store stamped with the stale value would then skip the new
-    /// objects forever while a freshly created store got them — a bug that only
-    /// reproduces on someone else's machine.
-    #[test]
-    fn a_stale_schema_stamp_reapplies_the_batch_even_when_it_is_nonzero() {
-        let root = TempDir::new().unwrap();
-        let store = Store::open(root.path()).unwrap();
-        store
-            .connection
-            .execute_batch(
-                "DROP INDEX results_task_revision;
-                 DROP INDEX one_active_attempt_per_revision;
-                 PRAGMA user_version = 2;",
-            )
-            .unwrap();
-        drop(store);
-
-        let reopened = Store::open(root.path()).unwrap();
-        let indexes = index_names(&reopened.connection);
-        assert!(indexes.contains(&"results_task_revision".to_owned()));
-        assert!(
-            indexes.contains(&"one_active_attempt_per_revision".to_owned()),
-            "the sole enforcement of one active attempt per revision was lost"
-        );
-        let version: i64 = reopened
-            .connection
-            .query_row("PRAGMA user_version", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!(version, schema_version());
-    }
-
-    /// The stamp has to change whenever the schema text does, or the self-healing
-    /// above cannot notice an edit.
-    #[test]
-    fn the_schema_stamp_is_derived_from_the_schema_text() {
-        assert_eq!(schema_version(), schema_version());
-        assert_ne!(schema_version(), 0, "0 is reserved for an unstamped store");
-        assert!(
-            schema_version() > 0,
-            "user_version is a signed 32-bit field"
-        );
-        assert_ne!(
-            schema_version(),
-            schema_stamp(&format!(
-                "{SCHEMA}\nCREATE INDEX IF NOT EXISTS later ON tasks (owner_id);"
-            )),
-            "the stamp does not change with the schema text, so a new object \
-             would be skipped by every existing store"
-        );
-    }
-
-    #[test]
-    fn retry_busy_replays_contention_and_passes_other_errors_through() {
-        let mut attempts = 0;
-        // Contention that clears is replayed until it succeeds.
-        let outcome = retry_busy(|| {
-            attempts += 1;
-            if attempts < 3 {
-                return Err(StoreError::Database(rusqlite::Error::SqliteFailure(
-                    rusqlite::ffi::Error::new(517),
-                    None,
-                )));
-            }
-            Ok(attempts)
-        })
-        .unwrap();
-        assert_eq!(outcome, 3);
-
-        // A rejected write is returned on its first occurrence, never replayed.
-        let mut calls = 0;
-        let error = retry_busy(|| {
-            calls += 1;
-            Err::<(), _>(StoreError::InvalidTaskLimit)
-        })
-        .unwrap_err();
-        assert!(matches!(error, StoreError::InvalidTaskLimit));
-        assert_eq!(calls, 1);
-    }
-
-    #[test]
-    fn retry_busy_gives_up_only_after_its_budget() {
-        let budget = Duration::from_millis(80);
-        let start = Instant::now();
-        let mut calls = 0;
-        let error = retry_busy_within(budget, || {
-            calls += 1;
-            Err::<(), _>(StoreError::Database(rusqlite::Error::SqliteFailure(
-                rusqlite::ffi::Error::new(5),
-                None,
-            )))
-        })
-        .unwrap_err();
-        assert!(is_lock_contention(&error));
-        assert!(calls > 1, "contention was not retried at all");
-        let elapsed = start.elapsed();
-        assert!(elapsed >= budget, "gave up before its budget: {elapsed:?}");
-        assert!(
-            elapsed < budget * 4,
-            "retry overran its budget: {elapsed:?}"
-        );
-    }
-
-    #[test]
-    fn only_lock_contention_is_retried() {
-        let busy = StoreError::Database(rusqlite::Error::SqliteFailure(
-            rusqlite::ffi::Error::new(5),
-            None,
-        ));
-        assert!(is_lock_contention(&busy));
-        let snapshot = StoreError::Database(rusqlite::Error::SqliteFailure(
-            rusqlite::ffi::Error::new(517),
-            None,
-        ));
-        assert!(is_lock_contention(&snapshot));
-        let full = StoreError::Database(rusqlite::Error::SqliteFailure(
-            rusqlite::ffi::Error::new(13),
-            None,
-        ));
-        assert!(!is_lock_contention(&full));
-        assert!(!is_lock_contention(&StoreError::InvalidTaskLimit));
-    }
-
-    fn index_names(connection: &Connection) -> Vec<String> {
-        let mut statement = connection
-            .prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name IS NOT NULL")
-            .unwrap();
-        let rows = statement
-            .query_map([], |row| row.get::<_, String>(0))
-            .unwrap();
-        rows.map(Result::unwrap).collect()
     }
 }
