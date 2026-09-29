@@ -115,6 +115,15 @@ fn gjc_home() -> (TempDir, PathBuf, PathBuf) {
     (temp, home, workspace)
 }
 
+/// An echo harness returns the prompt it was given. The objective must still be
+/// its exact first line — some harnesses key on it, OMP on `FROM CODEX` — and
+/// the owner-messaging brief must follow, since every worker may ask.
+fn assert_worker_prompt(echoed: &str, objective: &str) {
+    assert_eq!(echoed.lines().next(), Some(objective), "{echoed}");
+    assert!(echoed.contains("BRGR OWNER MESSAGES"), "{echoed}");
+    assert!(echoed.contains("may not start child tasks"), "{echoed}");
+}
+
 fn write_devin_fixture(executable: &Path) {
     fs::write(executable, DEVIN_FIXTURE).unwrap();
     fs::set_permissions(executable, fs::Permissions::from_mode(0o700)).unwrap();
@@ -536,6 +545,146 @@ fn plugin_worker_placement_respects_config_and_reaches_owner_decision() {
         &host_env,
     ));
     assert_eq!(decision["verdict"], "accepted");
+}
+
+/// A worker that asks its owner, or tries to delegate, as its prompt says.
+///
+/// Runs as a real harness process, so what it can do is exactly what brgr gave
+/// it — the identity in its environment and nothing the test simulates.
+const ASKING_GJC_FIXTURE: &str = r#"#!/bin/sh
+set -u
+case "${1:-}" in
+  --version) echo 'gjc v-asking-fixture'; exit 0;;
+  --help)
+    printf '%s\n' '-p, --print' '--mode=<value>' '--no-session' '--no-mcp' '--model' '--thinking'
+    exit 0;;
+esac
+prompt_file=
+for argument in "$@"; do
+  case "$argument" in @*) prompt_file=${argument#@};; esac
+done
+answer=NO_WORKER_IDENTITY
+if test -n "${BRGR_PARENT_ATTEMPT_ID:-}"; then
+  if /usr/bin/grep -q '^ASK' "$prompt_file"; then
+    "$BRGR_BIN" --json message send "$BRGR_PARENT_TASK_ID" --to owner --kind question --body 'Which token?' >/dev/null
+    reply=$("$BRGR_BIN" --json message wait "$BRGR_PARENT_TASK_ID" --for worker --timeout-seconds 20)
+    reply_id=$(printf '%s\n' "$reply" | /usr/bin/sed -n 's/.*"message_id":"\([^"]*\)".*/\1/p')
+    "$BRGR_BIN" --json message ack "$BRGR_PARENT_TASK_ID" "$reply_id" --for worker >/dev/null
+    answer=$(printf '%s\n' "$reply" | /usr/bin/sed -n 's/.*"body":"\([^"]*\)".*/\1/p')
+  elif /usr/bin/grep -q '^SPAWN' "$prompt_file"; then
+    if "$BRGR_BIN" --json run LEAF --harness local.gjc --workspace "$PWD" --foreground >/dev/null 2>"$PWD/../spawn.err"; then
+      answer=SPAWN_ALLOWED
+    elif /usr/bin/grep -q 'not started with delegation' "$PWD/../spawn.err"; then
+      answer=SPAWN_REFUSED
+    else
+      answer=SPAWN_FAILED_OTHERWISE
+    fi
+  fi
+fi
+printf '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"%s"}]}}\n' "$answer"
+printf '%s\n' '{"type":"agent_end","stopReason":"completed"}'
+"#;
+
+fn asking_home() -> (TempDir, PathBuf, PathBuf) {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("brgr");
+    let workspace = temp.path().join("work");
+    let executable = temp.path().join("gjc");
+    fs::create_dir_all(&workspace).unwrap();
+    fs::write(&executable, ASKING_GJC_FIXTURE).unwrap();
+    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+    add_fixture(&home, &executable, &temp.path().join("scratch"));
+    (temp, home, workspace)
+}
+
+/// A worker started by a plain `brgr run` can ask its owner and use the reply.
+///
+/// Before 2.4.0 the identity a worker needs to message was attached only when
+/// the task was started with delegation, so the default route — the one the
+/// orchestration skill uses — could not ask at all. The author's store held
+/// zero messages across 57 tasks.
+#[test]
+fn a_worker_started_without_delegation_can_ask_its_owner() {
+    let (_temp, home, workspace) = asking_home();
+    let owner = [("BRGR_OWNER_ID", "codex:ask-test")];
+    let launched = json_output(&run(
+        &home,
+        &["run", "ASK", "--workspace", workspace.to_str().unwrap()],
+        &owner,
+    ));
+    let task = launched["task_id"].as_str().unwrap();
+
+    let question = json_output(&run(
+        &home,
+        &[
+            "message",
+            "wait",
+            task,
+            "--for",
+            "owner",
+            "--timeout-seconds",
+            "20",
+        ],
+        &owner,
+    ));
+    assert_eq!(question["body"], "Which token?", "{question}");
+    let question_id = question["message_id"].as_str().unwrap();
+    json_output(&run(
+        &home,
+        &[
+            "message",
+            "send",
+            task,
+            "--to",
+            "worker",
+            "--kind",
+            "reply",
+            "--reply-to",
+            question_id,
+            "--body",
+            "token-42",
+        ],
+        &owner,
+    ));
+    json_output(&run(
+        &home,
+        &["message", "ack", task, question_id, "--for", "owner"],
+        &owner,
+    ));
+
+    json_output(&run(
+        &home,
+        &["wait", task, "--timeout-seconds", "20"],
+        &owner,
+    ));
+    let result = json_output(&run(&home, &["result", task], &owner));
+    assert_eq!(result["artifacts"][0]["text"], "token-42", "{result}");
+}
+
+/// Messaging is for every worker; delegation stays a permission.
+///
+/// Giving every worker its identity also lets it name itself as a parent, so
+/// the permission is checked at child admission against the parent's launch.
+#[test]
+fn a_worker_started_without_delegation_cannot_start_a_child() {
+    let (_temp, home, workspace) = asking_home();
+    let owner = [("BRGR_OWNER_ID", "codex:spawn-test")];
+    let result = json_output(&run(
+        &home,
+        &[
+            "run",
+            "SPAWN",
+            "--workspace",
+            workspace.to_str().unwrap(),
+            "--foreground",
+        ],
+        &owner,
+    ));
+    let task = result["task_id"].as_str().unwrap();
+    let sealed = json_output(&run(&home, &["result", task], &owner));
+    assert_eq!(sealed["artifacts"][0]["text"], "SPAWN_REFUSED", "{sealed}");
+    let listed = json_output(&run(&home, &["status"], &owner));
+    assert_eq!(listed.as_array().map(Vec::len), Some(1), "{listed}");
 }
 
 const RECURSIVE_GJC_FIXTURE: &str = r#"#!/bin/sh
@@ -2689,7 +2838,10 @@ fn unsupported_model_fails_before_task_admission() {
     assert_eq!(result["outcome"], "candidate");
     let task = result["task_id"].as_str().unwrap();
     let sealed = json_output(&run(&home, &["result", task], &owner));
-    assert_eq!(sealed["artifacts"][0]["text"], "GENERIC_PROCESS_OK");
+    assert_worker_prompt(
+        sealed["artifacts"][0]["text"].as_str().unwrap(),
+        "GENERIC_PROCESS_OK",
+    );
     let accepted = json_output(&run(
         &home,
         &["accept", task, "--reason", "generic result checked"],
@@ -2799,7 +2951,10 @@ fn devin_process_recipe_reaches_owner_acceptance_without_shell_interpolation() {
     assert_eq!(result["outcome"], "candidate");
     let task = result["task_id"].as_str().unwrap();
     let detail = json_output(&run(&home, &["result", task], &owner));
-    assert_eq!(detail["artifacts"][0]["text"], "DEVIN_PROCESS_OK");
+    assert_worker_prompt(
+        detail["artifacts"][0]["text"].as_str().unwrap(),
+        "DEVIN_PROCESS_OK",
+    );
     assert_eq!(detail["route_observation"]["model_source"], "unavailable");
     let accepted = json_output(&run(
         &home,
@@ -2886,7 +3041,10 @@ fn authored_manifest_runs_unknown_positional_cli_to_owner_acceptance() {
     assert_eq!(result["outcome"], "candidate");
     let task = result["task_id"].as_str().unwrap();
     let sealed = json_output(&run(&home, &["result", task], &owner));
-    assert_eq!(sealed["artifacts"][0]["text"], "CUSTOM_MANIFEST_OK");
+    assert_worker_prompt(
+        sealed["artifacts"][0]["text"].as_str().unwrap(),
+        "CUSTOM_MANIFEST_OK",
+    );
     let accepted = json_output(&run(
         &home,
         &["accept", task, "--reason", "custom result checked"],

@@ -285,6 +285,7 @@ pub(crate) async fn start_task(
     let store = Store::open(&paths.store)?;
     if let Some((parent_task, parent_attempt)) = options.parent {
         store.validate_delegation_parent(parent_task, parent_attempt, &spec.owner_id)?;
+        require_parent_may_delegate(paths, &store, parent_task, parent_attempt)?;
     }
     let session = current_session()?;
     match (store.owner_binding(&spec.owner_id)?, session.as_deref()) {
@@ -519,4 +520,30 @@ pub(crate) async fn start_herdr_worker(
             Err(error)
         }
     }
+}
+
+/// Refuses a child of a task that was not started with delegation.
+///
+/// Every managed worker now carries its identity so it can message its owner,
+/// which also means it could name itself as a parent. Before that, a worker
+/// without delegation simply had no identity to name; the permission has to be
+/// checked here instead, against the launch the parent was started with.
+fn require_parent_may_delegate(
+    paths: &Paths,
+    store: &Store,
+    parent_task: TaskId,
+    parent_attempt: AttemptId,
+) -> Result<()> {
+    let parent = store.task_for_attempt(parent_attempt)?;
+    let launch: LaunchEnvelope = serde_json::from_slice(
+        &fs::read(paths.launch(parent_task, parent.revision))
+            .context("the parent task's launch record is unreadable")?,
+    )?;
+    if !launch.delegation_enabled {
+        bail!(
+            "the parent task was not started with delegation; its worker may message its \
+             owner but may not start child tasks"
+        );
+    }
+    Ok(())
 }

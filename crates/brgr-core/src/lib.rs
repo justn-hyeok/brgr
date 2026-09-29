@@ -382,6 +382,7 @@ pub struct Supervisor {
 struct DelegationHost {
     control_home: PathBuf,
     brgr_executable: PathBuf,
+    may_delegate: bool,
 }
 
 /// Independent observation of the original runner incarnation. A numeric PID
@@ -410,11 +411,19 @@ impl Supervisor {
         })
     }
 
-    /// Gives each worker process its exact parent attempt and brgr entrypoint.
-    pub fn enable_worker_delegation(&mut self, control_home: PathBuf, brgr_executable: PathBuf) {
+    /// Gives each worker process its exact attempt identity and brgr
+    /// entrypoint, so it can message its owner; `may_delegate` additionally
+    /// allows it to start child tasks.
+    pub fn enable_worker_context(
+        &mut self,
+        control_home: PathBuf,
+        brgr_executable: PathBuf,
+        may_delegate: bool,
+    ) {
         self.delegation_host = Some(DelegationHost {
             control_home,
             brgr_executable,
+            may_delegate,
         });
     }
 
@@ -634,6 +643,7 @@ async fn run_single_attempt(
                 brgr_executable: &host.brgr_executable,
                 task_id: spec.task_id,
                 attempt_id,
+                may_delegate: host.may_delegate,
             }),
         ),
         store,
