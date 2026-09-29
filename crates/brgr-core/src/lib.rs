@@ -34,7 +34,13 @@
 //! let second = task.revise(wire(2))?;
 //! assert_eq!(second.revision(), 2);
 //! assert_eq!(second.task_id(), task.task_id());
-//! assert!(task.revise(wire(4)).is_err(), "revision 3 was skipped");
+//! // Revision 3 is skipped here. The receiver is `second` on purpose: asked of
+//! // `task` (revision 1), `wire(4)` fails because 4 is not 2, which says nothing
+//! // about skipping, and would hold for `wire(0)` or `wire(7)` just the same.
+//! assert!(matches!(
+//!     second.revise(wire(4)),
+//!     Err(CoreError::RevisionNotNext { current: 2, attempted: 4 })
+//! ));
 //!
 //! // An attempt runs against one revision and walks the v1 state machine.
 //! let mut attempt = Attempt::new(second, AttemptId::new(), 1)?;

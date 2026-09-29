@@ -29,9 +29,8 @@
 //! task.validate()?;
 //! assert_eq!(task.schema, SCHEMA_V1);
 //! assert_eq!(task.revision, 1);
-//! // `instructions`, `evidence`, and `max_concurrent_children` are optional and
-//! // are left out of the encoding when empty, so the round trip is not
-//! // byte-identical to the input above but is value-identical.
+//! // Compared as values, not bytes: the input above is pretty-printed and the
+//! // re-encoding is compact, so the two texts differ while the tasks do not.
 //! let reencoded: TaskSpec = serde_json::from_slice(&serde_json::to_vec(&task)?)?;
 //! assert_eq!(reencoded, task);
 //! # Ok::<(), Box<dyn std::error::Error>>(())
