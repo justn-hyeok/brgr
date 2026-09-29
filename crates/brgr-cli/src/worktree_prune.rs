@@ -473,14 +473,27 @@ fn unreadable_entry(path: PathBuf) -> Entry {
 fn parse_slug(slug: &str) -> Option<(&str, u32)> {
     const PREFIX_LENGTH: usize = 8;
     let (prefix, revision) = match slug.split_once("-r") {
-        Some((prefix, revision)) => (prefix, revision.parse::<u32>().ok()?),
+        // The suffix has to be the one `task_slug` would have written. Rust's
+        // integer parser accepts a leading `+` and leading zeros, so `-r+5`,
+        // `-r007`, and `-r01` all resolved to real revisions; `-r1` did too,
+        // although `task_slug` drops the suffix entirely at revision one. Each
+        // named a directory brgr never created, and each would then have its
+        // checkout removed and a branch rebuilt from the raw slug that does not
+        // exist. Re-rendering is the check: a suffix that does not round-trip is
+        // not ours. Found by `a_parsed_slug_is_always_one_brgr_could_have_written`.
+        Some((prefix, revision)) => {
+            let parsed = revision.parse::<u32>().ok()?;
+            if parsed < 2 || revision != parsed.to_string() {
+                return None;
+            }
+            (prefix, parsed)
+        }
         None => (slug, 1),
     };
     // `task_slug` renders a UUID, which is lowercase. Accepting `A-F` would let a
     // directory brgr never created resolve to a real task on a case-sensitive
     // filesystem, and the branch name rebuilt from the raw slug would not exist.
-    if revision == 0
-        || prefix.len() != PREFIX_LENGTH
+    if prefix.len() != PREFIX_LENGTH
         || !prefix
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
@@ -621,6 +634,124 @@ fn lossy(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::adversary::Adversary;
+
+    /// Every slug the parser accepts must be one `task_slug` would have written.
+    ///
+    /// The parser's job is not "does this look plausible" but "did brgr create
+    /// this", because what follows an accepted slug is `git worktree remove`.
+    /// Re-rendering the parse is the whole property: if the round trip does not
+    /// land back on the input, the directory was named by someone else.
+    ///
+    /// This found four families the example tests missed — `-r+5`, `-r007`,
+    /// `-r01`, and a plain `-r1` — all of which resolved to a live revision.
+    #[test]
+    fn a_parsed_slug_is_always_one_brgr_could_have_written() {
+        // Structured, not free-form. Sixteen random characters over a mixed
+        // alphabet essentially never lands on "eight hex digits, `-r`, a
+        // revision", so a free-form generator explores only the rejection path
+        // and the property never fires — confirmed by reverting the parser and
+        // watching 4,096 free-form cases all pass. Building a slug from the
+        // parts a real one has puts the cases where the decision is.
+        // Weighted, not uniform. A uniform draw over lengths and an alphabet
+        // half of which is uppercase left 11 of 4,096 cases parsing at all, so
+        // the property almost never ran — the counter below is what caught it.
+        // The point is to crowd the boundary, not to sample garbage evenly.
+        const PREFIX_ALPHABET: &str = "0123456789abcdefabcdefabcdefABCDEF";
+        // Each of these is a plausible revision suffix, and the ones that are
+        // not canonical decimal are exactly the interesting half.
+        const SUFFIXES: &[&str] = &[
+            "1",
+            "2",
+            "10",
+            "01",
+            "007",
+            "+5",
+            "-3",
+            "0",
+            "",
+            "x",
+            " 2",
+            "2 ",
+            "4294967295",
+            "4294967296",
+            "99999999999999999999",
+            "1_0",
+            "2.0",
+            "٣",
+        ];
+        let mut adversary = Adversary::new(0x5eed_0f0f_c0de_0002);
+
+        // See the bridge property's counter: a generator that stops reaching the
+        // accepting path leaves the assertion below unreached and the test green.
+        let mut accepted = 0_u32;
+        for case in 0..4_096 {
+            // Eight characters most of the time; the other lengths are there to
+            // keep the length check honest.
+            let length = if adversary.below(4) == 0 {
+                adversary.below(11)
+            } else {
+                8
+            };
+            let mut slug: String = (0..length)
+                .map(|_| {
+                    let letters: Vec<char> = PREFIX_ALPHABET.chars().collect();
+                    letters[adversary.below(letters.len())]
+                })
+                .collect();
+            match adversary.below(4) {
+                // A bare slug, which is what revision one looks like.
+                0 => {}
+                // A suffix drawn from the plausible set.
+                1 | 2 => {
+                    let suffix = SUFFIXES[adversary.below(SUFFIXES.len())];
+                    slug.push_str("-r");
+                    slug.push_str(suffix);
+                }
+                // Free-form, so the rejection path keeps getting exercised too.
+                _ => slug = adversary.text("0123456789abcdefABCDEFr-+ ._", 16),
+            }
+            let Some((prefix, revision)) = parse_slug(&slug) else {
+                continue;
+            };
+            accepted += 1;
+            // `task_slug`, spelled out rather than called: the two live in
+            // different modules, and a test that reuses the renderer would pass
+            // even if both agreed on the wrong thing.
+            let rendered = if revision == 1 {
+                prefix.to_owned()
+            } else {
+                format!("{prefix}-r{revision}")
+            };
+            assert_eq!(
+                rendered, slug,
+                "case {case}: {slug:?} parsed as ({prefix:?}, {revision}), which renders as \
+                 {rendered:?} — brgr never created a directory by that name"
+            );
+        }
+        assert!(
+            accepted > 100,
+            "only {accepted} of 4096 generated slugs parsed; the generator is no \
+             longer reaching the path this asserts about"
+        );
+    }
+
+    #[test]
+    fn a_slug_suffix_has_to_be_the_one_task_slug_would_write() {
+        // The four the property found, pinned so a future edit that reopens any
+        // one of them fails by name rather than by seed.
+        assert_eq!(parse_slug("3d3c9081-r+5"), None);
+        assert_eq!(parse_slug("3d3c9081-r007"), None);
+        assert_eq!(parse_slug("3d3c9081-r01"), None);
+        assert_eq!(parse_slug("3d3c9081-r1"), None);
+        // Still accepted: what `task_slug` actually writes.
+        assert_eq!(parse_slug("3d3c9081"), Some(("3d3c9081", 1)));
+        assert_eq!(parse_slug("3d3c9081-r2"), Some(("3d3c9081", 2)));
+        assert_eq!(
+            parse_slug("3d3c9081-r4294967295"),
+            Some(("3d3c9081", u32::MAX))
+        );
+    }
 
     #[test]
     fn slugs_parse_their_revision_and_reject_every_other_directory_name() {

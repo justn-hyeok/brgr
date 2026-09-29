@@ -2,6 +2,31 @@
 
 ## 2.4.0 — unreleased
 
+Three parsers that read bytes brgr did not write now carry property tests: the
+harness JSONL stream, the Herdr bridge request file, and the directory names under
+the worktrees root. Each generator is deterministic and seeded, so a failure names
+the case and re-running reproduces it, and each property was checked by deleting
+the rule it covers and confirming the test fails. Two rounds of that check found
+generators that never reached the accepting path at all — a bound of roughly a
+megabyte that six-kilobyte inputs could not press on, and eleven of four thousand
+slugs parsing — so both tests now count how often they reach it and fail if that
+count collapses.
+
+The slug property found a real gap. `parse_slug` accepted four families of
+directory names brgr never creates: `-r+5` and `-r007` and `-r01`, because Rust's
+integer parser takes a leading sign and leading zeros, and a plain `-r1`, because
+`task_slug` writes revision one with no suffix at all. Each resolved to a live
+revision, and what follows an accepted slug is `git worktree remove` and a branch
+name rebuilt from the raw text. A suffix must now re-render to exactly what was
+read.
+
+The bridge property found dead code rather than a defect. The 64 KiB ceiling on a
+request's combined arguments is unreachable: an encoded request contains its own
+arguments, so while the file bound is no larger, an oversized command is rejected
+as a file first. The ceiling is kept as the bound that still holds if the file
+bound is raised, is named rather than spelled inline, and a test now records which
+of the two is doing the work — and fails if that changes.
+
 Retry coverage is now a recorded decision per write path rather than a claim. The
 store has twenty-one write paths — fifteen opening an explicit transaction and six
 writing through an implicit one — and four were retried. The five a running attempt

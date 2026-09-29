@@ -1,3 +1,5 @@
+#[cfg(test)]
+mod adversary;
 mod codex_integration;
 mod config;
 mod evidence;

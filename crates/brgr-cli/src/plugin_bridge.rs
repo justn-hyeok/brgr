@@ -19,6 +19,15 @@ pub const BRIDGE_DIR_ENV: &str = "BRGR_PLUGIN_BRIDGE_DIR";
 pub const BRIDGE_HOST_HOME_ENV: &str = "BRGR_PLUGIN_HOST_HOME";
 pub const BRIDGE_HOST_WORKSPACE_ENV: &str = "BRGR_PLUGIN_HOST_WORKSPACE";
 const MAX_REQUEST_BYTES: u64 = 65_536;
+/// Ceiling on the combined length of a request's arguments.
+///
+/// Currently unreachable through [`read_request`], and deliberately kept: the
+/// encoded request always contains its own arguments, so at the present
+/// [`MAX_REQUEST_BYTES`] the file bound rejects an oversized command first. It
+/// stays as the bound that still holds if the file bound is ever raised, and
+/// `the_file_bound_currently_subsumes_the_argument_ceiling` records which of the
+/// two is doing the work today.
+const MAX_ARGUMENT_BYTES: usize = 65_536;
 const MAX_RESPONSE_BYTES: u64 = 16 * 1024 * 1024;
 pub const MAX_BRIDGE_SECONDS: u64 = 7 * 24 * 3_600;
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
@@ -406,7 +415,7 @@ fn read_request(path: &Path, id: &str) -> Result<Request> {
     {
         bail!("bridge request identity, command, or cwd is invalid");
     }
-    if request.args.iter().map(String::len).sum::<usize>() > 65_536 {
+    if request.args.iter().map(String::len).sum::<usize>() > MAX_ARGUMENT_BYTES {
         bail!("bridge command arguments exceed 64 KiB");
     }
     Ok(request)
@@ -564,6 +573,8 @@ async fn kill_process_group(pid: Option<u32>) {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt as _;
+
+    use crate::adversary::Adversary;
     use tempfile::TempDir;
 
     fn write_script(dir: &Path, name: &str, body: &str) -> PathBuf {
@@ -571,6 +582,116 @@ mod tests {
         fs::write(&path, body).unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
         path
+    }
+
+    /// A request that survives `read_request` satisfies every rule it enforces.
+    ///
+    /// The bytes come from another process, and what follows an accepted request
+    /// is spawning a child with its `args` in its `cwd`. Example tests pin the
+    /// rejections someone thought to write down; this asserts the complement —
+    /// that nothing else gets through — over inputs nobody pictured.
+    ///
+    /// Structured rather than free-form: random bytes are rejected by serde
+    /// before any of these rules is consulted, so the generator builds
+    /// request-shaped JSON and varies only the fields the rules look at.
+    ///
+    /// Each assertion was checked by deleting the rule it covers and confirming
+    /// this fails: the id match, the non-empty command, the absolute `cwd`, and
+    /// the deadline range all fire. The argument ceiling does not, because it is
+    /// unreachable — see `the_file_bound_currently_subsumes_the_argument_ceiling`.
+    #[test]
+    fn a_request_that_parses_obeys_every_rule_read_request_enforces() {
+        // Weighted toward values that get past each rule, so the assertions
+        // below are actually reached; the rejecting values still appear. The
+        // rules are conjunctive, so a uniform draw over four tables leaves the
+        // accepting path rare — the counter at the end is what measures that.
+        const IDS: &[&str] = &["1-2-3", "1-2-3", "1-2-3", "1-2-3", "", "1-2-4", "../escape"];
+        const CWDS: &[&str] = &[
+            "/tmp",
+            "/",
+            "/tmp/../tmp",
+            "/a/b",
+            "relative/path",
+            "",
+            "./x",
+        ];
+        const TIMEOUTS: &[u64] = &[1, 30, 3_600, MAX_BRIDGE_SECONDS, 0, MAX_BRIDGE_SECONDS + 1];
+        let dir = TempDir::new().unwrap();
+        let mut adversary = Adversary::new(0x5eed_b21d_9e00_0003);
+
+        let mut accepted = 0_u32;
+        for case in 0..2_048 {
+            let args: Vec<String> = (0..=adversary.below(3))
+                .map(|_| adversary.text("abc -/\\", 8))
+                .collect();
+            let args = match adversary.below(24) {
+                // One case in twenty-four sits past the argument ceiling and one
+                // carries no command at all: both are rules asserted below, and
+                // neither is reachable from the ordinary draw.
+                0 => vec!["a".repeat(70_000)],
+                1 => vec![],
+                _ => args,
+            };
+            let body = serde_json::json!({
+                "id": IDS[adversary.below(IDS.len())],
+                "args": args,
+                "cwd": CWDS[adversary.below(CWDS.len())],
+                "timeout_seconds": TIMEOUTS[adversary.below(TIMEOUTS.len())],
+            });
+            let path = request_path(dir.path(), "probe");
+            fs::write(&path, serde_json::to_vec(&body).unwrap()).unwrap();
+
+            // Asked for the id the caller expects, which is the check that a
+            // request cannot answer for a different one.
+            let Ok(request) = read_request(&path, "1-2-3") else {
+                continue;
+            };
+            accepted += 1;
+            assert_eq!(request.id, "1-2-3", "case {case} answered for another id");
+            assert!(!request.args.is_empty(), "case {case} accepted no command");
+            assert!(
+                request.cwd.is_absolute(),
+                "case {case} accepted a relative cwd {:?}",
+                request.cwd
+            );
+            assert!(
+                request.timeout_seconds > 0 && request.timeout_seconds <= MAX_BRIDGE_SECONDS,
+                "case {case} accepted a {}s deadline",
+                request.timeout_seconds
+            );
+            assert!(
+                request.args.iter().map(String::len).sum::<usize>() <= MAX_ARGUMENT_BYTES,
+                "case {case} accepted arguments past the 64 KiB ceiling"
+            );
+        }
+        // A property over inputs that are all rejected asserts nothing. Counted
+        // so a later edit that narrows the generator fails here instead of
+        // quietly turning this test into decoration.
+        assert!(
+            accepted > 400,
+            "only {accepted} of 2048 generated requests were accepted; the \
+             generator is no longer reaching the path this asserts about"
+        );
+    }
+
+    /// Which of the two size bounds rejects an oversized command today.
+    ///
+    /// The encoded request contains its arguments, so a request whose arguments
+    /// sum past [`MAX_ARGUMENT_BYTES`] is a file larger than that, and while
+    /// [`MAX_REQUEST_BYTES`] is no larger the file bound always fires first. A
+    /// mutation run found this: deleting the argument ceiling left
+    /// `a_request_that_parses_obeys_every_rule_read_request_enforces` green.
+    ///
+    /// Raising [`MAX_REQUEST_BYTES`] above the argument ceiling makes the
+    /// argument rule live, and that property then covers it. This fails at that
+    /// point so the change is a decision rather than a side effect.
+    #[test]
+    fn the_file_bound_currently_subsumes_the_argument_ceiling() {
+        assert!(
+            MAX_REQUEST_BYTES <= u64::try_from(MAX_ARGUMENT_BYTES).unwrap(),
+            "the argument ceiling is now reachable through read_request; the \
+             property test covers it, and this comment needs updating"
+        );
     }
 
     fn sample_request(id: &str, cwd: &Path, args: &[&str], timeout_seconds: u64) -> Request {
