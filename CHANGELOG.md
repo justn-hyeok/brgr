@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+Claude Code and Cline can now run a chosen model with `brgr run --model`. brgr
+checks a model name against a list before a paid run, and neither CLI can list
+its models, so both used only their configured default. Both refuse a name they
+do not know on their own, locally and before any request — Claude Code in about
+three seconds ("isn't described by this version's model catalog"), Cline in about
+four ("model not found") — so the check is theirs to make. A new catalog format,
+`cli_validated`, records that: it names no list command, and a harness gets it
+only where that refusal was observed. An empty name and `auto` are still refused
+by brgr before anything runs.
+
 ## 2.5.0 — 2026-09-29
 
 Workers now run at a permission level: `full`, `edits`, or `read-only`. Each

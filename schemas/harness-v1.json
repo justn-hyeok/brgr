@@ -24,7 +24,7 @@
             "format": {
               "oneOf": [
                 { "type": "object", "additionalProperties": false, "required": ["kind", "pointer", "field"], "properties": { "kind": { "const": "json_selectors" }, "pointer": { "type": "string", "pattern": "^/" }, "field": { "type": "string", "minLength": 1 } } },
-                { "type": "object", "additionalProperties": false, "required": ["kind"], "properties": { "kind": { "enum": ["canonical_provider_table", "dash_separated", "first_column", "lines"] } } }
+                { "type": "object", "additionalProperties": false, "required": ["kind"], "properties": { "kind": { "enum": ["canonical_provider_table", "dash_separated", "first_column", "lines", "cli_validated"] } } }
               ]
             }
           }
