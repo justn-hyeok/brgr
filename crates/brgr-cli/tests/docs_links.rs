@@ -137,3 +137,27 @@ fn every_relative_link_in_the_repository_resolves() {
         "only {checked} links were examined; the extraction has stopped finding them"
     );
 }
+
+/// The release workflow finds this version's notes where they actually live.
+///
+/// It builds the notes path from the tag at release time, so neither a link
+/// checker nor a file move sees it: moving the notes into `docs/releases/` left
+/// the workflow pointing at the old name, which would have failed the very last
+/// step of the next release. This reads the template from the workflow and
+/// resolves it for the version being built.
+#[test]
+fn the_release_workflow_finds_this_versions_notes() {
+    let root = repository_root();
+    let workflow = fs::read_to_string(root.join(".github/workflows/release.yml")).unwrap();
+    let template = workflow
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("notes_file=\""))
+        .and_then(|rest| rest.strip_suffix('"'))
+        .expect("release.yml names its notes file");
+    let tag = format!("v{}", env!("CARGO_PKG_VERSION"));
+    let notes = template.replace("${GITHUB_REF_NAME}", &tag);
+    assert!(
+        root.join(&notes).is_file(),
+        "release.yml would look for {notes}, which does not exist"
+    );
+}
