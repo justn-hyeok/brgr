@@ -160,11 +160,13 @@ routes before worker admission.
 
 `--capture-diff`, `--capture-logs`, and `--evidence-file RELATIVE_FILE` seal
 bounded review artifacts. `brgr artifact export TASK INDEX --output PATH`
-exports binary evidence. `brgr apply TASK --workspace PATH` checks a sealed
+exports binary evidence. `brgr diff TASK` prints a sealed diff and
+`brgr diff TASK --stat` lists the files it changes. `brgr apply TASK --workspace PATH` checks a sealed
 diff; `--execute` applies it only after an explicit accepted result. The diff
 includes files the worker created without staging them, except ignored files
 and files named with `--evidence-file`. The integration target must be the
-repository root at the task's starting commit. `brgr status TASK --tree` shows time and question/approval waits;
+repository root at the task's starting commit or a later commit on the same
+history, and the diff must still apply cleanly there. `brgr status TASK --tree` shows time and question/approval waits;
 `brgr cancel TASK --tree` records cancellation for the subtree before stopping
 its active processes. See [the completion loop plan](docs/guides/completion-loop-plan.md)
 for the current scope and limits.

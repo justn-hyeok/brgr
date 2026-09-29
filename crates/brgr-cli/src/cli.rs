@@ -81,10 +81,18 @@ pub(crate) enum Command {
         #[arg(long)]
         reason: String,
     },
+    /// Show a candidate's sealed Git diff, or its per-file summary.
+    Diff {
+        task: TaskId,
+        /// Print changed files with added and deleted line counts instead.
+        #[arg(long)]
+        stat: bool,
+    },
     /// Integrate a candidate's sealed Git diff into a matching workspace.
     Apply {
         task: TaskId,
-        /// Repository root to integrate into; must match the task's base.
+        /// Repository root to integrate into: the task's base commit or a
+        /// commit that descends from it.
         #[arg(long)]
         workspace: PathBuf,
         /// Write the diff instead of only checking that it would apply.
