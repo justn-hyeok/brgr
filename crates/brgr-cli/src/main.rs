@@ -2675,8 +2675,9 @@ fn write_json_new(path: &Path, value: &impl Serialize) -> Result<()> {
 /// a sealed result and its decision are the durable record brgr exists to keep.
 fn prune(paths: &Paths, apply: bool, include_ignored: bool, json_output: bool) -> Result<()> {
     let store = Store::open(&paths.store)?;
-    let entries = worktree_prune::prune(&paths.worktrees, &store, apply, include_ignored)?;
-    let worktrees: Vec<serde_json::Value> = entries
+    let swept = worktree_prune::prune(&paths.worktrees, &store, apply, include_ignored);
+    let worktrees: Vec<serde_json::Value> = swept
+        .entries
         .iter()
         .map(|entry| {
             let mut row = json!({
@@ -2698,10 +2699,29 @@ fn prune(paths: &Paths, apply: bool, include_ignored: bool, json_output: bool) -
             row
         })
         .collect();
+    let orphans: Vec<serde_json::Value> = swept
+        .orphans
+        .iter()
+        .map(|orphan| {
+            let mut row = json!({"branch": orphan.branch, "status": orphan.outcome.code()});
+            if let Some(reason) = orphan.outcome.reason() {
+                row["reason"] = json!(reason);
+            }
+            row
+        })
+        .collect();
     let count = |code: &str| {
-        entries
+        swept
+            .entries
             .iter()
             .filter(|entry| entry.outcome.code() == code)
+            .count()
+    };
+    let orphan_count = |code: &str| {
+        swept
+            .orphans
+            .iter()
+            .filter(|orphan| orphan.outcome.code() == code)
             .count()
     };
     // A checkout whose branch git kept is still reclaimed: its directory is gone
@@ -2716,6 +2736,10 @@ fn prune(paths: &Paths, apply: bool, include_ignored: bool, json_output: bool) -
             "removable": count("removable"),
             "kept": count("kept"),
             "worktrees": worktrees,
+            "orphan_branches_removed": orphan_count("removed"),
+            "orphan_branches_removable": orphan_count("removable"),
+            "orphan_branches_kept": orphan_count("kept"),
+            "orphan_branches": orphans,
             "note": "sealed results, decisions, artifacts, and task rows are never removed",
         }),
         json_output,

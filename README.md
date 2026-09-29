@@ -267,8 +267,13 @@ git is not the only check. Its clean test does not look at ignored files, so
 credential, or a build cache — the things a task worktree is most likely to
 hold. Those worktrees are kept and their ignored paths listed; pass
 `--include-ignored` to remove them anyway. A symlink, a directory git has not
-registered as a worktree, a name the layout could not have produced, and the
-directory prune is running in are all refused.
+registered as a worktree, one git has locked, a name the layout could not have
+produced, and the directory prune is running in are all refused.
+
+A sweep also reclaims the `brgr/task-*` branches left behind by worktrees that no
+longer exist, which is what removing one by hand leaves in a repository brgr does
+not own. `git branch -d` still refuses any branch holding unmerged commits. One
+unreadable directory is reported rather than ending the sweep.
 
 Sealed results, decisions, artifacts, and task rows are never removed — they
 cost about 9 KiB per task, while a worktree costs the size of the checkout.

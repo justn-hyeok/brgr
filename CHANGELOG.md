@@ -2,6 +2,19 @@
 
 ## 2.4.0 — unreleased
 
+`brgr prune` gains four corrections found by reproducing a review of it. A
+worktree git has locked is now refused in report mode as well, so `removable` no
+longer promises a removal that `--apply` then declines. Branches left behind by
+worktrees removed outside brgr are reclaimed, since the sweep previously walked
+only directories that still existed and could never see them; `git worktree prune`
+drops the stale registration and `git branch -d` still refuses unmerged commits. A
+directory that cannot be read is reported as one kept row instead of ending the
+sweep and hiding every worktree it could have reclaimed elsewhere. The repository
+worktree listing is read once per repository rather than once per candidate, and
+one status call now answers both the clean check and the ignored set, which takes a
+report over a hundred settled worktrees from roughly five hundred git invocations
+to about a hundred.
+
 Narrow a P0 defect in which concurrent admissions failed with a raw
 `database is locked` error after their harness had already run. A deferred
 transaction that reads before it writes reports `SQLITE_BUSY_SNAPSHOT` in WAL
