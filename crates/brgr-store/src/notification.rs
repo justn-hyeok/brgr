@@ -24,6 +24,17 @@ pub struct NotificationTarget {
     pub herdr_bin: String,
 }
 
+/// A worker's question its owner's current Codex session has not been told of.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct QuestionTarget {
+    pub message_id: String,
+    pub task_id: TaskId,
+    pub session_id: String,
+    pub pane_id: String,
+    pub herdr_session: Option<String>,
+    pub herdr_bin: String,
+}
+
 struct ClaimRow {
     task: String,
     owner: String,
@@ -292,6 +303,74 @@ impl Store {
                claim_until = 0, last_error = ?1
              WHERE result_id = ?2 AND claim_token = ?3 AND resolved = 0",
             params![diagnostic, result_id.to_string(), token],
+        )?;
+        Ok(())
+    }
+
+    /// Worker questions on `task_id` still waiting on the owner, which the
+    /// owner's currently bound session has not been notified of.
+    ///
+    /// Only the completion ever reached the owner by itself, so a worker that
+    /// asked sat until its own wait timed out unless someone happened to run
+    /// `brgr status --tree`. A question stops being pending once it is replied
+    /// to or acknowledged; a notice is per session, so a transferred owner is
+    /// told again.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when storage fails or stored identifiers are invalid.
+    pub fn pending_question_notices(
+        &self,
+        task_id: TaskId,
+    ) -> Result<Vec<QuestionTarget>, StoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT q.message_id, b.session_id, s.pane_id, s.herdr_session, s.herdr_bin
+             FROM task_messages q
+             JOIN attempts a ON a.attempt_id = q.attempt_id
+             JOIN tasks t ON t.task_id = a.task_id AND t.revision = a.revision
+             JOIN owner_bindings b ON b.owner_id = t.owner_id
+             JOIN owner_surfaces s ON s.owner_id = b.owner_id
+               AND s.session_id = b.session_id AND s.binding_epoch = b.binding_epoch
+             WHERE q.task_id = ?1 AND q.kind = 'question'
+               AND q.direction = 'worker_to_owner' AND q.acknowledged = 0
+               AND NOT EXISTS (
+                 SELECT 1 FROM task_messages r
+                 WHERE r.in_reply_to = q.message_id AND r.kind = 'reply'
+               )
+               AND NOT EXISTS (
+                 SELECT 1 FROM question_notices n
+                 WHERE n.message_id = q.message_id AND n.session_id = b.session_id
+               )
+             ORDER BY q.rowid",
+        )?;
+        let rows = statement.query_map([task_id.to_string()], |row| {
+            Ok(QuestionTarget {
+                message_id: row.get(0)?,
+                task_id,
+                session_id: row.get(1)?,
+                pane_id: row.get(2)?,
+                herdr_session: row.get(3)?,
+                herdr_bin: row.get(4)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Records that `session_id` was told about a question, so it is not told
+    /// again. Losing this write re-sends one notice, which the notice itself
+    /// says to treat as a duplicate by `message_id`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when storage fails.
+    pub fn record_question_notice(
+        &self,
+        message_id: &str,
+        session_id: &str,
+    ) -> Result<(), StoreError> {
+        self.connection.execute(
+            "INSERT OR IGNORE INTO question_notices (message_id, session_id) VALUES (?1, ?2)",
+            params![message_id, session_id],
         )?;
         Ok(())
     }

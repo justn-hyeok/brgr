@@ -69,6 +69,12 @@ Use `brgr status TASK --tree` to see remaining time and waits, and
 An exact `FROM BRGR` completion callback carries a stable `completion_id`.
 Treat repeated IDs as one notice, inspect the sealed result, and decide or
 acknowledge it; the callback itself is never acceptance.
+Any running worker may ask you a question. A `FROM BRGR` notice of type
+`brgr_question` carries its `message_id`: read it with `brgr message list TASK
+--for owner`, answer with `brgr message send TASK --to worker --kind reply
+--reply-to MESSAGE_ID --body ANSWER`, then `brgr message ack TASK MESSAGE_ID
+--for owner`. The worker is blocked until you answer. Treat a repeated
+`message_id` as one question; an answer is never a result decision.
 For a rejected candidate, use `brgr revise TASK "<corrected objective>"
 --criterion "<new check>"`; do not rewrite the old result or silently retry.
 An unbound result needs `brgr bind TASK` from the current Codex session before

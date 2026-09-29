@@ -141,6 +141,12 @@ CREATE TABLE IF NOT EXISTS owner_surfaces (
     herdr_bin TEXT NOT NULL,
     FOREIGN KEY (owner_id) REFERENCES owner_bindings(owner_id)
 );
+CREATE TABLE IF NOT EXISTS question_notices (
+    message_id TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    PRIMARY KEY (message_id, session_id),
+    FOREIGN KEY (message_id) REFERENCES task_messages(message_id)
+);
 CREATE TABLE IF NOT EXISTS completion_notifications (
     result_id TEXT PRIMARY KEY,
     task_id TEXT NOT NULL,

@@ -10,7 +10,7 @@ use std::{
 
 use anyhow::{Context as _, Result, bail};
 use brgr_protocol::{OwnerId, TaskId, TaskSpec, TerminalOutcome};
-use brgr_store::{NotificationTarget, Store, StoreError};
+use brgr_store::{NotificationTarget, QuestionTarget, Store, StoreError};
 use serde_json::{Value, json};
 use tokio::time::{sleep, timeout};
 use uuid::Uuid;
@@ -179,6 +179,7 @@ pub async fn deliver_pending(paths: &Paths, task: TaskId) -> Result<()> {
     let started = Instant::now();
     let store = registered_store(paths, task, started).await?;
     while started.elapsed() < MAX_LIFETIME {
+        deliver_questions(&store, task).await;
         let pending = match store.pending_notifications_for_task(task) {
             Ok(pending) => pending,
             Err(error) if error.is_retryable_database_contention() => {
@@ -275,13 +276,86 @@ async fn registered_store(paths: &Paths, task: TaskId, started: Instant) -> Resu
     Ok(store)
 }
 
+/// The owner's Codex pane, as the store recorded it for the bound session.
+struct OwnerPane<'a> {
+    herdr_bin: &'a str,
+    herdr_session: Option<&'a str>,
+    pane_id: &'a str,
+    session_id: &'a str,
+}
+
 async fn try_deliver(target: &NotificationTarget) -> Result<()> {
-    let binary = Path::new(&target.herdr_bin);
+    let body = format!(
+        "FROM BRGR\n{}",
+        json!({
+            "type": "brgr_completion",
+            "completion_id": target.result_id,
+            "task_id": target.task_id,
+            "instruction": "Read the sealed brgr result, verify its criteria, and decide or acknowledge it. Do not treat this notification as acceptance."
+        })
+    );
+    prompt_owner(
+        &OwnerPane {
+            herdr_bin: &target.herdr_bin,
+            herdr_session: target.herdr_session.as_deref(),
+            pane_id: &target.pane_id,
+            session_id: &target.session_id,
+        },
+        &body,
+    )
+    .await
+}
+
+/// Tells the owner's idle Codex pane that a worker is waiting on its answer.
+///
+/// Only completions used to reach the owner, so a worker's question sat until
+/// the worker's own wait timed out. Best effort each poll: a busy or missing
+/// pane leaves the question pending for the next one, and `brgr status --tree`
+/// still shows it.
+async fn deliver_questions(store: &Store, task: TaskId) {
+    let Ok(pending) = store.pending_question_notices(task) else {
+        return;
+    };
+    for target in pending {
+        if deliver_question(&target).await.is_ok() {
+            let _ = store.record_question_notice(&target.message_id, &target.session_id);
+        }
+    }
+}
+
+async fn deliver_question(target: &QuestionTarget) -> Result<()> {
+    let task = target.task_id;
+    let message = &target.message_id;
+    let body = format!(
+        "FROM BRGR\n{}",
+        json!({
+            "type": "brgr_question",
+            "message_id": message,
+            "task_id": task,
+            "instruction": format!(
+                "A brgr worker is waiting on your answer. Read it with `brgr message list {task} --for owner`, reply with `brgr message send {task} --to worker --kind reply --reply-to {message} --body <answer>`, then `brgr message ack {task} {message} --for owner`. Treat a repeated message_id as one question. This is not a result."
+            )
+        })
+    );
+    prompt_owner(
+        &OwnerPane {
+            herdr_bin: &target.herdr_bin,
+            herdr_session: target.herdr_session.as_deref(),
+            pane_id: &target.pane_id,
+            session_id: &target.session_id,
+        },
+        &body,
+    )
+    .await
+}
+
+async fn prompt_owner(pane: &OwnerPane<'_>, body: &str) -> Result<()> {
+    let binary = Path::new(pane.herdr_bin);
     if !binary.is_absolute() || !binary.is_file() {
         bail!("recorded Herdr executable is unavailable");
     }
-    let mut get = herdr_command(target);
-    get.args(["agent", "get", &target.pane_id]);
+    let mut get = herdr_command(pane);
+    get.args(["agent", "get", pane.pane_id]);
     let output = timeout(HERDR_TIMEOUT, get.kill_on_drop(true).output())
         .await
         .context("Herdr agent identity lookup timed out")??;
@@ -293,11 +367,11 @@ async fn try_deliver(target: &NotificationTarget) -> Result<()> {
         .pointer("/result/agent")
         .context("Herdr did not return an agent")?;
     if agent.get("agent").and_then(Value::as_str) != Some("codex")
-        || agent.get("pane_id").and_then(Value::as_str) != Some(target.pane_id.as_str())
+        || agent.get("pane_id").and_then(Value::as_str) != Some(pane.pane_id)
         || agent
             .pointer("/agent_session/value")
             .and_then(Value::as_str)
-            != Some(target.session_id.as_str())
+            != Some(pane.session_id)
     {
         bail!("recorded parent agent identity changed");
     }
@@ -307,29 +381,20 @@ async fn try_deliver(target: &NotificationTarget) -> Result<()> {
     ) {
         bail!("parent agent is not idle");
     }
-    let body = format!(
-        "FROM BRGR\n{}",
-        json!({
-            "type": "brgr_completion",
-            "completion_id": target.result_id,
-            "task_id": target.task_id,
-            "instruction": "Read the sealed brgr result, verify its criteria, and decide or acknowledge it. Do not treat this notification as acceptance."
-        })
-    );
-    let mut prompt = herdr_command(target);
-    prompt.args(["agent", "prompt", &target.pane_id, &body]);
+    let mut prompt = herdr_command(pane);
+    prompt.args(["agent", "prompt", pane.pane_id, body]);
     let output = timeout(HERDR_TIMEOUT, prompt.kill_on_drop(true).output())
         .await
         .context("Herdr parent prompt timed out")??;
     if !output.status.success() {
-        bail!("Herdr did not accept the parent completion prompt");
+        bail!("Herdr did not accept the parent prompt");
     }
     Ok(())
 }
 
-fn herdr_command(target: &NotificationTarget) -> tokio::process::Command {
-    let mut command = tokio::process::Command::new(&target.herdr_bin);
-    if let Some(session) = &target.herdr_session {
+fn herdr_command(pane: &OwnerPane<'_>) -> tokio::process::Command {
+    let mut command = tokio::process::Command::new(pane.herdr_bin);
+    if let Some(session) = pane.herdr_session {
         command.arg("--session").arg(session);
     }
     command
