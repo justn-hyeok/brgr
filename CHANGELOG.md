@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+`brgr prune` now deletes a task branch when every commit on it also lives on
+another branch or a remote-tracking branch, not only when it is merged into
+`HEAD`. A task started from a feature branch carries that branch's commits, so
+once you went back to `main`, `git branch -d` called its branch unmerged and
+kept it forever. Other `brgr/task-*` branches do not count as a copy, since the
+same sweep may delete them, and a branch holding a commit found nowhere else is
+still kept. The deletion still refuses a branch some worktree has checked out,
+and a branch that moves while it is being deleted is restored.
+
 ## 2.7.1 — 2026-09-30
 
 A harness's version, help, and model-catalog probes may now take 15 seconds
