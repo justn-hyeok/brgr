@@ -1,11 +1,13 @@
 use std::{
-    io::Write as _,
+    io::{self, Write as _},
     path::{Path, PathBuf},
     process::{Command, Stdio},
 };
 
 use anyhow::{Context as _, Result, bail};
-use brgr_protocol::{DecisionVerdict, TaskId, TerminalOutcome};
+use brgr_protocol::{
+    ArtifactRef, DecisionVerdict, ResultEnvelope, TaskId, TaskSpec, TerminalOutcome,
+};
 use brgr_store::Store;
 use serde_json::json;
 use tempfile::NamedTempFile;
@@ -75,15 +77,11 @@ pub fn apply_result(
     let spec = store.task(task)?;
     require_owner(&store, &spec.owner_id)?;
     let result = store.latest_result(task)?;
-    if result.outcome != TerminalOutcome::Candidate || !spec.evidence.capture_diff {
+    if result.outcome != TerminalOutcome::Candidate {
         bail!("only a candidate with a requested sealed Git diff can be integrated");
     }
-    let reference = result
-        .artifacts
-        .get(1)
-        .filter(|artifact| artifact.media_type == "text/x-diff")
-        .context("result has no sealed Git diff")?;
-    let patch = store.read_artifact(reference, spec.artifact_contract.max_bytes)?;
+    let (reference, patch) = sealed_patch(&store, &spec, &result)?;
+    let reference = &reference;
     let target = workspace_path.canonicalize()?;
     let repository_root = git_value(&target, &["rev-parse", "--show-toplevel"])?.canonicalize()?;
     if target != repository_root {
@@ -94,15 +92,18 @@ pub fn apply_result(
         || git_value(&task_workspace, &["rev-parse", "HEAD"]),
         |commit| Ok(PathBuf::from(commit)),
     )?;
+    let target_head = git_value(&target, &["rev-parse", "HEAD"])?;
     if git_value(
         &target,
         &["rev-parse", "--path-format=absolute", "--git-common-dir"],
     )? != git_value(
         &task_workspace,
         &["rev-parse", "--path-format=absolute", "--git-common-dir"],
-    )? || git_value(&target, &["rev-parse", "HEAD"])? != expected_head
+    )? || !(target_head == expected_head || is_ancestor(&target, &expected_head, &target_head)?)
     {
-        bail!("integration target must be the same repository at the task base commit");
+        bail!(
+            "integration target must be the same repository at the task base commit or a commit that descends from it"
+        );
     }
     let _admission = workspace::acquire_admission_lock(&paths.worktrees, &target)?;
     git_apply(&target, &patch, true)?;
@@ -132,10 +133,152 @@ pub fn apply_result(
     };
     print_value(
         &json!({"task_id": task, "result_id": result.result_id,
-            "target": target, "patch_digest": reference.digest, "status": status}),
+            "target": target, "patch_digest": reference.digest, "status": status,
+            "base_commit": expected_head, "target_head": target_head}),
         json_output,
     );
     Ok(())
+}
+
+/// Prints a result's sealed Git diff, or with `stat` the files it changes.
+pub fn show_diff(paths: &Paths, task: TaskId, stat: bool, json_output: bool) -> Result<()> {
+    let store = Store::open(&paths.store)?;
+    let spec = store.task(task)?;
+    require_owner(&store, &spec.owner_id)?;
+    let result = store.latest_result(task)?;
+    let (reference, patch) = sealed_patch(&store, &spec, &result)?;
+    if !stat && !json_output {
+        io::stdout().write_all(&patch)?;
+        return Ok(());
+    }
+    let files = numstat(&patch)?;
+    if !json_output {
+        let (mut added, mut deleted) = (0_u64, 0_u64);
+        for file in &files {
+            match (file.added, file.deleted) {
+                (Some(plus), Some(minus)) => {
+                    added += plus;
+                    deleted += minus;
+                    println!("+{plus:<6} -{minus:<6} {}", file.path);
+                }
+                _ => println!("{:<15} {}", "binary", file.path),
+            }
+        }
+        println!("{} files, +{added} -{deleted}", files.len());
+        return Ok(());
+    }
+    let files: Vec<_> = files
+        .iter()
+        .map(|file| json!({"path": file.path, "added": file.added, "deleted": file.deleted}))
+        .collect();
+    let mut value = json!({"task_id": task, "result_id": result.result_id,
+        "outcome": result.outcome, "patch_digest": reference.digest,
+        "bytes": reference.bytes, "files": files});
+    if !stat {
+        value["patch"] = String::from_utf8(patch)
+            .context("the sealed diff is not UTF-8; read it without --json")?
+            .into();
+    }
+    print_value(&value, json_output);
+    Ok(())
+}
+
+/// The sealed diff of a result whose task asked for one.
+fn sealed_patch(
+    store: &Store,
+    spec: &TaskSpec,
+    result: &ResultEnvelope,
+) -> Result<(ArtifactRef, Vec<u8>)> {
+    if !spec.evidence.capture_diff {
+        bail!("the task did not request a sealed Git diff; run it with --capture-diff");
+    }
+    let reference = result
+        .artifacts
+        .get(1)
+        .filter(|artifact| artifact.media_type == "text/x-diff")
+        .context("result has no sealed Git diff")?;
+    let patch = store.read_artifact(reference, spec.artifact_contract.max_bytes)?;
+    Ok((reference.clone(), patch))
+}
+
+struct FileStat {
+    path: String,
+    /// `None` for a binary file.
+    added: Option<u64>,
+    deleted: Option<u64>,
+}
+
+/// Per-file line counts, read by `git apply --numstat` outside any repository
+/// so no repository configuration takes part.
+fn numstat(patch: &[u8]) -> Result<Vec<FileStat>> {
+    let scratch = tempfile::tempdir()?;
+    let mut child = Command::new("git")
+        .args(["apply", "--numstat", "-z", "-"])
+        .current_dir(scratch.path())
+        .env("GIT_CEILING_DIRECTORIES", scratch.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()?;
+    let mut stdin = child
+        .stdin
+        .take()
+        .context("Git numstat input is unavailable")?;
+    let input = patch.to_vec();
+    let writer = std::thread::spawn(move || stdin.write_all(&input));
+    let output = child.wait_with_output()?;
+    let _ = writer.join();
+    if !output.status.success() {
+        bail!("the sealed diff could not be summarized");
+    }
+    parse_numstat(&output.stdout)
+}
+
+/// Parses `--numstat -z` records: `ADDED\tDELETED\tPATH\0`, or for a rename
+/// `ADDED\tDELETED\t\0OLD\0NEW\0`.
+fn parse_numstat(bytes: &[u8]) -> Result<Vec<FileStat>> {
+    let mut fields = bytes.split(|byte| *byte == 0).map(String::from_utf8_lossy);
+    let mut files = Vec::new();
+    while let Some(record) = fields.next() {
+        if record.is_empty() {
+            continue;
+        }
+        let mut parts = record.splitn(3, '\t');
+        let (Some(added), Some(deleted), Some(path)) = (parts.next(), parts.next(), parts.next())
+        else {
+            bail!("Git numstat output is malformed");
+        };
+        let path = if path.is_empty() {
+            let from = fields.next().context("Git numstat rename is incomplete")?;
+            let to = fields.next().context("Git numstat rename is incomplete")?;
+            format!("{from} => {to}")
+        } else {
+            path.to_owned()
+        };
+        files.push(FileStat {
+            path,
+            added: added.parse().ok(),
+            deleted: deleted.parse().ok(),
+        });
+    }
+    Ok(files)
+}
+
+fn is_ancestor(workspace: &Path, ancestor: &Path, descendant: &Path) -> Result<bool> {
+    let status = Command::new("git")
+        .arg("-C")
+        .arg(workspace)
+        .args(["merge-base", "--is-ancestor"])
+        .arg(ancestor)
+        .arg(descendant)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()?;
+    match status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => bail!("integration workspace is not a readable Git checkout"),
+    }
 }
 
 fn git_value(workspace: &Path, argv: &[&str]) -> Result<PathBuf> {

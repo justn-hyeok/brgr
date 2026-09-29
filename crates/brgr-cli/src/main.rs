@@ -170,6 +170,7 @@ async fn main() -> Result<()> {
         Command::Reject { task, reason } => {
             decide(&paths, task, DecisionVerdict::Rejected, reason, cli.json)
         }
+        Command::Diff { task, stat } => evidence::show_diff(&paths, task, stat, cli.json),
         Command::Apply {
             task,
             workspace,
@@ -293,6 +294,7 @@ fn validate_bridge_host_command(
         }
         Command::Status { .. }
         | Command::Result { .. }
+        | Command::Diff { .. }
         | Command::Wait { .. }
         | Command::Message { .. }
         | Command::Cancel { .. }

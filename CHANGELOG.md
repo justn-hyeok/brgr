@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+`brgr diff TASK` prints a result's sealed diff, and `brgr diff TASK --stat`
+lists the files it changes with added and deleted line counts. They show the
+same bytes `brgr apply` writes, so review and integration cannot disagree;
+before this, reading a diff meant exporting it to a file first. `--json`
+returns the patch, the per-file counts, and the patch digest together.
+
+`brgr apply` now accepts a target whose `HEAD` has moved past the task's base
+commit, as long as the new commit descends from it and the diff still applies
+cleanly. It used to require `HEAD` to be exactly the base, so any commit made
+while a worker ran blocked integration. A target on unrelated history is still
+refused, and the result names both commits (`base_commit`, `target_head`).
+
 A sealed diff (`--capture-diff`) now includes files the worker created without
 staging them. It used to compare only paths the worktree's index already
 tracked, so a new file fell out of the patch without any error, and `brgr apply`
