@@ -43,15 +43,15 @@ both placement requests, and a worker-pane fixture reaches a sealed result and
 owner decision. SQLite read-then-write paths use immediate transactions so
 concurrent worker admission cannot promote a stale snapshot into a write.
 
-The [2026-09-23 live receipt](live-recursive-bridge-2026-09-23.md) records a
+The [2026-09-23 live receipt](../evidence/live-recursive-bridge-2026-09-23.md) records a
 real Herdr 0.9.0 OMP → GJC → GJC chain: adjacent worker panes, two parent
 decisions, a final Codex-owner decision, and a separate `tab` placement run.
-The [bidirectional receipt](live-bidirectional-bridge-2026-09-23.md) records
+The [bidirectional receipt](../evidence/live-bidirectional-bridge-2026-09-23.md) records
 live question, reply, and acknowledgment traffic in both directions at each
 edge. Its accepted rerun completed a single Codex ↔ OMP ↔ GJC ↔ GJC chain
 with explicit decisions at all three levels. The rerun used longer parent
 deadlines after an earlier middle GJC timed out.
-An [ordinary Herdr pane receipt](live-ordinary-herdr-pane-2026-09-23.md)
+An [ordinary Herdr pane receipt](../evidence/live-ordinary-herdr-pane-2026-09-23.md)
 records the v2.2.1 caller path using a deterministic fixture.
 
 ## Remaining product gates

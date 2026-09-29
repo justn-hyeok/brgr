@@ -9,7 +9,7 @@ compare-and-close 보장은 v1 필수 조건에서 제외한다. Owner 승인 20
 
 - Herdr 0.9.0의 `pane.close(pane_id)`에는 조건부 identity 필드가 없다. 최종 live
   확인과 close 호출은 분리된 연산이며, 그 사이 다른 actor가 pane을 바꾸는
-  race는 brgr 단독으로 제거할 수 없다 (`docs/architecture.md`, `pane_cleanup.rs::close_if_eligible` 문서화됨).
+  race는 brgr 단독으로 제거할 수 없다 (`../guides/architecture.md`, `pane_cleanup.rs::close_if_eligible` 문서화됨).
 - Herdr API 변경은 brgr 범위 밖이다. brgr가 바꿀 수 없는 외부 API 보장을 v1
   필수 P0로 두는 것은 완료 기준 오류였다 (2026-09-13 초안의 문제).
 - Pane 정리는 선택적 `local.omp-herdr` 어댑터의 presentation 영역이다. 관리 실행

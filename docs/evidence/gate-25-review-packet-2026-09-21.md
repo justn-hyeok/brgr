@@ -17,7 +17,7 @@
 
 ## 리뷰어에게 줄 것
 
-1. 본 브랜치 checkout + `docs/v1-readiness-checklist-2026-09-14.md`
+1. 본 브랜치 checkout + `../readiness/v1-readiness-checklist-2026-09-14.md`
 2. 증거 문서: `gates-section1-copilot-bundle-2026-09-21.md`,
    `gates-public-binary-rerun-2026-09-21.md`,
    `omp-callback-reconciliation-2026-09-21.md`,

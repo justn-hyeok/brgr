@@ -12,11 +12,11 @@ Herdr hosts a read-only task board and a Codex pane; brgr still owns task
 identity, sealed results, and the durable inbox, while Codex alone decides
 accept or reject. The v1 CLI and stored results remain usable without Herdr.
 Release archives are
-unsigned and not notarized. Read [the unsigned distribution guide](docs/unsigned-distribution.md)
+unsigned and not notarized. Read [the unsigned distribution guide](docs/guides/unsigned-distribution.md)
 before sharing or running a downloaded binary.
 
 The v1 managed-run contract is retained. The v2.1.0 release closed the
-[v1 readiness checklist](docs/v1-readiness-checklist-2026-09-14.md) under its
+[v1 readiness checklist](docs/readiness/v1-readiness-checklist-2026-09-14.md) under its
 recorded personal-use scope and evidence limits, and v2.2.0 adds recursive worker
 delegation and an attempt-scoped message mailbox; its verified scope and open
 limits are described below.
@@ -77,7 +77,7 @@ an approved executable with a small authorized scratch run outside the plugin
 Codex pane before using it for a task. The board shows task status, route, and
 decision state without revealing prompts or artifact contents.
 
-See [the v2 plugin contract](docs/v2-herdr-plugin.md) for ownership, context,
+See [the v2 plugin contract](docs/guides/v2-herdr-plugin.md) for ownership, context,
 recovery, and verification boundaries.
 
 GJC, Cursor CLI, Command Code, Devin CLI, and OMP have bounded one-shot process recipes.
@@ -100,7 +100,7 @@ already selected in Devin CLI. Run `/model` once in an interactive Devin session
 if that configured default is stale. Devin's current JSON catalog exceeds
 brgr's bounded probe limit, so `brgr run --model` and `--effort` intentionally
 fail for this route instead of guessing a family variant. See the
-[v2.0.2 live receipt](docs/live-devin-cli-v2.0.2-2026-09-15.md).
+[v2.0.2 live receipt](docs/evidence/live-devin-cli-v2.0.2-2026-09-15.md).
 
 For JSONL OMP process results, brgr checks every assistant event's native
 `provider/model` against an explicitly requested selector before publishing a
@@ -140,10 +140,10 @@ waits for a child result without approving it. `brgr message send|list|wait|ack`
 lets each side ask and answer questions on the active attempt; unanswered
 questions block a successful candidate. Standalone runs opt in with
 `--enable-delegation`; plugin workers enable it automatically. See
-[recursive worker contract](docs/recursive-workers.md) for the verified scope
+[recursive worker contract](docs/guides/recursive-workers.md) for the verified scope
 and remaining gates, including the
-[live OMP → GJC → GJC receipt](docs/live-recursive-bridge-2026-09-23.md) and
-[bidirectional message receipt](docs/live-bidirectional-bridge-2026-09-23.md).
+[live OMP → GJC → GJC receipt](docs/evidence/live-recursive-bridge-2026-09-23.md) and
+[bidirectional message receipt](docs/evidence/live-bidirectional-bridge-2026-09-23.md).
 Earlier v2.1.0 binaries do not contain these commands.
 
 ### Completion loop (v2.3.0)
@@ -166,7 +166,7 @@ result. Untracked worker output needs explicit evidence export or staging by the
 worker before diff capture. The integration target must be the repository root
 at the task's starting commit. `brgr status TASK --tree` shows time and question/approval waits;
 `brgr cancel TASK --tree` records cancellation for the subtree before stopping
-its active processes. See [the completion loop plan](docs/completion-loop-plan.md)
+its active processes. See [the completion loop plan](docs/guides/completion-loop-plan.md)
 for the current scope and limits.
 
 Install the local binary and Codex integration, then start a new Codex session:
@@ -212,7 +212,7 @@ entries. For OMP, Cursor CLI, Command Code, Devin CLI, or an approved unfamiliar
 `brgr harness activate` and `brgr harness status`. Pass `--model MODEL` when
 that exact manifest supports model selection. Do not infer support for flags
 absent from the installed executable's help.
-See [agent-authored manifests](docs/custom-harness-registration.md) for a
+See [agent-authored manifests](docs/guides/custom-harness-registration.md) for a
 documented CLI whose prompt shape needs a custom declarative recipe.
 For an already approved executable, `brgr harness add EXECUTABLE --workspace
 SCRATCH --prompt "small authorized probe"` is the combined probe, contract-test,
@@ -299,4 +299,6 @@ registry snapshot only after stopping new admissions and confirming no active
 task depends on the newer activation. Never overwrite a newer live store with
 an old snapshot.
 
-See [Architecture](docs/architecture.md) for the managed-run contract.
+See [Architecture](docs/guides/architecture.md) for the managed-run contract,
+and [the documentation index](docs/README.md) for the guides, release notes, and
+the dated evidence records behind the claims made here.
