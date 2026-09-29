@@ -1583,6 +1583,115 @@ fn idle_codex_parent_receives_completion_without_another_user_turn() {
     assert_eq!(fs::read_to_string(prompts).unwrap(), prompt);
 }
 
+/// A worker's question reaches an idle Codex owner without another user turn.
+///
+/// Only completions used to be pushed, so a question waited until the worker's
+/// own `message wait` timed out unless the owner happened to poll. The notice is
+/// held while Codex is busy, sent once per session, and stops once answered.
+#[test]
+fn idle_codex_owner_is_told_when_a_worker_asks() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("brgr");
+    let workspace = temp.path().join("work");
+    let herdr = temp.path().join("herdr");
+    let agent_state = temp.path().join("agent-state");
+    let prompts = temp.path().join("prompts");
+    fs::create_dir_all(&workspace).unwrap();
+    fs::write(&agent_state, "working").unwrap();
+    fs::write(
+        &herdr,
+        "#!/bin/sh\nif [ \"$1\" = --session ]; then shift 2; fi\ncase \"$1 $2\" in\n 'agent get') state=$(/bin/cat \"$BRGR_TEST_AGENT_STATE\"); printf '{\"result\":{\"agent\":{\"agent\":\"codex\",\"pane_id\":\"w1:p1\",\"agent_status\":\"%s\",\"agent_session\":{\"value\":\"session-q\"}}}}\\n' \"$state\";;\n 'agent prompt') printf '%s\\n' \"$4\" >> \"$BRGR_TEST_PROMPTS\"; printf '{}\\n';;\n *) exit 2;;\nesac\n",
+    )
+    .unwrap();
+    fs::set_permissions(&herdr, fs::Permissions::from_mode(0o700)).unwrap();
+    add_fixture(&home, &gjc_fixture(), &temp.path().join("scratch"));
+    let owner = [
+        ("CODEX_THREAD_ID", "session-q"),
+        ("BRGR_OWNER_ID", "codex:session-q"),
+        ("BRGR_SESSION_ID", "session-q"),
+        ("HERDR_ENV", "1"),
+        ("HERDR_PANE_ID", "w1:p1"),
+        ("HERDR_WORKSPACE_ID", "w1"),
+        ("HERDR_BIN_PATH", herdr.to_str().unwrap()),
+        ("HERDR_SESSION", "fixture-herdr"),
+        ("BRGR_TEST_AGENT_STATE", agent_state.to_str().unwrap()),
+        ("BRGR_TEST_PROMPTS", prompts.to_str().unwrap()),
+    ];
+    let launch = json_output(&run(
+        &home,
+        &[
+            "run",
+            "SLOW",
+            "--workspace",
+            workspace.to_str().unwrap(),
+            "--enable-delegation",
+        ],
+        &owner,
+    ));
+    let task = launch["task_id"].as_str().unwrap();
+    let store = brgr_store::Store::open(home.join("store")).unwrap();
+    let attempt = (0..100)
+        .find_map(|_| {
+            let found = store.active_message_attempt(task.parse().unwrap()).ok();
+            if found.is_none() {
+                thread::sleep(Duration::from_millis(20));
+            }
+            found
+        })
+        .expect("worker attempt did not become active")
+        .to_string();
+    let worker_owner = format!("worker:{attempt}");
+    let worker = [
+        ("BRGR_OWNER_ID", worker_owner.as_str()),
+        ("BRGR_SESSION_ID", worker_owner.as_str()),
+        ("BRGR_PARENT_TASK_ID", task),
+        ("BRGR_PARENT_ATTEMPT_ID", attempt.as_str()),
+    ];
+    let question = json_output(&run(
+        &home,
+        &[
+            "message",
+            "send",
+            task,
+            "--to",
+            "owner",
+            "--kind",
+            "question",
+            "--body",
+            "Which token?",
+        ],
+        &worker,
+    ));
+    let question_id = question["message_id"].as_str().unwrap().to_owned();
+
+    thread::sleep(Duration::from_millis(1_200));
+    assert!(!prompts.exists(), "a busy Codex owner was prompted");
+    fs::write(&agent_state, "idle").unwrap();
+    let delivered = (0..100)
+        .find_map(|_| {
+            let text = fs::read_to_string(&prompts).unwrap_or_default();
+            if text.contains(&question_id) {
+                return Some(text);
+            }
+            thread::sleep(Duration::from_millis(50));
+            None
+        })
+        .expect("the question was not delivered");
+    assert!(delivered.contains("FROM BRGR"), "{delivered}");
+    assert!(delivered.contains("brgr_question"), "{delivered}");
+    assert!(delivered.contains(task), "{delivered}");
+
+    // Several more polls while the question is still open: told once, not again.
+    thread::sleep(Duration::from_millis(1_500));
+    let text = fs::read_to_string(&prompts).unwrap();
+    // The id also appears inside the notice's own instructions, so count
+    // notices by their `message_id` field.
+    let field = format!("\"message_id\":\"{question_id}\"");
+    assert_eq!(text.matches(field.as_str()).count(), 1, "{text}");
+
+    json_output(&run(&home, &["cancel", task], &owner));
+}
+
 #[test]
 fn missing_herdr_codex_session_is_reported_from_exact_bound_pane() {
     let temp = TempDir::new().unwrap();

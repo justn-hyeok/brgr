@@ -31,7 +31,7 @@ use brgr_protocol::{
 use contention::{BUSY_TIMEOUT, retry_busy};
 use delegation::{recorded_delegation_parent, validate_new_task_parent, validated_parent_depth};
 pub use message::{MessageDirection, MessageDraft, MessageKind, TaskMessage};
-pub use notification::{NotificationTarget, PendingNotification};
+pub use notification::{NotificationTarget, PendingNotification, QuestionTarget};
 use owner::assert_owner_binding;
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use schema::initialize_connection;
@@ -3991,6 +3991,70 @@ mod tests {
         );
     }
 
+    /// A worker question is owed a notice until it is answered, once per
+    /// session: recorded notices suppress repeats, a transferred owner is told
+    /// again, and a reply ends it.
+    #[test]
+    fn a_question_notice_is_owed_until_answered_once_per_session() {
+        let root = TempDir::new().unwrap();
+        let mut store = Store::open(root.path()).unwrap();
+        let task = task();
+        store.record_task(&task, "question-notice").unwrap();
+        let attempt_id = AttemptId::new();
+        store
+            .claim_attempt(task.task_id, task.revision, attempt_id)
+            .unwrap();
+        store
+            .set_attempt_state(attempt_id, AttemptState::Starting)
+            .unwrap();
+        store
+            .set_attempt_state(attempt_id, AttemptState::Running)
+            .unwrap();
+        let bind = |session: &str| {
+            let epoch = store.rebind_owner(&task.owner_id, session).unwrap();
+            store
+                .register_owner_surface(&task.owner_id, session, epoch, "w1:p1", None, "/bin/herdr")
+                .unwrap();
+        };
+        bind("session-a");
+        let question = MessageDraft {
+            message_id: uuid::Uuid::new_v4().to_string(),
+            task_id: task.task_id,
+            attempt_id,
+            direction: MessageDirection::WorkerToOwner,
+            kind: MessageKind::Question,
+            body: "Which token?".to_owned(),
+            in_reply_to: None,
+        };
+        store.post_message(&question).unwrap();
+        let owed = |store: &Store| store.pending_question_notices(task.task_id).unwrap();
+
+        assert_eq!(owed(&store).len(), 1);
+        assert_eq!(owed(&store)[0].session_id, "session-a");
+        store
+            .record_question_notice(&question.message_id, "session-a")
+            .unwrap();
+        assert!(owed(&store).is_empty(), "a recorded notice was owed again");
+
+        bind("session-b");
+        assert_eq!(owed(&store).len(), 1, "a transferred owner was not told");
+
+        store
+            .post_message(&MessageDraft {
+                message_id: uuid::Uuid::new_v4().to_string(),
+                direction: MessageDirection::OwnerToWorker,
+                kind: MessageKind::Reply,
+                body: "token-42".to_owned(),
+                in_reply_to: Some(question.message_id.clone()),
+                ..question.clone()
+            })
+            .unwrap();
+        assert!(
+            owed(&store).is_empty(),
+            "an answered question was still owed"
+        );
+    }
+
     /// Every write path must have a recorded decision about waiting for a lock.
     ///
     /// The rule this encodes: retry a write a running attempt depends on, do not
@@ -4033,6 +4097,9 @@ mod tests {
             ("claim_notification", false),
             ("mark_notification_delivered", false),
             ("release_notification_claim", false),
+            // The dispatcher re-reads pending questions every poll, so a lost
+            // notice record costs one repeated notice, not a lost question.
+            ("record_question_notice", false),
         ];
 
         // A module added without being listed here would silently stop being

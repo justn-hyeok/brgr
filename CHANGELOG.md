@@ -16,6 +16,17 @@ started with delegation, against the launch record it was started from, and
 refuses the child otherwise. Both behaviours are tested with a real worker
 process rather than a simulated identity.
 
+A worker's question now reaches its owner. Only completions were ever pushed to
+the owner's Codex pane, so a question sat until the worker's own `message wait`
+timed out unless someone ran `brgr status --tree`. The notification dispatcher
+that already runs for the life of a task now also sends a `FROM BRGR` notice of
+type `brgr_question`, carrying the `message_id` and the exact commands to read,
+answer, and acknowledge it. Like a completion it waits until Codex is idle. A
+new `question_notices` table records which session was told, so a question is
+announced once per session: a restarted dispatcher does not repeat it, a
+transferred owner is told again, and a reply ends it. The guidance brgr installs
+into Codex describes the notice.
+
 A harness manifest whose result source says `stdout` but carries a `path` is now
 refused. It used to parse as `Stdout` with the path silently dropped, so a
 manifest meant to read a result file sealed raw stdout instead and skipped every
