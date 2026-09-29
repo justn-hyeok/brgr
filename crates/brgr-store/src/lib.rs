@@ -219,6 +219,15 @@ const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 /// 17.5s and still failed, while a second admission gave up after 10.2s with
 /// `another admission is in progress` — a misleading error for a store problem.
 /// Without the retry the holder failed in about 5s and released the lock.
+///
+/// The wait is a blocking sleep, and the retried paths are reached from async code
+/// in `brgr-core`, so a contended write occupies a runtime worker. That is not
+/// this loop's doing: `busy_timeout` blocks the thread inside `SQLite` for up to
+/// five seconds per attempt whether or not a retry follows, so every store call
+/// from async code already holds a worker. Moving store work off the runtime is a
+/// change to how the store is called, not to this budget, and is tracked in the
+/// readiness checklist rather than papered over here. The budget bounds how much
+/// this loop can add to it.
 const BUSY_RETRY_BUDGET: Duration = Duration::from_secs(10);
 const BUSY_RETRY_BACKOFF: Duration = Duration::from_millis(2);
 const BUSY_RETRY_BACKOFF_CAP: Duration = Duration::from_millis(250);
@@ -303,6 +312,28 @@ impl Store {
             connection,
             artifacts,
         })
+    }
+
+    /// Reads the task spec an attempt belongs to, without taking a write lock.
+    ///
+    /// Used to size and verify sealed artifacts before the terminal commit opens
+    /// its transaction. `tasks.spec_json` is insert-only, so this cannot go stale
+    /// in a way the commit would miss.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the attempt is unknown or storage fails.
+    fn task_spec_for_attempt(&self, attempt_id: AttemptId) -> Result<String, StoreError> {
+        self.connection
+            .query_row(
+                "SELECT t.spec_json FROM attempts a
+                 JOIN tasks t ON t.task_id = a.task_id AND t.revision = a.revision
+                 WHERE a.attempt_id = ?1",
+                [attempt_id.to_string()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .ok_or(StoreError::AttemptNotFound(attempt_id))
     }
 
     /// Begins a write transaction that takes its reserved lock at `BEGIN`.
@@ -1007,6 +1038,15 @@ impl Store {
         let envelope_json = serde_json::to_string(result)?;
         let digest = sha256(envelope_json.as_bytes());
         let observation = serialize_route_observation(result.route_observation.as_ref())?;
+        // Verified before the lock is taken. `verify_candidate_artifacts` reads and
+        // re-hashes every sealed artifact, up to the contract's `max_bytes` of
+        // 20 MiB, and holding the store's write lock across that file I/O
+        // serialized every other writer behind it. `tasks.spec_json` is only ever
+        // inserted, never updated, so reading it here is sound; the transaction
+        // below compares its own copy against this one.
+        let verified_spec = self.task_spec_for_attempt(result.attempt_id)?;
+        verify_candidate_artifacts(&self.artifacts, result, &verified_spec)?;
+
         // Terminal commit reads the attempt before it writes, so it goes through
         // the same immediate begin as every other write path.
         let transaction = self.write_transaction()?;
@@ -1052,7 +1092,12 @@ impl Store {
                 to: AttemptState::Terminal,
             });
         }
-        verify_candidate_artifacts(&self.artifacts, result, &expected.4)?;
+        // The spec the artifacts were checked against must be the one this
+        // transaction sees. It cannot change — nothing updates `tasks.spec_json` —
+        // so a mismatch means an assumption broke rather than a race.
+        if expected.4 != verified_spec {
+            return Err(StoreError::TaskSpecChangedDuringCommit);
+        }
 
         transaction.execute(
             "INSERT INTO results
@@ -2390,6 +2435,8 @@ pub enum StoreError {
     RouteObservationIntegrityMismatch,
     #[error("task {task_id} revision {revision} has an unresolved lost attempt")]
     UnresolvedPriorAttempt { task_id: TaskId, revision: u32 },
+    #[error("task spec changed while its terminal result was being committed")]
+    TaskSpecChangedDuringCommit,
     #[error("task {task_id} revision {revision} already has a non-retryable terminal result")]
     NonRetryablePriorAttempt { task_id: TaskId, revision: u32 },
     #[error("attempt {0} cannot receive a pre-spawn retry grant without a failed result")]
@@ -4353,6 +4400,68 @@ mod tests {
         blocker.execute_batch("ROLLBACK").unwrap();
         drop(second);
         drop(first);
+    }
+
+    /// A terminal commit must not hold the store's write lock across artifact
+    /// file I/O.
+    ///
+    /// `verify_candidate_artifacts` reads and re-hashes every sealed artifact, up
+    /// to the contract's 20 MiB ceiling. With that inside the transaction, every
+    /// other writer queued behind one commit's file reads. This measures the lock
+    /// window directly: a second connection with no busy timeout must be able to
+    /// take the write lock while the hashing happens.
+    #[test]
+    fn a_terminal_commit_hashes_artifacts_before_it_takes_the_write_lock() {
+        let root = TempDir::new().unwrap();
+        let mut store = Store::open(root.path()).unwrap();
+        let task = TaskSpec {
+            // Large enough that hashing is measurable work, and within the 20 MiB
+            // ceiling a manifest may declare.
+            artifact_contract: ArtifactContract {
+                media_type: "text/plain".to_owned(),
+                max_bytes: 4 * 1024 * 1024,
+            },
+            ..task()
+        };
+        let attempt_id = AttemptId::new();
+        store.record_task(&task, "hash-outside-lock").unwrap();
+        store
+            .create_attempt(task.task_id, task.revision, attempt_id)
+            .unwrap();
+
+        let payload = vec![b'a'; 1_000_000];
+        let mut result = result(&task, attempt_id);
+        result.artifacts.push(
+            store
+                .seal_artifact_reader(
+                    std::io::Cursor::new(payload),
+                    &task.artifact_contract.media_type,
+                    task.artifact_contract.max_bytes,
+                )
+                .unwrap(),
+        );
+
+        // Held for the whole verification window, released before the insert.
+        let blocker = Connection::open(root.path().join("brgr.sqlite3")).unwrap();
+        blocker.busy_timeout(Duration::ZERO).unwrap();
+        blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let verified = store.task_spec_for_attempt(attempt_id);
+        assert!(
+            verified.is_ok(),
+            "reading the spec for verification needed the write lock"
+        );
+        assert!(
+            verify_candidate_artifacts(&store.artifacts, &result, &verified.unwrap()).is_ok(),
+            "verifying artifacts needed the write lock"
+        );
+        blocker.execute_batch("ROLLBACK").unwrap();
+
+        assert_eq!(
+            store
+                .commit_terminal_result(&task.owner_id, &result)
+                .unwrap(),
+            WriteOutcome::Inserted
+        );
     }
 
     /// Task admission runs inside the repository admission lock, so it must give

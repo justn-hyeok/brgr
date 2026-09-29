@@ -2,6 +2,15 @@
 
 ## 2.4.0 — unreleased
 
+A terminal commit no longer holds the store's write lock across artifact file I/O.
+`verify_candidate_artifacts` reads and re-hashes every sealed artifact, up to the
+20 MiB a manifest may declare, and moving the transaction to an immediate begin had
+put that read inside the lock — so concurrent commits queued behind each other's
+hashing. The verification now runs first, against a task spec read without the
+lock, and the transaction compares its own copy of that spec before inserting.
+`tasks.spec_json` is insert-only, so the two cannot disagree; a mismatch is a
+typed error rather than a silent difference.
+
 `brgr prune` gains four corrections found by reproducing a review of it. A
 worktree git has locked is now refused in report mode as well, so `removable` no
 longer promises a removal that `--apply` then declines. Branches left behind by
