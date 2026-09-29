@@ -783,6 +783,184 @@ fn store_task(home: &Path, task: &str) -> brgr_protocol::TaskSpec {
         .unwrap()
 }
 
+/// A Claude Code stand-in for registration: it documents the recipe's flags and
+/// answers a print-mode run.
+const CLAUDE_FIXTURE: &str = r#"#!/bin/sh
+case "$1" in
+  --version) echo '2.1.0 (Claude Code)'; exit 0;;
+  --help) printf '%s\n' '-p, --print' '--output-format <format>' '--model <model>' '--permission-mode <mode>' '--effort <level>'; exit 0;;
+esac
+echo CLAUDE_PRINT_MODE_OK
+"#;
+
+/// A Herdr stand-in. It opens a pane, starts an agent, and — standing in for
+/// the agent too — writes the report named in the prompt, then goes from
+/// working to idle. Every call and the pane's environment are recorded beside
+/// it, since the pane runner does not pass test variables through.
+const PANE_HERDR_FIXTURE: &str = r#"#!/bin/sh
+d="$(/usr/bin/dirname "$0")/herdr-state"
+/bin/mkdir -p "$d"
+if [ "$1" = --session ]; then shift 2; fi
+printf '%s\n' "$*" >> "$d/calls.log"
+case "$1 $2" in
+  'pane split')
+    shift 2
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --env) printf '%s\n' "$2" >> "$d/pane-env"; shift 2;;
+        --cwd) printf '%s\n' "$2" > "$d/pane-cwd"; shift 2;;
+        *) shift;;
+      esac
+    done
+    echo '{"result":{"pane":{"pane_id":"w9:p2"}}}';;
+  'agent start')
+    printf '%s\n' "$@" > "$d/start-args"
+    echo idle > "$d/state"
+    echo '{"result":{"agent":{"agent":"claude","agent_status":"idle","pane_id":"w9:p2"}}}';;
+  'agent prompt')
+    report=$(printf '%s\n' "$4" | /usr/bin/grep -E '^/.*\.md$' | /usr/bin/tail -1)
+    printf '%s' 'PANE_REPORT_OK' > "$report"
+    echo working > "$d/state"
+    echo '{"result":{"type":"ok"}}';;
+  'agent get')
+    s=$(/bin/cat "$d/state")
+    printf '{"result":{"agent":{"agent":"claude","agent_status":"%s","pane_id":"w9:p2"}}}\n' "$s"
+    if [ "$s" = working ]; then echo idle > "$d/state"; fi;;
+  'pane close') echo closed > "$d/closed"; echo '{"result":{"type":"ok"}}';;
+  *) exit 2;;
+esac
+"#;
+
+struct PaneFixture {
+    _temp: TempDir,
+    home: PathBuf,
+    workspace: PathBuf,
+    herdr: PathBuf,
+    state: PathBuf,
+}
+
+fn pane_fixture() -> PaneFixture {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("brgr");
+    let workspace = temp.path().join("work");
+    let bin = temp.path().join("bin");
+    fs::create_dir_all(&workspace).unwrap();
+    fs::create_dir_all(&bin).unwrap();
+    for (name, body) in [("claude", CLAUDE_FIXTURE), ("herdr", PANE_HERDR_FIXTURE)] {
+        fs::write(bin.join(name), body).unwrap();
+        fs::set_permissions(bin.join(name), fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    add_fixture(&home, &bin.join("claude"), &temp.path().join("scratch"));
+    PaneFixture {
+        home,
+        workspace,
+        herdr: bin.join("herdr"),
+        state: bin.join("herdr-state"),
+        _temp: temp,
+    }
+}
+
+impl PaneFixture {
+    fn run(&self, extra: &[&str]) -> Value {
+        let herdr = self.herdr.to_str().unwrap();
+        let mut args = vec![
+            "run",
+            "Explain the build",
+            "--harness",
+            "local.claude-code",
+            "--workspace",
+            self.workspace.to_str().unwrap(),
+            "--foreground",
+        ];
+        args.extend_from_slice(extra);
+        json_output(&run(
+            &self.home,
+            &args,
+            &[
+                ("BRGR_OWNER_ID", "codex:pane-test"),
+                ("HERDR_ENV", "1"),
+                ("HERDR_PANE_ID", "w9:p1"),
+                ("HERDR_BIN_PATH", herdr),
+            ],
+        ))
+    }
+
+    fn state(&self, name: &str) -> String {
+        fs::read_to_string(self.state.join(name)).unwrap_or_default()
+    }
+}
+
+/// Inside Herdr, a harness with an interactive launch runs as its own TUI in a
+/// pane beside the caller, and the report the agent writes is the result.
+#[test]
+fn pane_mode_runs_the_agent_in_a_pane_and_seals_its_report() {
+    let fixture = pane_fixture();
+    let ran = fixture.run(&[]);
+    assert_eq!(ran["outcome"], "candidate", "{ran}");
+    let task = ran["task_id"].as_str().unwrap();
+    let result = json_output(&run(
+        &fixture.home,
+        &["result", task],
+        &[("BRGR_OWNER_ID", "codex:pane-test")],
+    ));
+    assert_eq!(result["artifacts"][0]["text"], "PANE_REPORT_OK", "{result}");
+
+    // Beside the caller, in the task workspace, and not stealing focus.
+    let calls = fixture.state("calls.log");
+    assert!(
+        calls.contains("pane split --pane w9:p1 --direction right"),
+        "{calls}"
+    );
+    assert!(calls.contains("--no-focus"), "{calls}");
+    // The same full-permission flags a print-mode run would get.
+    let start = fixture.state("start-args");
+    assert!(start.contains("--kind\nclaude"), "{start}");
+    assert!(
+        start.contains("--permission-mode\nbypassPermissions"),
+        "{start}"
+    );
+    // The agent can message its owner like any other worker.
+    let env = fixture.state("pane-env");
+    assert!(
+        env.contains(&format!("BRGR_PARENT_TASK_ID={task}")),
+        "{env}"
+    );
+    // The report is sealed and removed, and the pane closed.
+    assert!(!fixture.workspace.join(".brgr").exists());
+    assert_eq!(fixture.state("closed").trim(), "closed");
+}
+
+/// Read-only runs stay in print mode: an agent that may not write cannot
+/// write its report. So does a run with pane mode switched off.
+#[test]
+fn pane_mode_is_skipped_for_read_only_and_when_switched_off() {
+    let fixture = pane_fixture();
+    let ran = fixture.run(&["--permission", "read-only"]);
+    assert_eq!(ran["outcome"], "candidate", "{ran}");
+    // Only pane mode opens a pane; the completion notice may still ask Herdr
+    // about the owner's own pane.
+    assert!(
+        !fixture.state("calls.log").contains("pane split"),
+        "a pane was opened for a read-only run: {}",
+        fixture.state("calls.log")
+    );
+
+    json_output(&run(
+        &fixture.home,
+        &["config", "set-pane-mode", "false"],
+        &[],
+    ));
+    let ran = fixture.run(&[]);
+    assert_eq!(ran["outcome"], "candidate", "{ran}");
+    // Only pane mode opens a pane; the completion notice may still ask Herdr
+    // about the owner's own pane.
+    assert!(
+        !fixture.state("calls.log").contains("pane split"),
+        "a pane was opened with pane mode off: {}",
+        fixture.state("calls.log")
+    );
+}
+
 const RECURSIVE_GJC_FIXTURE: &str = r#"#!/bin/sh
 set -eu
 case "${1:-}" in

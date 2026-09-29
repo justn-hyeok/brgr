@@ -43,6 +43,14 @@
           "items": { "type": "string", "pattern": "^[A-Z_][A-Z0-9_]*$" }
         },
         "mode": { "enum": ["one_shot", "delegated_external"] },
+        "interactive": {
+          "type": "object", "additionalProperties": false,
+          "required": ["herdr_kind"],
+          "properties": {
+            "herdr_kind": { "type": "string", "pattern": "^[a-z0-9-]+$" },
+            "argv": { "$ref": "#/$defs/argv" }
+          }
+        },
         "permission_argv": {
           "type": "object", "additionalProperties": false,
           "properties": {

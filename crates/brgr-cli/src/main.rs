@@ -10,6 +10,7 @@ mod herdr_plugin;
 mod message;
 mod notification;
 mod omp_adapter;
+mod pane_adapter;
 mod pane_cleanup;
 mod plugin_bridge;
 mod supervision;
@@ -117,6 +118,9 @@ struct LaunchEnvelope {
     manifest: Option<HarnessManifest>,
     #[serde(default)]
     executable_digest: Option<String>,
+    /// Run the harness as its own TUI in a Herdr pane beside the caller.
+    #[serde(default)]
+    pane_mode: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -142,22 +146,7 @@ async fn main() -> Result<()> {
             | Command::Notify { .. }
     ) && let Some(dir) = env::var_os(plugin_bridge::BRIDGE_DIR_ENV)
     {
-        let budget_seconds = match &cli.command {
-            Command::Run(args) if args.foreground => args.deadline_seconds,
-            Command::Revise(args) if args.foreground => {
-                plugin_bridge::MAX_BRIDGE_SECONDS.saturating_sub(120)
-            }
-            Command::Wait {
-                timeout_seconds, ..
-            }
-            | Command::Message {
-                command:
-                    message::MessageCommand::Wait {
-                        timeout_seconds, ..
-                    },
-            } => *timeout_seconds,
-            _ => 3_600,
-        };
+        let budget_seconds = bridge_budget_seconds(&cli.command);
         return plugin_bridge::client(Path::new(&dir), budget_seconds.saturating_add(120)).await;
     }
     validate_bridge_host_preflight(&cli)?;
@@ -210,6 +199,7 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Command::Notify { task } => notification::deliver_pending(&paths, task).await,
+        Command::PaneRun(args) => pane_adapter::run_pane_adapter(&paths, &args),
         Command::OmpRun {
             prompt_file,
             workspace,
@@ -232,6 +222,25 @@ async fn main() -> Result<()> {
                 keep_pane,
             },
         ),
+    }
+}
+
+fn bridge_budget_seconds(command: &Command) -> u64 {
+    match command {
+        Command::Run(args) if args.foreground => args.deadline_seconds,
+        Command::Revise(args) if args.foreground => {
+            plugin_bridge::MAX_BRIDGE_SECONDS.saturating_sub(120)
+        }
+        Command::Wait {
+            timeout_seconds, ..
+        }
+        | Command::Message {
+            command:
+                message::MessageCommand::Wait {
+                    timeout_seconds, ..
+                },
+        } => *timeout_seconds,
+        _ => 3_600,
     }
 }
 
@@ -307,6 +316,7 @@ fn validate_bridge_host_command(
         Command::Plugin { .. }
         | Command::Hook { .. }
         | Command::Notify { .. }
+        | Command::PaneRun(_)
         | Command::OmpRun { .. } => {
             bail!("internal brgr commands are unavailable through the Herdr host bridge")
         }
@@ -332,6 +342,10 @@ fn config_command(paths: &Paths, command: &ConfigCommand, json_output: bool) -> 
         }
         ConfigCommand::SetAutoWorkerPane { enabled } => {
             config.herdr.auto_worker_pane = *enabled;
+            config.save(&paths.config)?;
+        }
+        ConfigCommand::SetPaneMode { enabled } => {
+            config.herdr.prefer_print_mode = !*enabled;
             config.save(&paths.config)?;
         }
         ConfigCommand::SetMaxPermission { level } => {

@@ -134,6 +134,8 @@ pub(crate) enum Command {
     Hook { event: HookEvent },
     #[command(name = "__notify", hide = true)]
     Notify { task: TaskId },
+    #[command(name = "__pane-run", hide = true)]
+    PaneRun(PaneRunArgs),
     #[command(name = "__omp-run", hide = true)]
     OmpRun {
         #[arg(long)]
@@ -186,6 +188,12 @@ pub(crate) enum ConfigCommand {
         placement: WorkerPlacement,
     },
     SetAutoWorkerPane {
+        #[arg(action = clap::ArgAction::Set)]
+        enabled: bool,
+    },
+    /// Run harnesses as their own TUI in a Herdr pane (true, the default) or
+    /// headless in print mode (false).
+    SetPaneMode {
         #[arg(action = clap::ArgAction::Set)]
         enabled: bool,
     },
@@ -486,4 +494,23 @@ pub(crate) enum HookEvent {
     SessionStart,
     UserPromptSubmit,
     Stop,
+}
+
+/// Arguments the supervisor passes to the hidden pane-mode runner.
+#[derive(Args)]
+pub(crate) struct PaneRunArgs {
+    #[arg(long)]
+    pub(crate) prompt_file: PathBuf,
+    #[arg(long)]
+    pub(crate) workspace: PathBuf,
+    #[arg(long)]
+    pub(crate) task: TaskId,
+    #[arg(long)]
+    pub(crate) revision: u32,
+    #[arg(long)]
+    pub(crate) kind: String,
+    #[arg(long = "agent-arg", allow_hyphen_values = true)]
+    pub(crate) agent_args: Vec<String>,
+    #[arg(long)]
+    pub(crate) keep_pane: bool,
 }

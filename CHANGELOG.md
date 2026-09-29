@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+Inside Herdr, a worker can now run as the harness's own interactive session in
+a pane beside the caller, so the work is visible while it happens. A harness
+opts in with a new manifest field, `launch.interactive` (`herdr_kind` and extra
+`argv`); Claude Code is the first. brgr splits a pane to the right without
+taking focus, starts the agent there with the task's permission, model, and
+effort flags, sends the prompt, and asks the agent to write its final answer to
+a report file, which brgr seals as the result. The pane closes when the task
+finishes. If the agent stops at an approval or question prompt, brgr sends the
+owner a question notice instead of answering it. A `read-only` task, a task run
+outside Herdr, and a harness without the field all keep the print-mode run.
+`brgr config set-pane-mode false` turns pane mode off.
+
 Claude Code and Cline can now run a chosen model with `brgr run --model`. brgr
 checks a model name against a list before a paid run, and neither CLI can list
 its models, so both used only their configured default. Both refuse a name they

@@ -173,6 +173,22 @@ pub struct LaunchSpec {
     /// a manifest that predates levels or a custom one that declares none.
     #[serde(default, skip_serializing_if = "PermissionArgv::is_empty")]
     pub permission_argv: PermissionArgv,
+    /// How to run this harness as its own interactive TUI in a Herdr pane, so
+    /// the work is visible. Absent for a harness Herdr does not recognize.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interactive: Option<InteractiveSpec>,
+}
+
+/// An interactive launch through `herdr agent start`.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InteractiveSpec {
+    /// The agent kind Herdr recognizes, e.g. `claude`.
+    pub herdr_kind: String,
+    /// Arguments before the permission and model arguments, which are the
+    /// same ones the print-mode launch uses.
+    #[serde(default)]
+    pub argv: Vec<String>,
 }
 
 /// Per-level arguments. `Some(vec![])` is a level the harness honours with no
@@ -875,7 +891,19 @@ impl HarnessManifest {
             .argv
             .iter()
             .chain(self.launch.permission_argv.all())
+            .chain(
+                self.launch
+                    .interactive
+                    .iter()
+                    .flat_map(|spec| spec.argv.iter()),
+            )
             .any(|value| value.contains('\0'))
+            || self.launch.interactive.as_ref().is_some_and(|spec| {
+                spec.herdr_kind.is_empty()
+                    || !spec.herdr_kind.bytes().all(|byte| {
+                        byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-'
+                    })
+            })
         {
             return Err(RunnerError::InvalidArgument);
         }
@@ -1502,6 +1530,7 @@ mod tests {
                 env_allow: vec![],
                 mode: ExecutionMode::OneShot,
                 permission_argv: PermissionArgv::default(),
+                interactive: None,
             },
             result: ResultSpec {
                 source: ResultSource::Stdout,

@@ -64,8 +64,8 @@ use std::{
 };
 
 use brgr_runner::{
-    Capability, CapabilityStatus, ExecutionMode, ExecutionOutput, HarnessManifest, LaunchSpec,
-    MANIFEST_SCHEMA_V1, ModelCatalogFormat, ModelCatalogSpec, OMP_ROLE_ADAPTER_V1,
+    Capability, CapabilityStatus, ExecutionMode, ExecutionOutput, HarnessManifest, InteractiveSpec,
+    LaunchSpec, MANIFEST_SCHEMA_V1, ModelCatalogFormat, ModelCatalogSpec, OMP_ROLE_ADAPTER_V1,
     PROCESS_ADAPTER_V1, PermissionArgv, ProbeSpec, ProcessRunner, ResultSource, ResultSpec,
     RunnerError,
 };
@@ -973,6 +973,9 @@ struct Recipe {
     full: Option<&'static [&'static str]>,
     edits: Option<&'static [&'static str]>,
     read_only: Option<&'static [&'static str]>,
+    /// The Herdr agent kind and leading arguments for running it as its own
+    /// TUI in a pane. Set only after a live run in a Herdr pane.
+    interactive: Option<(&'static str, &'static [&'static str])>,
 }
 
 #[derive(Clone, Copy)]
@@ -1044,6 +1047,7 @@ const GENERIC: Recipe = Recipe {
     full: None,
     edits: None,
     read_only: None,
+    interactive: None,
 };
 
 const RECIPES: &[Recipe] = &[
@@ -1272,6 +1276,7 @@ const RECIPES: &[Recipe] = &[
         full: Some(&["--permission-mode", "bypassPermissions"]),
         edits: Some(&["--permission-mode", "acceptEdits"]),
         read_only: Some(&["--permission-mode", "plan"]),
+        interactive: Some(("claude", &[])),
         ..GENERIC
     },
     Recipe {
@@ -1400,6 +1405,10 @@ fn draft(recipe: &Recipe, id: String, executable: PathBuf, help: &str) -> Harnes
                 edits: recipe.edits.map(strings),
                 read_only: recipe.read_only.map(strings),
             },
+            interactive: recipe.interactive.map(|(kind, argv)| InteractiveSpec {
+                herdr_kind: kind.to_owned(),
+                argv: strings(argv),
+            }),
         },
         result: ResultSpec {
             source: match recipe.source {
@@ -1980,6 +1989,7 @@ mod tests {
                 env_allow: vec!["HOME".to_owned(), "PATH".to_owned()],
                 mode: ExecutionMode::OneShot,
                 permission_argv: brgr_runner::PermissionArgv::default(),
+                interactive: None,
             },
             result: ResultSpec {
                 source: ResultSource::Stdout,
@@ -2438,6 +2448,7 @@ mod tests {
                 env_allow: vec!["HOME".to_owned(), "PATH".to_owned()],
                 mode: ExecutionMode::OneShot,
                 permission_argv: brgr_runner::PermissionArgv::default(),
+                interactive: None,
             },
             result: ResultSpec {
                 source: ResultSource::Stdout,

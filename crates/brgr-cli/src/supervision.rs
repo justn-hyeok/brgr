@@ -43,6 +43,8 @@ pub(crate) async fn supervise(paths: &Paths, launch_path: &Path, json_output: bo
     };
     let manifest = if manifest.adapter == brgr_runner::OMP_ROLE_ADAPTER_V1 {
         omp_process_manifest(paths, &launch, &manifest)?
+    } else if launch.pane_mode {
+        crate::pane_adapter::pane_process_manifest(paths, &launch, &manifest)?
     } else {
         manifest
     };
