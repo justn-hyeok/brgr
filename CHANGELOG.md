@@ -1,6 +1,6 @@
 # Changelog
 
-## 2.4.0 — unreleased
+## 2.4.0 — 2026-09-29
 
 Every managed worker can now ask its owner a question. The identity a worker
 needs to message — and the brief that tells it how — used to be attached only
