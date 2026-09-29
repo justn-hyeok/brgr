@@ -2,6 +2,14 @@
 
 ## 2.4.0 — unreleased
 
+A schema stamp from a different build no longer makes an open take the write lock.
+The stamp is derived from the schema text, so two builds whose text differs carry
+different stamps, and re-applying the batch on that signal alone had them rewrite
+`user_version` past each other on every open — turning a read-only command into one
+that needs the write lock. A mismatch is now checked read-only first, against the
+object names read out of the schema text, and the batch runs only when something is
+really absent. Two builds that disagree only on the digest leave it alone.
+
 A terminal commit no longer holds the store's write lock across artifact file I/O.
 `verify_candidate_artifacts` reads and re-hashes every sealed artifact, up to the
 20 MiB a manifest may declare, and moving the transaction to an immediate begin had

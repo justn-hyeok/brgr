@@ -2272,12 +2272,60 @@ fn initialize_connection(connection: &Connection) -> Result<(), StoreError> {
     }
     let stamp = schema_version();
     let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-    // Any difference, in either direction, re-applies the idempotent batch.
-    if version != stamp {
+    if version == stamp {
+        return Ok(());
+    }
+
+    // A different stamp means a build with different schema text opened this store,
+    // which is not the same as something being absent. Applying the batch on that
+    // signal alone made two builds rewrite `user_version` past each other, so a
+    // read-only command such as `brgr status` needed the write lock and failed
+    // after 16.8s against a held one — the contention the stamp exists to avoid.
+    // Check first; write only when an object really is missing.
+    let missing = missing_schema_objects(connection)?;
+    if !missing.is_empty() {
         connection.execute_batch(SCHEMA)?;
+        connection.pragma_update(None, "user_version", stamp)?;
+    } else if version == 0 {
+        // Written before the stamp existed: record it once so ordinary opens stop
+        // re-checking. A build that disagrees only on the digest leaves it alone.
         connection.pragma_update(None, "user_version", stamp)?;
     }
     Ok(())
+}
+
+/// Names every table and index [`SCHEMA`] declares that the store does not have.
+///
+/// Read-only, and one query rather than one per object.
+fn missing_schema_objects(connection: &Connection) -> Result<Vec<String>, StoreError> {
+    let mut statement =
+        connection.prepare("SELECT name FROM sqlite_master WHERE name IS NOT NULL")?;
+    let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+    let present = rows.collect::<Result<Vec<_>, _>>()?;
+    Ok(declared_schema_objects(SCHEMA)
+        .into_iter()
+        .filter(|name| !present.iter().any(|existing| existing == name))
+        .map(str::to_owned)
+        .collect())
+}
+
+/// Reads the object names out of the schema text instead of keeping a second list
+/// beside it, for the same reason the stamp is derived rather than hand-written: a
+/// parallel list is a thing to forget.
+fn declared_schema_objects(schema: &str) -> Vec<&str> {
+    schema
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            let rest = line
+                .strip_prefix("CREATE TABLE IF NOT EXISTS ")
+                .or_else(|| line.strip_prefix("CREATE UNIQUE INDEX IF NOT EXISTS "))
+                .or_else(|| line.strip_prefix("CREATE INDEX IF NOT EXISTS "))?;
+            rest.split(|character: char| character.is_whitespace() || character == '(')
+                .next()
+                .filter(|name| !name.is_empty())
+        })
+        .collect()
 }
 
 /// Retries an operation that failed only because another process held a lock.
@@ -4569,6 +4617,92 @@ mod tests {
             blocked.unwrap_err()
         )));
         transaction.commit().unwrap();
+    }
+
+    /// Two builds whose schema text differs must not rewrite `user_version` past
+    /// each other on every open.
+    ///
+    /// The stamp is derived from the schema text, so a build with one extra object
+    /// carries a different one. Applying the batch on that signal alone turned a
+    /// read-only command into one that needs the write lock: measured on
+    /// 2026-09-29, `brgr status` against a held lock failed after 16.8s. The
+    /// mismatch is now checked read-only first.
+    #[test]
+    fn a_stamp_from_another_build_does_not_make_an_open_take_the_write_lock() {
+        let root = TempDir::new().unwrap();
+        let first = Store::open(root.path()).unwrap();
+        // What the other build's stamp looks like: different, nonzero, and with
+        // every declared object still in place.
+        first
+            .connection
+            .pragma_update(None, "user_version", 4_242)
+            .unwrap();
+        drop(first);
+
+        let blocker = Connection::open(root.path().join("brgr.sqlite3")).unwrap();
+        blocker.busy_timeout(Duration::ZERO).unwrap();
+        blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
+
+        let started = Instant::now();
+        let reopened = Store::open(root.path());
+        let elapsed = started.elapsed();
+        blocker.execute_batch("ROLLBACK").unwrap();
+
+        assert!(
+            reopened.is_ok(),
+            "a foreign stamp made the open take the write lock: {:?}",
+            reopened.err()
+        );
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "the open waited {elapsed:?} on the write lock"
+        );
+        // The disagreement is left alone rather than fought over.
+        let version: i64 = reopened
+            .unwrap()
+            .connection
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 4_242);
+    }
+
+    /// The read-only check has to name what is actually absent, or the self-healing
+    /// above degrades into never applying the batch.
+    #[test]
+    fn the_declared_objects_are_read_from_the_schema_text() {
+        let declared = declared_schema_objects(SCHEMA);
+        for expected in [
+            "tasks",
+            "attempts",
+            "results",
+            "decisions",
+            "inbox_items",
+            "one_active_attempt_per_revision",
+            "results_task_revision",
+            "attempts_task_revision",
+        ] {
+            assert!(
+                declared.contains(&expected),
+                "{expected} is declared by SCHEMA but not recognised: {declared:?}"
+            );
+        }
+
+        let root = TempDir::new().unwrap();
+        let store = Store::open(root.path()).unwrap();
+        assert!(
+            missing_schema_objects(&store.connection)
+                .unwrap()
+                .is_empty(),
+            "a freshly initialized store is missing a declared object"
+        );
+        store
+            .connection
+            .execute_batch("DROP INDEX results_task_revision;")
+            .unwrap();
+        assert_eq!(
+            missing_schema_objects(&store.connection).unwrap(),
+            vec!["results_task_revision".to_owned()]
+        );
     }
 
     /// A hand-maintained version constant could be left behind by a schema
