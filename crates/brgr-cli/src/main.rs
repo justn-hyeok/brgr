@@ -11,6 +11,7 @@ mod workspace;
 mod worktree_prune;
 
 use std::{
+    collections::BTreeMap,
     collections::BTreeSet,
     env,
     fmt::Write as _,
@@ -2710,20 +2711,17 @@ fn prune(paths: &Paths, apply: bool, include_ignored: bool, json_output: bool) -
             row
         })
         .collect();
-    let count = |code: &str| {
-        swept
-            .entries
-            .iter()
-            .filter(|entry| entry.outcome.code() == code)
-            .count()
-    };
-    let orphan_count = |code: &str| {
-        swept
-            .orphans
-            .iter()
-            .filter(|orphan| orphan.outcome.code() == code)
-            .count()
-    };
+    // One pass each rather than one per reported figure.
+    let mut tally = BTreeMap::<&str, usize>::new();
+    for entry in &swept.entries {
+        *tally.entry(entry.outcome.code()).or_default() += 1;
+    }
+    let mut orphan_tally = BTreeMap::<&str, usize>::new();
+    for orphan in &swept.orphans {
+        *orphan_tally.entry(orphan.outcome.code()).or_default() += 1;
+    }
+    let count = |code: &str| tally.get(code).copied().unwrap_or_default();
+    let orphan_count = |code: &str| orphan_tally.get(code).copied().unwrap_or_default();
     // A checkout whose branch git kept is still reclaimed: its directory is gone
     // and will never be enumerated again, so counting it as kept would report
     // that nothing happened.

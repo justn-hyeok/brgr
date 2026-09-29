@@ -690,6 +690,11 @@ impl Store {
     ///
     /// Returns an error unless the attempt has a committed failed result.
     pub fn grant_pre_spawn_retry(&self, attempt_id: AttemptId) -> Result<(), StoreError> {
+        // Retried: without the grant a transient spawn failure becomes terminal.
+        retry_busy(|| self.grant_pre_spawn_retry_once(attempt_id))
+    }
+
+    fn grant_pre_spawn_retry_once(&self, attempt_id: AttemptId) -> Result<(), StoreError> {
         let outcome: Option<String> = self
             .connection
             .query_row(
@@ -730,6 +735,16 @@ impl Store {
     /// Rejects a missing/non-starting attempt, invalid receipt, or a second
     /// launch claim, including one from another supervisor connection.
     pub fn record_launch_intent(
+        &self,
+        attempt_id: AttemptId,
+        nonce: &str,
+        supervisor_epoch: u64,
+    ) -> Result<(), StoreError> {
+        // Retried: a running attempt depends on this receipt existing.
+        retry_busy(|| self.record_launch_intent_once(attempt_id, nonce, supervisor_epoch))
+    }
+
+    fn record_launch_intent_once(
         &self,
         attempt_id: AttemptId,
         nonce: &str,
@@ -779,6 +794,16 @@ impl Store {
     ///
     /// Rejects a stale nonce, invalid identity, or conflicting observation.
     pub fn record_runner_identity(
+        &self,
+        attempt_id: AttemptId,
+        nonce: &str,
+        identity: &RunnerIdentity,
+    ) -> Result<WriteOutcome, StoreError> {
+        // Retried: the process is already spawned when this is written.
+        retry_busy(|| self.record_runner_identity_once(attempt_id, nonce, identity))
+    }
+
+    fn record_runner_identity_once(
         &self,
         attempt_id: AttemptId,
         nonce: &str,
@@ -891,6 +916,16 @@ impl Store {
     /// Returns a conflict for a stale writer or an invalid transition. Terminal
     /// state is reserved for `commit_terminal_result`.
     pub fn compare_and_set_attempt_state(
+        &self,
+        attempt_id: AttemptId,
+        expected: AttemptState,
+        next: AttemptState,
+    ) -> Result<(), StoreError> {
+        // Retried: a state transition lost mid-run leaves the attempt unfinished.
+        retry_busy(|| self.compare_and_set_attempt_state_once(attempt_id, expected, next))
+    }
+
+    fn compare_and_set_attempt_state_once(
         &self,
         attempt_id: AttemptId,
         expected: AttemptState,
@@ -1577,6 +1612,11 @@ impl Store {
     /// Returns an error for malformed events, missing attempts, or conflicting
     /// reuse of an event identity or producer sequence.
     pub fn record_event(&self, event: &Event) -> Result<WriteOutcome, StoreError> {
+        // Retried: supervision events are written while the attempt is live.
+        retry_busy(|| self.record_event_once(event))
+    }
+
+    fn record_event_once(&self, event: &Event) -> Result<WriteOutcome, StoreError> {
         validate_schema(&event.schema)?;
         if event.producer.trim().is_empty() || event.producer_seq == 0 {
             return Err(StoreError::InvalidEvent);
@@ -4539,6 +4579,112 @@ mod tests {
             elapsed < BUSY_RETRY_BACKOFF * 8,
             "admission waited {elapsed:?} while holding the admission lock"
         );
+    }
+
+    /// Every write path must have a recorded decision about waiting for a lock.
+    ///
+    /// The rule this encodes: retry a write a running attempt depends on, do not
+    /// retry a write the caller can simply reissue, and never retry inside the
+    /// repository admission lock — #28 measured that turning one failure into two.
+    ///
+    /// Retry coverage was claimed once and was wrong, so it is bound here rather
+    /// than described. Adding a write path without classifying it fails this test.
+    #[test]
+    fn every_write_path_has_a_recorded_retry_decision() {
+        /// `true` where a contended write is retried.
+        const CLASSIFIED: &[(&str, bool)] = &[
+            // A running attempt depends on these: losing one leaves a paid run
+            // unfinished, which recovery can only settle as `Lost`.
+            ("claim_attempt_once", true),
+            ("commit_terminal_result_once", true),
+            ("record_decision_once", true),
+            ("record_decision_and_ack_once", true),
+            ("record_launch_intent_once", true),
+            ("record_runner_identity_once", true),
+            ("compare_and_set_attempt_state_once", true),
+            ("grant_pre_spawn_retry_once", true),
+            ("record_event_once", true),
+            // Runs inside the repository admission lock. Waiting here blocks every
+            // other admission on that repository; it must fail fast instead.
+            ("record_task_with_parent", false),
+            // Reissuable by the caller. Waiting would hold a runtime worker for a
+            // command the user can simply run again.
+            ("acknowledge", false),
+            ("acknowledge_bound", false),
+            ("bind_owner", false),
+            ("rebind_owner", false),
+            ("record_cancellation_intents", false),
+            ("post_message", false),
+            ("acknowledge_message", false),
+            // Notification delivery carries its own claim and lease protocol, which
+            // already re-drives a lost step. Left alone deliberately.
+            ("register_owner_surface", false),
+            ("claim_notification", false),
+            ("mark_notification_delivered", false),
+            ("release_notification_claim", false),
+        ];
+
+        let sources: [(&str, &str); 4] = [
+            ("lib.rs", include_str!("lib.rs")),
+            ("message.rs", include_str!("message.rs")),
+            ("notification.rs", include_str!("notification.rs")),
+            ("tree.rs", include_str!("tree.rs")),
+        ];
+        // Assembled at runtime so this test's own text is not a match.
+        let explicit = format!("self.{}()?", "write_transaction");
+        let implicit = format!("self.{}\n", "connection");
+
+        let mut unclassified = Vec::new();
+        for (name, source) in sources {
+            let body = source.split("\nmod tests").next().unwrap_or(source);
+            let lines: Vec<&str> = body.lines().collect();
+            for (index, line) in lines.iter().enumerate() {
+                let writes = line.contains(explicit.as_str())
+                    || (line.trim_end() == implicit.trim_end()
+                        && lines[index..index.saturating_add(7).min(lines.len())]
+                            .iter()
+                            .any(|ahead| {
+                                ahead.contains("INSERT ")
+                                    || ahead.contains("UPDATE ")
+                                    || ahead.contains("DELETE ")
+                            }));
+                if !writes {
+                    continue;
+                }
+                let enclosing = lines[..=index]
+                    .iter()
+                    .rev()
+                    .find_map(|candidate| {
+                        let trimmed = candidate.strip_prefix("    ")?;
+                        let rest = trimmed
+                            .strip_prefix("pub fn ")
+                            .or_else(|| trimmed.strip_prefix("fn "))?;
+                        rest.split('(').next()
+                    })
+                    .unwrap_or("<unknown>");
+                if !CLASSIFIED.iter().any(|(known, _)| *known == enclosing) {
+                    unclassified.push(format!("{name}:{} in {enclosing}", index + 1));
+                }
+            }
+        }
+        assert!(
+            unclassified.is_empty(),
+            "write paths with no recorded retry decision: {unclassified:?}\n\
+             add each to CLASSIFIED with the reason it does or does not wait"
+        );
+
+        // And the declared decisions must match what the code does.
+        let lib = include_str!("lib.rs");
+        for (name, retried) in CLASSIFIED {
+            if !lib.contains(&format!("fn {name}(")) {
+                continue;
+            }
+            let wrapped = lib.contains(&format!("retry_busy(|| self.{name}("));
+            assert_eq!(
+                wrapped, *retried,
+                "{name} is declared retried={retried} but the code says {wrapped}"
+            );
+        }
     }
 
     /// Every write transaction in this crate must begin through
