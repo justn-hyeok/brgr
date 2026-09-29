@@ -1570,6 +1570,168 @@ mod tests {
         assert_eq!(JSONL_TRANSPORT_LIMIT_BYTES, 64 * 1024 * 1024);
     }
 
+    /// A deterministic generator of adversarial bytes.
+    ///
+    /// `AGENTS.md` calls harness output untrusted, and the capture path is the
+    /// only place that reads it. The example-based tests around it all describe
+    /// well-formed streams; this walks shapes nobody wrote by hand. Seeded, so a
+    /// failure is reproducible from the printed case rather than from luck.
+    struct Adversary(u64);
+
+    impl Adversary {
+        fn next(&mut self) -> u64 {
+            // xorshift64*, enough for shaping input and small enough to read.
+            self.0 ^= self.0 >> 12;
+            self.0 ^= self.0 << 25;
+            self.0 ^= self.0 >> 27;
+            self.0.wrapping_mul(0x2545_f491_4f6c_dd1d)
+        }
+
+        fn pick<'a, T: ?Sized>(&mut self, options: &'a [&'a T]) -> &'a T {
+            options[usize::try_from(self.next()).unwrap_or(0) % options.len()]
+        }
+
+        /// Builds a stream out of fragments that have each broken something:
+        /// truncated JSON, the right shape with the wrong types, control bytes,
+        /// invalid UTF-8, no terminator, and a line with no newline at all.
+        fn stream(&mut self) -> Vec<u8> {
+            const FRAGMENTS: [&[u8]; 14] = [
+                b"{\"type\":\"message_update\",\"delta\":\"x\"}",
+                b"{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\"}}",
+                b"{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[]}}",
+                b"{\"type\":\"agent_end\"}",
+                b"{\"type\":\"agent_end\",\"stopReason\":\"completed\"}",
+                b"{\"type\":42}",
+                b"{\"type\":\"message_end\",\"message\":null}",
+                b"{\"type\":\"turn_end\",\"message\":{\"role\":\"assistant\"}}",
+                b"{",
+                b"}",
+                b"not json at all",
+                b"",
+                b"\x00\x01\x02\x7f",
+                b"\xff\xfe invalid utf-8",
+            ];
+            let mut stream = Vec::new();
+            for _ in 0..(self.next() % 12) {
+                stream.extend_from_slice(self.pick(&FRAGMENTS));
+                if !self.next().is_multiple_of(8) {
+                    stream.push(b'\n');
+                }
+            }
+            stream
+        }
+
+        /// A stream whose *retained* content passes the retention bound.
+        ///
+        /// Small fragments never reach it: retention is bounded by the result
+        /// limit plus a megabyte of slack, so a few kilobytes of input leaves the
+        /// bound untested. Verified by deleting the limit check — with only
+        /// [`Self::stream`] the property still passed, which made it decoration.
+        /// Only retained event kinds count, so this emits those.
+        fn flood(past: usize) -> Vec<u8> {
+            let filler = "y".repeat(8_000);
+            let mut stream = Vec::with_capacity(past + 16_000);
+            while stream.len() < past {
+                stream.extend_from_slice(
+                    format!(
+                        "{{\"type\":\"message_end\",\"message\":{{\"role\":\"assistant\",\
+                         \"content\":[{{\"type\":\"text\",\"text\":\"{filler}\"}}]}}}}\n"
+                    )
+                    .as_bytes(),
+                );
+            }
+            stream
+        }
+    }
+
+    /// The capture path must hold its bounds and its refusals for any input.
+    ///
+    /// Three properties, none of which any example test states: retention never
+    /// exceeds the limit it was given, a stream is never reported both complete
+    /// and truncated, and a final answer is only ever produced for a stream that
+    /// actually carries a terminal assistant event.
+    #[tokio::test]
+    async fn arbitrary_harness_output_never_breaks_the_capture_bounds() {
+        use tokio::io::AsyncWriteExt as _;
+
+        /// The head of a stream, for failure messages.
+        ///
+        /// A failing flood case would otherwise print a megabyte of filler and
+        /// bury the assertion that fired.
+        fn excerpt(raw: &[u8]) -> String {
+            let head = String::from_utf8_lossy(&raw[..raw.len().min(160)]).into_owned();
+            format!("{} bytes starting {head:?}", raw.len())
+        }
+
+        const RESULT_LIMIT: u64 = 4 * 1024;
+        // Deliberately above the retention bound. With a transport limit below
+        // it the reader always cuts on transport first, so retention never grows
+        // far enough for its own bound to mean anything — verified by deleting
+        // the limit check in `retain_jsonl_event` and watching this test still
+        // pass with a 64 KiB transport. Transport truncation has its own tests.
+        const TRANSPORT: u64 = 8 * 1024 * 1024;
+        let mut adversary = Adversary(0x5eed_1234_abcd_0001);
+
+        for case in 0..512 {
+            // Every sixteenth case carries enough retainable content to press on
+            // the retention bound; the rest explore shape rather than size.
+            let raw = if case % 16 == 0 {
+                Adversary::flood(
+                    usize::try_from(RESULT_LIMIT + JSONL_METADATA_SLACK_BYTES).unwrap() + 32_000,
+                )
+            } else {
+                adversary.stream()
+            };
+            let (mut writer, reader) = tokio::io::duplex(256);
+            let payload = raw.clone();
+            let writer_task = tokio::spawn(async move {
+                let _ = writer.write_all(&payload).await;
+            });
+            let overflow = Arc::new(AtomicBool::new(false));
+            let (semantic, truncated) =
+                read_jsonl_semantic(reader, RESULT_LIMIT, TRANSPORT, Arc::clone(&overflow))
+                    .await
+                    .expect("a duplex read cannot fail");
+            writer_task.await.unwrap();
+
+            assert!(
+                u64::try_from(semantic.len()).unwrap() <= RESULT_LIMIT + JSONL_METADATA_SLACK_BYTES,
+                "case {case} retained {} bytes past the limit: {}",
+                semantic.len(),
+                excerpt(&raw)
+            );
+            assert_eq!(
+                truncated,
+                overflow.load(Ordering::Relaxed),
+                "case {case} disagreed with its own overflow flag: {}",
+                excerpt(&raw)
+            );
+            // A final answer may only come from a stream that carries the event
+            // that ends one. Anything else must be an error, never a value.
+            if let Ok(final_answer) = extract_jsonl_assistant_final(&semantic) {
+                assert!(
+                    semantic
+                        .windows(b"message_end".len())
+                        .any(|w| w == b"message_end")
+                        || semantic
+                            .windows(b"turn_end".len())
+                            .any(|w| w == b"turn_end"),
+                    "case {case} produced {final_answer:?} with no terminal event: {}",
+                    excerpt(&raw)
+                );
+            }
+            // Model observation reads the same bytes and must not panic or invent
+            // an identity the stream does not contain.
+            if let Ok(Some(model)) = observe_jsonl_model(&semantic, None) {
+                assert!(
+                    semantic.windows(model.len()).any(|w| w == model.as_bytes()),
+                    "case {case} reported model {model} absent from the stream: {}",
+                    excerpt(&raw)
+                );
+            }
+        }
+    }
+
     #[tokio::test]
     async fn jsonl_transport_limit_truncates_without_retaining_the_raw_stream() {
         use tokio::io::AsyncWriteExt as _;
