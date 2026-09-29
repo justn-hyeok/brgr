@@ -24,7 +24,7 @@
             "format": {
               "oneOf": [
                 { "type": "object", "additionalProperties": false, "required": ["kind", "pointer", "field"], "properties": { "kind": { "const": "json_selectors" }, "pointer": { "type": "string", "pattern": "^/" }, "field": { "type": "string", "minLength": 1 } } },
-                { "type": "object", "additionalProperties": false, "required": ["kind"], "properties": { "kind": { "enum": ["canonical_provider_table", "dash_separated", "first_column"] } } }
+                { "type": "object", "additionalProperties": false, "required": ["kind"], "properties": { "kind": { "enum": ["canonical_provider_table", "dash_separated", "first_column", "lines"] } } }
               ]
             }
           }
@@ -42,7 +42,15 @@
           "type": "array", "uniqueItems": true, "maxItems": 32,
           "items": { "type": "string", "pattern": "^[A-Z_][A-Z0-9_]*$" }
         },
-        "mode": { "enum": ["one_shot", "delegated_external"] }
+        "mode": { "enum": ["one_shot", "delegated_external"] },
+        "permission_argv": {
+          "type": "object", "additionalProperties": false,
+          "properties": {
+            "full": { "$ref": "#/$defs/argv" },
+            "edits": { "$ref": "#/$defs/argv" },
+            "read_only": { "$ref": "#/$defs/argv" }
+          }
+        }
       }
     },
     "result": {

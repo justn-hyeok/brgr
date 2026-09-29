@@ -7,7 +7,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use crate::cli::{ReviseArgs, RunArgs};
+use crate::cli::{DelegationArgs, ReviseArgs, RunArgs};
 use crate::harness_commands::{recertify_action_fallback, require_healthy_harness};
 use crate::supervision::{record_unstarted_terminal, spawn_supervisor, supervise};
 use crate::{
@@ -18,8 +18,8 @@ use crate::{
 use anyhow::{Context, Result, bail};
 use brgr_core::TaskRevision;
 use brgr_protocol::{
-    ArtifactContract, AttemptBudget, AttemptId, DecisionVerdict, OwnerId, Route, SCHEMA_V1, TaskId,
-    TaskInstructions, TaskSpec, TerminalOutcome,
+    ArtifactContract, AttemptBudget, AttemptId, DecisionVerdict, OwnerId, PermissionLevel, Route,
+    SCHEMA_V1, TaskId, TaskInstructions, TaskSpec, TerminalOutcome,
 };
 use brgr_registry::{ActivationReceipt, Registry};
 use brgr_runner::HarnessManifest;
@@ -78,18 +78,7 @@ pub(crate) async fn run_task(paths: &Paths, args: RunArgs, json_output: bool) ->
     let task_id = TaskId::new();
     let forward_criteria = args.forwards_criteria();
     let source_workspace = args.workspace.unwrap_or(env::current_dir()?);
-    let explicit_parent = args
-        .delegation
-        .parent_task
-        .zip(args.delegation.parent_attempt);
-    let inherited_parent = delegation_parent_from_environment()?;
-    if explicit_parent.is_some()
-        && inherited_parent.is_some()
-        && explicit_parent != inherited_parent
-    {
-        bail!("explicit delegation parent differs from the current worker attempt");
-    }
-    let parent = explicit_parent.or(inherited_parent);
+    let parent = delegation_parent(&args.delegation)?;
     let owner_id = if let Some((_, attempt)) = parent {
         OwnerId::new(format!("worker:{attempt}"))?
     } else {
@@ -126,6 +115,7 @@ pub(crate) async fn run_task(paths: &Paths, args: RunArgs, json_output: bool) ->
         },
         evidence: args.evidence.spec(),
         max_concurrent_children: args.max_children,
+        permission: args.permission.map(Into::into),
     };
     spec.validate()?;
     activated.validate_task_route(&spec)?;
@@ -190,13 +180,13 @@ pub(crate) async fn revise_task(paths: &Paths, args: ReviseArgs, json_output: bo
     let source_workspace = args
         .workspace
         .unwrap_or_else(|| PathBuf::from(&previous.workspace));
-    let criteria = acceptance_criteria(&args.objective, args.criteria);
     let mut replacement = previous.clone();
+    replacement.acceptance_criteria = acceptance_criteria(&args.objective, args.criteria);
     replacement.revision = next_revision;
     replacement.create_request_id = format!("revise-{}-{next_revision}", args.task);
     replacement.objective = args.objective;
+    replacement.permission = args.permission.map(Into::into).or(replacement.permission);
     replacement.workspace = source_workspace.to_string_lossy().into_owned();
-    replacement.acceptance_criteria = criteria;
     let requested = args.capabilities.required_names()?;
     replacement.required_capabilities.extend(requested);
     replacement.required_capabilities.sort();
@@ -273,6 +263,7 @@ pub(crate) async fn start_task(
     options: StartOptions<'_>,
 ) -> Result<()> {
     spec.validate()?;
+    spec.permission = effective_permission(paths, &spec, options.parent)?;
     activated.validate_task_route(&spec)?;
     let source = options.source_workspace.canonicalize()?;
     let home = paths.home.canonicalize()?;
@@ -546,4 +537,67 @@ fn require_parent_may_delegate(
         );
     }
     Ok(())
+}
+
+/// The level a task runs at.
+///
+/// Whatever was asked for, bounded by the configured cap and by the parent
+/// task's own level: a child never gets more than the worker that started it.
+/// Asking for more is an error rather than a quiet downgrade, so the caller
+/// finds out. Asking for nothing yields the tightest bound, if any; a bound of
+/// `full` is no bound, which keeps a task that asked for nothing running
+/// exactly as it did before levels existed.
+fn effective_permission(
+    paths: &Paths,
+    spec: &TaskSpec,
+    parent: Option<(TaskId, AttemptId)>,
+) -> Result<Option<PermissionLevel>> {
+    let cap = Config::load(&paths.config)?.worker.max_permission;
+    let parent_level = match parent {
+        Some((_, attempt)) => {
+            Store::open(&paths.store)?
+                .task_for_attempt(attempt)?
+                .permission
+        }
+        None => None,
+    };
+    bound_permission(spec.permission, cap, parent_level)
+}
+
+/// The rule behind [`effective_permission`], without the lookups.
+pub(crate) fn bound_permission(
+    requested: Option<PermissionLevel>,
+    cap: Option<PermissionLevel>,
+    parent: Option<PermissionLevel>,
+) -> Result<Option<PermissionLevel>> {
+    let bounds = [
+        ("the configured maximum", cap),
+        ("the parent task's level", parent),
+    ];
+    if let Some(requested) = requested {
+        for (source, bound) in bounds {
+            if let Some(bound) = bound
+                && requested > bound
+            {
+                bail!("permission {requested:?} exceeds {source}, {bound:?}");
+            }
+        }
+        return Ok(Some(requested));
+    }
+    Ok(bounds
+        .into_iter()
+        .filter_map(|(_, bound)| bound)
+        .min()
+        .filter(|level| *level != PermissionLevel::Full))
+}
+
+/// The attempt a new task is delegated from: named on the command line or
+/// inherited from the worker environment, and the two must agree.
+fn delegation_parent(args: &DelegationArgs) -> Result<Option<(TaskId, AttemptId)>> {
+    let explicit = args.parent_task.zip(args.parent_attempt);
+    let inherited = delegation_parent_from_environment()?;
+    if explicit.is_some() && inherited.is_some() && explicit != inherited {
+        bail!("explicit delegation parent differs from the current worker attempt");
+    }
+    Ok(explicit.or(inherited))
 }

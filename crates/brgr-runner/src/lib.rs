@@ -87,6 +87,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+/// Re-exported because manifests take it: a caller choosing a level should not
+/// need the protocol crate to name one.
+pub use brgr_protocol::PermissionLevel;
 use brgr_protocol::{AttemptId, TaskId, TaskInstructions, TaskSpec};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -139,10 +142,16 @@ pub struct ModelCatalogSpec {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ModelCatalogFormat {
-    JsonSelectors { pointer: String, field: String },
+    JsonSelectors {
+        pointer: String,
+        field: String,
+    },
     CanonicalProviderTable,
     DashSeparated,
     FirstColumn,
+    /// One `provider/model` selector per line and nothing else, as
+    /// `opencode models` prints.
+    Lines,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -156,6 +165,76 @@ pub struct LaunchSpec {
     #[serde(default)]
     pub env_allow: Vec<String>,
     pub mode: ExecutionMode,
+    /// Arguments for each permission level the harness can honour. Empty for
+    /// a manifest that predates levels or a custom one that declares none.
+    #[serde(default, skip_serializing_if = "PermissionArgv::is_empty")]
+    pub permission_argv: PermissionArgv,
+}
+
+/// Per-level arguments. `Some(vec![])` is a level the harness honours with no
+/// flag; `None` is a level it cannot honour, which is refused rather than run
+/// under a wider one.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PermissionArgv {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub full: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edits: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_only: Option<Vec<String>>,
+}
+
+impl PermissionArgv {
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.full.is_none() && self.edits.is_none() && self.read_only.is_none()
+    }
+
+    #[must_use]
+    pub fn for_level(&self, level: PermissionLevel) -> Option<&[String]> {
+        match level {
+            PermissionLevel::Full => self.full.as_deref(),
+            PermissionLevel::Edits => self.edits.as_deref(),
+            PermissionLevel::ReadOnly => self.read_only.as_deref(),
+        }
+    }
+
+    fn all(&self) -> impl Iterator<Item = &String> {
+        [&self.full, &self.edits, &self.read_only]
+            .into_iter()
+            .flatten()
+            .flatten()
+    }
+}
+
+impl HarnessManifest {
+    /// The arguments that make this harness run at `requested`.
+    ///
+    /// No request keeps the harness's own default: the full level where the
+    /// recipe declares levels, and plain `argv` for a manifest without them —
+    /// which is how every task before levels existed ran. An explicit request
+    /// the harness cannot honour is an error, never a wider level.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RunnerError::UnsupportedPermission`] for a level the manifest
+    /// does not declare.
+    pub fn permission_arguments(
+        &self,
+        requested: Option<PermissionLevel>,
+    ) -> Result<&[String], RunnerError> {
+        let table = &self.launch.permission_argv;
+        match requested {
+            None if table.is_empty() => Ok(&[]),
+            level => {
+                let level = level.unwrap_or(PermissionLevel::Full);
+                table
+                    .for_level(level)
+                    .ok_or(RunnerError::UnsupportedPermission(level))
+            }
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -245,6 +324,7 @@ pub struct RunRequest<'a> {
     pub instructions: Option<&'a TaskInstructions>,
     pub model: Option<&'a str>,
     pub effort: Option<&'a str>,
+    pub permission: Option<PermissionLevel>,
     pub deadline: Duration,
     pub cancel_path: Option<&'a Path>,
     pub pid_path: Option<&'a Path>,
@@ -701,6 +781,8 @@ impl HarnessManifest {
     /// required operation. OMP's internal process wrapper preserves the
     /// activated OMP capabilities but has its own executable identity.
     pub fn validate_task_route(&self, task: &TaskSpec) -> Result<(), RunnerError> {
+        // Refused at admission rather than after a paid launch.
+        self.permission_arguments(task.permission)?;
         self.validate()?;
         if self.id != task.route.harness_id
             && !(self.id == "internal.omp-runner"
@@ -784,7 +866,13 @@ impl HarnessManifest {
         if !self.executable.is_absolute() || !self.executable.is_file() {
             return Err(RunnerError::InvalidExecutable(self.executable.clone()));
         }
-        if self.launch.argv.iter().any(|value| value.contains('\0')) {
+        if self
+            .launch
+            .argv
+            .iter()
+            .chain(self.launch.permission_argv.all())
+            .any(|value| value.contains('\0'))
+        {
             return Err(RunnerError::InvalidArgument);
         }
         if let Some(catalog) = &self.probe.model_catalog
@@ -840,6 +928,7 @@ fn render_argv(
     values: &Substitutions<'_>,
 ) -> Result<Vec<String>, RunnerError> {
     let mut arguments = manifest.launch.argv.clone();
+    arguments.extend_from_slice(manifest.permission_arguments(request.permission)?);
     if request.model.is_some() {
         arguments.extend(manifest.launch.model_argv.clone());
     }
@@ -1322,6 +1411,8 @@ fn join_capture(
 
 #[derive(Debug, Error)]
 pub enum RunnerError {
+    #[error("harness does not support permission level {0:?}; it will not run under a wider one")]
+    UnsupportedPermission(PermissionLevel),
     #[error("child process could not start: {0}")]
     SpawnIo(std::io::Error),
     #[error("unsupported manifest schema: {0}")]
@@ -1405,6 +1496,7 @@ mod tests {
                 effort_argv: vec![],
                 env_allow: vec![],
                 mode: ExecutionMode::OneShot,
+                permission_argv: PermissionArgv::default(),
             },
             result: ResultSpec {
                 source: ResultSource::Stdout,
@@ -1482,6 +1574,7 @@ mod tests {
             instructions: None,
             model: None,
             effort: None,
+            permission: None,
             deadline: Duration::from_secs(2),
             cancel_path: None,
             pid_path: None,
@@ -1542,6 +1635,7 @@ mod tests {
             instructions: TaskInstructions::default(),
             evidence: brgr_protocol::EvidenceSpec::default(),
             max_concurrent_children: None,
+            permission: None,
         };
         assert!(matches!(
             manifest.validate_task_route(&task),
@@ -1579,6 +1673,7 @@ mod tests {
                 instructions: None,
                 model: None,
                 effort: None,
+                permission: None,
                 deadline: Duration::from_millis(250),
                 cancel_path: None,
                 pid_path: None,
@@ -1607,6 +1702,7 @@ mod tests {
                 instructions: None,
                 model: None,
                 effort: None,
+                permission: None,
                 deadline: Duration::from_secs(2),
                 cancel_path: None,
                 pid_path: None,
@@ -1632,6 +1728,7 @@ mod tests {
                 instructions: None,
                 model: None,
                 effort: None,
+                permission: None,
                 deadline: Duration::from_secs(2),
                 cancel_path: None,
                 pid_path: None,
@@ -2073,6 +2170,7 @@ mod tests {
             instructions: None,
             model: None,
             effort: None,
+            permission: None,
             deadline: Duration::from_secs(1),
             cancel_path: None,
             pid_path: None,
@@ -2113,6 +2211,7 @@ mod tests {
                 instructions: None,
                 model: None,
                 effort: None,
+                permission: None,
                 deadline: Duration::from_secs(10),
                 cancel_path: None,
                 pid_path: None,
@@ -2154,6 +2253,7 @@ mod tests {
                 instructions: None,
                 model: None,
                 effort: None,
+                permission: None,
                 deadline: Duration::from_secs(10),
                 cancel_path: Some(&cancel),
                 pid_path: None,

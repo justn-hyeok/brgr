@@ -65,6 +65,9 @@ fn add_fixture(home: &Path, fixture: &Path, scratch: &Path) {
     assert!(receipt["scratch_result_digest"].as_str().is_some());
 }
 
+/// Fails unless brgr runs it the way the Devin recipe promises: print mode,
+/// workspace trust bypassed, and — with no level requested — the full level,
+/// which Devin calls `dangerous`.
 const DEVIN_FIXTURE: &str = r#"#!/bin/sh
 case "$1" in
   --version) echo 'devin 3000.fixture'; exit 0;;
@@ -78,20 +81,20 @@ case "$1" in
 esac
 prompt_file=
 print_mode=0
-smart_mode=0
+full_mode=0
 trust_bypassed=0
 while test "$#" -gt 0; do
   case "$1" in
     --prompt-file) shift; prompt_file=$1;;
     -p|--print) print_mode=1;;
-    --permission-mode) shift; test "$1" = smart || exit 3; smart_mode=1;;
+    --permission-mode) shift; test "$1" = dangerous || exit 3; full_mode=1;;
     --respect-workspace-trust) shift; test "$1" = false || exit 4; trust_bypassed=1;;
     *) exit 5;;
   esac
   shift
 done
 test "$print_mode" = 1 || exit 6
-test "$smart_mode" = 1 || exit 7
+test "$full_mode" = 1 || exit 7
 test "$trust_bypassed" = 1 || exit 8
 test -f "$prompt_file" || exit 10
 /bin/cat "$prompt_file"
@@ -685,6 +688,99 @@ fn a_worker_started_without_delegation_cannot_start_a_child() {
     assert_eq!(sealed["artifacts"][0]["text"], "SPAWN_REFUSED", "{sealed}");
     let listed = json_output(&run(&home, &["status"], &owner));
     assert_eq!(listed.as_array().map(Vec::len), Some(1), "{listed}");
+}
+
+/// A level the harness cannot honour is refused before anything runs, and a
+/// configured cap binds a task that asked for nothing instead of being ignored.
+///
+/// The gjc recipe has no approval system, so it declares only `full`: asking it
+/// for read-only must fail rather than run with every tool approved.
+#[test]
+fn a_permission_the_harness_cannot_honour_is_refused_before_it_runs() {
+    let (_temp, home, workspace) = gjc_home();
+    let owner = [("BRGR_OWNER_ID", "codex:permission-test")];
+    let ws = workspace.to_str().unwrap();
+    let refuse = |args: &[&str], why: &str| {
+        let output = run(&home, args, &owner);
+        assert!(!output.status.success(), "{why}: ran anyway");
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        assert!(stderr.contains("permission"), "{why}: {stderr}");
+    };
+
+    refuse(
+        &[
+            "run",
+            "BRGR_FIXTURE_OK",
+            "--workspace",
+            ws,
+            "--foreground",
+            "--permission",
+            "read-only",
+        ],
+        "explicit read-only on a full-only harness",
+    );
+
+    json_output(&run(
+        &home,
+        &["config", "set-max-permission", "edits"],
+        &owner,
+    ));
+    refuse(
+        &["run", "BRGR_FIXTURE_OK", "--workspace", ws, "--foreground"],
+        "a cap on a harness that cannot honour it",
+    );
+    refuse(
+        &[
+            "run",
+            "BRGR_FIXTURE_OK",
+            "--workspace",
+            ws,
+            "--foreground",
+            "--permission",
+            "full",
+        ],
+        "a request above the cap",
+    );
+
+    // A cap of full is no cap.
+    json_output(&run(
+        &home,
+        &["config", "set-max-permission", "full"],
+        &owner,
+    ));
+    let ran = json_output(&run(
+        &home,
+        &["run", "BRGR_FIXTURE_OK", "--workspace", ws, "--foreground"],
+        &owner,
+    ));
+    assert_eq!(ran["outcome"], "candidate", "{ran}");
+
+    json_output(&run(&home, &["config", "clear-max-permission"], &owner));
+    let ran = json_output(&run(
+        &home,
+        &[
+            "run",
+            "BRGR_FIXTURE_OK",
+            "--workspace",
+            ws,
+            "--foreground",
+            "--permission",
+            "full",
+        ],
+        &owner,
+    ));
+    assert_eq!(ran["outcome"], "candidate", "{ran}");
+    assert_eq!(
+        store_task(&home, ran["task_id"].as_str().unwrap()).permission,
+        Some(brgr_protocol::PermissionLevel::Full)
+    );
+}
+
+fn store_task(home: &Path, task: &str) -> brgr_protocol::TaskSpec {
+    brgr_store::Store::open(home.join("store"))
+        .unwrap()
+        .task(task.parse().unwrap())
+        .unwrap()
 }
 
 const RECURSIVE_GJC_FIXTURE: &str = r#"#!/bin/sh

@@ -66,7 +66,8 @@ use std::{
 use brgr_runner::{
     Capability, CapabilityStatus, ExecutionMode, ExecutionOutput, HarnessManifest, LaunchSpec,
     MANIFEST_SCHEMA_V1, ModelCatalogFormat, ModelCatalogSpec, OMP_ROLE_ADAPTER_V1,
-    PROCESS_ADAPTER_V1, ProbeSpec, ProcessRunner, ResultSource, ResultSpec, RunnerError,
+    PROCESS_ADAPTER_V1, PermissionArgv, ProbeSpec, ProcessRunner, ResultSource, ResultSpec,
+    RunnerError,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -378,6 +379,7 @@ impl Registry {
                 instructions: None,
                 model,
                 effort,
+                permission: None,
                 deadline: Duration::from_mins(1),
                 cancel_path: None,
                 pid_path: None,
@@ -385,7 +387,19 @@ impl Registry {
         )
         .await?;
         if !output.succeeded(manifest) || output.result.is_empty() {
-            return Err(RegistryError::ScratchRunFailed);
+            // Say which condition failed. The bare "did not succeed" left a
+            // working CLI looking broken with nothing to go on. The harness's own
+            // output is never echoed, as everywhere else in this crate.
+            return Err(RegistryError::ScratchRunFailed(format!(
+                "exit code {}, timed out {}, output truncated {}, {} result bytes, {} stderr bytes",
+                output
+                    .exit_code
+                    .map_or_else(|| "none".to_owned(), |code| code.to_string()),
+                output.timed_out,
+                output.output_truncated,
+                output.result.len(),
+                output.stderr.len()
+            )));
         }
         let after = match authority {
             RecipeAuthority::Generated => {
@@ -513,9 +527,11 @@ impl Registry {
             other => return Ok(other),
         }
         manifest.validate()?;
-        for (argv, expected) in [
-            (&manifest.probe.version_argv, &receipt.version_digest),
-            (&manifest.probe.help_argv, &receipt.help_digest),
+        // Help is digested the way registration digested it, so a CLI that
+        // prints help to stderr is not reported as changed on every check.
+        for (argv, expected, is_help) in [
+            (&manifest.probe.version_argv, &receipt.version_digest, false),
+            (&manifest.probe.help_argv, &receipt.help_digest, true),
         ] {
             let observed =
                 match ProcessRunner::probe(&manifest.executable, argv, PROBE_DEADLINE).await {
@@ -525,7 +541,12 @@ impl Registry {
                     }
                     Err(error) => return Err(error.into()),
                 };
-            match classify_probe(&observed, expected)? {
+            let evidence = if is_help {
+                help_output(&observed)
+            } else {
+                &observed.stdout
+            };
+            match classify_probe(&observed, evidence, expected)? {
                 Health::Healthy => {}
                 other => return Ok(other),
             }
@@ -750,12 +771,12 @@ async fn probe_custom_contract(manifest: &HarnessManifest) -> Result<ProbeEviden
     {
         return Err(RegistryError::ProbeFailed);
     }
-    let help_text = String::from_utf8_lossy(&help.stdout);
+    let help_text = String::from_utf8_lossy(help_output(&help));
     validate_custom_argv(manifest, &help_text)?;
     Ok(ProbeEvidence {
         executable: digest_file(&manifest.executable)?,
         version: digest_bytes(&version.stdout),
-        help: digest_bytes(&help.stdout),
+        help: digest_bytes(help_output(&help)),
     })
 }
 
@@ -862,6 +883,17 @@ async fn draft_manifest(
     draft_manifest_as(executable, &requested_name).await
 }
 
+/// The help a probe printed. Some CLIs print it to stderr — `opencode run
+/// --help` writes nothing to stdout — so stderr counts when stdout is empty.
+/// A CLI that prints to stdout keeps exactly the evidence it had before.
+fn help_output(help: &ExecutionOutput) -> &[u8] {
+    if help.stdout.is_empty() {
+        &help.stderr
+    } else {
+        &help.stdout
+    }
+}
+
 async fn draft_manifest_as(
     executable: &Path,
     requested_name: &str,
@@ -870,13 +902,20 @@ async fn draft_manifest_as(
     if !realpath.is_file() {
         return Err(RegistryError::UnsupportedHarness);
     }
-    let version_argv = if requested_name == "omp-role" {
-        vec!["--help".to_owned()]
-    } else {
-        vec!["--version".to_owned()]
-    };
+    // The recipe says where its version and help live; a CLI whose flags
+    // belong to a subcommand documents them only there.
+    let recipe = RECIPES
+        .iter()
+        .find(|recipe| recipe.names.contains(&requested_name))
+        .unwrap_or(&GENERIC);
+    let version_argv = vec![recipe.version_argv.to_owned()];
+    let help_argv: Vec<String> = recipe
+        .help_argv
+        .iter()
+        .map(|arg| (*arg).to_owned())
+        .collect();
     let version = ProcessRunner::probe(&realpath, &version_argv, PROBE_DEADLINE).await?;
-    let help = ProcessRunner::probe(&realpath, &["--help".to_owned()], PROBE_DEADLINE).await?;
+    let help = ProcessRunner::probe(&realpath, &help_argv, PROBE_DEADLINE).await?;
     if version.exit_code != Some(0)
         || help.exit_code != Some(0)
         || version.timed_out
@@ -886,7 +925,7 @@ async fn draft_manifest_as(
     {
         return Err(RegistryError::ProbeFailed);
     }
-    let help_text = String::from_utf8_lossy(&help.stdout);
+    let help_text = String::from_utf8_lossy(help_output(&help));
     let manifest = generate_manifest(requested_name, realpath, &help_text)?;
     manifest.validate()?;
     let executable_digest = digest_file(&manifest.executable)?;
@@ -895,7 +934,7 @@ async fn draft_manifest_as(
         ProbeEvidence {
             executable: executable_digest,
             version: digest_bytes(&version.stdout),
-            help: digest_bytes(&help.stdout),
+            help: digest_bytes(help_output(&help)),
         },
     ))
 }
@@ -922,6 +961,14 @@ struct Recipe {
     source: Source,
     media_type: &'static str,
     capabilities: &'static [(&'static str, Cap)],
+    /// Where the help that documents `required_flags` lives, when the flags
+    /// belong to a subcommand (`opencode run --help`).
+    help_argv: &'static [&'static str],
+    /// Arguments for each permission level; `None` is a level the CLI has no
+    /// way to honour, which brgr then refuses rather than run wider.
+    full: Option<&'static [&'static str]>,
+    edits: Option<&'static [&'static str]>,
+    read_only: Option<&'static [&'static str]>,
 }
 
 #[derive(Clone, Copy)]
@@ -930,6 +977,7 @@ enum Catalog {
     OmpSelectors,
     DashSeparated,
     FirstColumn,
+    Lines,
 }
 
 #[derive(Clone, Copy)]
@@ -985,6 +1033,12 @@ const GENERIC: Recipe = Recipe {
         ("model_select", Cap::Unsupported("not_observed")),
         ("effort_select", Cap::Unsupported("not_observed")),
     ],
+    help_argv: &["--help"],
+    // A generic CLI's approval model is unknown, so it declares no levels and
+    // runs only as it always has.
+    full: None,
+    edits: None,
+    read_only: None,
 };
 
 const RECIPES: &[Recipe] = &[
@@ -1005,6 +1059,9 @@ const RECIPES: &[Recipe] = &[
         env_allow: &BASE_ENV,
         source: Source::JsonlAssistantFinal,
         capabilities: &JSON_CAPS,
+        full: Some(&[]),
+        edits: None,
+        read_only: None,
         ..GENERIC
     },
     Recipe {
@@ -1035,6 +1092,9 @@ const RECIPES: &[Recipe] = &[
         env_allow: &BASE_ENV,
         source: Source::JsonlAssistantFinal,
         capabilities: &JSON_CAPS,
+        full: Some(&["--approval-mode=yolo"]),
+        edits: Some(&["--approval-mode=write"]),
+        read_only: None,
         ..GENERIC
     },
     Recipe {
@@ -1049,8 +1109,6 @@ const RECIPES: &[Recipe] = &[
         catalog: Some((&["models"], Catalog::DashSeparated)),
         argv: &[
             "--print",
-            "--mode",
-            "ask",
             "--output-format",
             "text",
             "--trust",
@@ -1066,6 +1124,9 @@ const RECIPES: &[Recipe] = &[
             ("model_select", Cap::Supported("--model")),
             ("effort_select", Cap::Unsupported("not_observed")),
         ],
+        full: Some(&["--force"]),
+        edits: Some(&[]),
+        read_only: Some(&["--mode", "plan"]),
         ..GENERIC
     },
     Recipe {
@@ -1087,10 +1148,6 @@ const RECIPES: &[Recipe] = &[
             "--no-skills",
             "--skip-onboarding",
             "--no-auto-update",
-            "--max-turns",
-            "2",
-            "--permission-mode",
-            "plan",
             "--print",
             "${input.prompt}",
         ],
@@ -1104,6 +1161,9 @@ const RECIPES: &[Recipe] = &[
             ("model_select", Cap::Supported("--model")),
             ("effort_select", Cap::Supported("--effort")),
         ],
+        full: Some(&["--permission-mode", "yolo"]),
+        edits: Some(&["--permission-mode", "accept-edits"]),
+        read_only: Some(&["--permission-mode", "plan"]),
         ..GENERIC
     },
     Recipe {
@@ -1116,8 +1176,6 @@ const RECIPES: &[Recipe] = &[
             "--respect-workspace-trust [<RESPECT_WORKSPACE_TRUST>]",
         ],
         argv: &[
-            "--permission-mode",
-            "smart",
             "--respect-workspace-trust",
             "false",
             "--prompt-file",
@@ -1134,6 +1192,9 @@ const RECIPES: &[Recipe] = &[
             ("model_select", Cap::Unsupported("configured_default_only")),
             ("effort_select", Cap::Unsupported("not_observed")),
         ],
+        full: Some(&["--permission-mode", "dangerous"]),
+        edits: Some(&["--permission-mode", "accept-edits"]),
+        read_only: Some(&["--permission-mode", "auto"]),
         ..GENERIC
     },
     Recipe {
@@ -1162,6 +1223,93 @@ const RECIPES: &[Recipe] = &[
             ("presentation", Cap::Supported("herdr_optional_adapter")),
             ("cancel", Cap::Unknown("not_certified_in_v1")),
         ],
+        ..GENERIC
+    },
+    Recipe {
+        names: &["claude", "claude-code"],
+        id: "local.claude-code",
+        required_flags: &[
+            "-p, --print",
+            "--output-format <format>",
+            "--model <model>",
+            "--permission-mode <mode>",
+        ],
+        argv: &[
+            "-p",
+            "--output-format",
+            "text",
+            "--no-session-persistence",
+            "${input.prompt}",
+        ],
+        effort_argv: &["--effort", "${route.effort}"],
+        effort_requires: Some("--effort <level>"),
+        // `USER` names the macOS keychain entry holding the login; without it
+        // Claude Code reports "Not logged in" even when it is.
+        env_allow: &[
+            "HOME",
+            "PATH",
+            "LANG",
+            "TMPDIR",
+            "USER",
+            "ANTHROPIC_API_KEY",
+        ],
+        capabilities: &[
+            PROCESS_CAPS[0],
+            PROCESS_CAPS[1],
+            // No model list to check a name against before a paid run, so the
+            // CLI's own configured default is used, as with Devin.
+            ("model_select", Cap::Unsupported("configured_default_only")),
+            ("effort_select", Cap::Supported("--effort")),
+        ],
+        full: Some(&["--permission-mode", "bypassPermissions"]),
+        edits: Some(&["--permission-mode", "acceptEdits"]),
+        read_only: Some(&["--permission-mode", "plan"]),
+        ..GENERIC
+    },
+    Recipe {
+        names: &["cline"],
+        id: "local.cline",
+        required_flags: &[
+            "-p, --plan",
+            "--auto-approve <boolean>",
+            "-m, --model <model-id>",
+            "--thinking <level>",
+        ],
+        argv: &["${input.prompt}"],
+        effort_argv: &["--thinking", "${route.effort}"],
+        env_allow: &BASE_ENV,
+        capabilities: &[
+            PROCESS_CAPS[0],
+            PROCESS_CAPS[1],
+            // No model list to check a name against before a paid run, so the
+            // CLI's own configured default is used, as with Devin.
+            ("model_select", Cap::Unsupported("configured_default_only")),
+            ("effort_select", Cap::Supported("--thinking")),
+        ],
+        full: Some(&["--auto-approve", "true"]),
+        edits: None,
+        read_only: Some(&["--plan"]),
+        ..GENERIC
+    },
+    Recipe {
+        names: &["opencode"],
+        id: "local.opencode",
+        required_flags: &["--model", "--variant", "--agent", "--auto"],
+        help_argv: &["run", "--help"],
+        catalog: Some((&["models"], Catalog::Lines)),
+        argv: &["run", "${input.prompt}"],
+        model_argv: &["--model", "${route.model}"],
+        effort_argv: &["--variant", "${route.effort}"],
+        env_allow: &BASE_ENV,
+        capabilities: &[
+            PROCESS_CAPS[0],
+            PROCESS_CAPS[1],
+            ("model_select", Cap::Supported("--model")),
+            ("effort_select", Cap::Supported("--variant")),
+        ],
+        full: Some(&["--auto"]),
+        edits: None,
+        read_only: Some(&["--agent", "plan"]),
         ..GENERIC
     },
 ];
@@ -1211,7 +1359,7 @@ fn draft(recipe: &Recipe, id: String, executable: PathBuf, help: &str) -> Harnes
         executable,
         probe: ProbeSpec {
             version_argv: vec![recipe.version_argv.to_owned()],
-            help_argv: vec!["--help".to_owned()],
+            help_argv: strings(recipe.help_argv),
             model_catalog: recipe.catalog.map(|(argv, format)| ModelCatalogSpec {
                 argv: strings(argv),
                 format: match format {
@@ -1222,6 +1370,7 @@ fn draft(recipe: &Recipe, id: String, executable: PathBuf, help: &str) -> Harnes
                     },
                     Catalog::DashSeparated => ModelCatalogFormat::DashSeparated,
                     Catalog::FirstColumn => ModelCatalogFormat::FirstColumn,
+                    Catalog::Lines => ModelCatalogFormat::Lines,
                 },
             }),
         },
@@ -1235,6 +1384,11 @@ fn draft(recipe: &Recipe, id: String, executable: PathBuf, help: &str) -> Harnes
             },
             env_allow: strings(recipe.env_allow),
             mode: ExecutionMode::OneShot,
+            permission_argv: PermissionArgv {
+                full: recipe.full.map(strings),
+                edits: recipe.edits.map(strings),
+                read_only: recipe.read_only.map(strings),
+            },
         },
         result: ResultSpec {
             source: match recipe.source {
@@ -1332,6 +1486,16 @@ fn parse_model_catalog(
                     if selector != "auto" && !selector.is_empty() {
                         selectors.insert(selector.to_owned());
                     }
+                }
+            }
+        }
+        ModelCatalogFormat::Lines => {
+            let text =
+                std::str::from_utf8(bytes).map_err(|_| RegistryError::InvalidModelCatalog)?;
+            for line in text.lines().map(str::trim) {
+                // A bare `provider/model`; prose or a table row is not one.
+                if line.contains('/') && !line.contains(char::is_whitespace) {
+                    selectors.insert(line.to_owned());
                 }
             }
         }
@@ -1474,6 +1638,7 @@ fn health_for(receipt: &ActivationReceipt) -> Result<Health, RegistryError> {
 
 fn classify_probe(
     observed: &ExecutionOutput,
+    evidence: &[u8],
     expected_digest: &str,
 ) -> Result<Health, RegistryError> {
     if observed.timed_out {
@@ -1487,7 +1652,7 @@ fn classify_probe(
     if observed.output_truncated {
         return Err(RegistryError::ProbeFailed);
     }
-    let observed_digest = digest_bytes(&observed.stdout);
+    let observed_digest = digest_bytes(evidence);
     if observed_digest == expected_digest {
         Ok(Health::Healthy)
     } else {
@@ -1582,8 +1747,8 @@ pub enum RegistryError {
     UnsupportedScratchModel,
     #[error("this harness cannot select effort for its scratch run")]
     UnsupportedScratchEffort,
-    #[error("scratch run did not produce a successful nonempty result")]
-    ScratchRunFailed,
+    #[error("scratch run did not produce a successful nonempty result: {0}")]
+    ScratchRunFailed(String),
     #[error("manifest differs from the currently observed process/v1 recipe")]
     ManifestNotObserved,
     #[error("manifest drifted: expected {expected}, observed {observed}")]
@@ -1609,6 +1774,7 @@ pub enum RegistryError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use brgr_runner::PermissionLevel;
     use std::collections::BTreeMap;
     use std::os::unix::fs::symlink;
 
@@ -1616,6 +1782,46 @@ mod tests {
         let workspace = root.path().join("scratch");
         fs::create_dir_all(&workspace).unwrap();
         workspace
+    }
+
+    /// Help printed to stderr is the evidence when stdout is empty, in both
+    /// registration and later health checks; a CLI printing to stdout keeps
+    /// exactly the evidence it had.
+    #[test]
+    fn help_on_stderr_is_evidence_only_when_stdout_is_empty() {
+        let output = |stdout: &[u8], stderr: &[u8]| ExecutionOutput {
+            exit_code: Some(0),
+            stdout: stdout.to_vec(),
+            stderr: stderr.to_vec(),
+            result: vec![],
+            observed_model: None,
+            timed_out: false,
+            cancelled: false,
+            output_truncated: false,
+            elapsed: Duration::ZERO,
+        };
+        assert_eq!(help_output(&output(b"", b"--auto")), b"--auto");
+        assert_eq!(
+            help_output(&output(b"--help text", b"noise")),
+            b"--help text"
+        );
+        let stderr_only = output(b"", b"--auto");
+        let expected = digest_bytes(b"--auto");
+        assert!(matches!(
+            classify_probe(&stderr_only, help_output(&stderr_only), &expected).unwrap(),
+            Health::Healthy
+        ));
+    }
+
+    #[test]
+    fn a_lines_catalog_takes_bare_selectors_and_ignores_everything_else() {
+        let output = b"opencode/big-pickle\nopencode-go/glm-5.3\n\nWARN something happened\nnot-a-selector\n";
+        let parsed = parse_model_catalog(&ModelCatalogFormat::Lines, output).unwrap();
+        assert_eq!(
+            parsed.into_iter().collect::<Vec<_>>(),
+            ["opencode-go/glm-5.3", "opencode/big-pickle"]
+        );
+        assert!(parse_model_catalog(&ModelCatalogFormat::Lines, b"no selectors here\n").is_err());
     }
 
     #[test]
@@ -1726,6 +1932,7 @@ mod tests {
                 effort_argv: vec![],
                 env_allow: vec!["HOME".to_owned(), "PATH".to_owned()],
                 mode: ExecutionMode::OneShot,
+                permission_argv: brgr_runner::PermissionArgv::default(),
             },
             result: ResultSpec {
                 source: ResultSource::Stdout,
@@ -1851,12 +2058,26 @@ mod tests {
     }
 
     #[test]
-    fn named_cursor_and_command_code_recipes_use_observed_read_only_flags() {
+    fn named_cursor_and_command_code_recipes_default_to_full_and_can_be_locked() {
         let cursor_help = "--print --mode <mode> --output-format <format> --model <model>";
         let cursor =
             generate_manifest("cursor-agent", PathBuf::from("/bin/echo"), cursor_help).unwrap();
         assert_eq!(cursor.id, "local.cursor-cli");
-        assert!(cursor.launch.argv.contains(&"ask".to_owned()));
+        // No permission flag in the base argv: the level decides it.
+        assert!(!cursor.launch.argv.contains(&"ask".to_owned()));
+        assert_eq!(cursor.permission_arguments(None).unwrap(), ["--force"]);
+        assert!(
+            cursor
+                .permission_arguments(Some(PermissionLevel::Edits))
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            cursor
+                .permission_arguments(Some(PermissionLevel::ReadOnly))
+                .unwrap(),
+            ["--mode", "plan"]
+        );
         assert!(cursor.launch.argv.contains(&"${input.prompt}".to_owned()));
         assert_eq!(
             cursor.capabilities["model_select"].status,
@@ -1876,7 +2097,20 @@ mod tests {
         )
         .unwrap();
         assert_eq!(command_code.id, "local.command-code");
-        assert!(command_code.launch.argv.contains(&"plan".to_owned()));
+        // The old recipe pinned plan mode and two turns, so it could not finish
+        // real work; the level decides the mode now, and turns are uncapped.
+        assert!(!command_code.launch.argv.contains(&"plan".to_owned()));
+        assert!(!command_code.launch.argv.contains(&"--max-turns".to_owned()));
+        for (level, mode) in [
+            (None, "yolo"),
+            (Some(PermissionLevel::Edits), "accept-edits"),
+            (Some(PermissionLevel::ReadOnly), "plan"),
+        ] {
+            assert_eq!(
+                command_code.permission_arguments(level).unwrap(),
+                ["--permission-mode", mode]
+            );
+        }
         assert!(
             command_code
                 .launch
@@ -1921,16 +2155,104 @@ mod tests {
         );
     }
 
+    /// The Claude Code, Cline, and `opencode` recipes draft from their own flags,
+    /// default to full permission, and refuse a level they have no way to honour.
     #[test]
-    fn devin_recipe_uses_bounded_print_mode_and_configured_model() {
+    fn claude_cline_and_opencode_recipes_map_every_level_they_support() {
+        let claude_help = "-p, --print --output-format <format> --model <model> --permission-mode <mode> --effort <level>";
+        let claude = generate_manifest("claude", PathBuf::from("/bin/echo"), claude_help).unwrap();
+        assert_eq!(claude.id, "local.claude-code");
+        assert_eq!(claude.launch.argv.last().unwrap(), "${input.prompt}");
+        assert_eq!(claude.launch.effort_argv, ["--effort", "${route.effort}"]);
+        assert!(claude.launch.env_allow.contains(&"USER".to_owned()));
+        // No model list to verify against, so the CLI's configured default runs.
+        assert!(claude.launch.model_argv.is_empty());
+        for (level, mode) in [
+            (None, "bypassPermissions"),
+            (Some(PermissionLevel::Edits), "acceptEdits"),
+            (Some(PermissionLevel::ReadOnly), "plan"),
+        ] {
+            assert_eq!(
+                claude.permission_arguments(level).unwrap(),
+                ["--permission-mode", mode]
+            );
+        }
+        let older = generate_manifest(
+            "claude",
+            PathBuf::from("/bin/echo"),
+            "-p, --print --output-format <format> --model <model> --permission-mode <mode>",
+        )
+        .unwrap();
+        assert!(
+            older.launch.effort_argv.is_empty(),
+            "effort offered without --effort in help"
+        );
+
+        let cline_help =
+            "-p, --plan --auto-approve <boolean> -m, --model <model-id> --thinking <level>";
+        let cline = generate_manifest("cline", PathBuf::from("/bin/echo"), cline_help).unwrap();
+        assert_eq!(cline.id, "local.cline");
+        assert_eq!(
+            cline.permission_arguments(None).unwrap(),
+            ["--auto-approve", "true"]
+        );
+        assert_eq!(
+            cline
+                .permission_arguments(Some(PermissionLevel::ReadOnly))
+                .unwrap(),
+            ["--plan"]
+        );
+        // Cline has no edits-only mode, so edits is refused, never widened.
+        assert!(
+            cline
+                .permission_arguments(Some(PermissionLevel::Edits))
+                .is_err()
+        );
+
+        let opencode_help = "--model --variant --agent --auto";
+        let opencode =
+            generate_manifest("opencode", PathBuf::from("/bin/echo"), opencode_help).unwrap();
+        assert_eq!(opencode.id, "local.opencode");
+        // `run`'s flags are documented only by `opencode run --help`.
+        assert_eq!(opencode.probe.help_argv, ["run", "--help"]);
+        assert_eq!(
+            opencode.probe.model_catalog.as_ref().unwrap().argv,
+            ["models"]
+        );
+        assert_eq!(opencode.launch.argv, ["run", "${input.prompt}"]);
+        assert_eq!(opencode.permission_arguments(None).unwrap(), ["--auto"]);
+        assert_eq!(
+            opencode
+                .permission_arguments(Some(PermissionLevel::ReadOnly))
+                .unwrap(),
+            ["--agent", "plan"]
+        );
+        assert!(
+            opencode
+                .permission_arguments(Some(PermissionLevel::Edits))
+                .is_err()
+        );
+
+        for (name, help) in [
+            ("claude", "--print"),
+            ("cline", "--plan"),
+            ("opencode", "--model"),
+        ] {
+            assert!(
+                generate_manifest(name, PathBuf::from("/bin/echo"), help).is_err(),
+                "{name} drafted without its required flags"
+            );
+        }
+    }
+
+    #[test]
+    fn devin_recipe_uses_print_mode_with_permission_levels() {
         let help = "--prompt-file <FILE> -p, --print [<PROMPT>] --permission-mode <PERMISSION_MODE> --respect-workspace-trust [<RESPECT_WORKSPACE_TRUST>] --model <MODEL>";
         let devin = generate_manifest("devin", PathBuf::from("/bin/echo"), help).unwrap();
         assert_eq!(devin.id, "local.devin");
         assert_eq!(
             devin.launch.argv,
             [
-                "--permission-mode",
-                "smart",
                 "--respect-workspace-trust",
                 "false",
                 "--prompt-file",
@@ -1938,6 +2260,16 @@ mod tests {
                 "-p",
             ]
         );
+        for (level, mode) in [
+            (None, "dangerous"),
+            (Some(PermissionLevel::Edits), "accept-edits"),
+            (Some(PermissionLevel::ReadOnly), "auto"),
+        ] {
+            assert_eq!(
+                devin.permission_arguments(level).unwrap(),
+                ["--permission-mode", mode]
+            );
+        }
         assert!(devin.launch.model_argv.is_empty());
         assert!(devin.launch.effort_argv.is_empty());
         assert!(devin.probe.model_catalog.is_none());
@@ -2017,6 +2349,7 @@ mod tests {
                 instructions: None,
                 model: None,
                 effort: None,
+                permission: None,
                 deadline: Duration::from_secs(2),
                 cancel_path: None,
                 pid_path: None,
@@ -2053,6 +2386,7 @@ mod tests {
                 effort_argv: vec![],
                 env_allow: vec!["HOME".to_owned(), "PATH".to_owned()],
                 mode: ExecutionMode::OneShot,
+                permission_argv: brgr_runner::PermissionArgv::default(),
             },
             result: ResultSpec {
                 source: ResultSource::Stdout,
@@ -2085,6 +2419,7 @@ mod tests {
                 instructions: None,
                 model: None,
                 effort: None,
+                permission: None,
                 deadline: Duration::from_secs(2),
                 cancel_path: None,
                 pid_path: None,

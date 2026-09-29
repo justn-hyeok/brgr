@@ -38,6 +38,7 @@ pub(crate) fn task() -> TaskSpec {
         instructions: brgr_protocol::TaskInstructions::default(),
         evidence: brgr_protocol::EvidenceSpec::default(),
         max_concurrent_children: None,
+        permission: None,
     }
 }
 pub(crate) fn result(task: &TaskSpec, attempt_id: AttemptId) -> ResultEnvelope {

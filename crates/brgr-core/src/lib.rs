@@ -634,6 +634,7 @@ async fn run_single_attempt(
                 instructions: Some(&spec.instructions),
                 model: spec.route.requested_model.as_deref(),
                 effort: spec.route.requested_effort.as_deref(),
+                permission: spec.permission,
                 deadline: Duration::from_secs(spec.budget.deadline_seconds),
                 cancel_path: control.cancel_path,
                 pid_path: control.pid_path,
@@ -1243,6 +1244,7 @@ mod tests {
             instructions: brgr_protocol::TaskInstructions::default(),
             evidence: brgr_protocol::EvidenceSpec::default(),
             max_concurrent_children: None,
+            permission: None,
         }
     }
 
@@ -1286,6 +1288,7 @@ mod tests {
                 effort_argv: vec![],
                 env_allow: vec![],
                 mode: ExecutionMode::DelegatedExternal,
+                permission_argv: brgr_runner::PermissionArgv::default(),
             },
             result: ResultSpec {
                 source: ResultSource::JsonlAssistantFinal,
@@ -1392,6 +1395,7 @@ mod tests {
                 effort_argv: vec![],
                 env_allow: vec![],
                 mode: ExecutionMode::DelegatedExternal,
+                permission_argv: brgr_runner::PermissionArgv::default(),
             },
             result: ResultSpec {
                 source: ResultSource::Stdout,

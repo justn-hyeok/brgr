@@ -66,6 +66,7 @@ fn task_schema_describes_a_serialized_task_spec() {
             base_tree: Some("b".repeat(40)),
         },
         max_concurrent_children: Some(2),
+        permission: None,
     };
     assert_matches_schema("task-v1.json", &serde_json::to_value(&task).unwrap());
 }

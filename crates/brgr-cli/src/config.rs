@@ -33,6 +33,17 @@ impl WorkerPlacement {
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub herdr: HerdrConfig,
+    pub worker: WorkerConfig,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct WorkerConfig {
+    /// The most a worker may be given. A task asking for more is refused, and a
+    /// task asking for nothing runs at this level instead of the harness's
+    /// full default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_permission: Option<brgr_protocol::PermissionLevel>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]

@@ -334,6 +334,14 @@ fn config_command(paths: &Paths, command: &ConfigCommand, json_output: bool) -> 
             config.herdr.auto_worker_pane = *enabled;
             config.save(&paths.config)?;
         }
+        ConfigCommand::SetMaxPermission { level } => {
+            config.worker.max_permission = Some((*level).into());
+            config.save(&paths.config)?;
+        }
+        ConfigCommand::ClearMaxPermission => {
+            config.worker.max_permission = None;
+            config.save(&paths.config)?;
+        }
     }
     if json_output {
         print_value(&serde_json::to_value(&config)?, true);
@@ -617,6 +625,79 @@ mod tests {
     use crate::supervision::pinned_manifest_for_launch;
     use tempfile::TempDir;
 
+    /// `--model` and `--permission` are options of `run` and `revise`. Adding
+    /// `--permission` once slipped between `model`'s `#[arg(long)]` and its
+    /// field, which turned `--model` into a positional and broke every run that
+    /// named a model; only a contract test several layers away noticed.
+    #[test]
+    fn run_and_revise_take_model_and_permission_as_options() {
+        let run = Cli::try_parse_from([
+            "brgr",
+            "run",
+            "objective",
+            "--model",
+            "m",
+            "--effort",
+            "high",
+            "--permission",
+            "edits",
+        ])
+        .unwrap();
+        let Command::Run(args) = run.command else {
+            panic!("not a run");
+        };
+        assert_eq!(args.model.as_deref(), Some("m"));
+        assert_eq!(args.effort.as_deref(), Some("high"));
+        assert_eq!(args.permission, Some(crate::cli::PermissionArg::Edits));
+
+        let task = TaskId::new().to_string();
+        let revise = Cli::try_parse_from([
+            "brgr",
+            "revise",
+            task.as_str(),
+            "objective",
+            "--permission",
+            "read-only",
+        ])
+        .unwrap();
+        let Command::Revise(args) = revise.command else {
+            panic!("not a revise");
+        };
+        assert_eq!(args.permission, Some(crate::cli::PermissionArg::ReadOnly));
+    }
+
+    /// A requested level is kept unless it exceeds a bound, which is an error;
+    /// no request takes the tightest bound, and `full` is no bound at all.
+    #[test]
+    fn a_permission_is_bounded_by_the_cap_and_the_parent() {
+        use crate::admission::bound_permission;
+        use brgr_protocol::PermissionLevel::{Edits, Full, ReadOnly};
+
+        assert_eq!(bound_permission(None, None, None).unwrap(), None);
+        assert_eq!(
+            bound_permission(Some(Edits), None, None).unwrap(),
+            Some(Edits)
+        );
+        // A cap of full locks nothing: the task runs as it always has.
+        assert_eq!(bound_permission(None, Some(Full), None).unwrap(), None);
+        // A cap applies to a task that asked for nothing.
+        assert_eq!(
+            bound_permission(None, Some(Edits), None).unwrap(),
+            Some(Edits)
+        );
+        // The tighter of cap and parent wins.
+        assert_eq!(
+            bound_permission(None, Some(Edits), Some(ReadOnly)).unwrap(),
+            Some(ReadOnly)
+        );
+        // Asking under a bound is fine; over it is refused, never clamped.
+        assert_eq!(
+            bound_permission(Some(ReadOnly), Some(Edits), None).unwrap(),
+            Some(ReadOnly)
+        );
+        assert!(bound_permission(Some(Full), Some(Edits), None).is_err());
+        assert!(bound_permission(Some(Edits), None, Some(ReadOnly)).is_err());
+    }
     #[test]
     fn bridge_host_allows_managed_operations_and_rejects_privileged_changes() {
         let root = TempDir::new().unwrap();

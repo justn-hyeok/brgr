@@ -227,6 +227,19 @@ impl EvidenceSpec {
     }
 }
 
+/// How much a worker may do without asking. Ordered: each level allows a
+/// subset of the next, so a cap is a comparison.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PermissionLevel {
+    /// Read and propose; no file changes.
+    ReadOnly,
+    /// Edit files in the task workspace; commands still need approval.
+    Edits,
+    /// Every tool auto-approved.
+    Full,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct TaskSpec {
     pub schema: String,
@@ -247,6 +260,10 @@ pub struct TaskSpec {
     pub evidence: EvidenceSpec,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_concurrent_children: Option<u8>,
+    /// `None` runs the harness as its recipe does by default, which is also how
+    /// every task admitted before permission levels existed runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission: Option<PermissionLevel>,
 }
 
 impl TaskSpec {
@@ -506,6 +523,7 @@ mod tests {
             instructions: TaskInstructions::default(),
             evidence: EvidenceSpec::default(),
             max_concurrent_children: None,
+            permission: None,
         };
 
         task.validate().unwrap();
@@ -542,6 +560,7 @@ mod tests {
             instructions: TaskInstructions::default(),
             evidence: EvidenceSpec::default(),
             max_concurrent_children: None,
+            permission: None,
         };
 
         assert_eq!(task.validate(), Err(ProtocolError::InvalidAttemptCount));

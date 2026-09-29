@@ -150,5 +150,6 @@ fn bench_task(owner: &OwnerId, index: usize) -> TaskSpec {
         instructions: TaskInstructions::default(),
         evidence: EvidenceSpec::default(),
         max_concurrent_children: None,
+        permission: None,
     }
 }
