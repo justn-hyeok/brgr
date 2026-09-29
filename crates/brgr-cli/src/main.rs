@@ -1,12 +1,14 @@
 mod admission;
 #[cfg(test)]
 mod adversary;
+mod bridge_host;
 mod cli;
 mod codex_integration;
 mod config;
 mod evidence;
 mod harness_commands;
 mod herdr_plugin;
+mod hook;
 mod message;
 mod notification;
 mod omp_adapter;
@@ -20,13 +22,11 @@ mod workspace;
 mod worktree_prune;
 
 use std::{
-    collections::BTreeMap,
     env,
     fs::{self},
-    io::{self, Read, Write},
+    io::Write,
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
-    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use admission::{revise_task, run_task};
@@ -35,13 +35,12 @@ use brgr_protocol::{AttemptId, DecisionVerdict, OwnerId, TaskId, TaskSpec};
 use brgr_runner::HarnessManifest;
 use brgr_store::{RunnerIdentity, Store};
 use clap::Parser;
-use cli::{ArtifactCommand, Cli, Command, ConfigCommand, HarnessCommand, HookEvent, PluginCommand};
+use cli::{ArtifactCommand, Cli, Command, ConfigCommand, PluginCommand};
 use config::Config;
 use harness_commands::{cleanup, doctor, harness, integrate};
 use omp_adapter::{OmpOptions, run_omp_adapter};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
-use supervision::{reconcile_pending, supervise};
+use supervision::supervise;
 use task_commands::{bind, cancel, decide, result, status, wait_for_result};
 use tempfile::NamedTempFile;
 
@@ -159,10 +158,10 @@ async fn main() -> Result<()> {
             | Command::Notify { .. }
     ) && let Some(dir) = env::var_os(plugin_bridge::BRIDGE_DIR_ENV)
     {
-        let budget_seconds = bridge_budget_seconds(&cli.command);
+        let budget_seconds = bridge_host::bridge_budget_seconds(&cli.command);
         return plugin_bridge::client(Path::new(&dir), budget_seconds.saturating_add(120)).await;
     }
-    validate_bridge_host_preflight(&cli)?;
+    bridge_host::validate_bridge_host_preflight(&cli)?;
     let paths = Paths::new(cli.home.clone())?;
     match cli.command {
         Command::Run(args) => run_task(&paths, args, cli.json).await,
@@ -196,7 +195,7 @@ async fn main() -> Result<()> {
         Command::Prune {
             apply,
             include_ignored,
-        } => prune(&paths, apply, include_ignored, cli.json),
+        } => worktree_prune::command(&paths, apply, include_ignored, cli.json),
         Command::Plugin { command } => match command {
             PluginCommand::Open { no_focus, codex } => herdr_plugin::open(no_focus, codex).await,
             PluginCommand::Board { once } => herdr_plugin::board(&paths, once).await,
@@ -206,7 +205,7 @@ async fn main() -> Result<()> {
         Command::Cleanup { command } => cleanup(&paths, command, cli.json),
         Command::Supervise { launch } => supervise(&paths, &launch, cli.json).await,
         Command::Hook { event } => {
-            if hook(&paths, event).await.is_err() {
+            if hook::hook(&paths, event).await.is_err() {
                 eprintln!("brgr hook could not read the inbox; run `brgr doctor`");
                 println!("{{}}");
             }
@@ -236,105 +235,6 @@ async fn main() -> Result<()> {
                 keep_pane,
             },
         ),
-    }
-}
-
-fn bridge_budget_seconds(command: &Command) -> u64 {
-    match command {
-        Command::Run(args) if args.foreground => args.deadline_seconds,
-        Command::Revise(args) if args.foreground => {
-            plugin_bridge::MAX_BRIDGE_SECONDS.saturating_sub(120)
-        }
-        Command::Wait {
-            timeout_seconds, ..
-        }
-        | Command::Message {
-            command:
-                message::MessageCommand::Wait {
-                    timeout_seconds, ..
-                },
-        } => *timeout_seconds,
-        _ => 3_600,
-    }
-}
-
-fn validate_bridge_host_preflight(cli: &Cli) -> Result<()> {
-    let host_home = env::var_os(plugin_bridge::BRIDGE_HOST_HOME_ENV);
-    let host_workspace = env::var_os(plugin_bridge::BRIDGE_HOST_WORKSPACE_ENV);
-    match (host_home, host_workspace) {
-        (None, None) => Ok(()),
-        (Some(home), Some(workspace)) => {
-            let home = PathBuf::from(home);
-            require_bridge_home(cli.home.as_deref(), &home)?;
-            validate_bridge_host_command(
-                &cli.command,
-                &PathBuf::from(workspace),
-                &env::current_dir()?,
-            )
-        }
-        _ => bail!("brgr Herdr bridge host context is incomplete"),
-    }
-}
-
-fn require_bridge_home(requested: Option<&Path>, expected: &Path) -> Result<()> {
-    if requested != Some(expected) {
-        bail!("brgr Herdr bridge cannot override its control home");
-    }
-    Ok(())
-}
-
-fn validate_bridge_host_command(
-    command: &Command,
-    workspace_root: &Path,
-    current_dir: &Path,
-) -> Result<()> {
-    let workspace_root = workspace_root
-        .canonicalize()
-        .context("brgr Herdr bridge workspace is unavailable")?;
-    match command {
-        Command::Run(args) => {
-            require_bridge_workspace(
-                args.workspace.as_deref().unwrap_or(current_dir),
-                &workspace_root,
-            )?;
-            Ok(())
-        }
-        Command::Revise(args) => {
-            if let Some(workspace) = args.workspace.as_deref() {
-                require_bridge_workspace(workspace, &workspace_root)?;
-            }
-            Ok(())
-        }
-        Command::Status { .. }
-        | Command::Result { .. }
-        | Command::Diff { .. }
-        | Command::Wait { .. }
-        | Command::Message { .. }
-        | Command::Cancel { .. }
-        | Command::Bind { .. }
-        | Command::Accept { .. }
-        | Command::Reject { .. }
-        | Command::Doctor
-        | Command::Config { .. }
-        | Command::Cleanup { .. }
-        | Command::Harness {
-            command: HarnessCommand::Status { .. },
-        }
-        | Command::Supervise { .. } => Ok(()),
-        Command::Artifact {
-            command: ArtifactCommand::Export { output, .. },
-        } => require_bridge_workspace(output.parent().unwrap_or(current_dir), &workspace_root),
-        Command::Apply { workspace, .. } => require_bridge_workspace(workspace, &workspace_root),
-        Command::Harness { .. } | Command::Integrate { .. } | Command::Prune { .. } => bail!(
-            "this brgr command is unavailable through the Herdr host bridge; run it explicitly outside the plugin Codex pane"
-        ),
-        Command::Plugin { .. }
-        | Command::Hook { .. }
-        | Command::Notify { .. }
-        | Command::PaneRun(_)
-        | Command::OmpRun { .. } => {
-            bail!("internal brgr commands are unavailable through the Herdr host bridge")
-        }
     }
 }
 
@@ -376,96 +276,6 @@ fn config_command(paths: &Paths, command: &ConfigCommand, json_output: bool) -> 
         print_value(&serde_json::to_value(&config)?, true);
     } else {
         print!("{}", toml::to_string_pretty(&config)?);
-    }
-    Ok(())
-}
-
-fn require_bridge_workspace(candidate: &Path, workspace_root: &Path) -> Result<()> {
-    let candidate = candidate
-        .canonicalize()
-        .context("brgr Herdr bridge task workspace is unavailable")?;
-    if !candidate.starts_with(workspace_root) {
-        bail!("brgr Herdr bridge task workspace is outside the selected Herdr workspace");
-    }
-    Ok(())
-}
-
-async fn hook(paths: &Paths, event: HookEvent) -> Result<()> {
-    let mut input = String::new();
-    io::stdin().read_to_string(&mut input)?;
-    let input: HookInput = serde_json::from_str(&input).unwrap_or(HookInput { session_id: None });
-    let Some(session_id) = input.session_id else {
-        println!("{{}}");
-        return Ok(());
-    };
-    let owner = OwnerId::new(format!("codex:{session_id}"))?;
-    reconcile_pending(paths)?;
-    let store = Store::open(&paths.store)?;
-    if event == HookEvent::SessionStart {
-        let epoch = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
-        store.bind_owner(&owner, &session_id, epoch.max(1))?;
-    }
-    let surface_ready = if event == HookEvent::Stop {
-        false
-    } else {
-        match tokio::time::timeout(
-            Duration::from_millis(500),
-            notification::register_current_surface(&store, &owner, &session_id),
-        )
-        .await
-        {
-            Ok(Ok(ready)) => ready,
-            Ok(Err(error)) => {
-                eprintln!("brgr completion notification remains queued: {error}");
-                false
-            }
-            Err(_) => {
-                eprintln!("brgr completion notification remains queued: Herdr lookup timed out");
-                false
-            }
-        }
-    };
-    if surface_ready {
-        for task in store.pending_notification_tasks_for_session(&session_id)? {
-            if let Err(error) = notification::spawn_for_task(paths, task) {
-                eprintln!("brgr completion notification remains queued: {error}");
-            }
-        }
-    }
-    let pending = store.pending_for_session(&session_id)?;
-    if pending.is_empty() {
-        println!("{{}}");
-        return Ok(());
-    }
-    let handles = pending
-        .iter()
-        .take(10)
-        .map(|item| format!("{}:{:?}", item.result.task_id, item.result.outcome))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let summary = format!("{} pending result(s): {handles}", pending.len());
-    match event {
-        HookEvent::Stop => println!(
-            "{}",
-            json!({
-                "decision": "block",
-                "reason": "brgr has unprocessed terminal results; inspect and accept, reject, or acknowledge them before stopping",
-                "hookSpecificOutput": {
-                    "hookEventName": "Stop",
-                    "decision": "block",
-                    "reason": format!("Pending brgr inbox: {summary}. Use brgr result TASK, then accept/reject or ack."),
-                }
-            })
-        ),
-        HookEvent::SessionStart | HookEvent::UserPromptSubmit => println!(
-            "{}",
-            json!({
-                "hookSpecificOutput": {
-                    "hookEventName": format!("{event:?}"),
-                    "additionalContext": format!("Pending brgr inbox: {summary}. Verify each result, then run brgr accept/reject; acknowledge non-candidate outcomes with brgr result TASK --ack.")
-                }
-            })
-        ),
     }
     Ok(())
 }
@@ -558,84 +368,6 @@ fn write_json_new(path: &Path, value: &impl Serialize) -> Result<()> {
     Ok(())
 }
 
-/// Reports, and with `apply` removes, task worktrees whose revision is decided.
-///
-/// Nothing in the store is removed: a worktree is a rebuildable checkout, while
-/// a sealed result and its decision are the durable record brgr exists to keep.
-fn prune(paths: &Paths, apply: bool, include_ignored: bool, json_output: bool) -> Result<()> {
-    let store = Store::open(&paths.store)?;
-    let swept = worktree_prune::prune(&paths.worktrees, &store, apply, include_ignored);
-    let worktrees: Vec<serde_json::Value> = swept
-        .entries
-        .iter()
-        .map(|entry| {
-            let mut row = json!({
-                "worktree": entry.worktree,
-                "task_slug": entry.slug,
-                "status": entry.outcome.code(),
-            });
-            if let Some(reason) = entry.outcome.reason() {
-                row["reason"] = json!(reason);
-            }
-            if let Some(owner) = &entry.owner {
-                // Pruning is not owner-scoped, so the owner is reported rather
-                // than silently acted on.
-                row["owner_id"] = json!(owner);
-            }
-            if !entry.ignored.is_empty() {
-                row["ignored_paths"] = json!(entry.ignored);
-            }
-            row
-        })
-        .collect();
-    let orphans: Vec<serde_json::Value> = swept
-        .orphans
-        .iter()
-        .map(|orphan| {
-            let mut row = json!({"branch": orphan.branch, "status": orphan.outcome.code()});
-            if let Some(reason) = orphan.outcome.reason() {
-                row["reason"] = json!(reason);
-            }
-            if let Some(owner) = &orphan.owner {
-                row["owner_id"] = json!(owner);
-            }
-            row
-        })
-        .collect();
-    // One pass each rather than one per reported figure.
-    let mut tally = BTreeMap::<&str, usize>::new();
-    for entry in &swept.entries {
-        *tally.entry(entry.outcome.code()).or_default() += 1;
-    }
-    let mut orphan_tally = BTreeMap::<&str, usize>::new();
-    for orphan in &swept.orphans {
-        *orphan_tally.entry(orphan.outcome.code()).or_default() += 1;
-    }
-    let count = |code: &str| tally.get(code).copied().unwrap_or_default();
-    let orphan_count = |code: &str| orphan_tally.get(code).copied().unwrap_or_default();
-    // A checkout whose branch git kept is still reclaimed: its directory is gone
-    // and will never be enumerated again, so counting it as kept would report
-    // that nothing happened.
-    let removed = count("removed") + count("removed_branch_kept");
-    print_value(
-        &json!({
-            "applied": apply,
-            "removed": removed,
-            "removed_keeping_branch": count("removed_branch_kept"),
-            "removable": count("removable"),
-            "kept": count("kept"),
-            "worktrees": worktrees,
-            "orphan_branches_removed": orphan_count("removed"),
-            "orphan_branches_removable": orphan_count("removable"),
-            "orphan_branches_kept": orphan_count("kept"),
-            "orphan_branches": orphans,
-            "note": "sealed results, decisions, artifacts, and task rows are never removed",
-        }),
-        json_output,
-    );
-    Ok(())
-}
-
 fn print_value(value: &serde_json::Value, json_output: bool) {
     if json_output {
         println!("{value}");
@@ -647,11 +379,13 @@ fn print_value(value: &serde_json::Value, json_output: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bridge_host::{require_bridge_home, validate_bridge_host_command};
     use crate::omp_adapter::{
         fresh_omp_report_path, omp_completion_ready, omp_spawn_matches_initial,
         read_bounded_regular_report,
     };
     use crate::supervision::pinned_manifest_for_launch;
+    use serde_json::json;
     use tempfile::TempDir;
 
     /// `--model` and `--permission` are options of `run` and `revise`. Adding

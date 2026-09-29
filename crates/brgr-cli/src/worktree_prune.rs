@@ -45,6 +45,7 @@
 //! is visible rather than silent.
 
 use std::{
+    collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
     process::Command,
@@ -53,6 +54,9 @@ use std::{
 use anyhow::Result;
 use brgr_protocol::TaskSpec;
 use brgr_store::Store;
+use serde_json::json;
+
+use crate::{Paths, print_value};
 
 /// Everything one sweep found: the worktrees it walked, and the branches left
 /// behind by worktrees that no longer exist.
@@ -854,6 +858,90 @@ fn file_name(path: &Path) -> String {
 
 fn lossy(path: &Path) -> String {
     path.to_string_lossy().into_owned()
+}
+
+/// Runs `brgr prune` and prints its report.
+/// Reports, and with `apply` removes, task worktrees whose revision is decided.
+///
+/// Nothing in the store is removed: a worktree is a rebuildable checkout, while
+/// a sealed result and its decision are the durable record brgr exists to keep.
+pub(crate) fn command(
+    paths: &Paths,
+    apply: bool,
+    include_ignored: bool,
+    json_output: bool,
+) -> Result<()> {
+    let store = Store::open(&paths.store)?;
+    let swept = prune(&paths.worktrees, &store, apply, include_ignored);
+    let worktrees: Vec<serde_json::Value> = swept
+        .entries
+        .iter()
+        .map(|entry| {
+            let mut row = json!({
+                "worktree": entry.worktree,
+                "task_slug": entry.slug,
+                "status": entry.outcome.code(),
+            });
+            if let Some(reason) = entry.outcome.reason() {
+                row["reason"] = json!(reason);
+            }
+            if let Some(owner) = &entry.owner {
+                // Pruning is not owner-scoped, so the owner is reported rather
+                // than silently acted on.
+                row["owner_id"] = json!(owner);
+            }
+            if !entry.ignored.is_empty() {
+                row["ignored_paths"] = json!(entry.ignored);
+            }
+            row
+        })
+        .collect();
+    let orphans: Vec<serde_json::Value> = swept
+        .orphans
+        .iter()
+        .map(|orphan| {
+            let mut row = json!({"branch": orphan.branch, "status": orphan.outcome.code()});
+            if let Some(reason) = orphan.outcome.reason() {
+                row["reason"] = json!(reason);
+            }
+            if let Some(owner) = &orphan.owner {
+                row["owner_id"] = json!(owner);
+            }
+            row
+        })
+        .collect();
+    // One pass each rather than one per reported figure.
+    let mut tally = BTreeMap::<&str, usize>::new();
+    for entry in &swept.entries {
+        *tally.entry(entry.outcome.code()).or_default() += 1;
+    }
+    let mut orphan_tally = BTreeMap::<&str, usize>::new();
+    for orphan in &swept.orphans {
+        *orphan_tally.entry(orphan.outcome.code()).or_default() += 1;
+    }
+    let count = |code: &str| tally.get(code).copied().unwrap_or_default();
+    let orphan_count = |code: &str| orphan_tally.get(code).copied().unwrap_or_default();
+    // A checkout whose branch git kept is still reclaimed: its directory is gone
+    // and will never be enumerated again, so counting it as kept would report
+    // that nothing happened.
+    let removed = count("removed") + count("removed_branch_kept");
+    print_value(
+        &json!({
+            "applied": apply,
+            "removed": removed,
+            "removed_keeping_branch": count("removed_branch_kept"),
+            "removable": count("removable"),
+            "kept": count("kept"),
+            "worktrees": worktrees,
+            "orphan_branches_removed": orphan_count("removed"),
+            "orphan_branches_removable": orphan_count("removable"),
+            "orphan_branches_kept": orphan_count("kept"),
+            "orphan_branches": orphans,
+            "note": "sealed results, decisions, artifacts, and task rows are never removed",
+        }),
+        json_output,
+    );
+    Ok(())
 }
 
 #[cfg(test)]
