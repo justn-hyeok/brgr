@@ -17,7 +17,7 @@ use crate::{
 use anyhow::{Context, Result, bail};
 use brgr_core::{ExecutionObservation, Supervisor};
 use brgr_protocol::{
-    AttemptId, AttemptState, ResultEnvelope, ResultId, SCHEMA_V1, TaskSpec, TerminalOutcome,
+    AttemptId, AttemptState, ResultEnvelope, ResultId, SCHEMA_V1, TaskId, TaskSpec, TerminalOutcome,
 };
 use brgr_registry::Registry;
 use brgr_runner::HarnessManifest;
@@ -273,6 +273,34 @@ pub(crate) fn observe_attempt(paths: &Paths, attempt: &UnfinishedAttempt) -> Exe
         Ok(actual) if actual == receipt.identity => ExecutionObservation::SupervisorAlive(actual),
         Ok(_) => ExecutionObservation::NotObserved,
         Err(_) => ExecutionObservation::Unknown,
+    }
+}
+
+/// Whether anything of this task may still be running: its supervisor, or the
+/// harness process group the supervisor started. The runner removes the pid
+/// file once the harness exits, so a file left behind means the supervisor
+/// died first. Anything unreadable counts as running.
+pub(crate) fn worker_may_be_running(paths: &Paths, task: TaskId) -> bool {
+    let receipt = fs::read(paths.supervisor(task))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<ProcessReceipt>(&bytes).ok());
+    if let Some(receipt) = receipt
+        && let Ok(pid) = receipt.identity.handle.parse::<u32>()
+        && process_identity(pid).is_ok_and(|actual| actual == receipt.identity)
+    {
+        return true;
+    }
+    match fs::read_to_string(paths.pid(task)) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => false,
+        Err(_) => true,
+        Ok(text) => match text.trim().parse::<u32>() {
+            Ok(pid) if pid > 1 => ProcessCommand::new("/bin/kill")
+                .args(["-0", &pid.to_string()])
+                .stderr(Stdio::null())
+                .status()
+                .is_ok_and(|status| status.success()),
+            _ => true,
+        },
     }
 }
 

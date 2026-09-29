@@ -17,8 +17,9 @@
 //! Every candidate must also be a real directory (not a symlink), a worktree git
 //! itself has registered for its repository and has not locked, a name
 //! [`crate::workspace`] could have produced, outside the current working
-//! directory, and the checkout of a task revision that carries a recorded owner
-//! decision.
+//! directory, and the checkout of a settled task revision: a candidate the owner
+//! decided, or a failed, cancelled, or lost result the owner acknowledged, with
+//! no attempt or granted retry left and no worker process still alive.
 //!
 //! The repositories come from the store, never from the worktrees root. Each
 //! candidate is judged against the repository its own task was admitted in; a
@@ -41,7 +42,7 @@
 //! roughly 9 KiB per task; a worktree costs the size of the checkout.
 //!
 //! Cross-owner isolation is explicitly outside v1 scope, so a prune acts on
-//! every decided task in this control home. Each row reports its owner so that
+//! every settled task in this control home. Each row reports its owner so that
 //! is visible rather than silent.
 
 use std::{
@@ -52,8 +53,8 @@ use std::{
 };
 
 use anyhow::Result;
-use brgr_protocol::TaskSpec;
-use brgr_store::Store;
+use brgr_protocol::{TaskId, TaskSpec, TerminalOutcome};
+use brgr_store::{OpenReason, Settlement, Store};
 use serde_json::json;
 
 use crate::{Paths, print_value};
@@ -119,12 +120,19 @@ impl Outcome {
 pub(crate) fn prune(
     worktrees_root: &Path,
     store: &Store,
+    worker_alive: &dyn Fn(TaskId) -> bool,
     apply: bool,
     include_ignored: bool,
 ) -> Prune {
     let current_dir = std::env::current_dir()
         .ok()
         .and_then(|path| canonical(&path));
+    let sweep = Sweep {
+        store,
+        current_dir: current_dir.as_deref(),
+        include_ignored,
+        worker_alive,
+    };
     let mut entries = Vec::new();
     let mut orphans = Vec::new();
 
@@ -145,14 +153,7 @@ pub(crate) fn prune(
         let mut removed_any = false;
         for worktree in candidates {
             let slug = file_name(&worktree);
-            let assessment = assess(
-                &worktree,
-                &slug,
-                store,
-                &mut known,
-                current_dir.as_deref(),
-                include_ignored,
-            );
+            let assessment = assess(&worktree, &slug, &sweep, &mut known);
             let outcome = match (assessment.blocked, &assessment.primary) {
                 (Some(reason), _) => Outcome::Kept(reason),
                 (None, Some(primary)) if apply => match remove(&worktree, &slug, primary) {
@@ -345,6 +346,59 @@ fn owning_task(
     }
 }
 
+/// Why a revision's checkout must stay, or `None` once it is settled.
+///
+/// A revision is settled when the owner decided its candidate, or acknowledged
+/// its failed, cancelled, or lost result with nothing left to run. The store
+/// guards make that stronger than it looks: `record_decision_in_transaction`
+/// accepts only a candidate, `claim_attempt` refuses a new attempt after a
+/// candidate or a lost result, and after a failure only with a retry grant,
+/// which counts as unsettled. What the store cannot see is a worker still
+/// running under a dead supervisor, which a lost result warns about; with a
+/// worktree present, `worker_alive` rules that out.
+fn unsettled(
+    store: &Store,
+    task: TaskId,
+    revision: u32,
+    worker_alive: Option<&dyn Fn(TaskId) -> bool>,
+) -> Option<String> {
+    let settlement = match store.revision_settlement(task, revision) {
+        Ok(settlement) => settlement,
+        Err(error) => return Some(format!("settlement lookup failed: {error}")),
+    };
+    match settlement {
+        Settlement::Acknowledged(_) if worker_alive.is_some_and(|alive| alive(task)) => {
+            Some("a worker of this task is still running".to_owned())
+        }
+        Settlement::Decided | Settlement::Acknowledged(_) => None,
+        Settlement::Open(OpenReason::NoResult) => {
+            Some("no result recorded for this revision yet".to_owned())
+        }
+        Settlement::Open(OpenReason::Undecided) => {
+            Some("no owner decision recorded for this revision".to_owned())
+        }
+        Settlement::Open(OpenReason::Unacknowledged(outcome)) => Some(format!(
+            "its {} result is not acknowledged; run `brgr result {task} --ack`",
+            outcome_name(outcome)
+        )),
+        Settlement::Open(OpenReason::AttemptActive) => {
+            Some("an attempt of this revision is still running".to_owned())
+        }
+        Settlement::Open(OpenReason::RetryGranted) => {
+            Some("a retry was granted for this revision and may still start".to_owned())
+        }
+    }
+}
+
+fn outcome_name(outcome: TerminalOutcome) -> &'static str {
+    match outcome {
+        TerminalOutcome::Candidate => "candidate",
+        TerminalOutcome::Failed => "failed",
+        TerminalOutcome::Cancelled => "cancelled",
+        TerminalOutcome::Lost => "lost",
+    }
+}
+
 /// Returns why an orphan branch must be kept, `Ok(None)` when it may go, or
 /// `Err(Live)` when its worktree still exists.
 fn orphan_objection(
@@ -369,14 +423,9 @@ fn orphan_objection(
         return Err(Live);
     }
     *owner = Some(task.owner_id.as_str().to_owned());
-    match store.decision_for_revision(task.task_id, revision) {
-        Ok(Some(_)) => {}
-        Ok(None) => {
-            return Ok(Some(
-                "no owner decision recorded for this revision".to_owned(),
-            ));
-        }
-        Err(error) => return Ok(Some(format!("decision lookup failed: {error}"))),
+    // Its worktree is gone, so no worker can still be running in it.
+    if let Some(reason) = unsettled(store, task.task_id, revision, None) {
+        return Ok(Some(reason));
     }
     if inventory.is_locked(&worktree) {
         return Ok(Some(
@@ -434,29 +483,25 @@ struct Assessment {
     primary: Option<PathBuf>,
 }
 
-fn assess(
-    worktree: &Path,
-    slug: &str,
-    store: &Store,
-    known: &mut Repositories,
-    current_dir: Option<&Path>,
+/// What stays the same for every worktree in one sweep.
+struct Sweep<'a> {
+    store: &'a Store,
+    current_dir: Option<&'a Path>,
     include_ignored: bool,
-) -> Assessment {
+    /// Whether a worker of this task may still be running where the store
+    /// cannot see it: a live supervisor, or a harness process whose supervisor
+    /// died without reaping it.
+    worker_alive: &'a dyn Fn(TaskId) -> bool,
+}
+
+fn assess(worktree: &Path, slug: &str, sweep: &Sweep<'_>, known: &mut Repositories) -> Assessment {
     let mut found = Assessment {
         blocked: None,
         owner: None,
         ignored: Vec::new(),
         primary: None,
     };
-    found.blocked = objection(
-        worktree,
-        slug,
-        store,
-        known,
-        current_dir,
-        include_ignored,
-        &mut found,
-    );
+    found.blocked = objection(worktree, slug, sweep, known, &mut found);
     found
 }
 
@@ -464,12 +509,16 @@ fn assess(
 fn objection(
     worktree: &Path,
     slug: &str,
-    store: &Store,
+    sweep: &Sweep<'_>,
     known: &mut Repositories,
-    current_dir: Option<&Path>,
-    include_ignored: bool,
     found: &mut Assessment,
 ) -> Option<String> {
+    let Sweep {
+        store,
+        current_dir,
+        include_ignored,
+        worker_alive,
+    } = *sweep;
     // `?` must never be used for these: in a function whose `None` means "no
     // objection", a short-circuit would mark an unrecognized directory removable.
     let Some((prefix, revision)) = parse_slug(slug) else {
@@ -540,16 +589,8 @@ fn objection(
         ));
     }
 
-    // A recorded decision is what makes this revision settled, and that is
-    // stronger than it looks. `record_decision_in_transaction` rejects anything
-    // whose outcome is not `Candidate`, and `claim_attempt` refuses a new attempt
-    // on a revision whose prior result is a candidate. So a decided revision can
-    // have no attempt still running in this worktree — the two guards live in
-    // brgr-store, which is why it is spelled out here.
-    match store.decision_for_revision(task.task_id, revision) {
-        Ok(Some(_)) => {}
-        Ok(None) => return Some("no owner decision recorded for this revision".to_owned()),
-        Err(error) => return Some(format!("decision lookup failed: {error}")),
+    if let Some(reason) = unsettled(store, task.task_id, revision, Some(worker_alive)) {
+        return Some(reason);
     }
 
     let inventory = &known.inventories[index];
@@ -872,7 +913,13 @@ pub(crate) fn command(
     json_output: bool,
 ) -> Result<()> {
     let store = Store::open(&paths.store)?;
-    let swept = prune(&paths.worktrees, &store, apply, include_ignored);
+    let swept = prune(
+        &paths.worktrees,
+        &store,
+        &|task| crate::supervision::worker_may_be_running(paths, task),
+        apply,
+        include_ignored,
+    );
     let worktrees: Vec<serde_json::Value> = swept
         .entries
         .iter()

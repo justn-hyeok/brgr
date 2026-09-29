@@ -70,4 +70,4 @@ the worker's report about it.
 - Accept on the strength of the worker's summary alone.
 - Copy files out of the worker's worktree by hand. The sealed diff is the
   audited path.
-- Delete a worker's worktree yourself. `brgr prune` reclaims decided ones.
+- Delete a worker's worktree yourself. `brgr prune` reclaims decided and acknowledged ones.

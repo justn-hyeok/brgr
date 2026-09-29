@@ -259,8 +259,12 @@ brgr prune           # report what is removable and why the rest is kept
 brgr prune --apply   # remove them
 ```
 
-A worktree is only considered once its task revision carries a recorded owner
-decision. Removal uses `git worktree remove` and `git branch -d`, neither
+A worktree is only considered once its task revision is settled: the owner
+accepted or rejected its candidate, or acknowledged its failed, cancelled, or
+lost result with `brgr result TASK --ack`. A failed revision also needs no
+attempt still running, no retry granted, and no worker process left alive; a
+lost result warns that its worker may outlive its supervisor, and while that
+process runs the worktree is kept. Removal uses `git worktree remove` and `git branch -d`, neither
 forced, so uncommitted work and unmerged commits are kept and reported with
 git's own reason.
 
