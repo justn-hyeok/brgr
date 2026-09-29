@@ -831,28 +831,51 @@ impl Store {
         observed: Option<&UnfinishedAttempt>,
         complete_run: bool,
     ) -> Result<WriteOutcome, StoreError> {
-        retry_busy(|| self.commit_terminal_result_once(owner_id, result, observed, complete_run))
+        // Prepared once, outside the retry. `verify_candidate_artifacts` reads and
+        // re-hashes every sealed artifact, up to the contract's `max_bytes` of
+        // 20 MiB. Inside the lock it serialized every other writer behind that
+        // I/O; moved out of the lock but left inside the retry, every contended
+        // attempt re-read and re-hashed it all and threw the work away. None of it
+        // depends on the lock: `tasks.spec_json` is only ever inserted, and the
+        // transaction compares its own copy against this one.
+        let prepared = self.prepare_terminal_result(result)?;
+        retry_busy(|| {
+            self.commit_terminal_result_once(owner_id, result, &prepared, observed, complete_run)
+        })
+    }
+
+    fn prepare_terminal_result(
+        &self,
+        result: &ResultEnvelope,
+    ) -> Result<PreparedTerminal, StoreError> {
+        validate_terminal_result(result)?;
+        let envelope_json = serde_json::to_string(result)?;
+        let prepared = PreparedTerminal {
+            digest: sha256(envelope_json.as_bytes()),
+            envelope_json,
+            observation: serialize_route_observation(result.route_observation.as_ref())?,
+            verified_spec: self.task_spec_for_attempt(result.attempt_id)?,
+        };
+        verify_candidate_artifacts(&self.artifacts, result, &prepared.verified_spec)?;
+        Ok(prepared)
     }
 
     fn commit_terminal_result_once(
         &mut self,
         owner_id: &OwnerId,
         result: &ResultEnvelope,
+        prepared: &PreparedTerminal,
         observed: Option<&UnfinishedAttempt>,
         complete_run: bool,
     ) -> Result<WriteOutcome, StoreError> {
-        validate_terminal_result(result)?;
-        let envelope_json = serde_json::to_string(result)?;
-        let digest = sha256(envelope_json.as_bytes());
-        let observation = serialize_route_observation(result.route_observation.as_ref())?;
-        // Verified before the lock is taken. `verify_candidate_artifacts` reads and
-        // re-hashes every sealed artifact, up to the contract's `max_bytes` of
-        // 20 MiB, and holding the store's write lock across that file I/O
-        // serialized every other writer behind it. `tasks.spec_json` is only ever
-        // inserted, never updated, so reading it here is sound; the transaction
-        // below compares its own copy against this one.
-        let verified_spec = self.task_spec_for_attempt(result.attempt_id)?;
-        verify_candidate_artifacts(&self.artifacts, result, &verified_spec)?;
+        #[cfg(test)]
+        COMMIT_TRIES.with(|tries| tries.set(tries.get() + 1));
+        let PreparedTerminal {
+            envelope_json,
+            digest,
+            observation,
+            verified_spec,
+        } = prepared;
 
         // Terminal commit reads the attempt before it writes, so it goes through
         // the same immediate begin as every other write path.
@@ -870,7 +893,7 @@ impl Store {
             )
             .optional()?
         {
-            if stored_id == result.result_id.to_string() && stored_digest == digest {
+            if stored_id == result.result_id.to_string() && stored_digest == *digest {
                 verify_replayed_route_observation(
                     &transaction,
                     result.result_id,
@@ -902,7 +925,7 @@ impl Store {
         // The spec the artifacts were checked against must be the one this
         // transaction sees. It cannot change — nothing updates `tasks.spec_json` —
         // so a mismatch means an assumption broke rather than a race.
-        if expected.4 != verified_spec {
+        if expected.4 != *verified_spec {
             return Err(StoreError::TaskSpecChangedDuringCommit);
         }
 
@@ -1810,11 +1833,27 @@ fn terminal_attempt(
         .ok_or(StoreError::AttemptNotFound(attempt_id))
 }
 
+/// What a terminal commit computes once before contending for the lock.
+struct PreparedTerminal {
+    envelope_json: String,
+    digest: String,
+    observation: Option<(String, String)>,
+    verified_spec: String,
+}
+
+#[cfg(test)]
+thread_local! {
+    static COMMIT_TRIES: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    static VERIFICATIONS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
 fn verify_candidate_artifacts(
     artifacts: &ArtifactStore,
     result: &ResultEnvelope,
     task_json: &str,
 ) -> Result<(), StoreError> {
+    #[cfg(test)]
+    VERIFICATIONS.with(|count| count.set(count.get() + 1));
     if result.outcome == brgr_protocol::TerminalOutcome::Candidate {
         let task: TaskSpec = serde_json::from_str(task_json)?;
         for reference in &result.artifacts {
@@ -2926,8 +2965,9 @@ mod tests {
         // wraps it in `retry_busy`, which would wait out the whole retry budget
         // against a blocker that never releases. Retry behavior is covered by
         // `retry_busy_gives_up_only_after_its_budget`.
+        let prepared = store.prepare_terminal_result(&result).unwrap();
         assert!(matches!(
-            store.commit_terminal_result_once(&task.owner_id, &result, None, false),
+            store.commit_terminal_result_once(&task.owner_id, &result, &prepared, None, false),
             Err(StoreError::Database(_))
         ));
         assert!(store.inbox(&task.owner_id, false).unwrap().is_empty());
@@ -3883,6 +3923,50 @@ mod tests {
     /// contended holder occupied the lock for 17.5s and still failed, while a
     /// second admission gave up at 10.2s blaming the wrong thing. This fails if a
     /// retry is put back on the admission path.
+    /// A contended terminal commit hashes its artifacts once, not once per try.
+    ///
+    /// Verification was moved out of the write lock but left inside the retry,
+    /// so each contended attempt re-read and re-hashed up to 20 MiB and discarded
+    /// it. Both counts are asserted: without a retry this would pass vacuously.
+    #[test]
+    fn a_contended_terminal_commit_verifies_its_artifacts_once() {
+        let root = TempDir::new().unwrap();
+        let mut store = Store::open(root.path()).unwrap();
+        let task = task();
+        store.record_task(&task, "contended-commit").unwrap();
+        let attempt_id = AttemptId::new();
+        store
+            .create_attempt(task.task_id, task.revision, attempt_id)
+            .unwrap();
+        let result = sealed_result(&store, &task, attempt_id);
+
+        store.connection.busy_timeout(Duration::ZERO).unwrap();
+        let blocker = Connection::open(root.path().join("brgr.sqlite3")).unwrap();
+        blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            blocker.execute_batch("ROLLBACK").unwrap();
+        });
+        COMMIT_TRIES.with(|tries| tries.set(0));
+        VERIFICATIONS.with(|count| count.set(0));
+
+        store
+            .commit_terminal_result(&task.owner_id, &result)
+            .unwrap();
+        release.join().unwrap();
+
+        let tries = COMMIT_TRIES.with(std::cell::Cell::get);
+        assert!(
+            tries > 1,
+            "the commit never contended ({tries} try); the test proves nothing"
+        );
+        assert_eq!(
+            VERIFICATIONS.with(std::cell::Cell::get),
+            1,
+            "over {tries} tries"
+        );
+    }
+
     #[test]
     fn task_admission_fails_fast_instead_of_retrying_under_the_admission_lock() {
         let root = TempDir::new().unwrap();
@@ -4030,12 +4114,17 @@ mod tests {
             .map(|(_, source)| source.split("\nmod tests").next().unwrap_or(source))
             .collect::<Vec<_>>()
             .join("\n");
+        // Whitespace removed, so the check is about the call and not about how
+        // rustfmt happened to lay it out: a long argument list moves the call
+        // into a block, which a literal match read as "not retried".
+        let compact: String = all.chars().filter(|c| !c.is_whitespace()).collect();
         for (name, retried) in CLASSIFIED {
             assert!(
                 all.contains(&format!("fn {name}(")),
                 "{name} is classified but defined in no scanned module"
             );
-            let wrapped = all.contains(&format!("retry_busy(|| self.{name}("));
+            let wrapped = compact.contains(&format!("retry_busy(||self.{name}("))
+                || compact.contains(&format!("retry_busy(||{{self.{name}("));
             assert_eq!(
                 wrapped, *retried,
                 "{name} is declared retried={retried} but the code says {wrapped}"

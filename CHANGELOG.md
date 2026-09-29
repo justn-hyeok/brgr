@@ -2,6 +2,27 @@
 
 ## 2.4.0 — unreleased
 
+A harness manifest whose result source says `stdout` but carries a `path` is now
+refused. It used to parse as `Stdout` with the path silently dropped, so a
+manifest meant to read a result file sealed raw stdout instead and skipped every
+file-result guard — the relative-path check, symlink refusal, size limit, and
+device and inode re-check. Adding `deny_unknown_fields` was not enough: on an
+internally tagged enum it does not reach unit variants, which still parsed. The
+source is now read through a struct of every permitted key and converted, so an
+unknown key, a `path` on a kind that takes none, and a `file` without one are all
+errors. All four manifests installed on the author's machine carry only `kind`.
+
+A contended terminal commit now hashes its artifacts once. Verification had
+been moved out of the write lock but left inside the retry, so each contended
+attempt re-read and re-hashed up to 20 MiB and discarded it. The retry-decision
+guard now compares calls with whitespace removed, since rustfmt moving a long
+call into a block had made it report a retried path as unretried.
+
+The registry's crate documentation said `Registry::health` re-checks probe
+evidence. It re-digests the executable only; `health_probed` re-runs the probes
+and is the only source of `EvidenceChanged`. Task admission already used the
+probed check, so behaviour was right and the documentation was not.
+
 `brgr prune --apply` could delete branches in a repository brgr had never
 worked in. It learned which repository a worktree directory belonged to by
 asking whichever child directory sorted first, without checking that the child

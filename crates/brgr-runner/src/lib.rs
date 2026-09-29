@@ -176,11 +176,48 @@ pub struct ResultSpec {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(
+    tag = "kind",
+    rename_all = "snake_case",
+    try_from = "ResultSourceFields"
+)]
 pub enum ResultSource {
     Stdout,
     JsonlAssistantFinal,
     File { path: String },
+}
+
+/// Every key a result source may carry, checked before the variant is chosen.
+///
+/// `deny_unknown_fields` on an internally tagged enum does not reach its unit
+/// variants: `{"kind":"stdout","path":"report.md"}` parsed as `Stdout` with the
+/// path silently dropped, so a manifest whose `kind` was wrong but whose `path`
+/// was set sealed raw stdout and skipped every file-result guard. Deserializing
+/// through this struct rejects an unknown key and a `path` on a source that has
+/// none.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ResultSourceFields {
+    kind: String,
+    path: Option<String>,
+}
+
+impl TryFrom<ResultSourceFields> for ResultSource {
+    type Error = String;
+
+    fn try_from(fields: ResultSourceFields) -> Result<Self, Self::Error> {
+        match (fields.kind.as_str(), fields.path) {
+            ("stdout", None) => Ok(Self::Stdout),
+            ("jsonl_assistant_final", None) => Ok(Self::JsonlAssistantFinal),
+            ("file", Some(path)) => Ok(Self::File { path }),
+            ("file", None) => Err("a `file` result source requires `path`".to_owned()),
+            ("stdout" | "jsonl_assistant_final", Some(_)) => Err(format!(
+                "a `{}` result source takes no `path`; did you mean `file`?",
+                fields.kind
+            )),
+            (other, _) => Err(format!("unknown result source kind `{other}`")),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -1637,6 +1674,47 @@ mod tests {
     /// The published contract in the README bounds raw JSONL transport at
     /// 64 MiB. Behavior is exercised against a small injected bound below, so
     /// this locks the value the production capture path actually passes.
+    /// A key a result source's kind does not take is an error, never ignored.
+    ///
+    /// `{"kind":"stdout","path":"report.md"}` used to parse as `Stdout`, so a
+    /// manifest meaning `file` sealed raw stdout and skipped the file guards.
+    /// Plain `deny_unknown_fields` does not fix that on a unit variant of an
+    /// internally tagged enum — checked, it still parsed — hence the field
+    /// struct this now goes through.
+    #[test]
+    fn a_result_source_refuses_keys_its_kind_does_not_take() {
+        let parse = |text: &str| serde_json::from_str::<ResultSource>(text);
+        for (text, expected) in [
+            (r#"{"kind":"stdout"}"#, ResultSource::Stdout),
+            (
+                r#"{"kind":"jsonl_assistant_final"}"#,
+                ResultSource::JsonlAssistantFinal,
+            ),
+            (
+                r#"{"kind":"file","path":"out.md"}"#,
+                ResultSource::File {
+                    path: "out.md".to_owned(),
+                },
+            ),
+        ] {
+            let parsed = parse(text).unwrap();
+            assert_eq!(parsed, expected);
+            // What brgr writes, brgr can read back.
+            let written = serde_json::to_string(&parsed).unwrap();
+            assert_eq!(parse(&written).unwrap(), expected, "{written}");
+        }
+        for text in [
+            r#"{"kind":"stdout","path":"report.md"}"#,
+            r#"{"kind":"jsonl_assistant_final","extra":1}"#,
+            r#"{"kind":"file"}"#,
+            r#"{"kind":"file","path":"out.md","mode":"x"}"#,
+            r#"{"kind":"stdoutt"}"#,
+            r#"{"path":"out.md"}"#,
+        ] {
+            assert!(parse(text).is_err(), "{text} was accepted");
+        }
+    }
+
     #[test]
     fn jsonl_transport_limit_matches_the_published_bound() {
         assert_eq!(JSONL_TRANSPORT_LIMIT_BYTES, 64 * 1024 * 1024);
