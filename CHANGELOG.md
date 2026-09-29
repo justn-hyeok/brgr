@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.5.0 — 2026-09-29
 
 Workers now run at a permission level: `full`, `edits`, or `read-only`. Each
 harness recipe maps the levels to its own flags — Claude Code
