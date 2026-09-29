@@ -2,6 +2,21 @@
 
 ## 2.4.0 — unreleased
 
+Retry coverage is now a recorded decision per write path rather than a claim. The
+store has twenty-one write paths — fifteen opening an explicit transaction and six
+writing through an implicit one — and four were retried. The five a running attempt
+depends on now are: the launch receipt, the runner identity, attempt state
+transitions, the pre-spawn retry grant, and supervision events. Losing one of those
+to contention leaves a paid run unfinished for recovery to settle as `Lost`, which
+no later attempt on that revision can supersede.
+
+The rest are left alone on purpose. Task admission must fail fast because it holds
+the repository admission lock. A command the caller can simply reissue should not
+occupy a runtime worker waiting. Notification delivery carries its own claim and
+lease protocol that already re-drives a lost step.
+`every_write_path_has_a_recorded_retry_decision` fails both when a write path has
+no decision and when a declared decision disagrees with the code.
+
 A schema stamp from a different build no longer makes an open take the write lock.
 The stamp is derived from the schema text, so two builds whose text differs carry
 different stamps, and re-applying the batch on that signal alone had them rewrite
