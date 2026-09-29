@@ -65,6 +65,9 @@ fn add_fixture(home: &Path, fixture: &Path, scratch: &Path) {
     assert!(receipt["scratch_result_digest"].as_str().is_some());
 }
 
+/// Fails unless brgr runs it the way the Devin recipe promises: print mode,
+/// workspace trust bypassed, and — with no level requested — the full level,
+/// which Devin calls `dangerous`.
 const DEVIN_FIXTURE: &str = r#"#!/bin/sh
 case "$1" in
   --version) echo 'devin 3000.fixture'; exit 0;;
@@ -78,20 +81,20 @@ case "$1" in
 esac
 prompt_file=
 print_mode=0
-smart_mode=0
+full_mode=0
 trust_bypassed=0
 while test "$#" -gt 0; do
   case "$1" in
     --prompt-file) shift; prompt_file=$1;;
     -p|--print) print_mode=1;;
-    --permission-mode) shift; test "$1" = smart || exit 3; smart_mode=1;;
+    --permission-mode) shift; test "$1" = dangerous || exit 3; full_mode=1;;
     --respect-workspace-trust) shift; test "$1" = false || exit 4; trust_bypassed=1;;
     *) exit 5;;
   esac
   shift
 done
 test "$print_mode" = 1 || exit 6
-test "$smart_mode" = 1 || exit 7
+test "$full_mode" = 1 || exit 7
 test "$trust_bypassed" = 1 || exit 8
 test -f "$prompt_file" || exit 10
 /bin/cat "$prompt_file"

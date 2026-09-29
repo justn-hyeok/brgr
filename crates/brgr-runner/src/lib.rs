@@ -142,10 +142,16 @@ pub struct ModelCatalogSpec {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ModelCatalogFormat {
-    JsonSelectors { pointer: String, field: String },
+    JsonSelectors {
+        pointer: String,
+        field: String,
+    },
     CanonicalProviderTable,
     DashSeparated,
     FirstColumn,
+    /// One `provider/model` selector per line and nothing else, as
+    /// `opencode models` prints.
+    Lines,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

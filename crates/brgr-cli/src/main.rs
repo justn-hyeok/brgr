@@ -625,6 +625,47 @@ mod tests {
     use crate::supervision::pinned_manifest_for_launch;
     use tempfile::TempDir;
 
+    /// `--model` and `--permission` are options of `run` and `revise`. Adding
+    /// `--permission` once slipped between `model`'s `#[arg(long)]` and its
+    /// field, which turned `--model` into a positional and broke every run that
+    /// named a model; only a contract test several layers away noticed.
+    #[test]
+    fn run_and_revise_take_model_and_permission_as_options() {
+        let run = Cli::try_parse_from([
+            "brgr",
+            "run",
+            "objective",
+            "--model",
+            "m",
+            "--effort",
+            "high",
+            "--permission",
+            "edits",
+        ])
+        .unwrap();
+        let Command::Run(args) = run.command else {
+            panic!("not a run");
+        };
+        assert_eq!(args.model.as_deref(), Some("m"));
+        assert_eq!(args.effort.as_deref(), Some("high"));
+        assert_eq!(args.permission, Some(crate::cli::PermissionArg::Edits));
+
+        let task = TaskId::new().to_string();
+        let revise = Cli::try_parse_from([
+            "brgr",
+            "revise",
+            task.as_str(),
+            "objective",
+            "--permission",
+            "read-only",
+        ])
+        .unwrap();
+        let Command::Revise(args) = revise.command else {
+            panic!("not a revise");
+        };
+        assert_eq!(args.permission, Some(crate::cli::PermissionArg::ReadOnly));
+    }
+
     /// A requested level is kept unless it exceeds a bound, which is an error;
     /// no request takes the tightest bound, and `full` is no bound at all.
     #[test]

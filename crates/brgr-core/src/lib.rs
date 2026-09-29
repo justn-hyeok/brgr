@@ -1288,7 +1288,7 @@ mod tests {
                 effort_argv: vec![],
                 env_allow: vec![],
                 mode: ExecutionMode::DelegatedExternal,
-                permission_argv: Default::default(),
+                permission_argv: brgr_runner::PermissionArgv::default(),
             },
             result: ResultSpec {
                 source: ResultSource::JsonlAssistantFinal,
@@ -1395,7 +1395,7 @@ mod tests {
                 effort_argv: vec![],
                 env_allow: vec![],
                 mode: ExecutionMode::DelegatedExternal,
-                permission_argv: Default::default(),
+                permission_argv: brgr_runner::PermissionArgv::default(),
             },
             result: ResultSpec {
                 source: ResultSource::Stdout,

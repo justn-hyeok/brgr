@@ -527,9 +527,11 @@ impl Registry {
             other => return Ok(other),
         }
         manifest.validate()?;
-        for (argv, expected) in [
-            (&manifest.probe.version_argv, &receipt.version_digest),
-            (&manifest.probe.help_argv, &receipt.help_digest),
+        // Help is digested the way registration digested it, so a CLI that
+        // prints help to stderr is not reported as changed on every check.
+        for (argv, expected, is_help) in [
+            (&manifest.probe.version_argv, &receipt.version_digest, false),
+            (&manifest.probe.help_argv, &receipt.help_digest, true),
         ] {
             let observed =
                 match ProcessRunner::probe(&manifest.executable, argv, PROBE_DEADLINE).await {
@@ -539,7 +541,12 @@ impl Registry {
                     }
                     Err(error) => return Err(error.into()),
                 };
-            match classify_probe(&observed, expected)? {
+            let evidence = if is_help {
+                help_output(&observed)
+            } else {
+                &observed.stdout
+            };
+            match classify_probe(&observed, evidence, expected)? {
                 Health::Healthy => {}
                 other => return Ok(other),
             }
@@ -764,12 +771,12 @@ async fn probe_custom_contract(manifest: &HarnessManifest) -> Result<ProbeEviden
     {
         return Err(RegistryError::ProbeFailed);
     }
-    let help_text = String::from_utf8_lossy(&help.stdout);
+    let help_text = String::from_utf8_lossy(help_output(&help));
     validate_custom_argv(manifest, &help_text)?;
     Ok(ProbeEvidence {
         executable: digest_file(&manifest.executable)?,
         version: digest_bytes(&version.stdout),
-        help: digest_bytes(&help.stdout),
+        help: digest_bytes(help_output(&help)),
     })
 }
 
@@ -876,6 +883,17 @@ async fn draft_manifest(
     draft_manifest_as(executable, &requested_name).await
 }
 
+/// The help a probe printed. Some CLIs print it to stderr — `opencode run
+/// --help` writes nothing to stdout — so stderr counts when stdout is empty.
+/// A CLI that prints to stdout keeps exactly the evidence it had before.
+fn help_output(help: &ExecutionOutput) -> &[u8] {
+    if help.stdout.is_empty() {
+        &help.stderr
+    } else {
+        &help.stdout
+    }
+}
+
 async fn draft_manifest_as(
     executable: &Path,
     requested_name: &str,
@@ -907,7 +925,7 @@ async fn draft_manifest_as(
     {
         return Err(RegistryError::ProbeFailed);
     }
-    let help_text = String::from_utf8_lossy(&help.stdout);
+    let help_text = String::from_utf8_lossy(help_output(&help));
     let manifest = generate_manifest(requested_name, realpath, &help_text)?;
     manifest.validate()?;
     let executable_digest = digest_file(&manifest.executable)?;
@@ -916,7 +934,7 @@ async fn draft_manifest_as(
         ProbeEvidence {
             executable: executable_digest,
             version: digest_bytes(&version.stdout),
-            help: digest_bytes(&help.stdout),
+            help: digest_bytes(help_output(&help)),
         },
     ))
 }
@@ -959,6 +977,7 @@ enum Catalog {
     OmpSelectors,
     DashSeparated,
     FirstColumn,
+    Lines,
 }
 
 #[derive(Clone, Copy)]
@@ -1222,7 +1241,6 @@ const RECIPES: &[Recipe] = &[
             "--no-session-persistence",
             "${input.prompt}",
         ],
-        model_argv: MODEL,
         effort_argv: &["--effort", "${route.effort}"],
         effort_requires: Some("--effort <level>"),
         // `USER` names the macOS keychain entry holding the login; without it
@@ -1238,7 +1256,9 @@ const RECIPES: &[Recipe] = &[
         capabilities: &[
             PROCESS_CAPS[0],
             PROCESS_CAPS[1],
-            ("model_select", Cap::Supported("--model")),
+            // No model list to check a name against before a paid run, so the
+            // CLI's own configured default is used, as with Devin.
+            ("model_select", Cap::Unsupported("configured_default_only")),
             ("effort_select", Cap::Supported("--effort")),
         ],
         full: Some(&["--permission-mode", "bypassPermissions"]),
@@ -1256,13 +1276,14 @@ const RECIPES: &[Recipe] = &[
             "--thinking <level>",
         ],
         argv: &["${input.prompt}"],
-        model_argv: &["--model", "${route.model}"],
         effort_argv: &["--thinking", "${route.effort}"],
         env_allow: &BASE_ENV,
         capabilities: &[
             PROCESS_CAPS[0],
             PROCESS_CAPS[1],
-            ("model_select", Cap::Supported("--model")),
+            // No model list to check a name against before a paid run, so the
+            // CLI's own configured default is used, as with Devin.
+            ("model_select", Cap::Unsupported("configured_default_only")),
             ("effort_select", Cap::Supported("--thinking")),
         ],
         full: Some(&["--auto-approve", "true"]),
@@ -1275,6 +1296,7 @@ const RECIPES: &[Recipe] = &[
         id: "local.opencode",
         required_flags: &["--model", "--variant", "--agent", "--auto"],
         help_argv: &["run", "--help"],
+        catalog: Some((&["models"], Catalog::Lines)),
         argv: &["run", "${input.prompt}"],
         model_argv: &["--model", "${route.model}"],
         effort_argv: &["--variant", "${route.effort}"],
@@ -1348,6 +1370,7 @@ fn draft(recipe: &Recipe, id: String, executable: PathBuf, help: &str) -> Harnes
                     },
                     Catalog::DashSeparated => ModelCatalogFormat::DashSeparated,
                     Catalog::FirstColumn => ModelCatalogFormat::FirstColumn,
+                    Catalog::Lines => ModelCatalogFormat::Lines,
                 },
             }),
         },
@@ -1463,6 +1486,16 @@ fn parse_model_catalog(
                     if selector != "auto" && !selector.is_empty() {
                         selectors.insert(selector.to_owned());
                     }
+                }
+            }
+        }
+        ModelCatalogFormat::Lines => {
+            let text =
+                std::str::from_utf8(bytes).map_err(|_| RegistryError::InvalidModelCatalog)?;
+            for line in text.lines().map(str::trim) {
+                // A bare `provider/model`; prose or a table row is not one.
+                if line.contains('/') && !line.contains(char::is_whitespace) {
+                    selectors.insert(line.to_owned());
                 }
             }
         }
@@ -1605,6 +1638,7 @@ fn health_for(receipt: &ActivationReceipt) -> Result<Health, RegistryError> {
 
 fn classify_probe(
     observed: &ExecutionOutput,
+    evidence: &[u8],
     expected_digest: &str,
 ) -> Result<Health, RegistryError> {
     if observed.timed_out {
@@ -1618,7 +1652,7 @@ fn classify_probe(
     if observed.output_truncated {
         return Err(RegistryError::ProbeFailed);
     }
-    let observed_digest = digest_bytes(&observed.stdout);
+    let observed_digest = digest_bytes(evidence);
     if observed_digest == expected_digest {
         Ok(Health::Healthy)
     } else {
@@ -1750,6 +1784,46 @@ mod tests {
         workspace
     }
 
+    /// Help printed to stderr is the evidence when stdout is empty, in both
+    /// registration and later health checks; a CLI printing to stdout keeps
+    /// exactly the evidence it had.
+    #[test]
+    fn help_on_stderr_is_evidence_only_when_stdout_is_empty() {
+        let output = |stdout: &[u8], stderr: &[u8]| ExecutionOutput {
+            exit_code: Some(0),
+            stdout: stdout.to_vec(),
+            stderr: stderr.to_vec(),
+            result: vec![],
+            observed_model: None,
+            timed_out: false,
+            cancelled: false,
+            output_truncated: false,
+            elapsed: Duration::ZERO,
+        };
+        assert_eq!(help_output(&output(b"", b"--auto")), b"--auto");
+        assert_eq!(
+            help_output(&output(b"--help text", b"noise")),
+            b"--help text"
+        );
+        let stderr_only = output(b"", b"--auto");
+        let expected = digest_bytes(b"--auto");
+        assert!(matches!(
+            classify_probe(&stderr_only, help_output(&stderr_only), &expected).unwrap(),
+            Health::Healthy
+        ));
+    }
+
+    #[test]
+    fn a_lines_catalog_takes_bare_selectors_and_ignores_everything_else() {
+        let output = b"opencode/big-pickle\nopencode-go/glm-5.3\n\nWARN something happened\nnot-a-selector\n";
+        let parsed = parse_model_catalog(&ModelCatalogFormat::Lines, output).unwrap();
+        assert_eq!(
+            parsed.into_iter().collect::<Vec<_>>(),
+            ["opencode-go/glm-5.3", "opencode/big-pickle"]
+        );
+        assert!(parse_model_catalog(&ModelCatalogFormat::Lines, b"no selectors here\n").is_err());
+    }
+
     #[test]
     fn model_catalog_formats_keep_only_exact_selectors() {
         let json = br#"{"models":[{"selector":"workbuddy/deepseek-v4.1-flash"}]}"#;
@@ -1858,7 +1932,7 @@ mod tests {
                 effort_argv: vec![],
                 env_allow: vec!["HOME".to_owned(), "PATH".to_owned()],
                 mode: ExecutionMode::OneShot,
-                permission_argv: Default::default(),
+                permission_argv: brgr_runner::PermissionArgv::default(),
             },
             result: ResultSpec {
                 source: ResultSource::Stdout,
@@ -2081,7 +2155,7 @@ mod tests {
         );
     }
 
-    /// Claude Code, Cline, and OpenCode draft from their own documented flags,
+    /// The Claude Code, Cline, and `opencode` recipes draft from their own flags,
     /// default to full permission, and refuse a level they have no way to honour.
     #[test]
     fn claude_cline_and_opencode_recipes_map_every_level_they_support() {
@@ -2091,6 +2165,8 @@ mod tests {
         assert_eq!(claude.launch.argv.last().unwrap(), "${input.prompt}");
         assert_eq!(claude.launch.effort_argv, ["--effort", "${route.effort}"]);
         assert!(claude.launch.env_allow.contains(&"USER".to_owned()));
+        // No model list to verify against, so the CLI's configured default runs.
+        assert!(claude.launch.model_argv.is_empty());
         for (level, mode) in [
             (None, "bypassPermissions"),
             (Some(PermissionLevel::Edits), "acceptEdits"),
@@ -2139,6 +2215,10 @@ mod tests {
         assert_eq!(opencode.id, "local.opencode");
         // `run`'s flags are documented only by `opencode run --help`.
         assert_eq!(opencode.probe.help_argv, ["run", "--help"]);
+        assert_eq!(
+            opencode.probe.model_catalog.as_ref().unwrap().argv,
+            ["models"]
+        );
         assert_eq!(opencode.launch.argv, ["run", "${input.prompt}"]);
         assert_eq!(opencode.permission_arguments(None).unwrap(), ["--auto"]);
         assert_eq!(
@@ -2306,7 +2386,7 @@ mod tests {
                 effort_argv: vec![],
                 env_allow: vec!["HOME".to_owned(), "PATH".to_owned()],
                 mode: ExecutionMode::OneShot,
-                permission_argv: Default::default(),
+                permission_argv: brgr_runner::PermissionArgv::default(),
             },
             result: ResultSpec {
                 source: ResultSource::Stdout,

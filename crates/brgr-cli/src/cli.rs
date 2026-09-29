@@ -236,11 +236,11 @@ pub(crate) struct RunArgs {
     pub(crate) delegation: DelegationArgs,
     #[arg(long, default_value = "local.gjc")]
     pub(crate) harness: String,
-    #[arg(long)]
     /// How much the worker may do without asking: read-only, edits, or full.
     /// Defaults to the configured cap, or the harness's full level.
     #[arg(long, value_enum)]
     pub(crate) permission: Option<PermissionArg>,
+    #[arg(long)]
     pub(crate) model: Option<String>,
     #[arg(long)]
     pub(crate) effort: Option<String>,

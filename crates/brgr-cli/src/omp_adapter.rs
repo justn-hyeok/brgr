@@ -73,7 +73,7 @@ pub(crate) fn omp_process_manifest(
                 "HERDR_PANE_ID".to_owned(),
             ],
             mode: ExecutionMode::DelegatedExternal,
-            permission_argv: Default::default(),
+            permission_argv: brgr_runner::PermissionArgv::default(),
         },
         result: ResultSpec {
             source: ResultSource::Stdout,

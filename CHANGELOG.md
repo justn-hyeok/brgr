@@ -2,6 +2,35 @@
 
 ## Unreleased
 
+Workers now run at a permission level: `full`, `edits`, or `read-only`. Each
+harness recipe maps the levels to its own flags — Claude Code
+`bypassPermissions`/`acceptEdits`/`plan`, Command Code `yolo`/`accept-edits`/
+`plan`, Devin `dangerous`/`accept-edits`/`auto`, Cursor `--force`/agent mode/
+`--mode plan`, OMP `--approval-mode=yolo`/`write`, Cline `--auto-approve true`/
+`--plan`, OpenCode `--auto`/`--agent plan`. `full` is the default. Choose per task
+with `brgr run --permission` or `brgr revise --permission`, and cap every task
+with `brgr config set-max-permission`: a request above the cap, or above the
+parent task's own level, is refused rather than lowered, and a level a harness
+cannot honour is refused before anything runs rather than run under a wider
+one. A task that asks for nothing and has no cap runs exactly as before.
+
+This changes two recipes' defaults. Cursor no longer pins `--mode ask`, and
+Command Code no longer pins plan mode and two turns; both were unable to do
+real work. Re-register a harness to pick up its new recipe.
+
+New recipes for Claude Code (`local.claude-code`), Cline (`local.cline`), and
+OpenCode (`local.opencode`). Claude Code and Cline have no model list to verify a
+name against before a paid run, so they use each CLI's configured default model,
+as Devin does; effort remains selectable. OpenCode's models are verified
+against `opencode models`, read by a new one-selector-per-line catalog format.
+Claude Code needs `USER` to find its keychain login, so it is allowed through.
+Help printed only to stderr — as `opencode run --help` does — now counts as
+help, in registration and in health checks alike.
+
+A failed registration now says why: exit code, whether it timed out or was
+truncated, and how much it printed. Before, a working CLI whose account had run
+out of credits looked broken with nothing to go on.
+
 A notification dispatcher now stops when its control home is removed. It polls
 for up to a day, and an open database connection keeps reading a deleted file,
 so every test run that deleted its home left dispatchers running; a single
