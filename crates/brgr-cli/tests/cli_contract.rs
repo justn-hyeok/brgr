@@ -687,6 +687,99 @@ fn a_worker_started_without_delegation_cannot_start_a_child() {
     assert_eq!(listed.as_array().map(Vec::len), Some(1), "{listed}");
 }
 
+/// A level the harness cannot honour is refused before anything runs, and a
+/// configured cap binds a task that asked for nothing instead of being ignored.
+///
+/// The gjc recipe has no approval system, so it declares only `full`: asking it
+/// for read-only must fail rather than run with every tool approved.
+#[test]
+fn a_permission_the_harness_cannot_honour_is_refused_before_it_runs() {
+    let (_temp, home, workspace) = gjc_home();
+    let owner = [("BRGR_OWNER_ID", "codex:permission-test")];
+    let ws = workspace.to_str().unwrap();
+    let refuse = |args: &[&str], why: &str| {
+        let output = run(&home, args, &owner);
+        assert!(!output.status.success(), "{why}: ran anyway");
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        assert!(stderr.contains("permission"), "{why}: {stderr}");
+    };
+
+    refuse(
+        &[
+            "run",
+            "BRGR_FIXTURE_OK",
+            "--workspace",
+            ws,
+            "--foreground",
+            "--permission",
+            "read-only",
+        ],
+        "explicit read-only on a full-only harness",
+    );
+
+    json_output(&run(
+        &home,
+        &["config", "set-max-permission", "edits"],
+        &owner,
+    ));
+    refuse(
+        &["run", "BRGR_FIXTURE_OK", "--workspace", ws, "--foreground"],
+        "a cap on a harness that cannot honour it",
+    );
+    refuse(
+        &[
+            "run",
+            "BRGR_FIXTURE_OK",
+            "--workspace",
+            ws,
+            "--foreground",
+            "--permission",
+            "full",
+        ],
+        "a request above the cap",
+    );
+
+    // A cap of full is no cap.
+    json_output(&run(
+        &home,
+        &["config", "set-max-permission", "full"],
+        &owner,
+    ));
+    let ran = json_output(&run(
+        &home,
+        &["run", "BRGR_FIXTURE_OK", "--workspace", ws, "--foreground"],
+        &owner,
+    ));
+    assert_eq!(ran["outcome"], "candidate", "{ran}");
+
+    json_output(&run(&home, &["config", "clear-max-permission"], &owner));
+    let ran = json_output(&run(
+        &home,
+        &[
+            "run",
+            "BRGR_FIXTURE_OK",
+            "--workspace",
+            ws,
+            "--foreground",
+            "--permission",
+            "full",
+        ],
+        &owner,
+    ));
+    assert_eq!(ran["outcome"], "candidate", "{ran}");
+    assert_eq!(
+        store_task(&home, ran["task_id"].as_str().unwrap()).permission,
+        Some(brgr_protocol::PermissionLevel::Full)
+    );
+}
+
+fn store_task(home: &Path, task: &str) -> brgr_protocol::TaskSpec {
+    brgr_store::Store::open(home.join("store"))
+        .unwrap()
+        .task(task.parse().unwrap())
+        .unwrap()
+}
+
 const RECURSIVE_GJC_FIXTURE: &str = r#"#!/bin/sh
 set -eu
 case "${1:-}" in

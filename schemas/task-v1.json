@@ -53,6 +53,7 @@
       }
     },
     "max_concurrent_children": { "type": ["integer", "null"], "minimum": 1, "maximum": 8 },
+    "permission": { "enum": ["read_only", "edits", "full", null] },
     "budget": {
       "type": "object",
       "required": ["deadline_seconds", "max_attempts"],

@@ -42,7 +42,15 @@
           "type": "array", "uniqueItems": true, "maxItems": 32,
           "items": { "type": "string", "pattern": "^[A-Z_][A-Z0-9_]*$" }
         },
-        "mode": { "enum": ["one_shot", "delegated_external"] }
+        "mode": { "enum": ["one_shot", "delegated_external"] },
+        "permission_argv": {
+          "type": "object", "additionalProperties": false,
+          "properties": {
+            "full": { "$ref": "#/$defs/argv" },
+            "edits": { "$ref": "#/$defs/argv" },
+            "read_only": { "$ref": "#/$defs/argv" }
+          }
+        }
       }
     },
     "result": {

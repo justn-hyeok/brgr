@@ -18,8 +18,8 @@ use crate::{
 use anyhow::{Context, Result, bail};
 use brgr_core::TaskRevision;
 use brgr_protocol::{
-    ArtifactContract, AttemptBudget, AttemptId, DecisionVerdict, OwnerId, Route, SCHEMA_V1, TaskId,
-    TaskInstructions, TaskSpec, TerminalOutcome,
+    ArtifactContract, AttemptBudget, AttemptId, DecisionVerdict, OwnerId, PermissionLevel, Route,
+    SCHEMA_V1, TaskId, TaskInstructions, TaskSpec, TerminalOutcome,
 };
 use brgr_registry::{ActivationReceipt, Registry};
 use brgr_runner::HarnessManifest;
@@ -126,6 +126,7 @@ pub(crate) async fn run_task(paths: &Paths, args: RunArgs, json_output: bool) ->
         },
         evidence: args.evidence.spec(),
         max_concurrent_children: args.max_children,
+        permission: args.permission.map(Into::into),
     };
     spec.validate()?;
     activated.validate_task_route(&spec)?;
@@ -195,6 +196,9 @@ pub(crate) async fn revise_task(paths: &Paths, args: ReviseArgs, json_output: bo
     replacement.revision = next_revision;
     replacement.create_request_id = format!("revise-{}-{next_revision}", args.task);
     replacement.objective = args.objective;
+    if let Some(level) = args.permission {
+        replacement.permission = Some(level.into());
+    }
     replacement.workspace = source_workspace.to_string_lossy().into_owned();
     replacement.acceptance_criteria = criteria;
     let requested = args.capabilities.required_names()?;
@@ -273,6 +277,7 @@ pub(crate) async fn start_task(
     options: StartOptions<'_>,
 ) -> Result<()> {
     spec.validate()?;
+    spec.permission = effective_permission(paths, &spec, options.parent)?;
     activated.validate_task_route(&spec)?;
     let source = options.source_workspace.canonicalize()?;
     let home = paths.home.canonicalize()?;
@@ -546,4 +551,56 @@ fn require_parent_may_delegate(
         );
     }
     Ok(())
+}
+
+/// The level a task runs at.
+///
+/// Whatever was asked for, bounded by the configured cap and by the parent
+/// task's own level: a child never gets more than the worker that started it.
+/// Asking for more is an error rather than a quiet downgrade, so the caller
+/// finds out. Asking for nothing yields the tightest bound, if any; a bound of
+/// `full` is no bound, which keeps a task that asked for nothing running
+/// exactly as it did before levels existed.
+fn effective_permission(
+    paths: &Paths,
+    spec: &TaskSpec,
+    parent: Option<(TaskId, AttemptId)>,
+) -> Result<Option<PermissionLevel>> {
+    let cap = Config::load(&paths.config)?.worker.max_permission;
+    let parent_level = match parent {
+        Some((_, attempt)) => {
+            Store::open(&paths.store)?
+                .task_for_attempt(attempt)?
+                .permission
+        }
+        None => None,
+    };
+    bound_permission(spec.permission, cap, parent_level)
+}
+
+/// The rule behind [`effective_permission`], without the lookups.
+pub(crate) fn bound_permission(
+    requested: Option<PermissionLevel>,
+    cap: Option<PermissionLevel>,
+    parent: Option<PermissionLevel>,
+) -> Result<Option<PermissionLevel>> {
+    let bounds = [
+        ("the configured maximum", cap),
+        ("the parent task's level", parent),
+    ];
+    if let Some(requested) = requested {
+        for (source, bound) in bounds {
+            if let Some(bound) = bound
+                && requested > bound
+            {
+                bail!("permission {requested:?} exceeds {source}, {bound:?}");
+            }
+        }
+        return Ok(Some(requested));
+    }
+    Ok(bounds
+        .into_iter()
+        .filter_map(|(_, bound)| bound)
+        .min()
+        .filter(|level| *level != PermissionLevel::Full))
 }

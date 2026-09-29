@@ -189,6 +189,34 @@ pub(crate) enum ConfigCommand {
         #[arg(action = clap::ArgAction::Set)]
         enabled: bool,
     },
+    /// Cap what any worker may be given; a task asking for more is refused.
+    SetMaxPermission {
+        #[arg(value_enum)]
+        level: PermissionArg,
+    },
+    /// Remove the cap, so tasks default to each harness's full level again.
+    ClearMaxPermission,
+}
+
+/// A worker permission level as typed on the command line.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, clap::ValueEnum)]
+pub(crate) enum PermissionArg {
+    /// Read and propose; no file changes.
+    ReadOnly,
+    /// Edit files in the task workspace; commands still need approval.
+    Edits,
+    /// Every tool auto-approved. The default when nothing is capped.
+    Full,
+}
+
+impl From<PermissionArg> for brgr_protocol::PermissionLevel {
+    fn from(value: PermissionArg) -> Self {
+        match value {
+            PermissionArg::ReadOnly => Self::ReadOnly,
+            PermissionArg::Edits => Self::Edits,
+            PermissionArg::Full => Self::Full,
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -209,6 +237,10 @@ pub(crate) struct RunArgs {
     #[arg(long, default_value = "local.gjc")]
     pub(crate) harness: String,
     #[arg(long)]
+    /// How much the worker may do without asking: read-only, edits, or full.
+    /// Defaults to the configured cap, or the harness's full level.
+    #[arg(long, value_enum)]
+    pub(crate) permission: Option<PermissionArg>,
     pub(crate) model: Option<String>,
     #[arg(long)]
     pub(crate) effort: Option<String>,
@@ -257,6 +289,10 @@ pub(crate) struct DelegationArgs {
 #[derive(Args)]
 pub(crate) struct ReviseArgs {
     pub(crate) task: TaskId,
+    /// Change the permission level; the previous revision's level is kept
+    /// otherwise.
+    #[arg(long, value_enum)]
+    pub(crate) permission: Option<PermissionArg>,
     pub(crate) objective: String,
     #[arg(long = "criterion")]
     pub(crate) criteria: Vec<String>,
