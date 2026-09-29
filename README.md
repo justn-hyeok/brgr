@@ -17,9 +17,24 @@ before sharing or running a downloaded binary.
 
 The v1 managed-run contract is retained. The v2.1.0 release closed the
 [v1 readiness checklist](docs/v1-readiness-checklist-2026-09-14.md) under its
-recorded personal-use scope and evidence limits. v2.2.0 adds recursive worker
-delegation and an attempt-scoped message mailbox. Its verified scope and open
+recorded personal-use scope and evidence limits, and v2.2.0 adds recursive worker
+delegation and an attempt-scoped message mailbox; its verified scope and open
 limits are described below.
+
+That gate closure did not hold. Re-measuring the same code on 2026-09-28 found a
+concurrency defect that failed one in four concurrent admissions with a raw store
+error, a board projection that cost 3.26s at 6,400 stored tasks against a
+two-second refresh, and task worktrees that were never reclaimed. Those are fixed
+and pinned by regression gates, but gates 2-4, 2-5 and the final GO verdict are
+reopened and the public v1 verdict is NO-GO until they close. The personal-use GO
+stands, because it was scoped to observed single-session paths.
+
+One limitation is accepted rather than pending: brgr has no human reviewer other
+than its author. The review gate is therefore defined as a procedure — a
+non-author review of the whole crate, every finding disposed of in writing, each
+load-bearing claim reproduced independently, and every performance claim backed
+by a bench in this repository — and the absence of a second person is recorded
+here instead of being waived.
 
 ## Herdr plugin
 
@@ -222,7 +237,7 @@ artifact limit. Over-limit processes are stopped and produce a failed result.
 
 `brgr cleanup status TASK` shows whether an owned OMP pane was closed or
 retained. `brgr cleanup run TASK` retries a pending close. Neither command
-removes a task worktree.
+removes a task worktree; `brgr prune` does that separately.
 
 Herdr 0.9.0 accepts `pane.close(pane_id)` without conditional identity fields.
 Brgr rechecks owner decision, inbox acknowledgment, pane ID, terminal ID,
@@ -230,6 +245,36 @@ immutable agent session, idle state, and protected-tab status immediately
 before closing. Another actor could still change the pane between that check
 and Herdr's close call. This is a best-effort cooperative-local guarantee, not
 an atomic compare-and-close guarantee; use `--keep-pane` for shared sessions.
+
+## Reclaiming task worktrees
+
+Every Git-backed task gets its own worktree, which costs a full copy of the
+source working tree and leaves a `brgr/task-*` branch in a repository brgr does
+not own. Nothing is reclaimed automatically.
+
+```bash
+brgr prune           # report what is removable and why the rest is kept
+brgr prune --apply   # remove them
+```
+
+A worktree is only considered once its task revision carries a recorded owner
+decision. Removal uses `git worktree remove` and `git branch -d`, neither
+forced, so uncommitted work and unmerged commits are kept and reported with
+git's own reason.
+
+git is not the only check. Its clean test does not look at ignored files, so
+`git worktree remove` would silently delete an ignored `.env`, a downloaded
+credential, or a build cache — the things a task worktree is most likely to
+hold. Those worktrees are kept and their ignored paths listed; pass
+`--include-ignored` to remove them anyway. A symlink, a directory git has not
+registered as a worktree, a name the layout could not have produced, and the
+directory prune is running in are all refused.
+
+Sealed results, decisions, artifacts, and task rows are never removed — they
+cost about 9 KiB per task, while a worktree costs the size of the checkout.
+Pruning is not owner-scoped, because cross-owner isolation is outside v1 scope;
+each row reports its owner. `brgr prune` is rejected through the Herdr host
+bridge; run it explicitly outside the plugin Codex pane.
 
 ## Development
 

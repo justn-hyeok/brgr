@@ -1,5 +1,12 @@
 # brgr v2.1.0
 
+> **Correction, 2026-09-28.** The claim below that the checklist had zero open
+> items did not hold. Re-measuring this same code found a P0 concurrency defect
+> that failed one in four concurrent admissions with a raw store error, plus two
+> P1 items. Gates 2-4, 2-5, and the final GO verdict are reopened; see the
+> [reopening record](v1-readiness-checklist-2026-09-14.md#2026-09-28-게이트-재개-기록).
+> The text below is kept as the record of what was published.
+
 This release closes every remaining public v1 readiness gate. The
 [v1 checklist](https://github.com/justn-hyeok/brgr/blob/v2.1.0/docs/v1-readiness-checklist-2026-09-14.md)
 has zero open items.

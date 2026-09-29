@@ -1,0 +1,36 @@
+# Supply-chain policy for `cargo deny`, enforced by the CI `supply-chain` job.
+# Keep the allow lists explicit: a new license or source in the dependency
+# graph should be a deliberate review, not a silent addition.
+
+[advisories]
+version = 2
+yanked = "deny"
+
+[licenses]
+version = 2
+# Every license currently present in the locked graph. LGPL-2.1-or-later is
+# reachable only as an alternative in a dual license, so it is not allowed here.
+allow = [
+  "Apache-2.0",
+  "MIT",
+  "Unicode-3.0",
+  "Unlicense",
+  "Zlib",
+]
+exceptions = []
+
+[licenses.private]
+ignore = true
+
+[bans]
+multiple-versions = "warn"
+# Every intra-workspace dependency is a `path` dependency, which this check
+# reads as a wildcard. `allow-wildcard-paths` does not apply while the member
+# crates remain publishable, so this stays a warning rather than a gate. The
+# checks that gate here are advisories, licenses, and sources.
+wildcards = "warn"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

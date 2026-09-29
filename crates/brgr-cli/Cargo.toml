@@ -29,5 +29,10 @@ uuid.workspace = true
 assert_cmd.workspace = true
 predicates.workspace = true
 
+[[bench]]
+name = "concurrent_admission"
+harness = false
+test = false
+
 [lints]
 workspace = true
