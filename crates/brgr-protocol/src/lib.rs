@@ -1,4 +1,64 @@
 //! Versioned protocol types shared by every brgr component.
+//!
+//! These are the wire types: what a plugin sends brgr and what brgr writes back.
+//! Every one of them carries an explicit `schema`, and [`TaskSpec::validate`]
+//! refuses anything that is not [`SCHEMA_V1`], so a component built against a
+//! different version fails at the boundary instead of part way through a run.
+//!
+//! A task as it arrives on the wire:
+//!
+//! ```
+//! use brgr_protocol::{SCHEMA_V1, TaskSpec};
+//!
+//! let wire = r#"{
+//!   "schema": "brgr/v1",
+//!   "task_id": "3d3c9081-0f4a-4f2e-9c1b-7a2d5e6f8a90",
+//!   "revision": 1,
+//!   "create_request_id": "req-1",
+//!   "owner_id": "codex:alice",
+//!   "objective": "Summarize the build log",
+//!   "workspace": "/srv/checkout",
+//!   "route": { "harness_id": "local.fixture" },
+//!   "required_capabilities": ["completion"],
+//!   "artifact_contract": { "media_type": "text/plain", "max_bytes": 4096 },
+//!   "acceptance_criteria": ["the report is sealed"],
+//!   "budget": { "deadline_seconds": 60, "max_attempts": 2 }
+//! }"#;
+//!
+//! let task: TaskSpec = serde_json::from_str(wire)?;
+//! task.validate()?;
+//! assert_eq!(task.schema, SCHEMA_V1);
+//! assert_eq!(task.revision, 1);
+//! // `instructions`, `evidence`, and `max_concurrent_children` are optional and
+//! // are left out of the encoding when empty, so the round trip is not
+//! // byte-identical to the input above but is value-identical.
+//! let reencoded: TaskSpec = serde_json::from_slice(&serde_json::to_vec(&task)?)?;
+//! assert_eq!(reencoded, task);
+//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! ```
+//!
+//! A schema brgr does not know is refused rather than guessed at:
+//!
+//! ```
+//! # use brgr_protocol::TaskSpec;
+//! # let wire = r#"{
+//! #   "schema": "brgr/v2",
+//! #   "task_id": "3d3c9081-0f4a-4f2e-9c1b-7a2d5e6f8a90",
+//! #   "revision": 1,
+//! #   "create_request_id": "req-1",
+//! #   "owner_id": "codex:alice",
+//! #   "objective": "Summarize the build log",
+//! #   "workspace": "/srv/checkout",
+//! #   "route": { "harness_id": "local.fixture" },
+//! #   "required_capabilities": ["completion"],
+//! #   "artifact_contract": { "media_type": "text/plain", "max_bytes": 4096 },
+//! #   "acceptance_criteria": ["the report is sealed"],
+//! #   "budget": { "deadline_seconds": 60, "max_attempts": 2 }
+//! # }"#;
+//! let task: TaskSpec = serde_json::from_str(wire)?;
+//! assert!(task.validate().is_err());
+//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! ```
 
 use std::{
     fmt,

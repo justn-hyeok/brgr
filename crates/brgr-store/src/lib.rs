@@ -278,6 +278,75 @@ impl Store {
     /// Lost, cancelled, and candidate results cannot start another attempt on
     /// the same revision. A concurrent supervisor cannot overlap a live run.
     ///
+    /// The candidate case is load-bearing well outside this function. `brgr
+    /// prune` removes the worktree of a settled revision, and its argument for
+    /// why no attempt can still be running there is exactly this refusal —
+    /// a revision with a recorded decision has a candidate result, and a
+    /// candidate result admits no further attempt. That is asserted here rather
+    /// than only stated, so a change that relaxes it fails at its source.
+    ///
+    /// The match on the prior outcome defaults to refusing, so an outcome this
+    /// build does not recognize cannot open the slot either:
+    ///
+    /// ```
+    /// use brgr_protocol::{AttemptId, ResultEnvelope, ResultId, SCHEMA_V1, TerminalOutcome};
+    /// use brgr_store::{Store, StoreError};
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let root = tempfile::tempdir()?;
+    /// # let task: brgr_protocol::TaskSpec = serde_json::from_str(r#"{
+    /// #   "schema": "brgr/v1",
+    /// #   "task_id": "3d3c9081-0f4a-4f2e-9c1b-7a2d5e6f8a90",
+    /// #   "revision": 1,
+    /// #   "create_request_id": "req-1",
+    /// #   "owner_id": "codex:alice",
+    /// #   "objective": "Summarize the build log",
+    /// #   "workspace": "/srv/checkout",
+    /// #   "route": { "harness_id": "local.fixture" },
+    /// #   "required_capabilities": ["completion"],
+    /// #   "artifact_contract": { "media_type": "text/plain", "max_bytes": 4096 },
+    /// #   "acceptance_criteria": ["the report is sealed"],
+    /// #   "budget": { "deadline_seconds": 60, "max_attempts": 2 }
+    /// # }"#)?;
+    /// let mut store = Store::open(root.path())?;
+    /// store.record_task(&task, "digest-1")?;
+    ///
+    /// let first = AttemptId::new();
+    /// store.create_attempt(task.task_id, task.revision, first)?;
+    /// let artifact = store.seal_artifact_reader(
+    ///     std::io::Cursor::new(b"the report"),
+    ///     &task.artifact_contract.media_type,
+    ///     task.artifact_contract.max_bytes,
+    /// )?;
+    /// store.commit_terminal_result(
+    ///     &task.owner_id,
+    ///     &ResultEnvelope {
+    ///         schema: SCHEMA_V1.to_owned(),
+    ///         task_id: task.task_id,
+    ///         revision: task.revision,
+    ///         attempt_id: first,
+    ///         result_id: ResultId::new(),
+    ///         outcome: TerminalOutcome::Candidate,
+    ///         artifacts: vec![artifact],
+    ///         error: None,
+    ///         legacy_embedded_route_observation: None,
+    ///         route_observation: None,
+    ///         unresolved_effects: vec![],
+    ///     },
+    /// )?;
+    ///
+    /// // The budget permits a retry and only one attempt was spent, so the
+    /// // refusal below is the candidate rule and not exhaustion. Matched on the
+    /// // variant for exactly that reason: `is_err` would not tell them apart.
+    /// let refusal = store.claim_attempt(task.task_id, task.revision, AttemptId::new());
+    /// assert!(
+    ///     matches!(refusal, Err(StoreError::NonRetryablePriorAttempt { .. })),
+    ///     "a candidate result must admit no further attempt, got {refusal:?}"
+    /// );
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
     /// # Errors
     ///
     /// Returns an error when the task is missing or an active attempt exists.

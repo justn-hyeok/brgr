@@ -1,4 +1,76 @@
 //! Shell-free process execution and declarative harness manifests.
+//!
+//! A harness is described by a manifest, not by a command line. Both words in
+//! that sentence are load-bearing and both are checked here.
+//!
+//! *Declarative*: every manifest struct is `deny_unknown_fields`, so a
+//! misspelled key is a parse error rather than a setting that silently does
+//! nothing. A harness that looks configured but is not is the failure this
+//! prevents.
+//!
+//! *Shell-free*: `launch.argv` is a list of arguments handed to the process
+//! directly. No shell ever sees it, so a value containing `;`, `$(...)`, or a
+//! glob is one literal argument and not an injection point.
+//!
+//! ```
+//! use brgr_runner::{HarnessManifest, MANIFEST_SCHEMA_V1};
+//!
+//! // `/bin/sh` only because `validate` requires the executable to exist; the
+//! // manifest never invokes it through a shell.
+//! let wire = r#"{
+//!   "schema": "brgr.harness/v1",
+//!   "id": "local.fixture",
+//!   "adapter": "process/v1",
+//!   "executable": "/bin/sh",
+//!   "probe": { "version_argv": ["--version"], "help_argv": ["--help"] },
+//!   "launch": { "argv": ["run", "; rm -rf / $(whoami)"], "mode": "one_shot" },
+//!   "result": {
+//!     "source": { "kind": "stdout" },
+//!     "media_type": "text/plain",
+//!     "max_bytes": 4096,
+//!     "success_exit_codes": [0]
+//!   }
+//! }"#;
+//!
+//! let manifest: HarnessManifest = serde_json::from_str(wire)?;
+//! manifest.validate()?;
+//! assert_eq!(manifest.schema, MANIFEST_SCHEMA_V1);
+//!
+//! // Two arguments, and the metacharacters are data inside the second one.
+//! assert_eq!(manifest.launch.argv.len(), 2);
+//! assert_eq!(manifest.launch.argv[1], "; rm -rf / $(whoami)");
+//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! ```
+//!
+//! A key that is not part of the schema is refused, rather than ignored:
+//!
+//! ```
+//! # use brgr_runner::HarnessManifest;
+//! let wire = r#"{
+//!   "schema": "brgr.harness/v1",
+//!   "id": "local.fixture",
+//!   "adapter": "process/v1",
+//!   "executable": "/bin/sh",
+//!   "probe": { "version_argv": ["--version"], "help_argv": ["--help"] },
+//!   "launch": { "argv": ["run"], "mode": "one_shot", "env_alow": ["PATH"] },
+//!   "result": {
+//!     "source": { "kind": "stdout" },
+//!     "media_type": "text/plain",
+//!     "max_bytes": 4096,
+//!     "success_exit_codes": [0]
+//!   }
+//! }"#;
+//!
+//! // `env_alow` is a typo for `env_allow`. Accepting it would produce a harness
+//! // that runs with an empty environment allow-list and looks configured.
+//! assert!(serde_json::from_str::<HarnessManifest>(wire).is_err());
+//!
+//! // The control: the same manifest spelled correctly parses, so the rejection
+//! // above is attributable to the typo and not to something else in the text.
+//! // Written after an earlier draft of this example passed for the wrong reason.
+//! let corrected = wire.replace("env_alow", "env_allow");
+//! assert!(serde_json::from_str::<HarnessManifest>(&corrected).is_ok());
+//! ```
 
 use std::{
     collections::{BTreeMap, BTreeSet},
