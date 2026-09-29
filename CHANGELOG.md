@@ -2,6 +2,20 @@
 
 ## 2.4.0 — unreleased
 
+Every managed worker can now ask its owner a question. The identity a worker
+needs to message — and the brief that tells it how — used to be attached only
+when a task was started with delegation, so a plain `brgr run`, the route the
+orchestration skill uses by default, produced workers that could not ask at all;
+the author's store held zero messages across 57 tasks. A worker without
+delegation now gets the owner-messaging brief appended after its task, so the
+task's own first line is unchanged (an OMP objective must begin `FROM CODEX`).
+
+Delegation stays a permission. Carrying an identity also lets a worker name
+itself as a parent, so child admission now checks that the parent task was
+started with delegation, against the launch record it was started from, and
+refuses the child otherwise. Both behaviours are tested with a real worker
+process rather than a simulated identity.
+
 A harness manifest whose result source says `stdout` but carries a `path` is now
 refused. It used to parse as `Stdout` with the path silently dropped, so a
 manifest meant to read a result file sealed raw stdout instead and skipped every

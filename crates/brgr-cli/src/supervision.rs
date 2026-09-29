@@ -49,9 +49,13 @@ pub(crate) async fn supervise(paths: &Paths, launch_path: &Path, json_output: bo
     let cancel_path = paths.cancel(launch.spec.task_id);
     let pid_path = paths.pid(launch.spec.task_id);
     let mut supervisor = Supervisor::open(&paths.store)?;
-    if launch.delegation_enabled {
-        supervisor.enable_worker_delegation(paths.home.clone(), env::current_exe()?);
-    }
+    // Every worker gets its identity so it can ask its owner; only a task
+    // started with delegation may also start children (checked at admission).
+    supervisor.enable_worker_context(
+        paths.home.clone(),
+        env::current_exe()?,
+        launch.delegation_enabled,
+    );
     // Reconcile before publishing our own task receipt. Otherwise a previous
     // crashed attempt without a launch identity could mistake this new process
     // for its original live supervisor and remain unfinished forever.
