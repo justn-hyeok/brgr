@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.7.0 — 2026-09-30
 
 `brgr prune` now reclaims the worktrees of failed, cancelled, and lost runs.
 It required an owner decision, and only a candidate can be accepted or
