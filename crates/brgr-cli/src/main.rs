@@ -121,6 +121,19 @@ struct LaunchEnvelope {
     /// Run the harness as its own TUI in a Herdr pane beside the caller.
     #[serde(default)]
     pane_mode: bool,
+    #[serde(default)]
+    claimant: Claimant,
+}
+
+/// What claims an admitted task by starting its supervisor.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum Claimant {
+    /// A detached `brgr __supervise` process, spawned at admission.
+    #[default]
+    Supervisor,
+    /// `brgr plugin worker` in a Herdr pane, which Herdr has to open first.
+    WorkerPane,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

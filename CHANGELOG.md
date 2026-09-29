@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+A task placed in a Herdr worker pane now has a minute, not five seconds, to be
+claimed. Herdr has to open the pane and start `brgr plugin worker` in it before
+the task's supervisor exists, and any brgr command run in the meantime treated
+the task as abandoned after five seconds and recorded it lost, with its worker
+still on the way. The launch envelope now records what will claim the task
+(`claimant`); a detached supervisor keeps the five-second window, and envelopes
+written before this change keep it too.
+
 ## 2.6.0 — 2026-09-30
 
 Pane mode now waits for a newly split pane's shell before starting the agent.

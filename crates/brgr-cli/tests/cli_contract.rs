@@ -455,6 +455,66 @@ fn ordinary_herdr_pane_opens_a_brgr_worker(
     assert!(!ordinary_args.contains("--workspace\n"));
 }
 
+/// A task placed in a Herdr worker pane is claimed only once Herdr has opened
+/// the pane and started `brgr plugin worker` in it. Another brgr command in the
+/// meantime must not record it lost after the detached supervisor's five-second
+/// window; it gets a minute.
+#[test]
+fn a_worker_pane_task_is_not_reaped_before_its_pane_can_claim_it() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("brgr");
+    let workspace = temp.path().join("work");
+    let fake_herdr = temp.path().join("herdr");
+    fs::create_dir_all(&workspace).unwrap();
+    fs::write(
+        &fake_herdr,
+        "#!/bin/sh\nprintf '%s\\n' '{\"result\":{\"type\":\"plugin_pane_opened\",\"plugin_pane\":{\"plugin_id\":\"brgr\",\"entrypoint\":\"worker\",\"pane\":{\"pane_id\":\"w1:p2\"}}}}'\n",
+    )
+    .unwrap();
+    fs::set_permissions(&fake_herdr, fs::Permissions::from_mode(0o700)).unwrap();
+    add_fixture(&home, &gjc_fixture(), &temp.path().join("scratch"));
+    let host_env = [
+        ("BRGR_OWNER_ID", "codex:claim-grace"),
+        ("HERDR_ENV", "1"),
+        ("HERDR_PLUGIN_ID", "brgr"),
+        ("HERDR_WORKSPACE_ID", "w1"),
+        ("HERDR_PANE_ID", "w1:p1"),
+        ("HERDR_BIN_PATH", fake_herdr.to_str().unwrap()),
+        ("BRGR_PLUGIN_HOST_HOME", home.to_str().unwrap()),
+        ("BRGR_PLUGIN_HOST_WORKSPACE", workspace.to_str().unwrap()),
+    ];
+    let admitted = json_output(&run(
+        &home,
+        &[
+            "run",
+            "BRGR_FIXTURE_OK",
+            "--workspace",
+            workspace.to_str().unwrap(),
+        ],
+        &host_env,
+    ));
+    assert_eq!(admitted["worker_pane"], "w1:p2", "{admitted}");
+    let task = admitted["task_id"].as_str().unwrap();
+    let launch = home.join("launches").join(format!("{task}.json"));
+    let age = |seconds: u64| {
+        fs::File::options()
+            .write(true)
+            .open(&launch)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - Duration::from_secs(seconds))
+            .unwrap();
+    };
+    let owner = [("BRGR_OWNER_ID", "codex:claim-grace")];
+
+    age(10);
+    let waiting = json_output(&run(&home, &["status", task], &owner));
+    assert_ne!(waiting["state"], "terminal", "{waiting}");
+
+    age(120);
+    let reaped = json_output(&run(&home, &["status", task], &owner));
+    assert_eq!(reaped["state"], "terminal", "{reaped}");
+}
+
 #[test]
 fn plugin_worker_placement_respects_config_and_reaches_owner_decision() {
     let temp = TempDir::new().unwrap();
