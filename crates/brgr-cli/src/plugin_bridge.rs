@@ -770,7 +770,7 @@ mod tests {
         let script = write_script(
             root.path(),
             "requests.sh",
-            "#!/bin/sh\nif [ \"$1\" = slow ]; then echo started > \"$2\"; exec /bin/sleep 5; fi\nprintf '%s\\n' \"$1\"\n",
+            "#!/bin/sh\nif [ \"$1\" = slow ]; then echo started > \"$2\"; exec /bin/sleep 20; fi\nprintf '%s\\n' \"$1\"\n",
         );
         let serve = tokio::spawn(serve(
             dir.clone(),
@@ -782,23 +782,30 @@ mod tests {
             "6-6-1",
             root.path(),
             &["slow", marker.to_str().unwrap()],
-            10,
+            30,
         );
         write_json_new(&request_path(&dir, &slow.id), &slow).unwrap();
-        tokio::time::timeout(Duration::from_secs(2), async {
+        // Setup, not the property: only that the slow request is running. A
+        // full parallel test run can take seconds to spawn the fixture shell.
+        tokio::time::timeout(Duration::from_secs(15), async {
             while !marker.exists() {
                 tokio::time::sleep(POLL_INTERVAL).await;
             }
         })
         .await
         .unwrap();
-        let fast = sample_request("6-6-2", root.path(), &["fast"], 2);
+        let fast = sample_request("6-6-2", root.path(), &["fast"], 15);
         write_json_new(&request_path(&dir, &fast.id), &fast).unwrap();
-        let response =
-            tokio::time::timeout(Duration::from_secs(2), wait_for_response(&dir, &fast.id, 2))
-                .await
-                .unwrap()
-                .unwrap();
+        // The property: the fast request is answered while the slow one is
+        // still running, which the missing slow response below confirms. The
+        // slow fixture sleeps 20 s, so this bound can be generous.
+        let response = tokio::time::timeout(
+            Duration::from_secs(15),
+            wait_for_response(&dir, &fast.id, 15),
+        )
+        .await
+        .unwrap()
+        .unwrap();
         assert_eq!(response.code, 0);
         assert_eq!(response.stdout.trim(), "fast");
         assert!(!response_path(&dir, &slow.id).exists());
