@@ -20,12 +20,22 @@
 //! directory, and the checkout of a task revision that carries a recorded owner
 //! decision.
 //!
+//! The repositories come from the store, never from the worktrees root. Each
+//! candidate is judged against the repository its own task was admitted in; a
+//! directory's name is only a name, and a checkout of some other repository can
+//! be dropped under the root by hand. An earlier version asked whichever
+//! directory sorted first and trusted the answer, so a stray `Backup` checkout
+//! made `--apply` delete branches in a repository brgr had never touched.
+//!
 //! A sweep also reclaims the `brgr/task-*` branches left behind by worktrees that
 //! no longer exist — removing one by hand was the only reclamation available
-//! before this command, and it leaves a branch and a stale registration behind
-//! forever. One unreadable directory is reported as a single kept row rather than
-//! ending the sweep, and the repository listing is read once per repository
-//! rather than once per candidate.
+//! before this command. Those branches get the same checks as a worktree: a task
+//! revision of that repository, a recorded decision, a reported owner, and a
+//! merge git will accept. Stale registrations are removed one path at a time;
+//! `git worktree prune` is repository-wide and would also drop the registration
+//! of a user's own worktree on an unmounted volume. One unreadable directory is
+//! reported as a single kept row rather than ending the sweep, and each
+//! repository is read from git once.
 //!
 //! No sealed result, decision, artifact, or task row is ever removed. Those cost
 //! roughly 9 KiB per task; a worktree costs the size of the checkout.
@@ -54,6 +64,7 @@ pub(crate) struct Prune {
 /// A `brgr/task-*` branch whose worktree is gone.
 pub(crate) struct Orphan {
     pub(crate) branch: String,
+    pub(crate) owner: Option<String>,
     pub(crate) outcome: Outcome,
 }
 
@@ -113,14 +124,19 @@ pub(crate) fn prune(
     let mut entries = Vec::new();
     let mut orphans = Vec::new();
 
-    let (repositories, unreadable) = repository_directories(worktrees_root);
+    let mut known = Repositories::load(store);
+    let mut unlocated = Vec::new();
+
+    let (directories, unreadable) = repository_directories(worktrees_root);
     entries.extend(unreadable.into_iter().map(unreadable_entry));
 
-    for repository in repositories {
-        let (candidates, unreadable) = child_directories(&repository);
+    for directory in directories {
+        let (candidates, unreadable) = child_directories(&directory);
         entries.extend(unreadable.into_iter().map(unreadable_entry));
-        // One listing for the whole repository rather than one per candidate.
-        let inventory = Inventory::load(&candidates);
+        let directory_name = file_name(&directory);
+        // Only a directory with nothing left in it can hide a repository: any
+        // candidate gets its own row with its own reason.
+        let emptied_by_hand = candidates.is_empty();
 
         let mut removed_any = false;
         for worktree in candidates {
@@ -129,13 +145,13 @@ pub(crate) fn prune(
                 &worktree,
                 &slug,
                 store,
-                inventory.as_ref(),
+                &mut known,
                 current_dir.as_deref(),
                 include_ignored,
             );
-            let outcome = match assessment.blocked {
-                Some(reason) => Outcome::Kept(reason),
-                None if apply => match remove(&worktree, &slug, inventory.as_ref()) {
+            let outcome = match (assessment.blocked, &assessment.primary) {
+                (Some(reason), _) => Outcome::Kept(reason),
+                (None, Some(primary)) if apply => match remove(&worktree, &slug, primary) {
                     Ok(None) => {
                         removed_any = true;
                         Outcome::Removed
@@ -146,7 +162,8 @@ pub(crate) fn prune(
                     }
                     Err(reason) => Outcome::Kept(reason),
                 },
-                None => Outcome::Removable,
+                (None, Some(_)) => Outcome::Removable,
+                (None, None) => Outcome::Kept("no repository was resolved for it".to_owned()),
             };
             entries.push(Entry {
                 worktree,
@@ -157,16 +174,46 @@ pub(crate) fn prune(
             });
         }
 
-        // A worktree removed by hand — the only reclamation available before
-        // `brgr prune` existed — leaves its branch and its registration behind
-        // forever, because this sweep only ever sees directories that still exist.
-        if let Some(inventory) = inventory.as_ref() {
-            orphans.extend(reconcile_orphans(inventory, worktrees_root, apply));
-        }
-
         if apply && removed_any {
-            remove_if_emptied(&repository, current_dir.as_deref());
+            remove_if_emptied(&directory, current_dir.as_deref());
         }
+        if emptied_by_hand {
+            unlocated.push(directory_name);
+        }
+    }
+    // A directory whose repository nobody could name: every checkout in it is
+    // gone and brgr did not record where it came from (tasks admitted before
+    // checkouts were recorded). Its branches may remain, and saying so beats a
+    // report of zero.
+    unlocated.retain(|name| {
+        !known
+            .inventories
+            .iter()
+            .any(|inventory| file_name(&inventory.primary) == *name)
+    });
+    for name in unlocated {
+        let directory = worktrees_root.join(&name);
+        if directory.is_dir() {
+            entries.push(Entry {
+                worktree: directory,
+                slug: name,
+                owner: None,
+                ignored: Vec::new(),
+                outcome: Outcome::Kept(
+                    "no checkout of this repository survives and brgr did not record its path, \
+                     so its brgr/task-* branches cannot be located; remove them from the \
+                     repository with `git branch -d`"
+                        .to_owned(),
+                ),
+            });
+        }
+    }
+
+    // Once per repository brgr has tasks in, not once per directory: two
+    // directories can resolve to one repository, and a repository can have no
+    // directory left at all — which is exactly the case this exists for.
+    for inventory in &known.inventories {
+        orphans.extend(reconcile_orphans(inventory, store, apply));
     }
 
     entries.sort_by(|left, right| left.worktree.cmp(&right.worktree));
@@ -194,18 +241,11 @@ fn remove_if_emptied(repository: &Path, current_dir: Option<&Path>) {
 
 /// Reclaims `brgr/task-*` branches whose worktree no longer exists.
 ///
-/// git holds the safety line as everywhere else in this module: `worktree prune`
-/// only drops registrations whose directory is gone, and `branch -d` refuses a
-/// branch whose commits are not merged.
-fn reconcile_orphans(inventory: &Inventory, worktrees_root: &Path, apply: bool) -> Vec<Orphan> {
-    let Some(root) = canonical(worktrees_root) else {
-        return Vec::new();
-    };
-    // Stale registrations first, so the branch listing below is not kept alive by
-    // a worktree directory that is already gone.
-    if apply {
-        let _ = git(&inventory.primary, &["worktree", "prune"]);
-    }
+/// A branch gets the checks a worktree gets: it must name a task revision of
+/// this repository with a recorded decision, and its owner is reported. git
+/// still holds the last line — `branch -d` refuses unmerged commits — but report
+/// mode asks the same merge question first, so `removable` means removable.
+fn reconcile_orphans(inventory: &Inventory, store: &Store, apply: bool) -> Vec<Orphan> {
     let Ok(listing) = git(
         &inventory.primary,
         &[
@@ -217,20 +257,21 @@ fn reconcile_orphans(inventory: &Inventory, worktrees_root: &Path, apply: bool) 
     ) else {
         return Vec::new();
     };
-    // Only re-read when the prune above could have changed the listing; report
-    // mode reuses the inventory it already has.
-    let live = if apply {
-        match git(&inventory.primary, &["worktree", "list", "--porcelain"]) {
-            Ok(listing) => Inventory::parse(inventory.primary.clone(), &listing),
-            Err(_) => return Vec::new(),
-        }
-    } else {
-        Inventory {
-            primary: inventory.primary.clone(),
-            registered: inventory.registered.clone(),
-            locked: inventory.locked.clone(),
-        }
-    };
+    // `branch -d` accepts a branch merged into its upstream or, with none, into
+    // HEAD. Task branches are created without an upstream.
+    let merged = git(
+        &inventory.primary,
+        &[
+            "branch",
+            "--list",
+            "brgr/task-*",
+            "--merged",
+            "HEAD",
+            "--format=%(refname:short)",
+        ],
+    )
+    .unwrap_or_default();
+    let merged: Vec<&str> = merged.lines().map(str::trim).collect();
 
     let mut orphans = Vec::new();
     for branch in listing
@@ -238,38 +279,144 @@ fn reconcile_orphans(inventory: &Inventory, worktrees_root: &Path, apply: bool) 
         .map(str::trim)
         .filter(|line| !line.is_empty())
     {
-        let Some(slug) = branch.strip_prefix("brgr/task-") else {
+        let Some((prefix, revision)) = branch.strip_prefix("brgr/task-").and_then(parse_slug)
+        else {
             continue;
         };
-        if parse_slug(slug).is_none() {
-            continue;
-        }
-        // Still checked out somewhere under our root? Then it is not an orphan and
-        // the per-worktree pass above owns it. The directory has to actually
-        // exist: in report mode `git worktree prune` has not run, so a worktree
-        // removed by hand is still listed while its checkout is gone, which is
-        // precisely the case this reclaims.
-        if live
-            .registered
-            .iter()
-            .any(|path| path.starts_with(&root) && file_name(path) == slug && path.is_dir())
-        {
-            continue;
-        }
-        let outcome = if apply {
-            match git(&inventory.primary, &["branch", "-d", branch]) {
-                Ok(_) => Outcome::Removed,
-                Err(reason) => Outcome::Kept(format!("git refused to delete it: {reason}")),
-            }
-        } else {
-            Outcome::Removable
+        let mut owner = None;
+        let judged = orphan_objection(
+            inventory,
+            store,
+            (prefix, revision),
+            branch,
+            &merged,
+            &mut owner,
+        );
+        let outcome = match judged {
+            // Still checked out: the per-worktree pass owns it.
+            Err(Live) => continue,
+            Ok(Some(reason)) => Outcome::Kept(reason),
+            Ok(None) if apply => reclaim(inventory, store, (prefix, revision), branch),
+            Ok(None) => Outcome::Removable,
         };
         orphans.push(Orphan {
             branch: branch.to_owned(),
+            owner,
             outcome,
         });
     }
     orphans
+}
+
+/// The branch's worktree still exists, so it is not an orphan.
+struct Live;
+
+/// The task revision of *this* repository a branch belongs to.
+///
+/// A recorded checkout decides it. A task admitted before checkouts were
+/// recorded belongs here when git still registers its worktree path, which it
+/// does after a hand deletion until the registration is removed.
+fn owning_task(
+    inventory: &Inventory,
+    store: &Store,
+    (prefix, revision): (&str, u32),
+) -> Result<Option<TaskSpec>, String> {
+    let matches = store
+        .task_revisions_with_prefix(prefix, revision)
+        .map_err(|error| format!("task lookup failed: {error}"))?;
+    let mut ours = Vec::new();
+    for task in matches {
+        let belongs = match store.task_checkout(task.task_id, revision) {
+            Ok(Some(recorded)) => resolve(Path::new(&recorded)) == inventory.primary,
+            Ok(None) => inventory.is_registered(&resolve(Path::new(&task.workspace))),
+            Err(error) => return Err(format!("checkout lookup failed: {error}")),
+        };
+        if belongs {
+            ours.push(task);
+        }
+    }
+    match ours.len() {
+        0 | 1 => Ok(ours.pop()),
+        _ => Err("task id prefix is ambiguous; refusing to guess".to_owned()),
+    }
+}
+
+/// Returns why an orphan branch must be kept, `Ok(None)` when it may go, or
+/// `Err(Live)` when its worktree still exists.
+fn orphan_objection(
+    inventory: &Inventory,
+    store: &Store,
+    (prefix, revision): (&str, u32),
+    branch: &str,
+    merged: &[&str],
+    owner: &mut Option<String>,
+) -> Result<Option<String>, Live> {
+    let task = match owning_task(inventory, store, (prefix, revision)) {
+        Ok(Some(task)) => task,
+        Ok(None) => {
+            return Ok(Some(
+                "no task revision of this repository matches this branch".to_owned(),
+            ));
+        }
+        Err(reason) => return Ok(Some(reason)),
+    };
+    let worktree = resolve(Path::new(&task.workspace));
+    if worktree.is_dir() {
+        return Err(Live);
+    }
+    *owner = Some(task.owner_id.as_str().to_owned());
+    match store.decision_for_revision(task.task_id, revision) {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            return Ok(Some(
+                "no owner decision recorded for this revision".to_owned(),
+            ));
+        }
+        Err(error) => return Ok(Some(format!("decision lookup failed: {error}"))),
+    }
+    if inventory.is_locked(&worktree) {
+        return Ok(Some(
+            "its stale worktree registration is locked; unlock it first with `git worktree unlock`"
+                .to_owned(),
+        ));
+    }
+    if !merged.contains(&branch) {
+        return Ok(Some(
+            "branch has commits not merged into the repository's HEAD; git branch -d would refuse"
+                .to_owned(),
+        ));
+    }
+    Ok(None)
+}
+
+/// Drops the task's own stale registration, then the branch. Never `git
+/// worktree prune`: that is repository-wide and would also drop the
+/// registration of a user's worktree on an unmounted volume.
+fn reclaim(
+    inventory: &Inventory,
+    store: &Store,
+    (prefix, revision): (&str, u32),
+    branch: &str,
+) -> Outcome {
+    let Ok(Some(task)) = owning_task(inventory, store, (prefix, revision)) else {
+        return Outcome::Kept("task could not be re-read before removal".to_owned());
+    };
+    let worktree = resolve(Path::new(&task.workspace));
+    if inventory.is_registered(&worktree)
+        && let Err(error) = git(
+            &inventory.primary,
+            &["worktree", "remove", &lossy(&worktree)],
+        )
+    {
+        return Outcome::Kept(format!(
+            "stale registration {} could not be removed: {error}",
+            worktree.display()
+        ));
+    }
+    match git(&inventory.primary, &["branch", "-d", branch]) {
+        Ok(_) => Outcome::Removed,
+        Err(reason) => Outcome::Kept(format!("git refused to delete it: {reason}")),
+    }
 }
 
 /// What the checks found for one candidate. `blocked` is `Some` when the
@@ -279,13 +426,15 @@ struct Assessment {
     blocked: Option<String>,
     owner: Option<String>,
     ignored: Vec<String>,
+    /// The primary checkout of the repository this worktree's task belongs to.
+    primary: Option<PathBuf>,
 }
 
 fn assess(
     worktree: &Path,
     slug: &str,
     store: &Store,
-    inventory: Option<&Inventory>,
+    known: &mut Repositories,
     current_dir: Option<&Path>,
     include_ignored: bool,
 ) -> Assessment {
@@ -293,12 +442,13 @@ fn assess(
         blocked: None,
         owner: None,
         ignored: Vec::new(),
+        primary: None,
     };
     found.blocked = objection(
         worktree,
         slug,
         store,
-        inventory,
+        known,
         current_dir,
         include_ignored,
         &mut found,
@@ -311,7 +461,7 @@ fn objection(
     worktree: &Path,
     slug: &str,
     store: &Store,
-    inventory: Option<&Inventory>,
+    known: &mut Repositories,
     current_dir: Option<&Path>,
     include_ignored: bool,
     found: &mut Assessment,
@@ -349,16 +499,42 @@ fn objection(
         );
     }
 
-    let mut matches = match store.task_revisions_with_prefix(prefix, revision) {
+    let matches = match store.task_revisions_with_prefix(prefix, revision) {
         Ok(matches) => matches,
         Err(error) => return Some(format!("task lookup failed: {error}")),
     };
-    let task: TaskSpec = match matches.len() {
-        1 => matches.remove(0),
-        0 => return Some("no task revision matches this worktree".to_owned()),
-        _ => return Some("task id prefix is ambiguous; refusing to guess".to_owned()),
+    // The store records the exact worktree it created for each revision. A
+    // directory under the right name that is not that path — a copy, a clone,
+    // one someone made — was not put here by brgr. This also settles a prefix
+    // shared by two tasks, which the name alone cannot.
+    let Some(task) = matches
+        .into_iter()
+        .find(|task| resolve(Path::new(&task.workspace)) == resolved)
+    else {
+        return Some("no task revision was admitted in this directory".to_owned());
     };
     found.owner = Some(task.owner_id.as_str().to_owned());
+
+    // Locate the repository before anything can return early: a worktree kept
+    // for any reason still tells the sweep which repository its siblings'
+    // orphaned branches live in. Ask the repository this task came from, never
+    // whatever directory sits beside it.
+    let recorded = match store.task_checkout(task.task_id, revision) {
+        Ok(recorded) => recorded,
+        Err(error) => return Some(format!("checkout lookup failed: {error}")),
+    };
+    let Some(index) = known.locate(recorded.as_deref(), worktree, &resolved) else {
+        return Some("worktree is not a usable git checkout".to_owned());
+    };
+    let primary = known.inventories[index].primary.clone();
+    if let Some(recorded) = recorded
+        && resolve(Path::new(&recorded)) != primary
+    {
+        return Some(format!(
+            "brgr recorded this worktree under {recorded}, but git places it in {}",
+            primary.display()
+        ));
+    }
 
     // A recorded decision is what makes this revision settled, and that is
     // stronger than it looks. `record_decision_in_transaction` rejects anything
@@ -372,11 +548,7 @@ fn objection(
         Err(error) => return Some(format!("decision lookup failed: {error}")),
     }
 
-    // Ask git the same questions `--apply` would, so `removable` means the apply
-    // run will remove it rather than discover a veto later.
-    let Some(inventory) = inventory else {
-        return Some("repository worktree inventory is unreadable".to_owned());
-    };
+    let inventory = &known.inventories[index];
     if !inventory.is_registered(&resolved) {
         return Some("path is not a registered worktree of its repository".to_owned());
     }
@@ -409,6 +581,7 @@ fn objection(
             found.ignored.first().map_or("", String::as_str)
         ));
     }
+    found.primary = Some(inventory.primary.clone());
     None
 }
 
@@ -507,19 +680,11 @@ fn parse_slug(slug: &str) -> Option<(&str, u32)> {
 ///
 /// `Ok(None)` removed both. `Ok(Some(reason))` removed the checkout while git
 /// kept the branch, which preserves committed work.
-fn remove(
-    worktree: &Path,
-    slug: &str,
-    inventory: Option<&Inventory>,
-) -> Result<Option<String>, String> {
-    let primary = match inventory {
-        Some(inventory) => inventory.primary.clone(),
-        None => primary_checkout(worktree)?,
-    };
-    git(&primary, &["worktree", "remove", &lossy(worktree)])
+fn remove(worktree: &Path, slug: &str, primary: &Path) -> Result<Option<String>, String> {
+    git(primary, &["worktree", "remove", &lossy(worktree)])
         .map_err(|error| format!("git declined to remove the worktree: {error}"))?;
     let branch = format!("brgr/task-{slug}");
-    if let Err(error) = git(&primary, &["branch", "-d", &branch]) {
+    if let Err(error) = git(primary, &["branch", "-d", &branch]) {
         return Ok(Some(format!(
             "checkout removed; branch {branch} kept because git refused to delete it: {error}"
         )));
@@ -527,12 +692,71 @@ fn remove(
     Ok(None)
 }
 
-/// One repository's worktree registrations, read once for all of its candidates.
+/// Every repository brgr has worktrees in, each read from git once.
 ///
-/// Every candidate under `<worktrees>/<repository>` belongs to the same primary
-/// checkout, so asking git per candidate re-ran an identical listing: a control
-/// home with a hundred settled worktrees paid hundreds of process spawns for one
-/// report.
+/// Seeded from the checkouts the store recorded at admission, so a directory
+/// dropped under the worktrees root by hand is never asked which repository it
+/// belongs to. A task admitted before checkouts were recorded is located from
+/// its own worktree, once the store has confirmed brgr created that path.
+struct Repositories {
+    inventories: Vec<Inventory>,
+}
+
+impl Repositories {
+    fn load(store: &Store) -> Self {
+        let mut known = Self {
+            inventories: Vec::new(),
+        };
+        for primary in store.task_checkouts().unwrap_or_default() {
+            if let Some(inventory) = Inventory::load(Path::new(&primary)) {
+                known.adopt(inventory);
+            }
+        }
+        known
+    }
+
+    fn adopt(&mut self, inventory: Inventory) -> usize {
+        if let Some(index) = self
+            .inventories
+            .iter()
+            .position(|known| known.primary == inventory.primary)
+        {
+            return index;
+        }
+        self.inventories.push(inventory);
+        self.inventories.len() - 1
+    }
+
+    /// The repository holding a store-verified worktree: its recorded checkout,
+    /// else one already read that registers it, else the worktree's own answer.
+    fn locate(
+        &mut self,
+        recorded: Option<&str>,
+        worktree: &Path,
+        resolved: &Path,
+    ) -> Option<usize> {
+        if let Some(recorded) = recorded {
+            let primary = resolve(Path::new(recorded));
+            if let Some(index) = self
+                .inventories
+                .iter()
+                .position(|known| known.primary == primary)
+            {
+                return Some(index);
+            }
+        }
+        if let Some(index) = self
+            .inventories
+            .iter()
+            .position(|known| known.is_registered(resolved))
+        {
+            return Some(index);
+        }
+        Inventory::load(worktree).map(|inventory| self.adopt(inventory))
+    }
+}
+
+/// One repository's worktree registrations.
 struct Inventory {
     primary: PathBuf,
     registered: Vec<PathBuf>,
@@ -540,16 +764,14 @@ struct Inventory {
 }
 
 impl Inventory {
-    /// Loads the inventory from the first candidate that is a usable checkout.
-    fn load(candidates: &[PathBuf]) -> Option<Self> {
-        candidates.iter().find_map(|candidate| {
-            let listing = git(candidate, &["worktree", "list", "--porcelain"]).ok()?;
-            let primary = listing
-                .lines()
-                .find_map(|line| line.strip_prefix("worktree "))
-                .map(PathBuf::from)?;
-            Some(Self::parse(primary, &listing))
-        })
+    /// Reads the repository that `checkout` belongs to.
+    fn load(checkout: &Path) -> Option<Self> {
+        let listing = git(checkout, &["worktree", "list", "--porcelain"]).ok()?;
+        let primary = listing
+            .lines()
+            .find_map(|line| line.strip_prefix("worktree "))
+            .map(|path| resolve(Path::new(path)))?;
+        Some(Self::parse(primary, &listing))
     }
 
     fn parse(primary: PathBuf, listing: &str) -> Self {
@@ -558,7 +780,7 @@ impl Inventory {
         let mut current: Option<PathBuf> = None;
         for line in listing.lines() {
             if let Some(path) = line.strip_prefix("worktree ") {
-                let path = canonical(Path::new(path)).unwrap_or_else(|| PathBuf::from(path));
+                let path = resolve(Path::new(path));
                 registered.push(path.clone());
                 current = Some(path);
             } else if (line == "locked" || line.starts_with("locked "))
@@ -585,17 +807,6 @@ impl Inventory {
     }
 }
 
-/// Resolves the primary checkout that owns a linked worktree.
-fn primary_checkout(worktree: &Path) -> Result<PathBuf, String> {
-    let listing = git(worktree, &["worktree", "list", "--porcelain"])
-        .map_err(|error| format!("worktree is not a usable git checkout: {error}"))?;
-    listing
-        .lines()
-        .find_map(|line| line.strip_prefix("worktree "))
-        .map(PathBuf::from)
-        .ok_or_else(|| "git worktree inventory has no primary checkout".to_owned())
-}
-
 fn git(directory: &Path, args: &[&str]) -> Result<String, String> {
     let output = Command::new("git")
         .arg("-C")
@@ -618,6 +829,20 @@ fn is_self_or_ancestor(candidate: &Path, inside: &Path) -> bool {
 
 fn canonical(path: &Path) -> Option<PathBuf> {
     path.canonicalize().ok()
+}
+
+/// Canonical form of a path that may no longer exist. A stale registration's
+/// directory is gone, but its parent usually is not, and comparing the raw text
+/// against a canonical root misses it wherever a symlink sits in between —
+/// `/tmp` on macOS, for one.
+fn resolve(path: &Path) -> PathBuf {
+    if let Some(found) = canonical(path) {
+        return found;
+    }
+    match (path.parent().and_then(canonical), path.file_name()) {
+        (Some(parent), Some(name)) => parent.join(name),
+        _ => path.to_path_buf(),
+    }
 }
 
 fn file_name(path: &Path) -> String {

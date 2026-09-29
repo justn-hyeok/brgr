@@ -103,6 +103,12 @@ CREATE TABLE IF NOT EXISTS cancellation_intents (
     revision INTEGER NOT NULL,
     requested_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS task_checkouts (
+    task_id TEXT NOT NULL,
+    revision INTEGER NOT NULL,
+    primary_checkout TEXT NOT NULL,
+    PRIMARY KEY (task_id, revision)
+);
 CREATE TABLE IF NOT EXISTS task_run_completions (
     task_id TEXT NOT NULL,
     revision INTEGER NOT NULL,

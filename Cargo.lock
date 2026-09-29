@@ -116,6 +116,7 @@ dependencies = [
  "brgr-store",
  "clap",
  "predicates",
+ "rusqlite",
  "serde",
  "serde_json",
  "sha2",

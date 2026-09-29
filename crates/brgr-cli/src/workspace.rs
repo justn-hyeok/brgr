@@ -514,6 +514,16 @@ fn admission_lock_holder_is_dead(path: &Path) -> bool {
     }
 }
 
+/// The primary checkout of the repository `checkout` belongs to, or `None` for
+/// a workspace that is not a git checkout.
+pub(crate) fn primary_checkout(checkout: &Path) -> Option<PathBuf> {
+    let listing = git_stdout(checkout, &["worktree", "list", "--porcelain"]).ok()?;
+    listing
+        .lines()
+        .find_map(|line| line.strip_prefix("worktree "))
+        .map(PathBuf::from)
+}
+
 pub(crate) fn prepare_workspace(
     worktrees_root: &Path,
     source: &Path,

@@ -1229,6 +1229,64 @@ impl Store {
         rows.map(|row| Ok(serde_json::from_str(&row?)?)).collect()
     }
 
+    /// Records the primary checkout of the repository a task worktree was
+    /// created from.
+    ///
+    /// The task spec records the worktree brgr created, not the repository it
+    /// came from, and once that worktree is deleted by hand nothing else can say
+    /// which repository still holds its branch. `brgr prune` needs exactly that.
+    /// Written inside the admission lock, so it does not wait on contention.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when storage fails.
+    pub fn record_task_checkout(
+        &self,
+        task_id: TaskId,
+        revision: u32,
+        primary_checkout: &str,
+    ) -> Result<(), StoreError> {
+        self.connection.execute(
+            "INSERT OR IGNORE INTO task_checkouts (task_id, revision, primary_checkout)
+             VALUES (?1, ?2, ?3)",
+            params![task_id.to_string(), revision, primary_checkout],
+        )?;
+        Ok(())
+    }
+
+    /// The recorded primary checkout for one task revision, if brgr recorded it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when storage fails.
+    pub fn task_checkout(
+        &self,
+        task_id: TaskId,
+        revision: u32,
+    ) -> Result<Option<String>, StoreError> {
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT primary_checkout FROM task_checkouts WHERE task_id = ?1 AND revision = ?2",
+                params![task_id.to_string(), revision],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
+    /// Every distinct primary checkout brgr has recorded a task worktree for.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when storage fails.
+    pub fn task_checkouts(&self) -> Result<Vec<String>, StoreError> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT DISTINCT primary_checkout FROM task_checkouts ORDER BY 1")?;
+        let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
     /// Resolves the task revisions whose id starts with `prefix`.
     ///
     /// A brgr-owned worktree directory is named after a short task-id prefix, so
@@ -3875,6 +3933,7 @@ mod tests {
             // Runs inside the repository admission lock. Waiting here blocks every
             // other admission on that repository; it must fail fast instead.
             ("record_task_with_parent", false),
+            ("record_task_checkout", false),
             // Reissuable by the caller. Waiting would hold a runtime worker for a
             // command the user can simply run again.
             ("acknowledge", false),

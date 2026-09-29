@@ -276,6 +276,247 @@ fn status_of(receipt: &Value, slug: &str) -> String {
         .to_owned()
 }
 
+#[test]
+fn a_stray_checkout_of_another_repository_is_never_asked_which_repository_it_is() {
+    let fixture = Fixture::new();
+    let settled = fixture.run_task("settled");
+    fixture.accept(&settled);
+
+    // Another repository, with a branch of the shape prune reclaims, and a
+    // checkout of it dropped under our root with a name that sorts first. The
+    // sweep used to ask whichever directory sorted first for the repository,
+    // then deleted this branch in a repository brgr had never worked in. `+`
+    // sorts before every hex digit: an earlier draft used `Backup`, which a slug
+    // starting with a digit precedes, so that draft caught the defect only when
+    // the random task id happened to start with a letter.
+    let other = fixture.temp.path().join("other");
+    fs::create_dir_all(&other).unwrap();
+    git(&other, &["init", "-q"]);
+    git(&other, &["commit", "-q", "--allow-empty", "-m", "init"]);
+    git(&other, &["branch", "brgr/task-cafed00d"]);
+    let stray = fixture.worktrees_root().join("repo").join("+backup");
+    git(
+        &other,
+        &["worktree", "add", "-q", "--detach", stray.to_str().unwrap()],
+    );
+
+    let report = fixture.prune(&[]);
+    assert_eq!(report["removable"], 1, "{report}");
+    let applied = fixture.prune(&["--apply"]);
+    assert_eq!(applied["removed"], 1, "{applied}");
+    assert!(!fixture.worktree(&settled).exists());
+
+    assert!(
+        branches_of(&other).contains(&"brgr/task-cafed00d".to_owned()),
+        "prune deleted a branch in an unrelated repository"
+    );
+    assert!(stray.is_dir(), "prune removed a checkout it did not create");
+}
+
+#[test]
+fn a_worktree_brgr_did_not_create_is_kept_even_under_a_task_name() {
+    let fixture = Fixture::new();
+    let settled = fixture.run_task("settled");
+    fixture.accept(&settled);
+    // The user's own worktree of the same repository, registered with git and
+    // carrying a settled task's name, but not the path brgr created for it. Name,
+    // registration, and decision all check out; only the path the store recorded
+    // tells the two apart.
+    let theirs = fixture
+        .worktrees_root()
+        .join("elsewhere")
+        .join(Fixture::slug(&settled));
+    fixture.git(&[
+        "worktree",
+        "add",
+        "-q",
+        "--detach",
+        theirs.to_str().unwrap(),
+    ]);
+
+    let applied = fixture.prune(&["--apply"]);
+    assert_eq!(applied["removed"], 1, "{applied}");
+    assert!(!fixture.worktree(&settled).exists());
+    assert!(
+        theirs.is_dir(),
+        "prune removed a worktree it did not create"
+    );
+    // Kept for its own reason, not reported as a repository nobody can locate.
+    assert!(
+        !applied.to_string().contains("cannot be located"),
+        "{applied}"
+    );
+}
+
+#[test]
+fn branches_are_reclaimed_when_every_worktree_was_removed_by_hand() {
+    let fixture = Fixture::new();
+    let first = fixture.run_task("first");
+    let second = fixture.run_task("second");
+    fixture.accept(&first);
+    fixture.accept(&second);
+    // No checkout survives to ask which repository these came from. That is
+    // the case orphan reclamation exists for, and it reported zero.
+    fs::remove_dir_all(fixture.worktree(&first)).unwrap();
+    fs::remove_dir_all(fixture.worktree(&second)).unwrap();
+
+    let report = fixture.prune(&[]);
+    assert_eq!(report["orphan_branches_removable"], 2, "{report}");
+    let applied = fixture.prune(&["--apply"]);
+    assert_eq!(applied["orphan_branches_removed"], 2, "{applied}");
+    assert!(
+        !fixture
+            .branches()
+            .iter()
+            .any(|branch| branch.starts_with("brgr/task-")),
+        "{:?}",
+        fixture.branches()
+    );
+    assert_eq!(
+        fixture
+            .git_stdout(&["worktree", "list", "--porcelain"])
+            .matches("worktree ")
+            .count(),
+        1,
+        "stale registrations survived"
+    );
+}
+
+#[test]
+fn reclaiming_an_orphan_leaves_the_users_own_missing_worktree_registered() {
+    let fixture = Fixture::new();
+    // A surviving worktree, so this test isolates its own defect: without one,
+    // the version before this fix never found the orphan at all.
+    let _anchor = fixture.run_task("anchor");
+    // A user's detached worktree on a volume that is not mounted right now.
+    // `git worktree prune` would drop its registration, and with a detached HEAD
+    // nothing else references its commits.
+    let volume = fixture.temp.path().join("unmounted").join("scratch");
+    fixture.git(&[
+        "worktree",
+        "add",
+        "-q",
+        "--detach",
+        volume.to_str().unwrap(),
+    ]);
+    fs::remove_dir_all(fixture.temp.path().join("unmounted")).unwrap();
+
+    let gone = fixture.run_task("gone");
+    fixture.accept(&gone);
+    fs::remove_dir_all(fixture.worktree(&gone)).unwrap();
+
+    let applied = fixture.prune(&["--apply"]);
+    assert_eq!(applied["orphan_branches_removed"], 1, "{applied}");
+    let listing = fixture.git_stdout(&["worktree", "list", "--porcelain"]);
+    assert!(
+        listing.contains("unmounted/scratch"),
+        "prune dropped a registration it did not create:\n{listing}"
+    );
+    assert!(
+        !listing.contains(&Fixture::slug(&gone)),
+        "the task's own stale registration survived:\n{listing}"
+    );
+}
+
+#[test]
+fn an_orphan_with_unmerged_commits_is_kept_in_report_mode_too() {
+    let fixture = Fixture::new();
+    // A surviving worktree, so this test isolates its own defect: without one,
+    // the version before this fix never found the orphan at all.
+    let _anchor = fixture.run_task("anchor");
+    let committed = fixture.run_task("committed");
+    fixture.accept(&committed);
+    fixture.commit_in_worktree(&committed);
+    fs::remove_dir_all(fixture.worktree(&committed)).unwrap();
+
+    // `git branch -d` refuses this branch. Report mode said `removable` and apply
+    // then said `kept` — the divergence `Removable` promises cannot happen.
+    let report = fixture.prune(&[]);
+    assert_eq!(report["orphan_branches_removable"], 0, "{report}");
+    assert!(orphan_reason(&report).contains("not merged"), "{report}");
+    let applied = fixture.prune(&["--apply"]);
+    assert_eq!(applied["orphan_branches_removed"], 0, "{applied}");
+    assert!(
+        fixture
+            .branches()
+            .contains(&format!("brgr/task-{}", Fixture::slug(&committed)))
+    );
+}
+
+#[test]
+fn an_orphan_of_an_undecided_revision_is_kept_and_names_its_owner() {
+    let fixture = Fixture::new();
+    // A surviving worktree, so this test isolates its own defect: without one,
+    // the version before this fix never found the orphan at all.
+    let _anchor = fixture.run_task("anchor");
+    let undecided = fixture.run_task("undecided");
+    fs::remove_dir_all(fixture.worktree(&undecided)).unwrap();
+
+    // The worktree pass requires a decision; the orphan pass required nothing.
+    let applied = fixture.prune(&["--apply"]);
+    assert_eq!(applied["orphan_branches_removed"], 0, "{applied}");
+    assert!(orphan_reason(&applied).contains("decision"), "{applied}");
+    assert_eq!(
+        applied["orphan_branches"][0]["owner_id"], "codex:prune-owner",
+        "{applied}"
+    );
+    assert!(
+        fixture
+            .branches()
+            .contains(&format!("brgr/task-{}", Fixture::slug(&undecided)))
+    );
+}
+
+#[test]
+fn a_task_admitted_before_checkouts_were_recorded_is_located_through_git() {
+    let fixture = Fixture::new();
+    let gone = fixture.run_task("gone");
+    let kept = fixture.run_task("kept");
+    fixture.accept(&gone);
+    fixture.forget_checkouts();
+    fs::remove_dir_all(fixture.worktree(&gone)).unwrap();
+
+    // With no record, the surviving worktree names the repository, and git's
+    // stale registration ties the orphan to it.
+    let applied = fixture.prune(&["--apply"]);
+    assert_eq!(applied["orphan_branches_removed"], 1, "{applied}");
+    assert!(fixture.worktree(&kept).is_dir());
+}
+
+#[test]
+fn a_repository_nobody_can_locate_is_reported_rather_than_counted_as_clean() {
+    let fixture = Fixture::new();
+    let gone = fixture.run_task("gone");
+    fixture.accept(&gone);
+    fixture.forget_checkouts();
+    fs::remove_dir_all(fixture.worktree(&gone)).unwrap();
+
+    let report = fixture.prune(&[]);
+    assert_eq!(report["orphan_branches_removable"], 0, "{report}");
+    let reason = reason_of(&report, "unlocated repository", "repo");
+    assert!(reason.contains("cannot be located"), "{report}");
+}
+
+fn orphan_reason(receipt: &Value) -> String {
+    receipt["orphan_branches"][0]["reason"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no orphan reason in {receipt}"))
+        .to_owned()
+}
+
+fn branches_of(repository: &Path) -> Vec<String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repository)
+        .args(["branch", "--format=%(refname:short)"])
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(|line| line.trim().to_owned())
+        .collect()
+}
+
 fn reason_of(receipt: &Value, label: &str, slug: &str) -> String {
     let row = row(receipt, slug);
     row["reason"]
@@ -439,6 +680,14 @@ impl Fixture {
             .map(str::to_owned)
             .filter(|line| !line.is_empty())
             .collect()
+    }
+
+    /// Puts the store back in the state every task admitted before checkouts
+    /// were recorded is in.
+    fn forget_checkouts(&self) {
+        let store =
+            rusqlite::Connection::open(self.home.join("store").join("brgr.sqlite3")).unwrap();
+        store.execute("DELETE FROM task_checkouts", []).unwrap();
     }
 
     fn branches(&self) -> Vec<String> {
