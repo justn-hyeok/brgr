@@ -2,25 +2,37 @@
 
 ## 2.4.0 — unreleased
 
-Fix a P0 defect in which concurrent admissions failed with a raw
-`database is locked` error after their harness had already run. Eight of nine
-store write paths used deferred transactions, which report
-`SQLITE_BUSY_SNAPSHOT` in WAL mode and are not covered by `busy_timeout`; they
-now take an immediate lock. `Store::open` also wrote `PRAGMA journal_mode` and
-re-applied the schema batch on every command, so simultaneous opens contended
-before doing any work; the journal mode is now only written when it differs and
-the DDL batch is gated on `PRAGMA user_version`. Lock contention that survives
-either change is retried with bounded backoff. Sealed results, decisions, and
-inbox items were never lost by the defect, and the fix adds no new behavior to
-that path.
+Narrow a P0 defect in which concurrent admissions failed with a raw
+`database is locked` error after their harness had already run. A deferred
+transaction that reads before it writes reports `SQLITE_BUSY_SNAPSHOT` in WAL
+mode, which `busy_timeout` does not cover. 2.2.0 converted ten store write paths
+to an immediate begin; `commit_terminal_result_guarded` was the one it missed,
+and it is the most expensive place to fail, because the harness has already run
+and recovery settles an unfinished attempt as `Lost` with unresolved effects that
+no later attempt on that revision can supersede. It now begins immediately, and
+`a_write_transaction_takes_its_lock_at_begin` fails if either path that goes
+through `Store::write_transaction` regresses. The other fourteen write
+transactions construct their immediate begin inline and are not covered by that
+test.
+
+`Store::open` also wrote `PRAGMA journal_mode` and re-applied the schema batch on
+every command, so simultaneous opens contended before doing any work; the journal
+mode is now only written when it differs and the DDL batch is gated on a stamp
+derived from the schema text. Lock contention is retried under a bounded budget
+at `Store::open` and at five write entry points — task admission, attempt claim,
+terminal commit, and both decision paths. The remaining write paths still surface
+a busy error to the caller.
+
+Sealed results, decisions, and inbox items were never lost by the defect, and the
+fix adds no new behavior to that path.
 
 Add `(task_id, revision)` indexes on `results` and `attempts`. The Herdr board
 projection joined both tables without one, which made a two-second refresh cost
 3.26s at 6,400 stored tasks; it now costs 11.5ms, and its per-task cost falls
 rather than grows as the store fills. Existing stores gain the indexes on the
-next open and keep every row. The schema stamp is derived from the schema text
-instead of a hand-maintained constant, so adding an object can no longer be
-forgotten and silently skipped by every existing store.
+next open and keep every row. Deriving the stamp from the schema text rather than
+a hand-maintained constant means adding an object can no longer be forgotten and
+silently skipped by every existing store.
 
 Add `brgr prune`, which reports and with `--apply` removes task worktrees whose
 revision carries a recorded owner decision, together with the `brgr/task-*`

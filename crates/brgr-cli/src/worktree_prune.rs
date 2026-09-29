@@ -137,6 +137,14 @@ pub(crate) fn prune(
         if file_name(&parent).starts_with('.') {
             continue;
         }
+        // The per-worktree check cannot cover this: removing every child of the
+        // directory the process is sitting in would then unlink that directory.
+        if current_dir
+            .as_deref()
+            .is_some_and(|cwd| is_self_or_ancestor(&parent, cwd))
+        {
+            continue;
+        }
         if fs::read_dir(&parent).is_ok_and(|mut entries| entries.next().is_none()) {
             let _ = fs::remove_dir(&parent);
         }
@@ -214,7 +222,7 @@ fn objection(
         return Some("path could not be resolved".to_owned());
     };
     if let Some(cwd) = current_dir
-        && (cwd == resolved || cwd.starts_with(&resolved))
+        && is_self_or_ancestor(&resolved, cwd)
     {
         return Some(
             "this is the current working directory; refusing to remove it from under the \
@@ -234,6 +242,12 @@ fn objection(
     };
     *owner = Some(task.owner_id.as_str().to_owned());
 
+    // A recorded decision is what makes this revision settled, and that is
+    // stronger than it looks. `record_decision_in_transaction` rejects anything
+    // whose outcome is not `Candidate`, and `claim_attempt` refuses a new attempt
+    // on a revision whose prior result is a candidate. So a decided revision can
+    // have no attempt still running in this worktree — the two guards live in
+    // brgr-store, which is why it is spelled out here.
     match store.decision_for_revision(task.task_id, revision) {
         Ok(Some(_)) => {}
         Ok(None) => return Some("no owner decision recorded for this revision".to_owned()),
@@ -308,9 +322,14 @@ fn parse_slug(slug: &str) -> Option<(&str, u32)> {
         Some((prefix, revision)) => (prefix, revision.parse::<u32>().ok()?),
         None => (slug, 1),
     };
+    // `task_slug` renders a UUID, which is lowercase. Accepting `A-F` would let a
+    // directory brgr never created resolve to a real task on a case-sensitive
+    // filesystem, and the branch name rebuilt from the raw slug would not exist.
     if revision == 0
         || prefix.len() != PREFIX_LENGTH
-        || !prefix.bytes().all(|byte| byte.is_ascii_hexdigit())
+        || !prefix
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
     {
         return None;
     }
@@ -388,6 +407,12 @@ fn git(directory: &Path, args: &[&str]) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
+/// Reports whether `candidate` is `inside` itself or one of its ancestors, which
+/// is what makes removing it pull the ground out from under `inside`.
+fn is_self_or_ancestor(candidate: &Path, inside: &Path) -> bool {
+    inside == candidate || inside.starts_with(candidate)
+}
+
 fn canonical(path: &Path) -> Option<PathBuf> {
     path.canonicalize().ok()
 }
@@ -424,6 +449,34 @@ mod tests {
         assert_eq!(parse_slug("dec0de"), None);
         assert_eq!(parse_slug("deadbeefcafe"), None);
         assert_eq!(parse_slug("deadbeefcafe-r2"), None);
+    }
+
+    #[test]
+    fn slugs_reject_uppercase_hex_that_task_slug_could_not_emit() {
+        assert_eq!(parse_slug("abcd1234"), Some(("abcd1234", 1)));
+        // A UUID renders lowercase, so these name a directory brgr never created.
+        assert_eq!(parse_slug("ABCD1234"), None);
+        assert_eq!(parse_slug("abcD1234"), None);
+        assert_eq!(parse_slug("ABCD1234-r2"), None);
+    }
+
+    #[test]
+    fn the_cwd_guard_covers_the_directory_holding_the_worktrees() {
+        let repository = Path::new("/home/brgr/worktrees/repo");
+        let worktree = repository.join("abcd1234");
+        // Sitting in the worktree blocks the worktree.
+        assert!(is_self_or_ancestor(&worktree, &worktree));
+        assert!(is_self_or_ancestor(&worktree, &worktree.join("src")));
+        // Sitting in the repository directory blocks that directory too, which the
+        // per-worktree check alone cannot see.
+        assert!(is_self_or_ancestor(repository, repository));
+        assert!(is_self_or_ancestor(repository, &worktree));
+        // An unrelated directory blocks nothing.
+        assert!(!is_self_or_ancestor(&worktree, repository));
+        assert!(!is_self_or_ancestor(
+            &worktree,
+            Path::new("/home/brgr/worktrees/other/abcd1234")
+        ));
     }
 
     #[test]

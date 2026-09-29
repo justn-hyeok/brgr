@@ -157,7 +157,7 @@
 ### 이번에 정정한 측정값
 
 - 병렬 실행 효율로 처음 보고한 76~91%는 **git이 아닌 작업 공간**에서 측정한 값이었다. 그 경로는 `acquire_admission_lock`과 `prepare_workspace`를 단축해 admission lock도 worktree도 만들지 않는다. git 저장소 기준 실측은 공유 저장소 8병렬에서 49%, 실행별 저장소에서 65%다.
-- 동시 admission 게이트는 `Store::open` 수정을 고정하지 못한다. 되돌려도 통과했고, 실제 효과는 48회 중 1회 실패를 막는 간헐적 크기다. `write_transaction`의 `IMMEDIATE` 변경은 `a_write_transaction_takes_its_lock_at_begin`이 결정적으로 고정한다(되돌리면 실패함을 확인).
+- 동시 admission 게이트는 `Store::open` 수정을 고정하지 못한다. 되돌려도 통과했고, 실제 효과는 48회 중 1회 실패를 막는 간헐적 크기다. `write_transaction`을 지나는 경로의 `IMMEDIATE` 변경은 `a_write_transaction_takes_its_lock_at_begin`이 결정적으로 고정한다(되돌리면 실패함을 확인). **다만 그 게이트가 덮는 것은 16개 쓰기 트랜잭션 중 2개뿐이다** — 나머지 14개는 인라인으로 immediate begin을 만들고, 그중 하나가 deferred로 돌아가도 이 테스트는 통과한다.
 
 위 네 항목은 모두 수정하고 회귀 검사를 붙였다. 2-4와 2-5를 다시 닫으려면 다음이 필요하다.
 
@@ -185,3 +185,27 @@
 **영구 잔여 위험:** 사람 리뷰어가 없다. 이건 닫을 수 없는 항목이므로 체크박스로 두지 않고, 릴리스 노트에 **수용된 한계**로 명시한다. 영구히 비어 있는 체크박스는 체크리스트 전체를 거짓말로 만든다.
 
 이 절차는 2026-09-28의 수정분(커밋되지 않은 작업 트리)에 대해 이미 한 바퀴 돌았다: (a) 비작성자 리뷰어가 `crates/` 전체를 검토해 15건 보고, (b) 14건 수정·1건(prune의 owner 범위 제한) 이유를 밝혀 기각 — 근거는 이 문서의 "적대적 동일 사용자 격리는 v1 대상이 아니다"이고 대신 receipt에 owner를 노출했다, (c) 데이터 손실 3건과 게이트 무효 주장을 직접 재현하고 probe 플레이크 1건은 미재현으로 기록, (d) board와 병렬 효율 주장에 벤치 대응. **다만 이것은 릴리스 SHA가 아닌 작업 트리에 대한 것이므로 2-5는 닫히지 않는다.** 커밋 후 릴리스 SHA에서 다시 돌려야 한다.
+
+
+## 2026-09-29 리뷰 처분 기록 — 게이트 2-5 (b)
+
+머지 커밋 `ad24cce`(PR #26) 시점에 비작성자 리뷰어가 `8f6671a..8d8b979` 전체를 검토해 16건을 보고했다. 게이트 2-5의 (a)는 이 SHA에서 충족됐다. **순서는 역전됐다** — 리뷰 결과 도착 전에 머지했으므로, 이 처분은 `main`에 이미 들어간 코드에 대한 것이다.
+
+### 작성자가 재현해 수용한 것
+
+- **공표한 주장 3건이 거짓이었다.** PR 본문의 "열한 개 쓰기 경로 전부가 하나의 immediate begin을 지난다"는 실측 16곳 중 2곳이었고, CHANGELOG 2.4.0의 "여덟 곳 중 아홉"은 v2.1.0 base의 상태이지 이 릴리스의 델타가 아니며(실제 델타는 1곳), "락 경합은 재시도된다"는 16곳 중 5곳만 해당한다. 리베이스 때 PR 본문은 갱신하고 CHANGELOG를 빼먹은 결과다. 이것이 2026-09-21과 같은 형태의 실패다: 코드가 하지 않는 일을 릴리스 기록이 단언했다.
+- **재시도 예산과 admission lock 예산이 같다.** `BUSY_RETRY_BUDGET`과 `ADMISSION_LOCK_WAIT`가 둘 다 10초이고, 재시도 3곳이 lock을 쥔 채 돈다. 보유자가 재시도하면 대기자가 `another admission is in progress`로 실패한다 — P0을 다른 하드 실패로 교환한 셈이다. 미해결.
+- **`parse_slug`이 대문자 hex를 수용했다.** `task_slug`는 소문자만 낸다. 수정하고 회귀를 붙였다.
+- **빈 부모 디렉터리 삭제가 cwd 가드 밖이었다.** cwd가 `<worktrees>/<repo>`면 자식 전부 삭제 후 자기 cwd를 unlink했다. 수정하고 단위·실동작 회귀를 붙였다.
+
+### 이유를 밝혀 기각한 것
+
+- **"결정된 revision에 살아있는 attempt가 같은 worktree에서 돌 수 있다"**(가장 심각하다고 보고된 항목)는 성립하지 않는다. `record_decision_in_transaction`은 `outcome == Candidate`가 아니면 거절하므로 failed 결과는 reject할 수 없고(`lib.rs` `DecisionRequiresCandidate`), `claim_attempt`는 prior 결과가 candidate면 `NonRetryablePriorAttempt`로 새 attempt를 거절한다. 따라서 결정이 있는 revision에는 실행 중인 attempt가 없다. 두 불변식이 다른 크레이트에 있어 읽히지 않았으므로 `worktree_prune`에 명시했다.
+
+### 아직 재현하지 않은 것 — 후속 PR 대상
+
+아티팩트 해싱이 쓰기 락 안에 있음, `retry_busy`의 `std::thread::sleep`이 tokio 워커를 블로킹, 스키마 스탬프가 서로 다른 SCHEMA를 가진 두 바이너리 사이에서 진동, git이 `locked`로 표시한 worktree가 report에서 removable로 나왔다가 apply에서 kept가 됨, 손으로 지운 worktree의 브랜치가 영구 고아, 후보당 git 프로세스 5개, `read_dir` 실패가 전체 prune을 중단시킴. 재현 전에는 수정 근거로 쓰지 않는다.
+
+### 이 라운드가 (b)에 남기는 것
+
+문서가 코드보다 앞서 나가지 않게 하는 검사가 없다. 성능 주장은 (d)가 벤치로 묶지만, "이 경로가 전부 덮인다" 같은 커버리지 주장은 아무것도 검증하지 않는다. 이번에 거짓 3건이 그 틈으로 나갔다.
