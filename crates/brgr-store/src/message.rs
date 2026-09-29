@@ -1,5 +1,5 @@
 use brgr_protocol::{AttemptId, TaskId};
-use rusqlite::{OptionalExtension as _, Transaction, TransactionBehavior, params};
+use rusqlite::{OptionalExtension as _, Transaction, params};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -191,8 +191,7 @@ impl Store {
     /// conflicting replay, or database failure.
     pub fn post_message(&self, draft: &MessageDraft) -> Result<TaskMessage, StoreError> {
         validate_draft(draft)?;
-        let transaction =
-            Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
+        let transaction = self.write_transaction()?;
         if let Some(existing) = load_message(&transaction, &draft.message_id)? {
             if message_matches_draft(&existing, draft) {
                 return Ok(existing);

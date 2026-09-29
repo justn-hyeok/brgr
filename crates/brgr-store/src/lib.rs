@@ -562,8 +562,7 @@ impl Store {
         revision: u32,
         attempt_id: AttemptId,
     ) -> Result<(), StoreError> {
-        let transaction =
-            Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
+        let transaction = self.write_transaction()?;
         let spec_json = transaction
             .query_row(
                 "SELECT spec_json FROM tasks WHERE task_id = ?1 AND revision = ?2",
@@ -709,8 +708,7 @@ impl Store {
             return Err(StoreError::InvalidLaunchIntent);
         }
         let epoch = i64::try_from(supervisor_epoch).map_err(|_| StoreError::NumericOverflow)?;
-        let transaction =
-            Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
+        let transaction = self.write_transaction()?;
         let state = transaction
             .query_row(
                 "SELECT state FROM attempts WHERE attempt_id = ?1",
@@ -756,8 +754,7 @@ impl Store {
         identity: &RunnerIdentity,
     ) -> Result<WriteOutcome, StoreError> {
         identity.validate()?;
-        let transaction =
-            Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
+        let transaction = self.write_transaction()?;
         let stored = read_launch_intent(&transaction, attempt_id)?
             .ok_or(StoreError::LaunchIntentNotFound(attempt_id))?;
         if stored.nonce != nonce {
@@ -1166,8 +1163,7 @@ impl Store {
     ///
     /// Returns an error if that owner has no matching inbox item.
     pub fn acknowledge(&self, owner_id: &OwnerId, result_id: ResultId) -> Result<(), StoreError> {
-        let transaction =
-            Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
+        let transaction = self.write_transaction()?;
         let changed = transaction.execute(
             "UPDATE inbox_items SET acknowledged = 1
              WHERE owner_id = ?1 AND result_id = ?2",
@@ -1198,8 +1194,7 @@ impl Store {
         session_id: &str,
         binding_epoch: u64,
     ) -> Result<(), StoreError> {
-        let transaction =
-            Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
+        let transaction = self.write_transaction()?;
         assert_owner_binding(
             &transaction,
             owner_id,
@@ -1237,8 +1232,7 @@ impl Store {
     }
 
     fn record_decision_once(&self, decision: &Decision) -> Result<WriteOutcome, StoreError> {
-        let transaction =
-            Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
+        let transaction = self.write_transaction()?;
         let outcome = record_decision_in_transaction(&transaction, &self.artifacts, decision)?;
         transaction.commit()?;
         Ok(outcome)
@@ -1259,8 +1253,7 @@ impl Store {
         &self,
         decision: &Decision,
     ) -> Result<WriteOutcome, StoreError> {
-        let transaction =
-            Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
+        let transaction = self.write_transaction()?;
         let outcome = record_decision_in_transaction(&transaction, &self.artifacts, decision)?;
         let changed = transaction.execute(
             "UPDATE inbox_items SET acknowledged = 1 WHERE owner_id = ?1 AND result_id = ?2",
@@ -1602,8 +1595,7 @@ impl Store {
         }
         let binding_epoch =
             i64::try_from(binding_epoch).map_err(|_| StoreError::NumericOverflow)?;
-        let transaction =
-            Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
+        let transaction = self.write_transaction()?;
         let existing = transaction
             .query_row(
                 "SELECT session_id, binding_epoch FROM owner_bindings WHERE owner_id = ?1",
@@ -1661,8 +1653,7 @@ impl Store {
         if session_id.trim().is_empty() {
             return Err(StoreError::InvalidOwnerBinding);
         }
-        let transaction =
-            Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
+        let transaction = self.write_transaction()?;
         let prior: Option<(String, i64)> = transaction
             .query_row(
                 "SELECT session_id, binding_epoch FROM owner_bindings WHERE owner_id = ?1",
@@ -4393,11 +4384,65 @@ mod tests {
         );
     }
 
+    /// Every write transaction in this crate must begin through
+    /// [`Store::write_transaction`], or the gate below pins only the paths that
+    /// happen to use it.
+    ///
+    /// This exists because a coverage claim went out wrong: the 2.4.0 notes said
+    /// the deterministic gate covered every write path while it covered two of
+    /// sixteen. A bench binds a performance claim to a measurement; nothing bound
+    /// that claim to anything, so it is bound here. Searching this crate's own
+    /// source is blunt, and it is the only thing that would have caught it.
+    #[test]
+    fn every_write_transaction_begins_through_one_helper() {
+        // Assembled at runtime so this test's own source does not match a search.
+        let inline_immediate = format!("Transaction::{}", "new_unchecked");
+        let behaviour = format!("transaction_{}", "with_behavior");
+        let deferred = format!(".connection.{}()", "transaction");
+
+        let sources: [(&str, &str); 6] = [
+            ("lib.rs", include_str!("lib.rs")),
+            ("board.rs", include_str!("board.rs")),
+            ("artifact.rs", include_str!("artifact.rs")),
+            ("message.rs", include_str!("message.rs")),
+            ("notification.rs", include_str!("notification.rs")),
+            ("tree.rs", include_str!("tree.rs")),
+        ];
+
+        let mut constructions = Vec::new();
+        for (name, source) in sources {
+            let inline = source.matches(inline_immediate.as_str()).count();
+            if inline > 0 {
+                constructions.push(format!("{name}: {inline}"));
+            }
+            assert_eq!(
+                source.matches(behaviour.as_str()).count(),
+                0,
+                "{name} begins a transaction by behaviour instead of write_transaction"
+            );
+            assert_eq!(
+                source.matches(deferred.as_str()).count(),
+                0,
+                "{name} begins a deferred transaction on the store connection"
+            );
+        }
+        assert_eq!(
+            constructions,
+            vec!["lib.rs: 1".to_owned()],
+            "a write transaction is built outside Store::write_transaction, so \
+             a_write_transaction_takes_its_lock_at_begin no longer covers it"
+        );
+    }
+
     /// A write transaction that reads before it takes its lock leaves a window
     /// in which another process can commit, which WAL reports as
     /// `SQLITE_BUSY_SNAPSHOT` — a code `busy_timeout` does not cover. This is
     /// the deterministic gate for that: it fails if `write_transaction` is ever
     /// changed back to a deferred begin.
+    ///
+    /// It covers every write path in the crate, because
+    /// `every_write_transaction_begins_through_one_helper` holds them all to this
+    /// one entry point.
     #[test]
     fn a_write_transaction_takes_its_lock_at_begin() {
         let root = TempDir::new().unwrap();

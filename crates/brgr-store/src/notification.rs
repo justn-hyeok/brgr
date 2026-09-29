@@ -1,5 +1,5 @@
 use brgr_protocol::{OwnerId, ResultId, TaskId};
-use rusqlite::{OptionalExtension as _, Transaction, TransactionBehavior, params};
+use rusqlite::{OptionalExtension as _, params};
 
 use super::{Store, StoreError, assert_owner_binding};
 
@@ -71,8 +71,7 @@ impl Store {
         if pane_id.trim().is_empty() || herdr_bin.trim().is_empty() {
             return Err(StoreError::InvalidOwnerSurface);
         }
-        let transaction =
-            Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
+        let transaction = self.write_transaction()?;
         assert_owner_binding(
             &transaction,
             owner_id,
@@ -180,8 +179,7 @@ impl Store {
         if token.is_empty() || lease_seconds <= 0 {
             return Err(StoreError::InvalidNotification);
         }
-        let transaction =
-            Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
+        let transaction = self.write_transaction()?;
         let record: Option<ClaimRow> = transaction
             .query_row(
                 "SELECT n.task_id, n.owner_id, b.session_id, s.pane_id,
