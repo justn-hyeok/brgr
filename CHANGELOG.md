@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.7.1 — 2026-09-30
 
 A harness's version, help, and model-catalog probes may now take 15 seconds
 instead of 5 before brgr reports the harness timed out. The limit only exists
