@@ -3,6 +3,56 @@
 //! This crate owns domain invariants. Persistence and process adapters may
 //! report observations, but they cannot bypass task revision or attempt state
 //! validation.
+//!
+//! The two invariants are that a task's history is a chain of whole revisions,
+//! and that an attempt walks a fixed state machine that can only be left through
+//! a result. Both are enforced by construction rather than by convention:
+//!
+//! ```
+//! use brgr_core::{Attempt, CoreError, TaskRevision};
+//! use brgr_protocol::{AttemptId, AttemptState};
+//!
+//! # fn wire(revision: u32) -> brgr_protocol::TaskSpec {
+//! #     serde_json::from_str(&format!(r#"{{
+//! #       "schema": "brgr/v1",
+//! #       "task_id": "3d3c9081-0f4a-4f2e-9c1b-7a2d5e6f8a90",
+//! #       "revision": {revision},
+//! #       "create_request_id": "req-1",
+//! #       "owner_id": "codex:alice",
+//! #       "objective": "Summarize the build log",
+//! #       "workspace": "/srv/checkout",
+//! #       "route": {{ "harness_id": "local.fixture" }},
+//! #       "required_capabilities": ["completion"],
+//! #       "artifact_contract": {{ "media_type": "text/plain", "max_bytes": 4096 }},
+//! #       "acceptance_criteria": ["the report is sealed"],
+//! #       "budget": {{ "deadline_seconds": 60, "max_attempts": 2 }}
+//! #     }}"#)).unwrap()
+//! # }
+//! let task = TaskRevision::new(wire(1))?;
+//!
+//! // A revision is replaced whole, never edited, and only by its own successor.
+//! let second = task.revise(wire(2))?;
+//! assert_eq!(second.revision(), 2);
+//! assert_eq!(second.task_id(), task.task_id());
+//! assert!(task.revise(wire(4)).is_err(), "revision 3 was skipped");
+//!
+//! // An attempt runs against one revision and walks the v1 state machine.
+//! let mut attempt = Attempt::new(second, AttemptId::new(), 1)?;
+//! assert_eq!(attempt.state(), AttemptState::Queued);
+//! attempt.transition(AttemptState::Starting)?;
+//! attempt.transition(AttemptState::Running)?;
+//!
+//! // Terminal is not a state you may step into: it is entered by recording the
+//! // result, so every terminal attempt owns one. Matched on the variant, not
+//! // `is_err`: from `Running` a step to `Terminal` is also not a legal edge, so
+//! // `is_err` alone would still hold if this rule were deleted.
+//! assert!(matches!(
+//!     attempt.transition(AttemptState::Terminal),
+//!     Err(CoreError::TerminalRequiresResult)
+//! ));
+//! assert!(attempt.terminal_result().is_none());
+//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! ```
 
 use std::{
     fmt::Write as _,

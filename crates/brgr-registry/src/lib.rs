@@ -1,4 +1,51 @@
 //! Evidence-backed harness registration and health checking.
+//!
+//! A registered harness is pinned to the evidence it was certified against: the
+//! executable's identity and what its probe said. [`Registry::health`] re-checks
+//! both, so a harness that was replaced on disk reports as changed instead of
+//! being run as though it were the one that was approved.
+//!
+//! Two rules shape everything an operator sees. Diagnostic output carries a
+//! stable code and never the probe's own bytes, which may contain anything a
+//! third-party binary chose to print. And the remedy is always a command the
+//! operator runs deliberately — this crate never updates or re-activates a
+//! harness on its own.
+//!
+//! ```
+//! use brgr_registry::{Health, recertify_action};
+//! use brgr_runner::HarnessManifest;
+//!
+//! // A probe whose output changed reports a fixed code. The differing text is
+//! // carried in the variant for logging by the caller, never in the code.
+//! let changed = Health::EvidenceChanged {
+//!     expected: "sha256:aaa".to_owned(),
+//!     observed: "sha256:bbb".to_owned(),
+//! };
+//! assert_eq!(changed.code(), "probe_evidence_changed");
+//! assert_eq!(Health::Healthy.code(), "healthy");
+//!
+//! // The remedy names a command, and the path is POSIX-quoted so an operator
+//! // can paste it even when it contains a space or a quote.
+//! # let wire = r#"{
+//! #   "schema": "brgr.harness/v1",
+//! #   "id": "local.fixture",
+//! #   "adapter": "process/v1",
+//! #   "executable": "/opt/my harness/bin/run",
+//! #   "probe": { "version_argv": ["--version"], "help_argv": ["--help"] },
+//! #   "launch": { "argv": ["run"], "mode": "one_shot" },
+//! #   "result": {
+//! #     "source": { "kind": "stdout" },
+//! #     "media_type": "text/plain",
+//! #     "max_bytes": 4096,
+//! #     "success_exit_codes": [0]
+//! #   }
+//! # }"#;
+//! let manifest: HarnessManifest = serde_json::from_str(wire)?;
+//! let action = recertify_action(&manifest);
+//! assert!(action.contains("'/opt/my harness/bin/run'"), "{action}");
+//! assert!(action.contains("brgr harness add"));
+//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! ```
 
 use std::{
     collections::{BTreeMap, BTreeSet},

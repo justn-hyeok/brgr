@@ -2,6 +2,28 @@
 
 ## 2.4.0 — unreleased
 
+Every crate root now carries a worked example, and `cargo test --doc` is no
+longer a step that cannot fail. CI has been running it against zero doc tests,
+so a green result meant nothing; there are now seven, and each was checked the
+same way the property tests were — by deleting the rule it covers and confirming
+the example fails.
+
+That check changed two of them. `Attempt::transition` and `Store::claim_attempt`
+both originally asserted `is_err`, which held for the wrong reason: a step from
+`Running` to `Terminal` is not a legal edge either, and an unrecognized prior
+outcome is refused by the same fallback. Both now name the variant they mean. A
+third, the manifest example, was rejecting its input on an unrelated malformed
+field rather than on the misspelled key it was meant to demonstrate, and now
+carries a control that parses.
+
+What the examples document is the rule each crate exists to enforce: the task
+revision chain and the attempt state machine in `brgr-core`, the wire schema and
+its refusal of an unknown version in `brgr-protocol`, `deny_unknown_fields` and
+the shell-free argument vector in `brgr-runner`, the stable health code and the
+POSIX-quoted remedy in `brgr-registry`, and in `brgr-store` the candidate rule
+that `brgr prune` depends on for its claim that a settled worktree holds no
+running attempt.
+
 Three parsers that read bytes brgr did not write now carry property tests: the
 harness JSONL stream, the Herdr bridge request file, and the directory names under
 the worktrees root. Each generator is deterministic and seeded, so a failure names
