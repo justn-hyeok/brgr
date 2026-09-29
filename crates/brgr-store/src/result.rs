@@ -1,6 +1,8 @@
 //! Owner-facing results: the inbox, acknowledgement, and decisions.
 
-use brgr_protocol::{Decision, InboxItem, OwnerId, ResultEnvelope, ResultId, TaskId};
+use brgr_protocol::{
+    Decision, InboxItem, OwnerId, ResultEnvelope, ResultId, TaskId, TerminalOutcome,
+};
 use rusqlite::{OptionalExtension as _, params};
 
 use super::{
@@ -8,7 +10,104 @@ use super::{
     record_decision_in_transaction,
 };
 
+/// Whether a task revision is finished with, as far as its checkout goes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Settlement {
+    /// The owner accepted or rejected the candidate.
+    Decided,
+    /// The owner acknowledged a failed, cancelled, or lost result, and nothing
+    /// can run in this revision again: no attempt is unfinished and no retry
+    /// was granted. A lost worker may still be alive outside brgr's control;
+    /// the caller checks for that.
+    Acknowledged(TerminalOutcome),
+    /// Still open, and why.
+    Open(OpenReason),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OpenReason {
+    /// No result was recorded for the revision yet.
+    NoResult,
+    /// A candidate the owner has not accepted or rejected.
+    Undecided,
+    /// A failed, cancelled, or lost result the owner has not acknowledged.
+    Unacknowledged(TerminalOutcome),
+    /// An attempt of this revision has not reached a terminal state.
+    AttemptActive,
+    /// The last attempt failed before spawning and was granted a retry.
+    RetryGranted,
+}
+
 impl Store {
+    /// Says whether a revision is settled: decided, or an acknowledged
+    /// non-candidate result with nothing left to run.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid stored data or a database failure.
+    pub fn revision_settlement(
+        &self,
+        task_id: TaskId,
+        revision: u32,
+    ) -> Result<Settlement, StoreError> {
+        let task = task_id.to_string();
+        if self
+            .connection
+            .query_row(
+                "SELECT 1 FROM attempts WHERE task_id = ?1 AND revision = ?2
+                 AND state <> 'terminal' LIMIT 1",
+                params![task, revision],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some()
+        {
+            return Ok(Settlement::Open(OpenReason::AttemptActive));
+        }
+        let latest: Option<(String, String, String)> = self
+            .connection
+            .query_row(
+                "SELECT result_id, attempt_id, envelope_json FROM results
+                 WHERE task_id = ?1 AND revision = ?2 ORDER BY rowid DESC LIMIT 1",
+                params![task, revision],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+        let Some((result_id, attempt_id, envelope)) = latest else {
+            return Ok(Settlement::Open(OpenReason::NoResult));
+        };
+        let outcome = serde_json::from_str::<ResultEnvelope>(&envelope)?.outcome;
+        let exists = |sql: &str, key: &str| -> Result<bool, StoreError> {
+            Ok(self
+                .connection
+                .query_row(sql, [key], |_| Ok(()))
+                .optional()?
+                .is_some())
+        };
+        if outcome == TerminalOutcome::Candidate {
+            return Ok(
+                if exists("SELECT 1 FROM decisions WHERE result_id = ?1", &result_id)? {
+                    Settlement::Decided
+                } else {
+                    Settlement::Open(OpenReason::Undecided)
+                },
+            );
+        }
+        if exists(
+            "SELECT 1 FROM pre_spawn_retry_grants WHERE attempt_id = ?1",
+            &attempt_id,
+        )? {
+            return Ok(Settlement::Open(OpenReason::RetryGranted));
+        }
+        if !exists(
+            "SELECT 1 FROM inbox_items WHERE result_id = ?1 AND acknowledged = 1",
+            &result_id,
+        )? {
+            return Ok(Settlement::Open(OpenReason::Unacknowledged(outcome)));
+        }
+        Ok(Settlement::Acknowledged(outcome))
+    }
+
     /// Lists an owner's inbox, optionally including acknowledged entries.
     ///
     /// # Errors

@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+`brgr prune` now reclaims the worktrees of failed, cancelled, and lost runs.
+It required an owner decision, and only a candidate can be accepted or
+rejected, so every failed run's checkout stayed forever. A failed revision now
+counts as settled once its owner acknowledged the result (`brgr result TASK
+--ack`), no attempt of it is still running, no retry was granted, and no worker
+process is left alive — a lost result's harness can outlive its supervisor, so
+brgr checks the supervisor and the harness process before removing anything.
+A kept failure says which of these is missing, including the `--ack` command
+to run.
+
 ## 2.6.1 — 2026-09-30
 
 A task placed in a Herdr worker pane now has a minute, not five seconds, to be

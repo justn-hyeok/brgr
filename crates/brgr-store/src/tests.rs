@@ -2143,3 +2143,88 @@ fn a_write_transaction_takes_its_lock_at_begin() {
     )));
     transaction.commit().unwrap();
 }
+
+/// A failed revision is settled only once nothing can run in it again and its
+/// owner has seen the failure; each earlier state names what is still open.
+#[test]
+fn a_failed_revision_settles_only_after_acknowledgement_with_no_retry_left() {
+    let root = TempDir::new().unwrap();
+    let mut store = Store::open(root.path()).unwrap();
+    let task = task();
+    store.record_task(&task, "settlement").unwrap();
+    assert_eq!(
+        store
+            .revision_settlement(task.task_id, task.revision)
+            .unwrap(),
+        Settlement::Open(OpenReason::NoResult)
+    );
+
+    let attempt = AttemptId::new();
+    store
+        .claim_attempt(task.task_id, task.revision, attempt)
+        .unwrap();
+    assert_eq!(
+        store
+            .revision_settlement(task.task_id, task.revision)
+            .unwrap(),
+        Settlement::Open(OpenReason::AttemptActive)
+    );
+
+    let failed = ResultEnvelope {
+        outcome: TerminalOutcome::Failed,
+        artifacts: vec![],
+        error: Some("fixture failure".to_owned()),
+        ..result(&task, attempt)
+    };
+    store
+        .commit_terminal_result(&task.owner_id, &failed)
+        .unwrap();
+    assert_eq!(
+        store
+            .revision_settlement(task.task_id, task.revision)
+            .unwrap(),
+        Settlement::Open(OpenReason::Unacknowledged(TerminalOutcome::Failed))
+    );
+
+    store.grant_pre_spawn_retry(attempt).unwrap();
+    assert_eq!(
+        store
+            .revision_settlement(task.task_id, task.revision)
+            .unwrap(),
+        Settlement::Open(OpenReason::RetryGranted)
+    );
+    store.acknowledge(&task.owner_id, failed.result_id).unwrap();
+    assert_eq!(
+        store
+            .revision_settlement(task.task_id, task.revision)
+            .unwrap(),
+        Settlement::Open(OpenReason::RetryGranted),
+        "an acknowledgement does not withdraw a granted retry"
+    );
+}
+
+#[test]
+fn an_acknowledged_failure_without_a_retry_is_settled() {
+    let root = TempDir::new().unwrap();
+    let mut store = Store::open(root.path()).unwrap();
+    let task = task();
+    store.record_task(&task, "settled-failure").unwrap();
+    let attempt = AttemptId::new();
+    store
+        .claim_attempt(task.task_id, task.revision, attempt)
+        .unwrap();
+    let lost = ResultEnvelope {
+        outcome: TerminalOutcome::Lost,
+        artifacts: vec![],
+        error: Some("fixture loss".to_owned()),
+        ..result(&task, attempt)
+    };
+    store.commit_terminal_result(&task.owner_id, &lost).unwrap();
+    store.acknowledge(&task.owner_id, lost.result_id).unwrap();
+    assert_eq!(
+        store
+            .revision_settlement(task.task_id, task.revision)
+            .unwrap(),
+        Settlement::Acknowledged(TerminalOutcome::Lost)
+    );
+}

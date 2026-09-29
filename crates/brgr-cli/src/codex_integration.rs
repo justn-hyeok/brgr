@@ -147,8 +147,9 @@ acceptance criteria. Run `brgr accept TASK` only after relevant evidence passes;
 otherwise run `brgr reject TASK --reason "..."`. A failed, cancelled, or lost
 result is acknowledged with `brgr result TASK --ack`, never accepted.
 
-`brgr prune` reports decided tasks' worktrees that can be reclaimed, and
-`brgr prune --apply` removes them; sealed results and decisions stay. Run it
+`brgr prune` reports the worktrees of settled tasks that can be reclaimed —
+decided candidates, and failed, cancelled, or lost results you acknowledged —
+and `brgr prune --apply` removes them; sealed results and decisions stay. Run it
 only when the user asks to reclaim space or clean up.
 
 Acceptance does not authorize commit, merge, push, deployment, release, or

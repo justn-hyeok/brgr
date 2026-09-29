@@ -32,6 +32,7 @@ pub use error::StoreError;
 pub use message::{MessageDirection, MessageDraft, MessageKind, TaskMessage};
 pub use notification::{NotificationTarget, PendingNotification, QuestionTarget};
 use owner::assert_owner_binding;
+pub use result::{OpenReason, Settlement};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use schema::initialize_connection;
 use serde::{Deserialize, Serialize};

@@ -148,6 +148,77 @@ fn prune_refuses_ignored_files_symlinks_foreign_directories_and_its_own_cwd() {
     );
 }
 
+/// A failed run can only be acknowledged, never accepted or rejected, so a
+/// decision alone left every failed worktree behind for good. Once the owner
+/// has seen the failure and nothing can run there again, it is settled.
+#[test]
+fn an_acknowledged_failure_is_reclaimed_and_an_unacknowledged_one_is_kept() {
+    let fixture = Fixture::new();
+    let seen = fixture.run_failing_task("seen");
+    let unseen = fixture.run_failing_task("unseen");
+    fixture.acknowledge(&seen);
+
+    let report = fixture.prune(&[]);
+    assert_eq!(
+        status_of(&report, &Fixture::slug(&seen)),
+        "removable",
+        "{report}"
+    );
+    let reason = reason_of(&report, "unseen", &Fixture::slug(&unseen));
+    assert!(reason.contains("not acknowledged"), "{reason}");
+    assert!(
+        reason.contains(&format!("brgr result {unseen} --ack")),
+        "{reason}"
+    );
+
+    let applied = fixture.prune(&["--apply"]);
+    assert_eq!(applied["removed"], 1, "{applied}");
+    assert!(!fixture.worktree(&seen).exists());
+    assert!(fixture.worktree(&unseen).is_dir());
+    // The sealed failure is still readable after its checkout is gone.
+    assert_ne!(
+        fixture.json(&["result", &seen])["result"]["outcome"],
+        "candidate"
+    );
+}
+
+/// Acknowledging a lost result does not stop its worker. A harness process
+/// left behind by a dead supervisor keeps its pid file, and while that process
+/// lives the worktree stays.
+#[test]
+fn an_acknowledged_failure_is_kept_while_its_worker_still_runs() {
+    let fixture = Fixture::new();
+    let task = fixture.run_failing_task("orphaned worker");
+    fixture.acknowledge(&task);
+    let mut worker = Command::new("/bin/sleep").arg("60").spawn().unwrap();
+    let pid_file = fixture.home.join("runs").join(format!("{task}.pid"));
+    fs::write(&pid_file, format!("{}\n", worker.id())).unwrap();
+
+    let kept = fixture.prune(&["--apply"]);
+    let reason = reason_of(&kept, "running", &Fixture::slug(&task));
+    assert!(reason.contains("still running"), "{reason}");
+    assert!(fixture.worktree(&task).is_dir());
+
+    worker.kill().unwrap();
+    worker.wait().unwrap();
+    let applied = fixture.prune(&["--apply"]);
+    assert_eq!(applied["removed"], 1, "{applied}");
+    assert!(!fixture.worktree(&task).exists());
+}
+
+#[test]
+fn an_orphan_branch_of_an_acknowledged_failure_is_reclaimed() {
+    let fixture = Fixture::new();
+    let task = fixture.run_failing_task("gone failure");
+    fixture.acknowledge(&task);
+    fs::remove_dir_all(fixture.worktree(&task)).unwrap();
+    let branch = format!("brgr/task-{}", Fixture::slug(&task));
+
+    let applied = fixture.prune(&["--apply"]);
+    assert_eq!(applied["orphan_branches_removed"], 1, "{applied}");
+    assert!(!fixture.branches().contains(&branch));
+}
+
 #[test]
 fn a_locked_worktree_is_kept_in_both_modes_rather_than_promised_then_refused() {
     let fixture = Fixture::new();
@@ -581,6 +652,26 @@ impl Fixture {
         ]);
         assert_eq!(receipt["outcome"], "candidate");
         receipt["task_id"].as_str().unwrap().to_owned()
+    }
+
+    /// A run that fails: the fixture sleeps on `SLOW` past a one-second deadline.
+    fn run_failing_task(&self, objective: &str) -> String {
+        let objective = format!("SLOW {objective}");
+        let receipt = self.json(&[
+            "run",
+            &objective,
+            "--workspace",
+            self.repo_arg(),
+            "--deadline-seconds",
+            "1",
+            "--foreground",
+        ]);
+        assert_ne!(receipt["outcome"], "candidate", "{receipt}");
+        receipt["task_id"].as_str().unwrap().to_owned()
+    }
+
+    fn acknowledge(&self, task: &str) {
+        self.json(&["result", task, "--ack"]);
     }
 
     fn accept(&self, task: &str) {
