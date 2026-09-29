@@ -152,6 +152,10 @@ pub enum ModelCatalogFormat {
     /// One `provider/model` selector per line and nothing else, as
     /// `opencode models` prints.
     Lines,
+    /// No list to read: the CLI refuses a model name it does not know, locally
+    /// and before any paid request, so brgr passes the name through. Only for a
+    /// CLI where that refusal was observed; its `argv` is empty.
+    CliValidated,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -877,6 +881,7 @@ impl HarnessManifest {
         }
         if let Some(catalog) = &self.probe.model_catalog
             && (catalog.argv.is_empty()
+                != matches!(catalog.format, ModelCatalogFormat::CliValidated)
                 || catalog.argv.len() > 64
                 || catalog.argv.iter().any(|arg| {
                     arg.contains('\0')
@@ -2274,6 +2279,33 @@ mod tests {
         assert!(matches!(
             manifest.validate(),
             Err(RunnerError::InvalidExecutable(_))
+        ));
+    }
+
+    /// A CLI-validated catalog names no command, and every other format must.
+    #[test]
+    fn a_cli_validated_catalog_is_the_only_one_without_a_command() {
+        let mut manifest = echo_manifest(4_096);
+        manifest.probe.model_catalog = Some(ModelCatalogSpec {
+            argv: vec![],
+            format: ModelCatalogFormat::CliValidated,
+        });
+        manifest.validate().unwrap();
+        manifest.probe.model_catalog = Some(ModelCatalogSpec {
+            argv: vec!["models".to_owned()],
+            format: ModelCatalogFormat::CliValidated,
+        });
+        assert!(matches!(
+            manifest.validate(),
+            Err(RunnerError::InvalidModelCatalog)
+        ));
+        manifest.probe.model_catalog = Some(ModelCatalogSpec {
+            argv: vec![],
+            format: ModelCatalogFormat::Lines,
+        });
+        assert!(matches!(
+            manifest.validate(),
+            Err(RunnerError::InvalidModelCatalog)
         ));
     }
 

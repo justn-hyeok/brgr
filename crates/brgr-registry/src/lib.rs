@@ -590,6 +590,10 @@ impl Registry {
             .model_catalog
             .as_ref()
             .ok_or_else(|| RegistryError::ModelCatalogMissing(manifest.id.clone()))?;
+        if catalog.format == ModelCatalogFormat::CliValidated {
+            // The CLI itself refuses an unknown name before any paid request.
+            return Ok(());
+        }
         if catalog.argv.is_empty() || catalog.argv.len() > 64 {
             return Err(RegistryError::InvalidModelCatalog);
         }
@@ -978,6 +982,7 @@ enum Catalog {
     DashSeparated,
     FirstColumn,
     Lines,
+    CliValidated,
 }
 
 #[derive(Clone, Copy)]
@@ -1241,6 +1246,8 @@ const RECIPES: &[Recipe] = &[
             "--no-session-persistence",
             "${input.prompt}",
         ],
+        catalog: Some((&[], Catalog::CliValidated)),
+        model_argv: MODEL,
         effort_argv: &["--effort", "${route.effort}"],
         effort_requires: Some("--effort <level>"),
         // `USER` names the macOS keychain entry holding the login; without it
@@ -1256,9 +1263,10 @@ const RECIPES: &[Recipe] = &[
         capabilities: &[
             PROCESS_CAPS[0],
             PROCESS_CAPS[1],
-            // No model list to check a name against before a paid run, so the
-            // CLI's own configured default is used, as with Devin.
-            ("model_select", Cap::Unsupported("configured_default_only")),
+            // Claude Code has no model list, but it refuses a name its own
+            // catalog does not describe in about three seconds, locally, before
+            // any request; `haiku` or a full model name passes.
+            ("model_select", Cap::Supported("--model")),
             ("effort_select", Cap::Supported("--effort")),
         ],
         full: Some(&["--permission-mode", "bypassPermissions"]),
@@ -1276,14 +1284,16 @@ const RECIPES: &[Recipe] = &[
             "--thinking <level>",
         ],
         argv: &["${input.prompt}"],
+        catalog: Some((&[], Catalog::CliValidated)),
+        model_argv: &["--model", "${route.model}"],
         effort_argv: &["--thinking", "${route.effort}"],
         env_allow: &BASE_ENV,
         capabilities: &[
             PROCESS_CAPS[0],
             PROCESS_CAPS[1],
-            // No model list to check a name against before a paid run, so the
-            // CLI's own configured default is used, as with Devin.
-            ("model_select", Cap::Unsupported("configured_default_only")),
+            // Cline has no model list, but it refuses a malformed or unknown
+            // `provider/model` ("model not found") before any paid request.
+            ("model_select", Cap::Supported("--model")),
             ("effort_select", Cap::Supported("--thinking")),
         ],
         full: Some(&["--auto-approve", "true"]),
@@ -1371,6 +1381,7 @@ fn draft(recipe: &Recipe, id: String, executable: PathBuf, help: &str) -> Harnes
                     Catalog::DashSeparated => ModelCatalogFormat::DashSeparated,
                     Catalog::FirstColumn => ModelCatalogFormat::FirstColumn,
                     Catalog::Lines => ModelCatalogFormat::Lines,
+                    Catalog::CliValidated => ModelCatalogFormat::CliValidated,
                 },
             }),
         },
@@ -1489,6 +1500,8 @@ fn parse_model_catalog(
                 }
             }
         }
+        // Never read: nothing is listed, and preflight passes the name through.
+        ModelCatalogFormat::CliValidated => {}
         ModelCatalogFormat::Lines => {
             let text =
                 std::str::from_utf8(bytes).map_err(|_| RegistryError::InvalidModelCatalog)?;
@@ -1879,6 +1892,40 @@ mod tests {
         );
     }
 
+    /// A CLI that refuses an unknown model itself gets the name passed through,
+    /// but an empty or `auto` name is still refused before anything runs.
+    #[tokio::test]
+    async fn a_cli_validated_catalog_passes_exact_names_through() {
+        let root = tempfile::tempdir().unwrap();
+        let registry = Registry::open(root.path().join("registry")).unwrap();
+        let help = "-p, --print --output-format <format> --model <model> --permission-mode <mode>";
+        let manifest = generate_manifest("claude", PathBuf::from("/bin/echo"), help).unwrap();
+        manifest.validate().unwrap();
+        registry
+            .preflight_model(&manifest, Some("haiku"))
+            .await
+            .unwrap();
+        registry
+            .preflight_model(&manifest, Some("claude-opus-5-5"))
+            .await
+            .unwrap();
+        assert!(matches!(
+            registry.preflight_model(&manifest, Some("auto")).await,
+            Err(RegistryError::ModelNotExact(_))
+        ));
+        let cline = generate_manifest(
+            "cline",
+            PathBuf::from("/bin/echo"),
+            "-p, --plan --auto-approve <boolean> -m, --model <model-id> --thinking <level>",
+        )
+        .unwrap();
+        assert_eq!(cline.launch.model_argv, ["--model", "${route.model}"]);
+        registry
+            .preflight_model(&cline, Some("anthropic/claude-haiku-4-5"))
+            .await
+            .unwrap();
+    }
+
     #[tokio::test]
     async fn missing_catalog_blocks_requested_model_without_a_probe() {
         let root = tempfile::tempdir().unwrap();
@@ -2165,8 +2212,12 @@ mod tests {
         assert_eq!(claude.launch.argv.last().unwrap(), "${input.prompt}");
         assert_eq!(claude.launch.effort_argv, ["--effort", "${route.effort}"]);
         assert!(claude.launch.env_allow.contains(&"USER".to_owned()));
-        // No model list to verify against, so the CLI's configured default runs.
-        assert!(claude.launch.model_argv.is_empty());
+        // No model list, but the CLI validates names itself, so they pass through.
+        assert_eq!(claude.launch.model_argv, ["--model", "${route.model}"]);
+        assert_eq!(
+            claude.probe.model_catalog.as_ref().unwrap().format,
+            ModelCatalogFormat::CliValidated
+        );
         for (level, mode) in [
             (None, "bypassPermissions"),
             (Some(PermissionLevel::Edits), "acceptEdits"),
