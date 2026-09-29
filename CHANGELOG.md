@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+A notification dispatcher now stops when its control home is removed. It polls
+for up to a day, and an open database connection keeps reading a deleted file,
+so every test run that deleted its home left dispatchers running; a single
+session of this project's own test runs had left fourteen. Production homes are
+not deleted, so installed use is unaffected.
+
 ## 2.4.0 — 2026-09-29
 
 Every managed worker can now ask its owner a question. The identity a worker
