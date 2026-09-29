@@ -60,16 +60,14 @@
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
+mod git_diff;
+
 use std::{
     fmt::Write as _,
     future::Future,
-    io::{Cursor, Read as _},
-    os::unix::process::CommandExt as _,
+    io::Cursor,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
-    sync::mpsc,
-    thread,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use brgr_protocol::{
@@ -899,13 +897,14 @@ fn seal_requested_evidence(
     let mut artifacts = Vec::new();
     let mut total = 0_u64;
     if spec.evidence.capture_diff {
-        let patch = bounded_git_diff(
+        let patch = git_diff::bounded_git_diff(
             Path::new(&spec.workspace),
             spec.evidence
                 .base_tree
                 .as_deref()
                 .or(spec.evidence.base_commit.as_deref())
                 .unwrap_or("HEAD"),
+            &spec.evidence.files,
             limit,
             remaining,
         )?;
@@ -991,100 +990,6 @@ fn evidence_media_type(path: &Path) -> &'static str {
         Some("log" | "txt") => "text/plain",
         _ => "application/octet-stream",
     }
-}
-
-fn bounded_git_diff(
-    workspace: &Path,
-    base_tree: &str,
-    max_bytes: u64,
-    deadline: Duration,
-) -> Result<Vec<u8>, String> {
-    bounded_git_diff_with_executable(Path::new("git"), workspace, base_tree, max_bytes, deadline)
-}
-
-fn bounded_git_diff_with_executable(
-    executable: &Path,
-    workspace: &Path,
-    base_tree: &str,
-    max_bytes: u64,
-    deadline: Duration,
-) -> Result<Vec<u8>, String> {
-    let mut child = Command::new(executable)
-        .arg("-C")
-        .arg(workspace)
-        .args([
-            "-c",
-            "core.fsmonitor=false",
-            "-c",
-            "diff.noprefix=false",
-            "-c",
-            "diff.relative=false",
-            "diff",
-            "--no-ext-diff",
-            "--no-textconv",
-            "--no-relative",
-            "--binary",
-            "--src-prefix=a/",
-            "--dst-prefix=b/",
-            base_tree,
-        ])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .process_group(0)
-        .spawn()
-        .map_err(|error| error.to_string())?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or("Git diff stream is unavailable")?;
-    let (sender, receiver) = mpsc::sync_channel(1);
-    let reader = thread::spawn(move || {
-        let mut bytes = Vec::new();
-        let read = stdout.take(max_bytes + 1).read_to_end(&mut bytes);
-        let _ = sender.send(read.map(|_| bytes));
-    });
-    let started = Instant::now();
-    let bytes = match receiver.recv_timeout(deadline) {
-        Ok(Ok(bytes)) => bytes,
-        Ok(Err(error)) => {
-            stop_git_diff(&mut child);
-            let _ = reader.join();
-            return Err(error.to_string());
-        }
-        Err(_) => {
-            stop_git_diff(&mut child);
-            let _ = reader.join();
-            return Err("Git diff exceeded the remaining attempt deadline".to_owned());
-        }
-    };
-    if bytes.len() as u64 > max_bytes {
-        stop_git_diff(&mut child);
-        let _ = reader.join();
-        return Err("requested Git diff exceeds 8 MiB".to_owned());
-    }
-    loop {
-        if let Some(status) = child.try_wait().map_err(|error| error.to_string())? {
-            let _ = reader.join();
-            if !status.success() {
-                return Err("requested Git diff could not be read".to_owned());
-            }
-            return Ok(bytes);
-        }
-        if started.elapsed() >= deadline {
-            stop_git_diff(&mut child);
-            let _ = reader.join();
-            return Err("Git diff exceeded the remaining attempt deadline".to_owned());
-        }
-        thread::sleep(Duration::from_millis(10));
-    }
-}
-
-fn stop_git_diff(child: &mut std::process::Child) {
-    let _ = Command::new("/bin/kill")
-        .args(["-KILL", &format!("-{}", child.id())])
-        .status();
-    let _ = child.kill();
-    let _ = child.wait();
 }
 
 fn transition(
@@ -1195,27 +1100,6 @@ mod tests {
         ResultSource, ResultSpec,
     };
     use std::{collections::BTreeMap, path::PathBuf};
-
-    #[test]
-    fn bounded_diff_stops_a_stalled_collector() {
-        use std::os::unix::fs::PermissionsExt as _;
-
-        let root = tempfile::tempdir().unwrap();
-        let slow = root.path().join("slow-git");
-        std::fs::write(&slow, "#!/bin/sh\n/bin/sleep 5\nprintf 'late patch'\n").unwrap();
-        std::fs::set_permissions(&slow, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let started = Instant::now();
-        let error = bounded_git_diff_with_executable(
-            &slow,
-            root.path(),
-            "HEAD",
-            1_024,
-            Duration::from_millis(150),
-        )
-        .unwrap_err();
-        assert!(error.contains("deadline"));
-        assert!(started.elapsed() < Duration::from_secs(3));
-    }
 
     fn task_spec(task_id: TaskId, revision: u32) -> TaskSpec {
         TaskSpec {

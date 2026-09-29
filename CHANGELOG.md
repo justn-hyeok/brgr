@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+A sealed diff (`--capture-diff`) now includes files the worker created without
+staging them. It used to compare only paths the worktree's index already
+tracked, so a new file fell out of the patch without any error, and `brgr apply`
+integrated an incomplete change. brgr now marks untracked, non-ignored files
+intent-to-add in a throwaway copy of the worker's index before diffing; the
+worker's own index is not written. Files requested with `--evidence-file` stay
+out of the patch, since they are evidence for the owner rather than changes to
+apply.
+
 Inside Herdr, a worker can now run as the harness's own interactive session in
 a pane beside the caller, so the work is visible while it happens. A harness
 opts in with a new manifest field, `launch.interactive` (`herdr_kind` and extra

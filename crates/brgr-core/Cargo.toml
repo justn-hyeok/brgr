@@ -11,6 +11,7 @@ brgr-runner = { path = "../brgr-runner" }
 brgr-store = { path = "../brgr-store" }
 serde_json.workspace = true
 sha2.workspace = true
+tempfile.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 uuid.workspace = true

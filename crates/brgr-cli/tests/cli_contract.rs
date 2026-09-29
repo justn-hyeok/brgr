@@ -4357,7 +4357,7 @@ fn sealed_evidence_is_reviewed_before_separate_conflict_checked_integration() {
     configure_misleading_external_diff(&repository, &temp.path().join("external-diff"));
     fs::write(
         &executable,
-        "#!/bin/sh\ncase \"$1\" in\n --version) echo 'gjc v-evidence-fixture'; exit 0;;\n --help) printf '%s\\n' '-p, --print' '--mode=<value>' '--no-session' '--no-mcp' '--model' '--thinking'; exit 0;;\nesac\nfor item in \"$@\"; do case \"$item\" in @*) prompt=${item#@};; esac; done\nif /usr/bin/grep -q EVIDENCE_TASK \"$prompt\"; then\n printf 'changed\\n' > README\n printf 'report\\n' > report.md\n printf 'PNG_BYTES' > screen.png\n printf 'worker log\\n' >&2\nfi\nprintf '%s\\n' '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"EVIDENCE_OK\"}]}}'\nprintf '%s\\n' '{\"type\":\"agent_end\",\"stopReason\":\"completed\"}'\n",
+        "#!/bin/sh\ncase \"$1\" in\n --version) echo 'gjc v-evidence-fixture'; exit 0;;\n --help) printf '%s\\n' '-p, --print' '--mode=<value>' '--no-session' '--no-mcp' '--model' '--thinking'; exit 0;;\nesac\nfor item in \"$@\"; do case \"$item\" in @*) prompt=${item#@};; esac; done\nif /usr/bin/grep -q EVIDENCE_TASK \"$prompt\"; then\n printf 'changed\\n' > README\n printf 'added\\n' > added.txt\n printf 'report\\n' > report.md\n printf 'PNG_BYTES' > screen.png\n printf 'worker log\\n' >&2\nfi\nprintf '%s\\n' '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"EVIDENCE_OK\"}]}}'\nprintf '%s\\n' '{\"type\":\"agent_end\",\"stopReason\":\"completed\"}'\n",
     )
     .unwrap();
     fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
@@ -4439,6 +4439,12 @@ fn sealed_evidence_is_reviewed_before_separate_conflict_checked_integration() {
         fs::read_to_string(repository.join("README")).unwrap(),
         "changed\n"
     );
+    assert_eq!(
+        fs::read_to_string(repository.join("added.txt")).unwrap(),
+        "added\n",
+        "a file the worker created without staging must reach the owner"
+    );
+    assert!(!repository.join("report.md").exists());
 }
 
 #[test]
@@ -4638,7 +4644,7 @@ fn subdirectory_snapshot_uses_repository_relative_paths() {
     let detail = json_output(&run(&home, &["result", task], &owner));
     let patch = detail["artifacts"][1]["text"].as_str().unwrap();
     assert!(patch.contains("README"), "sealed patch: {patch}");
-    assert!(!patch.contains("sub/a"));
+    assert!(!patch.contains("sub/a"), "sealed patch: {patch}");
     json_output(&run(&home, &["accept", task], &owner));
     let applied = json_output(&run(
         &home,
