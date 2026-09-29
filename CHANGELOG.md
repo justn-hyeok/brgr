@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+Pane mode now waits for a newly split pane's shell before starting the agent.
+Herdr refuses an agent until the pane shows its prompt, and a slow shell
+startup failed the run within a second. A pane-mode run that fails now closes
+the pane it opened, and a lost Herdr-backed run reports the adapter's own error
+(for example "Herdr could not start the claude agent: …") instead of a generic
+message that named OMP for every harness.
+
 The Codex skill that `brgr integrate` installs now covers what brgr gained since
 it was written: the registered harnesses, `--permission` levels and the
 permission cap, model selection, pane mode and how to handle a blocked pane

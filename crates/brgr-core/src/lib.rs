@@ -743,6 +743,33 @@ fn is_retryable_spawn_failure(
     )
 }
 
+/// The last non-empty line a Herdr-backed adapter wrote to stderr, bounded. The
+/// adapter is brgr's own `__pane-run` or `__omp-run`, whose last line is its
+/// error, which says why the run failed far better than the outcome alone.
+fn delegated_lost_reason(output: Option<&brgr_runner::ExecutionOutput>) -> String {
+    let reason = "the Herdr-backed worker did not provide a valid final result";
+    match output.and_then(|output| last_stderr_line(&output.stderr)) {
+        Some(line) => format!("{reason}: {line}"),
+        None => reason.to_owned(),
+    }
+}
+
+fn last_stderr_line(stderr: &[u8]) -> Option<String> {
+    let text = String::from_utf8_lossy(stderr);
+    let line = text
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find(|line| !line.is_empty())?;
+    let line = line.strip_prefix("Error: ").unwrap_or(line);
+    Some(
+        line.chars()
+            .filter(|character| !character.is_control())
+            .take(300)
+            .collect(),
+    )
+}
+
 fn finish_execution(
     store: &Store,
     spec: &TaskSpec,
@@ -755,16 +782,17 @@ fn finish_execution(
     if manifest.launch.mode == ExecutionMode::DelegatedExternal
         && !matches!(&execution, Ok(output) if !output.cancelled && output.succeeded(manifest) && !output.result.is_empty())
     {
+        let reason = delegated_lost_reason(execution.as_ref().ok());
         let mut result = terminal_with_requested_logs(
             store,
             spec,
             attempt_id,
             TerminalOutcome::Lost,
-            "Herdr-backed OMP wrapper did not provide a valid final result".to_owned(),
+            reason,
             execution.as_ref().ok(),
         );
         result.unresolved_effects.push(
-            "The separately launched OMP worker may still be running or may have caused external effects"
+            "The separately launched worker may still be running or may have caused external effects"
                 .to_owned(),
         );
         return Ok(result);
@@ -1100,6 +1128,33 @@ mod tests {
         ResultSource, ResultSpec,
     };
     use std::{collections::BTreeMap, path::PathBuf};
+
+    #[test]
+    fn a_lost_delegated_run_names_the_adapter_error() {
+        let output = brgr_runner::ExecutionOutput {
+            exit_code: Some(1),
+            stdout: Vec::new(),
+            stderr: b"brgr pane mode \xc2\xb7 claude agent in pane w1:p2\nError: Herdr could not start the claude agent\n\n".to_vec(),
+            result: Vec::new(),
+            observed_model: None,
+            timed_out: false,
+            cancelled: false,
+            output_truncated: false,
+            elapsed: Duration::from_secs(1),
+        };
+        assert_eq!(
+            delegated_lost_reason(Some(&output)),
+            "the Herdr-backed worker did not provide a valid final result: Herdr could not start the claude agent"
+        );
+        assert_eq!(
+            delegated_lost_reason(None),
+            "the Herdr-backed worker did not provide a valid final result"
+        );
+        let noisy = format!("{}\u{1b}[31m", "x".repeat(400));
+        let line = last_stderr_line(noisy.as_bytes()).unwrap();
+        assert_eq!(line.chars().count(), 300);
+        assert!(!line.contains('\u{1b}'));
+    }
 
     fn task_spec(task_id: TaskId, revision: u32) -> TaskSpec {
         TaskSpec {

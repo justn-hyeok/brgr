@@ -37,6 +37,10 @@ const POLL: Duration = Duration::from_secs(1);
 /// How long an agent may sit idle after working without having written its
 /// report before it is reminded once.
 const REPORT_GRACE: Duration = Duration::from_secs(15);
+/// How long a freshly split pane may take to show its shell prompt. Until it
+/// does, Herdr refuses to start an agent there (`agent_pane_busy`).
+const SHELL_READY: Duration = Duration::from_secs(20);
+const SHELL_POLL: Duration = Duration::from_millis(250);
 
 /// Whether a task should run in pane mode: inside Herdr, with a harness that
 /// declares an interactive launch, and not read-only — an agent that may not
@@ -176,7 +180,9 @@ pub(crate) fn run_pane_adapter(paths: &Paths, run: &PaneRunArgs) -> Result<()> {
     // `brgr prune` keep this worktree for holding an ignored path.
     let _ = fs::remove_file(&report);
     let _ = fs::remove_dir(&report_dir);
-    if finished.is_ok() && !run.keep_pane {
+    // A failed run closes its pane too: the task is over, and an agent left
+    // behind there would keep running unobserved.
+    if !run.keep_pane {
         let _ = herdr.call(&["pane", "close", &pane]);
     }
     finished
@@ -205,15 +211,25 @@ fn drive(
     .map(str::to_owned)
     .to_vec();
     start.extend(run.agent_args.iter().cloned());
-    match herdr.call_owned(&start) {
-        Ok(_) => {}
-        // Startup stopped at an approval — a folder trust prompt, a new MCP
-        // server. The owner answers it in the pane; the run waits.
-        Err(HerdrFailure::Code(code, _)) if code == "agent_not_ready" => {
-            announce_blocked(&run.kind, pane, "while starting");
-            wait_ready(herdr, name)?;
+    let opened = Instant::now();
+    loop {
+        match herdr.call_owned(&start) {
+            Ok(_) => break,
+            // The new pane's shell has not drawn its prompt yet.
+            Err(HerdrFailure::Code(code, _))
+                if code == "agent_pane_busy" && opened.elapsed() < SHELL_READY =>
+            {
+                thread::sleep(SHELL_POLL);
+            }
+            // Startup stopped at an approval — a folder trust prompt, a new MCP
+            // server. The owner answers it in the pane; the run waits.
+            Err(HerdrFailure::Code(code, _)) if code == "agent_not_ready" => {
+                announce_blocked(&run.kind, pane, "while starting");
+                wait_ready(herdr, name)?;
+                break;
+            }
+            Err(failure) => bail!("Herdr could not start the {} agent: {failure}", run.kind),
         }
-        Err(failure) => bail!("Herdr could not start the {} agent: {failure}", run.kind),
     }
 
     let prompt = fs::read_to_string(&run.prompt_file)?;
