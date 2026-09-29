@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.6.1 — 2026-09-30
 
 A task placed in a Herdr worker pane now has a minute, not five seconds, to be
 claimed. Herdr has to open the pane and start `brgr plugin worker` in it before
