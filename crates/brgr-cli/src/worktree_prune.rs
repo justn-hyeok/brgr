@@ -14,10 +14,18 @@
 //! module therefore checks the ignored set itself and keeps the worktree unless
 //! the caller opts in.
 //!
-//! Every candidate must also be a real directory (not a symlink), a worktree
-//! git itself has registered for its repository, a name [`crate::workspace`]
-//! could have produced, outside the current working directory, and the checkout
-//! of a task revision that carries a recorded owner decision.
+//! Every candidate must also be a real directory (not a symlink), a worktree git
+//! itself has registered for its repository and has not locked, a name
+//! [`crate::workspace`] could have produced, outside the current working
+//! directory, and the checkout of a task revision that carries a recorded owner
+//! decision.
+//!
+//! A sweep also reclaims the `brgr/task-*` branches left behind by worktrees that
+//! no longer exist — removing one by hand was the only reclamation available
+//! before this command, and it leaves a branch and a stale registration behind
+//! forever. One unreadable directory is reported as a single kept row rather than
+//! ending the sweep, and the repository listing is read once per repository
+//! rather than once per candidate.
 //!
 //! No sealed result, decision, artifact, or task row is ever removed. Those cost
 //! roughly 9 KiB per task; a worktree costs the size of the checkout.
@@ -32,9 +40,22 @@ use std::{
     process::Command,
 };
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use brgr_protocol::TaskSpec;
 use brgr_store::Store;
+
+/// Everything one sweep found: the worktrees it walked, and the branches left
+/// behind by worktrees that no longer exist.
+pub(crate) struct Prune {
+    pub(crate) entries: Vec<Entry>,
+    pub(crate) orphans: Vec<Orphan>,
+}
+
+/// A `brgr/task-*` branch whose worktree is gone.
+pub(crate) struct Orphan {
+    pub(crate) branch: String,
+    pub(crate) outcome: Outcome,
+}
 
 /// One brgr-owned worktree directory and what pruning did or would do with it.
 pub(crate) struct Entry {
@@ -85,73 +106,170 @@ pub(crate) fn prune(
     store: &Store,
     apply: bool,
     include_ignored: bool,
-) -> Result<Vec<Entry>> {
+) -> Prune {
     let current_dir = std::env::current_dir()
         .ok()
         .and_then(|path| canonical(&path));
     let mut entries = Vec::new();
-    let mut emptied: Vec<PathBuf> = Vec::new();
+    let mut orphans = Vec::new();
 
-    for worktree in worktree_directories(worktrees_root)? {
-        let slug = file_name(&worktree);
-        let assessment = assess(
-            &worktree,
-            &slug,
-            store,
-            current_dir.as_deref(),
-            include_ignored,
-        );
-        let outcome = match assessment.blocked {
-            Some(reason) => Outcome::Kept(reason),
-            None if apply => match remove(&worktree, &slug) {
-                Ok(None) => {
-                    if let Some(parent) = worktree.parent() {
-                        emptied.push(parent.to_path_buf());
-                    }
-                    Outcome::Removed
-                }
-                Ok(Some(reason)) => {
-                    if let Some(parent) = worktree.parent() {
-                        emptied.push(parent.to_path_buf());
-                    }
-                    Outcome::RemovedKeepingBranch(reason)
-                }
-                Err(reason) => Outcome::Kept(reason),
-            },
-            None => Outcome::Removable,
-        };
-        entries.push(Entry {
-            worktree,
-            slug,
-            owner: assessment.owner,
-            ignored: assessment.ignored,
-            outcome,
-        });
-    }
+    let (repositories, unreadable) = repository_directories(worktrees_root);
+    entries.extend(unreadable.into_iter().map(unreadable_entry));
 
-    // Only directories this prune actually emptied are considered, and never a
-    // dot-directory: `<worktrees>/.locks` holds the cross-process admission lock
-    // and is empty at rest, so treating every empty child as a stale repository
-    // directory would delete it and break a concurrent `brgr run`.
-    for parent in emptied {
-        if file_name(&parent).starts_with('.') {
-            continue;
+    for repository in repositories {
+        let (candidates, unreadable) = child_directories(&repository);
+        entries.extend(unreadable.into_iter().map(unreadable_entry));
+        // One listing for the whole repository rather than one per candidate.
+        let inventory = Inventory::load(&candidates);
+
+        let mut removed_any = false;
+        for worktree in candidates {
+            let slug = file_name(&worktree);
+            let assessment = assess(
+                &worktree,
+                &slug,
+                store,
+                inventory.as_ref(),
+                current_dir.as_deref(),
+                include_ignored,
+            );
+            let outcome = match assessment.blocked {
+                Some(reason) => Outcome::Kept(reason),
+                None if apply => match remove(&worktree, &slug, inventory.as_ref()) {
+                    Ok(None) => {
+                        removed_any = true;
+                        Outcome::Removed
+                    }
+                    Ok(Some(reason)) => {
+                        removed_any = true;
+                        Outcome::RemovedKeepingBranch(reason)
+                    }
+                    Err(reason) => Outcome::Kept(reason),
+                },
+                None => Outcome::Removable,
+            };
+            entries.push(Entry {
+                worktree,
+                slug,
+                owner: assessment.owner,
+                ignored: assessment.ignored,
+                outcome,
+            });
         }
-        // The per-worktree check cannot cover this: removing every child of the
-        // directory the process is sitting in would then unlink that directory.
-        if current_dir
-            .as_deref()
-            .is_some_and(|cwd| is_self_or_ancestor(&parent, cwd))
-        {
-            continue;
+
+        // A worktree removed by hand — the only reclamation available before
+        // `brgr prune` existed — leaves its branch and its registration behind
+        // forever, because this sweep only ever sees directories that still exist.
+        if let Some(inventory) = inventory.as_ref() {
+            orphans.extend(reconcile_orphans(inventory, worktrees_root, apply));
         }
-        if fs::read_dir(&parent).is_ok_and(|mut entries| entries.next().is_none()) {
-            let _ = fs::remove_dir(&parent);
+
+        if apply && removed_any {
+            remove_if_emptied(&repository, current_dir.as_deref());
         }
     }
 
     entries.sort_by(|left, right| left.worktree.cmp(&right.worktree));
-    Ok(entries)
+    orphans.sort_by(|left, right| left.branch.cmp(&right.branch));
+    Prune { entries, orphans }
+}
+
+/// Drops a repository directory this run emptied.
+///
+/// Never a dot-directory: `<worktrees>/.locks` holds the cross-process admission
+/// lock and is empty at rest. Never the directory the process is sitting in or an
+/// ancestor of it either, or removing the last child unlinks the caller's own
+/// working directory.
+fn remove_if_emptied(repository: &Path, current_dir: Option<&Path>) {
+    if file_name(repository).starts_with('.') {
+        return;
+    }
+    if current_dir.is_some_and(|cwd| is_self_or_ancestor(repository, cwd)) {
+        return;
+    }
+    if fs::read_dir(repository).is_ok_and(|mut entries| entries.next().is_none()) {
+        let _ = fs::remove_dir(repository);
+    }
+}
+
+/// Reclaims `brgr/task-*` branches whose worktree no longer exists.
+///
+/// git holds the safety line as everywhere else in this module: `worktree prune`
+/// only drops registrations whose directory is gone, and `branch -d` refuses a
+/// branch whose commits are not merged.
+fn reconcile_orphans(inventory: &Inventory, worktrees_root: &Path, apply: bool) -> Vec<Orphan> {
+    let Some(root) = canonical(worktrees_root) else {
+        return Vec::new();
+    };
+    // Stale registrations first, so the branch listing below is not kept alive by
+    // a worktree directory that is already gone.
+    if apply {
+        let _ = git(&inventory.primary, &["worktree", "prune"]);
+    }
+    let Ok(listing) = git(
+        &inventory.primary,
+        &[
+            "branch",
+            "--list",
+            "brgr/task-*",
+            "--format=%(refname:short)",
+        ],
+    ) else {
+        return Vec::new();
+    };
+    // Only re-read when the prune above could have changed the listing; report
+    // mode reuses the inventory it already has.
+    let live = if apply {
+        match git(&inventory.primary, &["worktree", "list", "--porcelain"]) {
+            Ok(listing) => Inventory::parse(inventory.primary.clone(), &listing),
+            Err(_) => return Vec::new(),
+        }
+    } else {
+        Inventory {
+            primary: inventory.primary.clone(),
+            registered: inventory.registered.clone(),
+            locked: inventory.locked.clone(),
+        }
+    };
+
+    let mut orphans = Vec::new();
+    for branch in listing
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
+        let Some(slug) = branch.strip_prefix("brgr/task-") else {
+            continue;
+        };
+        if parse_slug(slug).is_none() {
+            continue;
+        }
+        // Still checked out somewhere under our root? Then it is not an orphan and
+        // the per-worktree pass above owns it. The directory has to actually
+        // exist: in report mode `git worktree prune` has not run, so a worktree
+        // removed by hand is still listed while its checkout is gone, which is
+        // precisely the case this reclaims.
+        if live
+            .registered
+            .iter()
+            .any(|path| path.starts_with(&root) && file_name(path) == slug && path.is_dir())
+        {
+            continue;
+        }
+        let outcome = if apply {
+            match git(&inventory.primary, &["branch", "-d", branch]) {
+                Ok(_) => Outcome::Removed,
+                Err(reason) => Outcome::Kept(format!("git refused to delete it: {reason}")),
+            }
+        } else {
+            Outcome::Removable
+        };
+        orphans.push(Orphan {
+            branch: branch.to_owned(),
+            outcome,
+        });
+    }
+    orphans
 }
 
 /// What the checks found for one candidate. `blocked` is `Some` when the
@@ -167,25 +285,25 @@ fn assess(
     worktree: &Path,
     slug: &str,
     store: &Store,
+    inventory: Option<&Inventory>,
     current_dir: Option<&Path>,
     include_ignored: bool,
 ) -> Assessment {
-    let mut owner = None;
-    let mut ignored = Vec::new();
-    let blocked = objection(
+    let mut found = Assessment {
+        blocked: None,
+        owner: None,
+        ignored: Vec::new(),
+    };
+    found.blocked = objection(
         worktree,
         slug,
         store,
+        inventory,
         current_dir,
         include_ignored,
-        &mut owner,
-        &mut ignored,
+        &mut found,
     );
-    Assessment {
-        blocked,
-        owner,
-        ignored,
-    }
+    found
 }
 
 /// Returns the first reason this worktree must be kept, or `None` to remove it.
@@ -193,10 +311,10 @@ fn objection(
     worktree: &Path,
     slug: &str,
     store: &Store,
+    inventory: Option<&Inventory>,
     current_dir: Option<&Path>,
     include_ignored: bool,
-    owner: &mut Option<String>,
-    ignored: &mut Vec<String>,
+    found: &mut Assessment,
 ) -> Option<String> {
     // `?` must never be used for these: in a function whose `None` means "no
     // objection", a short-circuit would mark an unrecognized directory removable.
@@ -240,7 +358,7 @@ fn objection(
         0 => return Some("no task revision matches this worktree".to_owned()),
         _ => return Some("task id prefix is ambiguous; refusing to guess".to_owned()),
     };
-    *owner = Some(task.owner_id.as_str().to_owned());
+    found.owner = Some(task.owner_id.as_str().to_owned());
 
     // A recorded decision is what makes this revision settled, and that is
     // stronger than it looks. `record_decision_in_transaction` rejects anything
@@ -256,60 +374,96 @@ fn objection(
 
     // Ask git the same questions `--apply` would, so `removable` means the apply
     // run will remove it rather than discover a veto later.
-    let primary = match primary_checkout(worktree) {
-        Ok(primary) => primary,
-        Err(reason) => return Some(reason),
+    let Some(inventory) = inventory else {
+        return Some("repository worktree inventory is unreadable".to_owned());
     };
-    if let Err(reason) = registered_worktree(&primary, &resolved) {
-        return Some(reason);
+    if !inventory.is_registered(&resolved) {
+        return Some("path is not a registered worktree of its repository".to_owned());
     }
-    match git(worktree, &["status", "--porcelain"]) {
-        Ok(status) if !status.trim().is_empty() => {
-            return Some("worktree holds modified or untracked files".to_owned());
-        }
-        Ok(_) => {}
-        Err(reason) => return Some(format!("worktree status is unreadable: {reason}")),
+    if inventory.is_locked(&resolved) {
+        return Some("worktree is locked; unlock it first with `git worktree unlock`".to_owned());
     }
 
-    *ignored = ignored_paths(worktree);
-    if !ignored.is_empty() && !include_ignored {
+    // One status call answers both questions: tracked or untracked changes, and
+    // the ignored set that git's own clean check does not look at.
+    let status = match git(worktree, &["status", "--porcelain", "--ignored"]) {
+        Ok(status) => status,
+        Err(reason) => return Some(format!("worktree status is unreadable: {reason}")),
+    };
+    if status
+        .lines()
+        .any(|line| !line.is_empty() && !line.starts_with("!! "))
+    {
+        return Some("worktree holds modified or untracked files".to_owned());
+    }
+    found.ignored = status
+        .lines()
+        .filter_map(|line| line.strip_prefix("!! "))
+        .map(str::to_owned)
+        .collect();
+    if !found.ignored.is_empty() && !include_ignored {
         return Some(format!(
             "worktree holds {} ignored path(s) git's clean check cannot see, such as {}; \
              pass --include-ignored to remove them",
-            ignored.len(),
-            ignored.first().map_or("", String::as_str)
+            found.ignored.len(),
+            found.ignored.first().map_or("", String::as_str)
         ));
     }
     None
 }
 
-/// Enumerates `<worktrees>/<repository>/<slug>` directories, skipping the
-/// dot-directories brgr keeps beside them.
-fn worktree_directories(worktrees_root: &Path) -> Result<Vec<PathBuf>> {
+/// Lists the repository directories under the worktrees root, and the ones that
+/// could not be read.
+///
+/// An unreadable entry is returned rather than propagated: every other failure in
+/// this module becomes one reported row, and enumeration was the last place where
+/// a single bad directory made the whole sweep report nothing — including the
+/// worktrees it could have reclaimed elsewhere.
+fn repository_directories(worktrees_root: &Path) -> (Vec<PathBuf>, Vec<PathBuf>) {
     if !worktrees_root.is_dir() {
-        return Ok(Vec::new());
+        return (Vec::new(), Vec::new());
     }
-    let mut found = Vec::new();
-    for repository in read_dir_sorted(worktrees_root)? {
-        if file_name(&repository).starts_with('.') || !repository.is_dir() {
-            continue;
-        }
-        for worktree in read_dir_sorted(&repository)? {
-            if !file_name(&worktree).starts_with('.') {
-                found.push(worktree);
-            }
+    let (children, mut unreadable) = child_directories(worktrees_root);
+    let mut repositories = Vec::new();
+    for child in children {
+        if fs::read_dir(&child).is_ok() {
+            repositories.push(child);
+        } else {
+            unreadable.push(child);
         }
     }
-    Ok(found)
+    (repositories, unreadable)
 }
 
-fn read_dir_sorted(directory: &Path) -> Result<Vec<PathBuf>> {
-    let mut paths = fs::read_dir(directory)
-        .with_context(|| format!("read {}", directory.display()))?
-        .map(|entry| entry.map(|entry| entry.path()))
-        .collect::<Result<Vec<_>, _>>()?;
-    paths.sort();
-    Ok(paths)
+/// Sorted children of `directory`, skipping dot-entries. The second half is the
+/// directory itself when it cannot be read at all.
+fn child_directories(directory: &Path) -> (Vec<PathBuf>, Vec<PathBuf>) {
+    let Ok(read) = fs::read_dir(directory) else {
+        return (Vec::new(), vec![directory.to_path_buf()]);
+    };
+    let mut found = Vec::new();
+    let mut unreadable = Vec::new();
+    for entry in read {
+        match entry {
+            Ok(entry) if !file_name(&entry.path()).starts_with('.') => found.push(entry.path()),
+            Ok(_) => {}
+            Err(_) => unreadable.push(directory.to_path_buf()),
+        }
+    }
+    found.sort();
+    unreadable.dedup();
+    (found, unreadable)
+}
+
+fn unreadable_entry(path: PathBuf) -> Entry {
+    let slug = file_name(&path);
+    Entry {
+        worktree: path,
+        slug,
+        owner: None,
+        ignored: Vec::new(),
+        outcome: Outcome::Kept("directory could not be read".to_owned()),
+    }
 }
 
 /// Splits `abcd1234` or `abcd1234-r3` into its task-id prefix and revision.
@@ -340,8 +494,15 @@ fn parse_slug(slug: &str) -> Option<(&str, u32)> {
 ///
 /// `Ok(None)` removed both. `Ok(Some(reason))` removed the checkout while git
 /// kept the branch, which preserves committed work.
-fn remove(worktree: &Path, slug: &str) -> Result<Option<String>, String> {
-    let primary = primary_checkout(worktree)?;
+fn remove(
+    worktree: &Path,
+    slug: &str,
+    inventory: Option<&Inventory>,
+) -> Result<Option<String>, String> {
+    let primary = match inventory {
+        Some(inventory) => inventory.primary.clone(),
+        None => primary_checkout(worktree)?,
+    };
     git(&primary, &["worktree", "remove", &lossy(worktree)])
         .map_err(|error| format!("git declined to remove the worktree: {error}"))?;
     let branch = format!("brgr/task-{slug}");
@@ -353,6 +514,64 @@ fn remove(worktree: &Path, slug: &str) -> Result<Option<String>, String> {
     Ok(None)
 }
 
+/// One repository's worktree registrations, read once for all of its candidates.
+///
+/// Every candidate under `<worktrees>/<repository>` belongs to the same primary
+/// checkout, so asking git per candidate re-ran an identical listing: a control
+/// home with a hundred settled worktrees paid hundreds of process spawns for one
+/// report.
+struct Inventory {
+    primary: PathBuf,
+    registered: Vec<PathBuf>,
+    locked: Vec<PathBuf>,
+}
+
+impl Inventory {
+    /// Loads the inventory from the first candidate that is a usable checkout.
+    fn load(candidates: &[PathBuf]) -> Option<Self> {
+        candidates.iter().find_map(|candidate| {
+            let listing = git(candidate, &["worktree", "list", "--porcelain"]).ok()?;
+            let primary = listing
+                .lines()
+                .find_map(|line| line.strip_prefix("worktree "))
+                .map(PathBuf::from)?;
+            Some(Self::parse(primary, &listing))
+        })
+    }
+
+    fn parse(primary: PathBuf, listing: &str) -> Self {
+        let mut registered = Vec::new();
+        let mut locked = Vec::new();
+        let mut current: Option<PathBuf> = None;
+        for line in listing.lines() {
+            if let Some(path) = line.strip_prefix("worktree ") {
+                let path = canonical(Path::new(path)).unwrap_or_else(|| PathBuf::from(path));
+                registered.push(path.clone());
+                current = Some(path);
+            } else if (line == "locked" || line.starts_with("locked "))
+                && let Some(path) = current.clone()
+            {
+                locked.push(path);
+            }
+        }
+        Self {
+            primary,
+            registered,
+            locked,
+        }
+    }
+
+    fn is_registered(&self, resolved: &Path) -> bool {
+        self.registered.iter().any(|path| path == resolved)
+    }
+
+    /// `git worktree remove` refuses a locked worktree, so report mode has to see
+    /// the lock too or it promises a removal that apply mode then declines.
+    fn is_locked(&self, resolved: &Path) -> bool {
+        self.locked.iter().any(|path| path == resolved)
+    }
+}
+
 /// Resolves the primary checkout that owns a linked worktree.
 fn primary_checkout(worktree: &Path) -> Result<PathBuf, String> {
     let listing = git(worktree, &["worktree", "list", "--porcelain"])
@@ -362,35 +581,6 @@ fn primary_checkout(worktree: &Path) -> Result<PathBuf, String> {
         .find_map(|line| line.strip_prefix("worktree "))
         .map(PathBuf::from)
         .ok_or_else(|| "git worktree inventory has no primary checkout".to_owned())
-}
-
-/// Confirms git itself registered this path as a worktree of `primary`.
-fn registered_worktree(primary: &Path, resolved: &Path) -> Result<(), String> {
-    let listing = git(primary, &["worktree", "list", "--porcelain"])
-        .map_err(|error| format!("repository worktree inventory is unreadable: {error}"))?;
-    let registered = listing
-        .lines()
-        .filter_map(|line| line.strip_prefix("worktree "))
-        .filter_map(|path| canonical(Path::new(path)))
-        .any(|path| path == resolved);
-    if registered {
-        Ok(())
-    } else {
-        Err("path is not a registered worktree of its repository".to_owned())
-    }
-}
-
-/// Lists ignored-but-present paths, which `git status --porcelain` omits.
-fn ignored_paths(worktree: &Path) -> Vec<String> {
-    let Ok(listing) = git(worktree, &["status", "--porcelain", "--ignored"]) else {
-        // Unreadable status is already refused by the caller's clean check.
-        return Vec::new();
-    };
-    listing
-        .lines()
-        .filter_map(|line| line.strip_prefix("!! "))
-        .map(str::to_owned)
-        .collect()
 }
 
 fn git(directory: &Path, args: &[&str]) -> Result<String, String> {
