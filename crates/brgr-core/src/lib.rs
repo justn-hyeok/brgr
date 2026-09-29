@@ -1289,6 +1289,7 @@ mod tests {
                 env_allow: vec![],
                 mode: ExecutionMode::DelegatedExternal,
                 permission_argv: brgr_runner::PermissionArgv::default(),
+                interactive: None,
             },
             result: ResultSpec {
                 source: ResultSource::JsonlAssistantFinal,
@@ -1396,6 +1397,7 @@ mod tests {
                 env_allow: vec![],
                 mode: ExecutionMode::DelegatedExternal,
                 permission_argv: brgr_runner::PermissionArgv::default(),
+                interactive: None,
             },
             result: ResultSpec {
                 source: ResultSource::Stdout,

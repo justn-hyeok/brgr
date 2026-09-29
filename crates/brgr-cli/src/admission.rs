@@ -255,6 +255,38 @@ pub(crate) async fn revise_task(paths: &Paths, args: ReviseArgs, json_output: bo
     .await
 }
 
+fn bind_owner_session(store: &Store, owner: &OwnerId, session: Option<&str>) -> Result<()> {
+    match (store.owner_binding(owner)?, session) {
+        (Some((bound, _)), Some(current)) if bound == current => {}
+        (None, Some(current)) => {
+            store.rebind_owner(owner, current)?;
+        }
+        (Some(_), _) => bail!(
+            "owner is bound to another session; run `brgr bind TASK --session SESSION` before starting another revision"
+        ),
+        (None, None) => {}
+    }
+    Ok(())
+}
+
+/// Pane mode puts the agent's own TUI in the split pane, so brgr's worker
+/// pane would only be a second, empty one.
+fn pane_mode_and_placement(
+    paths: &Paths,
+    activated: &HarnessManifest,
+    permission: Option<PermissionLevel>,
+    execution: &ExecutionDisposition,
+) -> Result<(bool, Option<WorkerPlacement>)> {
+    let pane_mode = !Config::load(&paths.config)?.herdr.prefer_print_mode
+        && crate::pane_adapter::applies(activated, permission);
+    let placement = if pane_mode {
+        None
+    } else {
+        plugin_worker_placement(paths, execution)?
+    };
+    Ok((pane_mode, placement))
+}
+
 pub(crate) async fn start_task(
     paths: &Paths,
     mut spec: TaskSpec,
@@ -271,7 +303,8 @@ pub(crate) async fn start_task(
     if spec.evidence.capture_diff && !workspace::is_git_workspace(&source)? {
         bail!("--capture-diff requires a Git workspace before task admission");
     }
-    let plugin_placement = plugin_worker_placement(paths, &options.execution)?;
+    let (pane_mode, plugin_placement) =
+        pane_mode_and_placement(paths, activated, spec.permission, &options.execution)?;
     let admission = workspace::acquire_admission_lock(&paths.worktrees, options.source_workspace)?;
     let store = Store::open(&paths.store)?;
     if let Some((parent_task, parent_attempt)) = options.parent {
@@ -279,16 +312,7 @@ pub(crate) async fn start_task(
         require_parent_may_delegate(paths, &store, parent_task, parent_attempt)?;
     }
     let session = current_session()?;
-    match (store.owner_binding(&spec.owner_id)?, session.as_deref()) {
-        (Some((bound, _)), Some(current)) if bound == current => {}
-        (None, Some(current)) => {
-            store.rebind_owner(&spec.owner_id, current)?;
-        }
-        (Some(_), _) => bail!(
-            "owner is bound to another session; run `brgr bind TASK --session SESSION` before starting another revision"
-        ),
-        (None, None) => {}
-    }
+    bind_owner_session(&store, &spec.owner_id, session.as_deref())?;
     let task_id = spec.task_id;
     let harness_id = spec.route.harness_id.clone();
     let workspace = prepare_task_workspace(paths, &mut spec, &activated.adapter, &options)?;
@@ -304,6 +328,7 @@ pub(crate) async fn start_task(
             || options.parent.is_some(),
         manifest: Some(activated.clone()),
         executable_digest: Some(activation.executable_digest.clone()),
+        pane_mode,
     };
     let launch_path = paths.launch(task_id, launch.spec.revision);
     write_json_new(&launch_path, &launch)?;

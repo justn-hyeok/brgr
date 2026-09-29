@@ -74,6 +74,7 @@ pub(crate) fn omp_process_manifest(
             ],
             mode: ExecutionMode::DelegatedExternal,
             permission_argv: brgr_runner::PermissionArgv::default(),
+            interactive: None,
         },
         result: ResultSpec {
             source: ResultSource::Stdout,

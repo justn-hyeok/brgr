@@ -52,6 +52,9 @@ pub struct HerdrConfig {
     pub worker_placement: WorkerPlacement,
     pub auto_worker_pane: bool,
     pub codex_executable: Option<PathBuf>,
+    /// Keep harnesses in print mode even inside Herdr, instead of running them
+    /// as their own TUI in a pane.
+    pub prefer_print_mode: bool,
 }
 
 pub fn validate_codex_executable(path: &Path) -> Result<()> {
