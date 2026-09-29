@@ -78,7 +78,7 @@ same task explicitly; a stale session cannot decide it.
 For an approved unfamiliar CLI, use `brgr harness draft EXECUTABLE` when its
 documented shape is recognized. Otherwise inspect its bounded help/version,
 write a declarative process/v1 manifest using the repository's
-docs/custom-harness-registration.md, then run `brgr harness test --manifest
+docs/guides/custom-harness-registration.md, then run `brgr harness test --manifest
 FILE`, `brgr harness activate --manifest FILE --workspace SCRATCH --prompt
 "<small authorized probe>"`, and `brgr harness status ID`. Pass `--model MODEL`
 only when the exact manifest supports it. Do not probe untrusted downloaded

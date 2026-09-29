@@ -1,0 +1,89 @@
+# Documentation
+
+Four directories, split by how each kind of document ages.
+
+| Directory | Holds | Changes |
+| --- | --- | --- |
+| [`guides/`](guides/) | how brgr works and how to work with it | edited as the code changes |
+| [`releases/`](releases/) | what shipped in each version | written once per release |
+| [`evidence/`](evidence/) | dated records of what was observed | never edited after the date in the name |
+| [`readiness/`](readiness/) | the checklist the project is held to | edited as gates open and close |
+
+The split matters because the three kinds cannot be read the same way. A guide
+that disagrees with the code is a bug; an evidence record that disagrees with
+the code is simply older than it, and rewriting one destroys the thing it was
+for. Every relative link below is resolved by
+[`crates/brgr-cli/tests/docs_links.rs`](../crates/brgr-cli/tests/docs_links.rs),
+so moving a file breaks a test rather than a reader.
+
+## Guides
+
+- [Architecture](guides/architecture.md) — the managed-run contract: task
+  identity, attempts, sealed results, and who may decide.
+- [Agent-authored process manifests](guides/custom-harness-registration.md) —
+  registering a new CLI harness, and the evidence that registration requires.
+- [v2 Herdr plugin contract](guides/v2-herdr-plugin.md) — ownership, context,
+  recovery, and the boundaries the plugin may not cross.
+- [Recursive worker bridge](guides/recursive-workers.md) — delegation between
+  workers, and the verified scope of it.
+- [Completion loop plan](guides/completion-loop-plan.md) — how a run reaches a
+  terminal state and what reconciles one that did not.
+- [Unsigned macOS distribution](guides/unsigned-distribution.md) — what a
+  release archive is and is not, and what to check before running one.
+
+## Readiness
+
+- [v1 readiness checklist](readiness/v1-readiness-checklist-2026-09-14.md) — the
+  gates, their current state, and the dated records of each review round.
+
+## Releases
+
+Newest first. [v2.3.1](releases/v2.3.1.md) ·
+[v2.3.0](releases/v2.3.0.md) · [v2.2.2](releases/v2.2.2.md) ·
+[v2.2.1](releases/v2.2.1.md) · [v2.2.0](releases/v2.2.0.md) ·
+[v2.1.0](releases/v2.1.0.md) · [v2.0.2](releases/v2.0.2.md) ·
+[v2.0.1](releases/v2.0.1.md) · [v2.0.0](releases/v2.0.0.md) ·
+[v1.0.9](releases/v1.0.9.md) · [v1.0.8](releases/v1.0.8.md) ·
+[v1.0.7](releases/v1.0.7.md) · [v1.0.6](releases/v1.0.6.md) ·
+[v1.0.5](releases/v1.0.5.md) · [v1.0.4](releases/v1.0.4.md) ·
+[v1.0.3](releases/v1.0.3.md) · [v1.0.2](releases/v1.0.2.md) ·
+[v1.0.1](releases/v1.0.1.md) · [v1.0.0](releases/v1.0.0.md)
+
+The running log is [`CHANGELOG.md`](../CHANGELOG.md); these are the per-version
+notes that accompanied each tag.
+
+## Evidence
+
+Dated records of runs that were actually performed. The date in the filename is
+when it was observed, and none of these is updated afterwards.
+
+**Live harness runs.**
+[Four real-harness Luna runs](evidence/live-four-harness-luna-evidence-2026-09-14.md) ·
+[minimum effort](evidence/live-four-harness-luna-min-2026-09-14.md) ·
+[v1.0.4](evidence/live-four-harness-luna-v1.0.4-evidence-2026-09-14.md) ·
+[v1.0.6 process-harness matrix](evidence/live-v1.0.6-luna-matrix-2026-09-14.md) ·
+[Devin CLI v2.0.2](evidence/live-devin-cli-v2.0.2-2026-09-15.md)
+
+**Route observation and OMP.**
+[WorkBuddy OMP process](evidence/live-workbuddy-omp-process-2026-09-14.md) ·
+[native route and downgrade](evidence/live-workbuddy-route-observation-2026-09-14.md) ·
+[callback migration audit](evidence/omp-callback-migration-audit-2026-09-14.md) ·
+[callback 3-1 reconciliation](evidence/omp-callback-reconciliation-2026-09-21.md)
+
+**Herdr plugin and bridge.**
+[Ordinary pane to worker](evidence/live-ordinary-herdr-pane-2026-09-23.md) ·
+[recursive bridge](evidence/live-recursive-bridge-2026-09-23.md) ·
+[bidirectional bridge](evidence/live-bidirectional-bridge-2026-09-23.md) ·
+[report replay regression](evidence/herdr-revision-replay-evidence-2026-09-14.md) ·
+[pane-close criterion](evidence/pane-close-criterion-decision-2026-09-21.md)
+
+**Gates.**
+[2-3 public binary rerun](evidence/gates-public-binary-rerun-2026-09-21.md) ·
+[2-4 clean-environment procedure](evidence/gate-24-cleanmac-procedure-2026-09-21.md) ·
+[2-4 clean-environment evidence](evidence/gate-24-cleanmac-evidence-2026-09-21.md) ·
+[2-5 review packet](evidence/gate-25-review-packet-2026-09-21.md) ·
+[§1 natural-language bundle](evidence/gates-section1-copilot-bundle-2026-09-21.md)
+
+**Durability.**
+[Detached crash window](evidence/crash-window-evidence-2026-09-14.md) ·
+[four-stage parallel verification](evidence/four-stage-parallel-evidence-2026-09-14.md)

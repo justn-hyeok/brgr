@@ -2,6 +2,22 @@
 
 ## 2.4.0 — unreleased
 
+`docs/` is sorted into four directories and carries an index. It was forty-seven
+files in one flat listing, nineteen of them release notes, with nothing saying
+what was current and what was a dated record of one afternoon in September. The
+split is by how each kind of document ages: `guides/` is edited as the code
+changes, `releases/` is written once per version, `evidence/` is never edited
+after the date in its name, and `readiness/` holds the checklist. A guide that
+disagrees with the code is a bug; an evidence record that disagrees with it is
+simply older, and editing one destroys what it was for.
+
+The move rewrote sixty-seven links, so it comes with a test that resolves every
+relative link in the repository's prose — markdown links, and the bare
+documentation paths that appear unlinked in Rust strings and workflow steps,
+where a link checker would not normally look. It found three links in the readiness checklist that
+broke because the file dropped a directory level, and it refuses to pass if the
+extraction stops finding links at all.
+
 Every crate root now carries a worked example, and `cargo test --doc` is no
 longer a step that cannot fail. CI has been running it against zero doc tests,
 so a green result meant nothing; there are now seven, and each was checked the
@@ -238,7 +254,7 @@ and the pane-cleanup status matrix. A flaky bridge timing test was fixed. No
 execution contract, adapter behavior, wire format, or store migration changed.
 
 That gate declaration did not hold: see the 2.2.0 entry and the
-[reopening record](docs/v1-readiness-checklist-2026-09-14.md#2026-09-28-게이트-재개-기록).
+[reopening record](docs/readiness/v1-readiness-checklist-2026-09-14.md#2026-09-28-게이트-재개-기록).
 
 ## 2.0.2 — 2026-09-15
 
@@ -285,7 +301,7 @@ The v1 managed-run CLI, store, result envelope, and decision contract remain
 available without Herdr. This release adds no implicit harness or model
 fallback, automatic acceptance, store migration, or worker cancellation claim.
 The optional legacy OMP-through-Herdr adapter keeps its documented cleanup
-limit. See `docs/v2-herdr-plugin.md` for the plugin contract and evidence gates.
+limit. See `docs/guides/v2-herdr-plugin.md` for the plugin contract and evidence gates.
 
 ## 1.0.9 — 2026-09-14
 
@@ -318,7 +334,7 @@ Command Code registration now enables `--effort` only when its installed help
 documents that option. A requested effort is passed as a separate argv value;
 older executables without the flag remain explicitly unsupported. Live
 minimum-effort Luna runs across OMP, GJC, Cursor CLI, and Command Code are
-recorded in `docs/live-four-harness-luna-min-2026-09-14.md`. Cursor's `none`
+recorded in `docs/evidence/live-four-harness-luna-min-2026-09-14.md`. Cursor's `none`
 level is selected through its exact model variant, not an invented effort flag.
 Native effort remains unobserved; accepting a response does not prove that a
 provider honored an effort setting.
@@ -425,6 +441,6 @@ can be corrected as immutable task revisions. A tested generic process recipe
 supports future CLIs with a documented `--prompt-file` contract.
 
 The macOS arm64 archive is unsigned and not notarized. See
-[release notes](docs/release-notes-v1.md) and the
-[distribution guide](docs/unsigned-distribution.md) for supported behavior and
+[release notes](docs/releases/v1.0.0.md) and the
+[distribution guide](docs/guides/unsigned-distribution.md) for supported behavior and
 limitations.
