@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+The Codex skill that `brgr integrate` installs now covers what brgr gained since
+it was written: the registered harnesses, `--permission` levels and the
+permission cap, model selection, pane mode and how to handle a blocked pane
+(inspect it, then ask the user), `brgr diff`, apply onto later commits, and
+`brgr prune`. A new `brgr-diff-review` skill in `skills/` walks through
+requesting, reviewing, deciding on, and integrating a worker's sealed diff.
+Run `brgr integrate codex install` to update an installed skill.
+
 `brgr diff TASK` prints a result's sealed diff, and `brgr diff TASK --stat`
 lists the files it changes with added and deleted line counts. They show the
 same bytes `brgr apply` writes, so review and integration cannot disagree;
