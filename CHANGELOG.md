@@ -2,6 +2,34 @@
 
 ## 2.4.0 — unreleased
 
+`brgr prune --apply` could delete branches in a repository brgr had never
+worked in. It learned which repository a worktree directory belonged to by
+asking whichever child directory sorted first, without checking that the child
+was one brgr created; a checkout of another repository dropped there by hand
+sorts before any lowercase slug when its name starts with a capital letter or
+punctuation, and the sweep then ran `git worktree prune` and `git branch -d
+brgr/task-*` against that repository. Reproduced on git 2.54.
+
+Repositories now come from the store. The task spec records the worktree brgr
+created, not the repository it came from, so admission now records the primary
+checkout too (`task_checkouts`, a new table; an existing store gains it on first
+open). A candidate is judged only after the store confirms brgr created that
+exact path for that revision, and against the repository recorded for it.
+
+Four related gaps in the orphan-branch pass are closed with it. Orphans were
+never looked for when every worktree of a repository had been removed by hand —
+the case the pass exists for — because the repository was discovered from a
+surviving worktree. `git worktree prune` is gone: it is repository-wide and would
+also drop the registration of a user's own worktree on an unmounted volume, so
+the task's own stale registration is now removed by path. An orphan branch now
+needs what a worktree needs — a task revision of that repository and a recorded
+decision — and reports its owner. And report mode now asks git's merge question
+before promising `removable`, so an orphan with commits is `kept` in both modes.
+
+Tasks admitted before this change are still located through a surviving worktree
+and git's stale registration. Where neither exists, the directory is reported as
+a repository that cannot be located, rather than counted as clean.
+
 `every_write_path_has_a_recorded_retry_decision` was checking far less than it
 claimed, in both of its halves. The implicit-write detector compared a whole
 untrimmed line to `self.connection`, which no indented line can equal, so it

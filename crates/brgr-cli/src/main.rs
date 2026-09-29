@@ -1091,6 +1091,11 @@ async fn start_task(
     write_json_new(&launch_path, &launch)?;
     let mut store = Store::open(&paths.store)?;
     let request_digest_text = task_request_digest(&launch.spec)?;
+    // The spec records the worktree, not the repository it came from; `brgr
+    // prune` needs the repository once that worktree is gone.
+    if let Some(primary) = workspace::primary_checkout(&workspace) {
+        store.record_task_checkout(task_id, launch.spec.revision, &primary.to_string_lossy())?;
+    }
     if let Some((parent_task, parent_attempt)) = options.parent {
         store.record_child_task(
             &launch.spec,
@@ -2709,6 +2714,9 @@ fn prune(paths: &Paths, apply: bool, include_ignored: bool, json_output: bool) -
             let mut row = json!({"branch": orphan.branch, "status": orphan.outcome.code()});
             if let Some(reason) = orphan.outcome.reason() {
                 row["reason"] = json!(reason);
+            }
+            if let Some(owner) = &orphan.owner {
+                row["owner_id"] = json!(owner);
             }
             row
         })
