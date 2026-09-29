@@ -514,6 +514,83 @@ fn an_orphan_with_unmerged_commits_is_kept_in_report_mode_too() {
     );
 }
 
+/// A task started from a feature branch carries that branch's commits, so
+/// `git branch -d` called its branch unmerged and kept it forever once the user
+/// went back to `main`. Commits that live on another branch lose nothing.
+#[test]
+fn a_task_branch_from_a_feature_branch_goes_while_that_branch_keeps_its_commits() {
+    let fixture = Fixture::new();
+    fixture.commit_on_new_branch("feature");
+    let task = fixture.run_task("on feature");
+    fixture.accept(&task);
+    fixture.git(&["checkout", "-q", "main"]);
+
+    let applied = fixture.prune(&["--apply"]);
+    assert_eq!(
+        status_of(&applied, &Fixture::slug(&task)),
+        "removed",
+        "{applied}"
+    );
+    assert!(
+        !fixture
+            .branches()
+            .contains(&format!("brgr/task-{}", Fixture::slug(&task)))
+    );
+    assert!(fixture.branches().contains(&"feature".to_owned()));
+}
+
+/// Another task branch is no refuge: the same sweep may delete it too, and two
+/// task branches holding each other's commits would both go.
+#[test]
+fn commits_held_only_by_other_task_branches_keep_every_branch() {
+    let fixture = Fixture::new();
+    fixture.commit_on_new_branch("feature");
+    let first = fixture.run_task("first");
+    let second = fixture.run_task("second");
+    fixture.accept(&first);
+    fixture.accept(&second);
+    fixture.git(&["checkout", "-q", "main"]);
+    fixture.git(&["branch", "-D", "feature"]);
+
+    let applied = fixture.prune(&["--apply"]);
+    for task in [&first, &second] {
+        let branch = format!("brgr/task-{}", Fixture::slug(task));
+        assert!(
+            fixture.branches().contains(&branch),
+            "{branch} was deleted: {applied}"
+        );
+        let reason = reason_of(&applied, "kept branch", &Fixture::slug(task));
+        assert!(reason.contains("no other branch or remote"), "{reason}");
+    }
+}
+
+/// A pushed branch deleted locally still holds its commits on the remote.
+#[test]
+fn a_remote_tracking_branch_preserves_the_commits_too() {
+    let fixture = Fixture::new();
+    let remote = fixture.temp.path().join("remote.git");
+    git(
+        fixture.temp.path(),
+        &["init", "-q", "--bare", remote.to_str().unwrap()],
+    );
+    fixture.git(&["remote", "add", "origin", remote.to_str().unwrap()]);
+    fixture.commit_on_new_branch("feature");
+    fixture.git(&["push", "-q", "origin", "feature"]);
+    let task = fixture.run_task("pushed");
+    fixture.accept(&task);
+    fixture.git(&["checkout", "-q", "main"]);
+    fixture.git(&["branch", "-D", "feature"]);
+    fs::remove_dir_all(fixture.worktree(&task)).unwrap();
+
+    let applied = fixture.prune(&["--apply"]);
+    assert_eq!(applied["orphan_branches_removed"], 1, "{applied}");
+    assert!(
+        !fixture
+            .branches()
+            .contains(&format!("brgr/task-{}", Fixture::slug(&task)))
+    );
+}
+
 #[test]
 fn an_orphan_of_an_undecided_revision_is_kept_and_names_its_owner() {
     let fixture = Fixture::new();
@@ -677,6 +754,18 @@ impl Fixture {
     fn accept(&self, task: &str) {
         let decision = self.json(&["accept", task, "--reason", "fixture result verified"]);
         assert_eq!(decision["verdict"], "accepted");
+    }
+
+    /// Checks out a new branch holding one commit `main` does not have.
+    fn commit_on_new_branch(&self, name: &str) {
+        self.git(&["checkout", "-q", "-b", name]);
+        fs::write(
+            self.repository.join(format!("{name}.txt")),
+            b"feature work\n",
+        )
+        .unwrap();
+        self.git(&["add", "-A"]);
+        self.git(&["commit", "-q", "-m", "feature work"]);
     }
 
     fn commit_in_worktree(&self, task: &str) {

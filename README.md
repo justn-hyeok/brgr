@@ -264,9 +264,14 @@ accepted or rejected its candidate, or acknowledged its failed, cancelled, or
 lost result with `brgr result TASK --ack`. A failed revision also needs no
 attempt still running, no retry granted, and no worker process left alive; a
 lost result warns that its worker may outlive its supervisor, and while that
-process runs the worktree is kept. Removal uses `git worktree remove` and `git branch -d`, neither
-forced, so uncommitted work and unmerged commits are kept and reported with
-git's own reason.
+process runs the worktree is kept. The checkout is removed with `git worktree
+remove`, never forced, so uncommitted work is kept and reported with git's own
+reason. Its `brgr/task-*` branch goes only when every commit on it also lives
+elsewhere: in `HEAD`, or on another branch or remote-tracking branch. A task
+started from a feature branch carries that branch's commits, and those are
+safe while the feature branch exists. Other task branches do not count, since
+the same sweep may delete them. A branch holding a commit found nowhere else is
+kept, with that reason.
 
 git is not the only check. Its clean test does not look at ignored files, so
 `git worktree remove` would silently delete an ignored `.env`, a downloaded
@@ -278,7 +283,7 @@ produced, and the directory prune is running in are all refused.
 
 A sweep also reclaims the `brgr/task-*` branches left behind by worktrees that no
 longer exist, which is what removing one by hand leaves in a repository brgr does
-not own. `git branch -d` still refuses any branch holding unmerged commits. One
+not own, under the same rule: a commit on no other branch keeps its branch. One
 unreadable directory is reported rather than ending the sweep.
 
 Sealed results, decisions, artifacts, and task rows are never removed — they

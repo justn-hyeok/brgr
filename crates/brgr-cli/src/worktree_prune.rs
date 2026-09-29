@@ -5,8 +5,11 @@
 //!
 //! git is used for the two removals, but it is deliberately **not** trusted as
 //! the only safety authority. `git worktree remove` refuses a worktree with
-//! modified or untracked files, and `git branch -d` refuses a branch with
-//! unmerged commits, and neither is ever forced — but git's clean check runs
+//! modified or untracked files, and is never forced. A task branch goes only
+//! when every commit on it survives elsewhere: in `HEAD`, or on another branch
+//! or remote-tracking branch — a task started from a feature branch carries that
+//! branch's commits, which `git branch -d` would count as unmerged forever. A
+//! branch holding a commit found nowhere else is kept. git's clean check runs
 //! `git status --porcelain` without `--ignored`, so a `.env`, a downloaded
 //! credential, or a build cache is invisible to it and would be deleted
 //! silently. A task worktree is exactly where an agent has been working, which
@@ -262,22 +265,6 @@ fn reconcile_orphans(inventory: &Inventory, store: &Store, apply: bool) -> Vec<O
     ) else {
         return Vec::new();
     };
-    // `branch -d` accepts a branch merged into its upstream or, with none, into
-    // HEAD. Task branches are created without an upstream.
-    let merged = git(
-        &inventory.primary,
-        &[
-            "branch",
-            "--list",
-            "brgr/task-*",
-            "--merged",
-            "HEAD",
-            "--format=%(refname:short)",
-        ],
-    )
-    .unwrap_or_default();
-    let merged: Vec<&str> = merged.lines().map(str::trim).collect();
-
     let mut orphans = Vec::new();
     for branch in listing
         .lines()
@@ -289,14 +276,7 @@ fn reconcile_orphans(inventory: &Inventory, store: &Store, apply: bool) -> Vec<O
             continue;
         };
         let mut owner = None;
-        let judged = orphan_objection(
-            inventory,
-            store,
-            (prefix, revision),
-            branch,
-            &merged,
-            &mut owner,
-        );
+        let judged = orphan_objection(inventory, store, (prefix, revision), branch, &mut owner);
         let outcome = match judged {
             // Still checked out: the per-worktree pass owns it.
             Err(Live) => continue,
@@ -406,7 +386,6 @@ fn orphan_objection(
     store: &Store,
     (prefix, revision): (&str, u32),
     branch: &str,
-    merged: &[&str],
     owner: &mut Option<String>,
 ) -> Result<Option<String>, Live> {
     let task = match owning_task(inventory, store, (prefix, revision)) {
@@ -433,13 +412,11 @@ fn orphan_objection(
                 .to_owned(),
         ));
     }
-    if !merged.contains(&branch) {
-        return Ok(Some(
-            "branch has commits not merged into the repository's HEAD; git branch -d would refuse"
-                .to_owned(),
-        ));
+    match preserved_elsewhere(&inventory.primary, branch) {
+        Ok(Some(_)) => Ok(None),
+        Ok(None) => Ok(Some(UNPRESERVED.to_owned())),
+        Err(reason) => Ok(Some(format!("branch could not be checked: {reason}"))),
     }
-    Ok(None)
 }
 
 /// Drops the task's own stale registration, then the branch. Never `git
@@ -466,9 +443,9 @@ fn reclaim(
             worktree.display()
         ));
     }
-    match git(&inventory.primary, &["branch", "-d", branch]) {
-        Ok(_) => Outcome::Removed,
-        Err(reason) => Outcome::Kept(format!("git refused to delete it: {reason}")),
+    match delete_task_branch(&inventory.primary, branch) {
+        Ok(()) => Outcome::Removed,
+        Err(reason) => Outcome::Kept(reason),
     }
 }
 
@@ -729,9 +706,9 @@ fn remove(worktree: &Path, slug: &str, primary: &Path) -> Result<Option<String>,
     git(primary, &["worktree", "remove", &lossy(worktree)])
         .map_err(|error| format!("git declined to remove the worktree: {error}"))?;
     let branch = format!("brgr/task-{slug}");
-    if let Err(error) = git(primary, &["branch", "-d", &branch]) {
+    if let Err(reason) = delete_task_branch(primary, &branch) {
         return Ok(Some(format!(
-            "checkout removed; branch {branch} kept because git refused to delete it: {error}"
+            "checkout removed; branch {branch} kept: {reason}"
         )));
     }
     Ok(None)
@@ -850,6 +827,79 @@ impl Inventory {
     fn is_locked(&self, resolved: &Path) -> bool {
         self.locked.iter().any(|path| path == resolved)
     }
+}
+
+const UNPRESERVED: &str = "branch has commits not merged into the repository's HEAD and \
+     found on no other branch or remote; deleting it would lose them";
+
+/// Where every commit on a task branch also lives, or `None` when some commit
+/// is on this branch alone. Returns the branch tip it checked, and the holder:
+/// `HEAD`, or the first other branch or remote-tracking branch containing it.
+/// Other task branches do not count, since a sweep may delete them too.
+fn preserved_elsewhere(primary: &Path, branch: &str) -> Result<Option<(String, String)>, String> {
+    let tip = git(
+        primary,
+        &[
+            "rev-parse",
+            "--verify",
+            &format!("refs/heads/{branch}^{{commit}}"),
+        ],
+    )?
+    .trim()
+    .to_owned();
+    if git(primary, &["merge-base", "--is-ancestor", &tip, "HEAD"]).is_ok() {
+        return Ok(Some((tip, "HEAD".to_owned())));
+    }
+    let holders = git(
+        primary,
+        &[
+            "for-each-ref",
+            "--contains",
+            &tip,
+            "--format=%(refname)",
+            "refs/heads",
+            "refs/remotes",
+        ],
+    )?;
+    let holder = holders
+        .lines()
+        .map(str::trim)
+        .find(|name| {
+            !name.is_empty()
+                && !name.starts_with("refs/heads/brgr/task-")
+                && !name.ends_with("/HEAD")
+        })
+        .map(str::to_owned);
+    Ok(holder.map(|holder| (tip, holder)))
+}
+
+/// Deletes a task branch whose commits all survive elsewhere.
+///
+/// `git branch -D` is used for its refusal to delete a branch some worktree has
+/// checked out; the force only skips its merge test, which
+/// [`preserved_elsewhere`] replaces. Should the branch have moved between the
+/// check and the deletion, it is recreated at the commit git reports it had.
+fn delete_task_branch(primary: &Path, branch: &str) -> Result<(), String> {
+    let Some((tip, _)) = preserved_elsewhere(primary, branch)? else {
+        return Err(UNPRESERVED.to_owned());
+    };
+    let deleted = git(primary, &["branch", "-D", branch])
+        .map_err(|error| format!("git refused to delete it: {error}"))?;
+    // "Deleted branch NAME (was ABBREV)."
+    let was = deleted
+        .rsplit("(was ")
+        .next()
+        .and_then(|rest| rest.split(')').next())
+        .unwrap_or_default()
+        .trim();
+    if was.is_empty() || !tip.starts_with(was) {
+        let restored = if was.is_empty() { tip.as_str() } else { was };
+        git(primary, &["branch", branch, restored]).map_err(|error| {
+            format!("branch moved during removal and could not be restored: {error}")
+        })?;
+        return Err("branch moved while it was being removed; restored and kept".to_owned());
+    }
+    Ok(())
 }
 
 fn git(directory: &Path, args: &[&str]) -> Result<String, String> {
