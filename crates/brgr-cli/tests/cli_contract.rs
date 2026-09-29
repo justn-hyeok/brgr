@@ -1692,6 +1692,55 @@ fn idle_codex_owner_is_told_when_a_worker_asks() {
     json_output(&run(&home, &["cancel", task], &owner));
 }
 
+/// A notification dispatcher stops once its control home is gone.
+///
+/// It polls for up to a day, and an open database connection keeps reading a
+/// deleted database, so every test that deleted its home left one running.
+#[test]
+fn a_dispatcher_exits_when_its_control_home_is_removed() {
+    let (temp, home, workspace) = gjc_home();
+    let owner = [("BRGR_OWNER_ID", "codex:dispatcher-exit")];
+    let launched = json_output(&run(
+        &home,
+        &["run", "SLOW", "--workspace", workspace.to_str().unwrap()],
+        &owner,
+    ));
+    let task = launched["task_id"].as_str().unwrap();
+    let mut dispatcher = Command::new(brgr())
+        .arg("--home")
+        .arg(&home)
+        .args(["__notify", task])
+        .env_remove("HERDR_ENV")
+        .spawn()
+        .unwrap();
+    // Still polling: the run is not finished.
+    thread::sleep(Duration::from_millis(800));
+    assert!(
+        dispatcher.try_wait().unwrap().is_none(),
+        "exited before the home was removed"
+    );
+
+    // Not cancelled first: a final result also ends the dispatcher, and this
+    // must show that a vanished home alone is enough.
+    fs::remove_dir_all(&home).unwrap();
+    let exited = (0..50).any(|_| {
+        if dispatcher.try_wait().unwrap().is_some() {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(100));
+        false
+    });
+    if !exited {
+        let _ = dispatcher.kill();
+    }
+    // The run's supervisor names the removed home in its argv; stop it too.
+    let _ = Command::new("/usr/bin/pkill")
+        .args(["-f", home.to_str().unwrap()])
+        .status();
+    drop(temp);
+    assert!(exited, "the dispatcher kept polling a removed control home");
+}
+
 #[test]
 fn missing_herdr_codex_session_is_reported_from_exact_bound_pane() {
     let temp = TempDir::new().unwrap();

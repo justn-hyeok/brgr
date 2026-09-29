@@ -178,7 +178,14 @@ pub async fn deliver_pending(paths: &Paths, task: TaskId) -> Result<()> {
     let _lock = lock;
     let started = Instant::now();
     let store = registered_store(paths, task, started).await?;
+    let database = paths.store.join("brgr.sqlite3");
     while started.elapsed() < MAX_LIFETIME {
+        // An open connection keeps reading a deleted database, so a dispatcher
+        // whose control home was removed polled a dead store for a day. Test
+        // suites delete their homes; each run left one such process behind.
+        if !database.exists() {
+            return Ok(());
+        }
         deliver_questions(&store, task).await;
         let pending = match store.pending_notifications_for_task(task) {
             Ok(pending) => pending,
