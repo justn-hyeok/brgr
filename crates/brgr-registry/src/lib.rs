@@ -1,9 +1,14 @@
 //! Evidence-backed harness registration and health checking.
 //!
 //! A registered harness is pinned to the evidence it was certified against: the
-//! executable's identity and what its probe said. [`Registry::health`] re-checks
-//! both, so a harness that was replaced on disk reports as changed instead of
-//! being run as though it were the one that was approved.
+//! executable's identity and what its probe said. The two are re-checked by
+//! different calls, and the difference matters. [`Registry::health`] only
+//! re-digests the executable — cheap, spawns nothing — so it cannot see a
+//! wrapper script whose interpreter or dependencies changed under an unchanged
+//! file. [`Registry::health_probed`] also re-runs the bounded version and help
+//! probes, and is the only source of [`Health::EvidenceChanged`]. Task admission
+//! uses the probed check, so a harness replaced on disk reports as changed
+//! instead of being run as though it were the one that was approved.
 //!
 //! Two rules shape everything an operator sees. Diagnostic output carries a
 //! stable code and never the probe's own bytes, which may contain anything a
@@ -15,8 +20,9 @@
 //! use brgr_registry::{Health, recertify_action};
 //! use brgr_runner::HarnessManifest;
 //!
-//! // A probe whose output changed reports a fixed code. The differing text is
-//! // carried in the variant for logging by the caller, never in the code.
+//! // A probe whose output changed — reported by `health_probed`, never by
+//! // `health` — has a fixed code. The differing text is carried in the variant
+//! // for logging by the caller, never in the code.
 //! let changed = Health::EvidenceChanged {
 //!     expected: "sha256:aaa".to_owned(),
 //!     observed: "sha256:bbb".to_owned(),
