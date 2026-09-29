@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.8.0 — 2026-09-30
 
 `brgr prune` now deletes a task branch when every commit on it also lives on
 another branch or a remote-tracking branch, not only when it is merged into
