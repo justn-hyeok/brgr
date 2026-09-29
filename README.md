@@ -41,7 +41,7 @@ here instead of being waived.
 Install the current public v2 plugin from GitHub:
 
 ```bash
-herdr plugin install justn-hyeok/brgr --ref v2.7.1
+herdr plugin install justn-hyeok/brgr --ref v2.8.0
 ```
 
 The plugin builds `brgr` from the pinned Cargo lockfile, so a Rust toolchain is
