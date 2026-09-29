@@ -1667,7 +1667,12 @@ mod tests {
         /// truncated JSON, the right shape with the wrong types, control bytes,
         /// invalid UTF-8, no terminator, and a line with no newline at all.
         fn stream(&mut self) -> Vec<u8> {
-            const FRAGMENTS: [&[u8]; 14] = [
+            const FRAGMENTS: [&[u8]; 16] = [
+                // Two identities, so model observation is reached and a stream
+                // carrying both exercises the mixed-model refusal. Without them
+                // the model assertion below was a branch no case entered.
+                b"{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"provider\":\"anthropic\",\"model\":\"opus\"}}",
+                b"{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"provider\":\"openai\",\"model\":\"gpt\"}}",
                 b"{\"type\":\"message_update\",\"delta\":\"x\"}",
                 b"{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\"}}",
                 b"{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[]}}",
@@ -1743,6 +1748,7 @@ mod tests {
         // pass with a 64 KiB transport. Transport truncation has its own tests.
         const TRANSPORT: u64 = 8 * 1024 * 1024;
         let mut adversary = Adversary(0x5eed_1234_abcd_0001);
+        let mut observed_models = 0_u32;
 
         for case in 0..512 {
             // Every sixteenth case carries enough retainable content to press on
@@ -1794,14 +1800,30 @@ mod tests {
             }
             // Model observation reads the same bytes and must not panic or invent
             // an identity the stream does not contain.
+            // The observer reports `provider/model`, joined, while the stream
+            // carries them as two JSON members, so the joined form is never
+            // contiguous in it. Each half has to be present instead.
             if let Ok(Some(model)) = observe_jsonl_model(&semantic, None) {
-                assert!(
-                    semantic.windows(model.len()).any(|w| w == model.as_bytes()),
-                    "case {case} reported model {model} absent from the stream: {}",
-                    excerpt(&raw)
-                );
+                observed_models += 1;
+                let (provider, name) = model.split_once('/').expect("provider/model");
+                for part in [provider, name] {
+                    let quoted = format!("\"{part}\"");
+                    assert!(
+                        semantic
+                            .windows(quoted.len())
+                            .any(|w| w == quoted.as_bytes()),
+                        "case {case} reported model {model}, but {part} is absent: {}",
+                        excerpt(&raw)
+                    );
+                }
             }
         }
+        // Counted for the same reason as the retention flood: a branch no case
+        // enters asserts nothing.
+        assert!(
+            observed_models > 5,
+            "only {observed_models} of 512 cases reached model observation"
+        );
     }
 
     #[tokio::test]

@@ -3911,7 +3911,12 @@ mod tests {
         let sources = SCANNED;
         // Assembled at runtime so this test's own text is not a match.
         let explicit = format!("self.{}()?", "write_transaction");
-        let implicit = format!("self.{}\n", "connection");
+        // Matched anywhere in the line. An earlier version compared the whole
+        // untrimmed line to `self.connection`, which no indented line can equal,
+        // so the implicit half matched nothing; a first fix matched only a line
+        // starting with it and still missed `let changed = self.connection...`
+        // and rustfmt's `self` / `.connection` split — five of seven paths.
+        let implicit = format!("self.{}", "connection");
 
         let mut unclassified = Vec::new();
         for (name, source) in sources {
@@ -3919,7 +3924,11 @@ mod tests {
             let lines: Vec<&str> = body.lines().collect();
             for (index, line) in lines.iter().enumerate() {
                 let writes = line.contains(explicit.as_str())
-                    || (line.trim_end() == implicit.trim_end()
+                    || ((line.contains(implicit.as_str())
+                        // `self` and `.connection` split across lines by rustfmt.
+                        || (line.trim().starts_with(".connection")
+                            && index > 0
+                            && lines[index - 1].trim().ends_with("self")))
                         && lines[index..index.saturating_add(7).min(lines.len())]
                             .iter()
                             .any(|ahead| {
@@ -3952,13 +3961,22 @@ mod tests {
              add each to CLASSIFIED with the reason it does or does not wait"
         );
 
-        // And the declared decisions must match what the code does.
-        let lib = include_str!("lib.rs");
+        // And the declared decisions must match what the code does, in whichever
+        // module the function now lives. This read only `lib.rs` and skipped any
+        // name it could not find there, so the module split silently dropped nine
+        // of twenty-one declarations from the check. A declared name that exists
+        // nowhere is now a failure: it is either stale or misspelled.
+        let all: String = SCANNED
+            .iter()
+            .map(|(_, source)| source.split("\nmod tests").next().unwrap_or(source))
+            .collect::<Vec<_>>()
+            .join("\n");
         for (name, retried) in CLASSIFIED {
-            if !lib.contains(&format!("fn {name}(")) {
-                continue;
-            }
-            let wrapped = lib.contains(&format!("retry_busy(|| self.{name}("));
+            assert!(
+                all.contains(&format!("fn {name}(")),
+                "{name} is classified but defined in no scanned module"
+            );
+            let wrapped = all.contains(&format!("retry_busy(|| self.{name}("));
             assert_eq!(
                 wrapped, *retried,
                 "{name} is declared retried={retried} but the code says {wrapped}"

@@ -2,6 +2,26 @@
 
 ## 2.4.0 — unreleased
 
+`every_write_path_has_a_recorded_retry_decision` was checking far less than it
+claimed, in both of its halves. The implicit-write detector compared a whole
+untrimmed line to `self.connection`, which no indented line can equal, so it
+matched none of the six implicit write paths; a first repair matched only lines
+starting with it and still missed five, because rustfmt writes most of them as
+`let changed = self.connection...` or splits `self` and `.connection` across
+lines. The declaration check read only `lib.rs` and skipped any name it could not
+find there, so the module split had silently removed nine of twenty-one
+declarations from it. It now reads every scanned module and fails on a declared
+name defined nowhere. Checked by mutation in four shapes: a flipped declaration,
+a misspelled one, and an unclassified write in three syntactic forms.
+
+Three tests passed for the wrong reason. The core doc example asked revision 1 to
+accept revision 4 and called the refusal "revision 3 was skipped" — it failed
+because 4 is not 2, and would have for any number. The runner's model assertion
+searched for the joined `provider/model` form, which the stream never contains
+contiguously, and no generated case carried an identity, so it never ran. And
+the protocol example attributed its byte-level difference to omitted optional
+fields when the actual cause is pretty-printed versus compact encoding.
+
 `docs/` is sorted into four directories and carries an index. It was forty-seven
 files in one flat listing, nineteen of them release notes, with nothing saying
 what was current and what was a dated record of one afternoon in September. The
