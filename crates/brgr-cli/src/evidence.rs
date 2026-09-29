@@ -164,7 +164,8 @@ pub fn show_diff(paths: &Paths, task: TaskId, stat: bool, json_output: bool) -> 
                 _ => println!("{:<15} {}", "binary", file.path),
             }
         }
-        println!("{} files, +{added} -{deleted}", files.len());
+        let noun = if files.len() == 1 { "file" } else { "files" };
+        println!("{} {noun}, +{added} -{deleted}", files.len());
         return Ok(());
     }
     let files: Vec<_> = files

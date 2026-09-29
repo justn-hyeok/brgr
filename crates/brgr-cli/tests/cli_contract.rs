@@ -814,6 +814,18 @@ case "$1 $2" in
     done
     echo '{"result":{"pane":{"pane_id":"w9:p2"}}}';;
   'agent start')
+    printf '%s\n' "$@" >> "$d/start-attempts"
+    if [ -s "$d/busy" ]; then
+      n=$(/bin/cat "$d/busy"); if [ "$n" -gt 0 ]; then
+        echo $((n - 1)) > "$d/busy"
+        echo '{"error":{"code":"agent_pane_busy","message":"agent target pane w9:p2 is not an available shell"}}' >&2
+        exit 1
+      fi
+    fi
+    if [ -e "$d/start-fails" ]; then
+      echo '{"error":{"code":"agent_kind_unknown","message":"no such agent kind"}}' >&2
+      exit 1
+    fi
     printf '%s\n' "$@" > "$d/start-args"
     echo idle > "$d/state"
     echo '{"result":{"agent":{"agent":"claude","agent_status":"idle","pane_id":"w9:p2"}}}';;
@@ -927,6 +939,41 @@ fn pane_mode_runs_the_agent_in_a_pane_and_seals_its_report() {
     );
     // The report is sealed and removed, and the pane closed.
     assert!(!fixture.workspace.join(".brgr").exists());
+    assert_eq!(fixture.state("closed").trim(), "closed");
+}
+
+/// A pane that has not drawn its shell prompt yet refuses an agent; the runner
+/// waits for it instead of failing the task.
+#[test]
+fn pane_mode_waits_for_the_new_pane_shell() {
+    let fixture = pane_fixture();
+    fs::create_dir_all(&fixture.state).unwrap();
+    fs::write(fixture.state.join("busy"), "3\n").unwrap();
+    let ran = fixture.run(&[]);
+    assert_eq!(ran["outcome"], "candidate", "{ran}");
+    assert_eq!(
+        fixture
+            .state("start-attempts")
+            .matches("agent\nstart")
+            .count(),
+        4
+    );
+}
+
+/// A run that fails still closes the pane it opened, and says why it failed.
+#[test]
+fn pane_mode_failure_closes_the_pane_and_names_the_cause() {
+    let fixture = pane_fixture();
+    fs::create_dir_all(&fixture.state).unwrap();
+    fs::write(fixture.state.join("start-fails"), "").unwrap();
+    let ran = fixture.run(&[]);
+    assert_eq!(ran["outcome"], "lost", "{ran}");
+    let error = ran["error"].as_str().unwrap();
+    assert!(
+        error.contains("could not start the claude agent"),
+        "{error}"
+    );
+    assert!(error.contains("agent_kind_unknown"), "{error}");
     assert_eq!(fixture.state("closed").trim(), "closed");
 }
 
