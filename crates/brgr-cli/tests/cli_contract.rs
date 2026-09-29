@@ -97,6 +97,24 @@ test -f "$prompt_file" || exit 10
 /bin/cat "$prompt_file"
 "#;
 
+/// The gjc fixture harness every contract test registers.
+fn gjc_fixture() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../testdata/fixtures/gjc")
+        .canonicalize()
+        .unwrap()
+}
+
+/// A control home with the gjc fixture registered, and an empty workspace.
+fn gjc_home() -> (TempDir, PathBuf, PathBuf) {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("brgr");
+    let workspace = temp.path().join("work");
+    fs::create_dir_all(&workspace).unwrap();
+    add_fixture(&home, &gjc_fixture(), &temp.path().join("scratch"));
+    (temp, home, workspace)
+}
+
 fn write_devin_fixture(executable: &Path) {
     fs::write(executable, DEVIN_FIXTURE).unwrap();
     fs::set_permissions(executable, fs::Permissions::from_mode(0o700)).unwrap();
@@ -104,15 +122,7 @@ fn write_devin_fixture(executable: &Path) {
 
 #[test]
 fn plugin_board_shows_candidate_then_explicit_decision_without_prompt_text() {
-    let temp = TempDir::new().unwrap();
-    let home = temp.path().join("brgr");
-    let workspace = temp.path().join("work");
-    fs::create_dir_all(&workspace).unwrap();
-    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../testdata/fixtures/gjc")
-        .canonicalize()
-        .unwrap();
-    add_fixture(&home, &fixture, &temp.path().join("scratch"));
+    let (_temp, home, workspace) = gjc_home();
     let envs = [
         ("BRGR_OWNER_ID", "codex:board-test"),
         ("HERDR_ENV", "1"),
@@ -158,15 +168,7 @@ fn plugin_board_shows_candidate_then_explicit_decision_without_prompt_text() {
 
 #[test]
 fn plugin_board_refresh_failure_is_visible_without_mutating_tasks() {
-    let temp = TempDir::new().unwrap();
-    let home = temp.path().join("brgr");
-    let workspace = temp.path().join("work");
-    fs::create_dir_all(&workspace).unwrap();
-    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../testdata/fixtures/gjc")
-        .canonicalize()
-        .unwrap();
-    add_fixture(&home, &fixture, &temp.path().join("scratch"));
+    let (_temp, home, workspace) = gjc_home();
     let envs = [
         ("BRGR_OWNER_ID", "codex:board-fail"),
         ("HERDR_ENV", "1"),
@@ -216,10 +218,7 @@ fn plugin_codex_bridge_runs_a_fixture_outside_the_codex_process() {
     fs::create_dir_all(&workspace).unwrap();
     fs::create_dir_all(&outside).unwrap();
     fs::create_dir_all(&fake_bin).unwrap();
-    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../testdata/fixtures/gjc")
-        .canonicalize()
-        .unwrap();
+    let fixture = gjc_fixture();
     add_fixture(&home, &fixture, &temp.path().join("scratch"));
 
     let fake_codex = fake_bin.join("codex");
@@ -458,10 +457,7 @@ fn plugin_worker_placement_respects_config_and_reaches_owner_decision() {
     )
     .unwrap();
     fs::set_permissions(&fake_herdr, fs::Permissions::from_mode(0o700)).unwrap();
-    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../testdata/fixtures/gjc")
-        .canonicalize()
-        .unwrap();
+    let fixture = gjc_fixture();
     add_fixture(&home, &fixture, &temp.path().join("scratch"));
     let host_home = home.to_str().unwrap();
     let host_env = [
@@ -706,10 +702,7 @@ fn rejected_delegated_child_revises_inside_parent_git_worktree() {
     let repository = temp.path().join("repo");
     fs::create_dir_all(&repository).unwrap();
     seed_git_repo(&repository);
-    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../testdata/fixtures/gjc")
-        .canonicalize()
-        .unwrap();
+    let fixture = gjc_fixture();
     add_fixture(&home, &fixture, &temp.path().join("scratch"));
     let root_owner = [("BRGR_OWNER_ID", "codex:git-revise")];
     let root = json_output(&run(
@@ -804,15 +797,7 @@ fn rejected_delegated_child_revises_inside_parent_git_worktree() {
 
 #[test]
 fn tree_status_shows_question_and_tree_cancel_stops_both_processes() {
-    let temp = TempDir::new().unwrap();
-    let home = temp.path().join("brgr");
-    let workspace = temp.path().join("work");
-    fs::create_dir_all(&workspace).unwrap();
-    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../testdata/fixtures/gjc")
-        .canonicalize()
-        .unwrap();
-    add_fixture(&home, &fixture, &temp.path().join("scratch"));
+    let (_temp, home, workspace) = gjc_home();
     let root_owner = [("BRGR_OWNER_ID", "codex:tree-cancel")];
     let root = json_output(&run(
         &home,
@@ -906,15 +891,7 @@ fn tree_status_shows_question_and_tree_cancel_stops_both_processes() {
 
 #[test]
 fn committed_cancellation_intent_stops_running_worker_without_cancel_file() {
-    let temp = TempDir::new().unwrap();
-    let home = temp.path().join("brgr");
-    let workspace = temp.path().join("work");
-    fs::create_dir_all(&workspace).unwrap();
-    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../testdata/fixtures/gjc")
-        .canonicalize()
-        .unwrap();
-    add_fixture(&home, &fixture, &temp.path().join("scratch"));
+    let (_temp, home, workspace) = gjc_home();
     let owner = [("BRGR_OWNER_ID", "codex:cancel-intent")];
     let task = json_output(&run(
         &home,
@@ -944,15 +921,7 @@ fn committed_cancellation_intent_stops_running_worker_without_cancel_file() {
 
 #[test]
 fn terminal_tree_cancellation_does_not_cancel_a_later_revision() {
-    let temp = TempDir::new().unwrap();
-    let home = temp.path().join("brgr");
-    let workspace = temp.path().join("work");
-    fs::create_dir_all(&workspace).unwrap();
-    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../testdata/fixtures/gjc")
-        .canonicalize()
-        .unwrap();
-    add_fixture(&home, &fixture, &temp.path().join("scratch"));
+    let (_temp, home, workspace) = gjc_home();
     let owner = [("BRGR_OWNER_ID", "codex:cancel-revision")];
     let first = json_output(&run(
         &home,
@@ -1028,15 +997,7 @@ struct MessageFixture {
 }
 
 fn start_message_fixture() -> MessageFixture {
-    let temp = TempDir::new().unwrap();
-    let home = temp.path().join("brgr");
-    let workspace = temp.path().join("work");
-    fs::create_dir_all(&workspace).unwrap();
-    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../testdata/fixtures/gjc")
-        .canonicalize()
-        .unwrap();
-    add_fixture(&home, &fixture, &temp.path().join("scratch"));
+    let (temp, home, workspace) = gjc_home();
     let launch = json_output(&run(
         &home,
         &[
@@ -1313,10 +1274,7 @@ fn owner_message_wait_survives_the_gap_before_attempt_creation() {
     let workspace = temp.path().join("work");
     let scratch = temp.path().join("scratch");
     fs::create_dir_all(&workspace).unwrap();
-    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../testdata/fixtures/gjc")
-        .canonicalize()
-        .unwrap();
+    let fixture = gjc_fixture();
     add_fixture(&home, &fixture, &scratch);
     let launch = json_output(&run(
         &home,
@@ -1410,10 +1368,7 @@ fn idle_codex_parent_receives_completion_without_another_user_turn() {
     )
     .unwrap();
     fs::set_permissions(&herdr, fs::Permissions::from_mode(0o700)).unwrap();
-    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../testdata/fixtures/gjc")
-        .canonicalize()
-        .unwrap();
+    let fixture = gjc_fixture();
     add_fixture(&home, &fixture, &scratch);
     let envs = [
         ("CODEX_THREAD_ID", "session-a"),
@@ -1507,10 +1462,7 @@ case "$1 $2" in
 esac
 "#).unwrap();
     fs::set_permissions(&herdr, fs::Permissions::from_mode(0o700)).unwrap();
-    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../testdata/fixtures/gjc")
-        .canonicalize()
-        .unwrap();
+    let fixture = gjc_fixture();
     add_fixture(&home, &fixture, &temp.path().join("scratch"));
     let envs = [
         ("CODEX_THREAD_ID", "session-a"),
@@ -1553,10 +1505,7 @@ fn unavailable_herdr_does_not_hide_the_codex_inbox_hook() {
     fs::create_dir_all(&workspace).unwrap();
     fs::write(&herdr, "#!/bin/sh\nexec /bin/sleep 3\n").unwrap();
     fs::set_permissions(&herdr, fs::Permissions::from_mode(0o700)).unwrap();
-    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../testdata/fixtures/gjc")
-        .canonicalize()
-        .unwrap();
+    let fixture = gjc_fixture();
     add_fixture(&home, &fixture, &temp.path().join("scratch"));
     let owner = [
         ("BRGR_OWNER_ID", "codex:hook-fallback"),
@@ -1624,10 +1573,7 @@ case "$1 $2" in
 esac
 "#).unwrap();
     fs::set_permissions(&herdr, fs::Permissions::from_mode(0o700)).unwrap();
-    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../testdata/fixtures/gjc")
-        .canonicalize()
-        .unwrap();
+    let fixture = gjc_fixture();
     add_fixture(&home, &fixture, &temp.path().join("scratch"));
     let envs = [
         ("CODEX_THREAD_ID", "session-a"),
@@ -1820,10 +1766,7 @@ fn transferred_codex_session_receives_undecided_completion() {
     let herdr = temp.path().join("herdr");
     let prompts = temp.path().join("prompts");
     fs::create_dir_all(&workspace).unwrap();
-    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../testdata/fixtures/gjc")
-        .canonicalize()
-        .unwrap();
+    let fixture = gjc_fixture();
     add_fixture(&home, &fixture, &temp.path().join("scratch"));
     let task = json_output(&run(
         &home,
@@ -2265,10 +2208,7 @@ fn doctor_reports_changed_harness_instead_of_ok() {
 fn named_process_harness_cannot_activate_without_authorized_scratch() {
     let temp = TempDir::new().unwrap();
     let home = temp.path().join("brgr");
-    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../testdata/fixtures/gjc")
-        .canonicalize()
-        .unwrap();
+    let fixture = gjc_fixture();
     let denied = run(&home, &["harness", "add", fixture.to_str().unwrap()], &[]);
     assert!(!denied.status.success());
     assert!(!home.join("registry/activations/local.gjc.json").exists());
@@ -2518,15 +2458,7 @@ fn owned_old_skill_and_hook_upgrade_without_touching_foreign_hook() {
 
 #[test]
 fn real_cli_run_binds_candidate_to_its_owner() {
-    let temp = TempDir::new().unwrap();
-    let home = temp.path().join("brgr");
-    let workspace = temp.path().join("work");
-    fs::create_dir_all(&workspace).unwrap();
-    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../testdata/fixtures/gjc")
-        .canonicalize()
-        .unwrap();
-    add_fixture(&home, &fixture, &temp.path().join("scratch"));
+    let (_temp, home, workspace) = gjc_home();
     let result = json_output(&run(
         &home,
         &[
@@ -2591,10 +2523,7 @@ fn control_home_inside_worker_workspace_is_rejected_before_task_admission() {
     let workspace = temp.path().join("work");
     let home = workspace.join("brgr-control");
     fs::create_dir_all(&workspace).unwrap();
-    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../testdata/fixtures/gjc")
-        .canonicalize()
-        .unwrap();
+    let fixture = gjc_fixture();
     add_fixture(&home, &fixture, &temp.path().join("scratch"));
     let output = run(
         &home,
@@ -2623,15 +2552,7 @@ fn control_home_inside_worker_workspace_is_rejected_before_task_admission() {
 
 #[test]
 fn unbound_task_needs_explicit_session_and_stale_session_cannot_decide() {
-    let temp = TempDir::new().unwrap();
-    let home = temp.path().join("brgr");
-    let workspace = temp.path().join("work");
-    fs::create_dir_all(&workspace).unwrap();
-    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../testdata/fixtures/gjc")
-        .canonicalize()
-        .unwrap();
-    add_fixture(&home, &fixture, &temp.path().join("scratch"));
+    let (_temp, home, workspace) = gjc_home();
     let unbound = [("BRGR_OWNER_ID", "codex:unbound"), ("BRGR_SESSION_ID", "")];
     let first = json_output(&run(
         &home,
@@ -2683,10 +2604,7 @@ fn non_git_workspace_runs_without_a_git_executable() {
     let home = temp.path().join("brgr");
     let workspace = temp.path().join("non-git");
     fs::create_dir_all(&workspace).unwrap();
-    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../testdata/fixtures/gjc")
-        .canonicalize()
-        .unwrap();
+    let fixture = gjc_fixture();
     add_fixture(&home, &fixture, &temp.path().join("scratch"));
     let result = json_output(&run(
         &home,
@@ -2782,15 +2700,7 @@ fn unsupported_model_fails_before_task_admission() {
 
 #[test]
 fn missing_write_browser_and_mcp_capabilities_fail_before_task_admission() {
-    let temp = TempDir::new().unwrap();
-    let home = temp.path().join("brgr");
-    let workspace = temp.path().join("work");
-    fs::create_dir_all(&workspace).unwrap();
-    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../testdata/fixtures/gjc")
-        .canonicalize()
-        .unwrap();
-    add_fixture(&home, &fixture, &temp.path().join("scratch"));
+    let (_temp, home, workspace) = gjc_home();
     let owner = [("BRGR_OWNER_ID", "codex:capability-preflight")];
     for (flag, value, missing) in [
         ("--requires-write", None, "workspace_write"),
@@ -2988,15 +2898,7 @@ fn authored_manifest_runs_unknown_positional_cli_to_owner_acceptance() {
 #[cfg(debug_assertions)]
 #[test]
 fn detached_supervisor_exit_before_claim_becomes_one_durable_lost_inbox_item() {
-    let temp = TempDir::new().unwrap();
-    let home = temp.path().join("brgr");
-    let workspace = temp.path().join("work");
-    fs::create_dir_all(&workspace).unwrap();
-    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../testdata/fixtures/gjc")
-        .canonicalize()
-        .unwrap();
-    add_fixture(&home, &fixture, &temp.path().join("scratch"));
+    let (_temp, home, workspace) = gjc_home();
     let owner = [("BRGR_OWNER_ID", "codex:admission-crash")];
     let launch = json_output(&run(
         &home,
@@ -3047,15 +2949,7 @@ fn detached_supervisor_exit_before_claim_becomes_one_durable_lost_inbox_item() {
 #[cfg(debug_assertions)]
 #[test]
 fn wait_reconciles_a_crashed_detached_supervisor_to_lost() {
-    let temp = TempDir::new().unwrap();
-    let home = temp.path().join("brgr");
-    let workspace = temp.path().join("work");
-    fs::create_dir_all(&workspace).unwrap();
-    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../testdata/fixtures/gjc")
-        .canonicalize()
-        .unwrap();
-    add_fixture(&home, &fixture, &temp.path().join("scratch"));
+    let (_temp, home, workspace) = gjc_home();
     let owner = [("BRGR_OWNER_ID", "codex:wait-crash")];
     let launch = json_output(&run(
         &home,
@@ -3081,10 +2975,7 @@ fn wait_reconciles_a_crashed_detached_supervisor_to_lost() {
 #[cfg(debug_assertions)]
 #[test]
 fn detached_crash_windows_reconcile_without_duplicate_or_overlapping_attempts() {
-    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../testdata/fixtures/gjc")
-        .canonicalize()
-        .unwrap();
+    let fixture = gjc_fixture();
     for (stage, expected) in [
         ("after_claim", "lost"),
         ("after_launch_intent", "lost"),
@@ -3154,15 +3045,7 @@ fn detached_crash_windows_reconcile_without_duplicate_or_overlapping_attempts() 
 #[cfg(debug_assertions)]
 #[test]
 fn restarted_supervisor_cannot_adopt_its_predecessors_unfinished_attempt() {
-    let temp = TempDir::new().unwrap();
-    let home = temp.path().join("brgr");
-    let workspace = temp.path().join("work");
-    fs::create_dir_all(&workspace).unwrap();
-    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../testdata/fixtures/gjc")
-        .canonicalize()
-        .unwrap();
-    add_fixture(&home, &fixture, &temp.path().join("scratch"));
+    let (_temp, home, workspace) = gjc_home();
     let owner = ("BRGR_OWNER_ID", "codex:restarted-supervisor");
     let crashed = run(
         &home,
@@ -3206,15 +3089,7 @@ fn restarted_supervisor_cannot_adopt_its_predecessors_unfinished_attempt() {
 #[cfg(debug_assertions)]
 #[test]
 fn status_during_live_pre_identity_window_does_not_publish_lost() {
-    let temp = TempDir::new().unwrap();
-    let home = temp.path().join("brgr");
-    let workspace = temp.path().join("work");
-    fs::create_dir_all(&workspace).unwrap();
-    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../testdata/fixtures/gjc")
-        .canonicalize()
-        .unwrap();
-    add_fixture(&home, &fixture, &temp.path().join("scratch"));
+    let (_temp, home, workspace) = gjc_home();
     let owner = ("BRGR_OWNER_ID", "codex:pre-identity");
     let launch = json_output(&run(
         &home,
@@ -3262,15 +3137,7 @@ fn status_during_live_pre_identity_window_does_not_publish_lost() {
 
 #[test]
 fn queued_cancel_settles_without_starting_the_harness() {
-    let temp = TempDir::new().unwrap();
-    let home = temp.path().join("brgr");
-    let workspace = temp.path().join("work");
-    fs::create_dir_all(&workspace).unwrap();
-    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../testdata/fixtures/gjc")
-        .canonicalize()
-        .unwrap();
-    add_fixture(&home, &fixture, &temp.path().join("scratch"));
+    let (_temp, home, workspace) = gjc_home();
     let owner = [("BRGR_OWNER_ID", "codex:queued-cancel")];
     let launch = json_output(&run(
         &home,
@@ -3302,15 +3169,7 @@ fn queued_cancel_settles_without_starting_the_harness() {
 
 #[test]
 fn rejected_result_can_be_revised_without_rewriting_its_decision() {
-    let temp = TempDir::new().unwrap();
-    let home = temp.path().join("brgr");
-    let workspace = temp.path().join("work");
-    fs::create_dir_all(&workspace).unwrap();
-    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../testdata/fixtures/gjc")
-        .canonicalize()
-        .unwrap();
-    add_fixture(&home, &fixture, &temp.path().join("scratch"));
+    let (_temp, home, workspace) = gjc_home();
     let owner = [("BRGR_OWNER_ID", "codex:revision-owner")];
     let first = json_output(&run(
         &home,
@@ -3556,15 +3415,7 @@ fn omp_fallback_model_cannot_be_sealed_as_requested_model() {
 
 #[test]
 fn detached_success_reopens_for_an_offline_owner_then_accepts_once() {
-    let temp = TempDir::new().unwrap();
-    let home = temp.path().join("brgr");
-    let workspace = temp.path().join("work");
-    fs::create_dir_all(&workspace).unwrap();
-    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../testdata/fixtures/gjc")
-        .canonicalize()
-        .unwrap();
-    add_fixture(&home, &fixture, &temp.path().join("scratch"));
+    let (_temp, home, workspace) = gjc_home();
     let owner = [("BRGR_OWNER_ID", "codex:offline-owner")];
 
     let launch = json_output(&run(
@@ -3656,10 +3507,7 @@ fn dirty_source_is_rejected_before_creating_a_task_worktree() {
         .output()
         .unwrap();
     assert!(initialized.status.success());
-    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../testdata/fixtures/gjc")
-        .canonicalize()
-        .unwrap();
+    let fixture = gjc_fixture();
     add_fixture(&home, &fixture, &temp.path().join("scratch"));
     fs::write(repository.join("user-note.txt"), b"uncommitted work\n").unwrap();
 
@@ -3700,10 +3548,7 @@ fn selected_dirty_files_are_copied_without_touching_other_source_changes() {
     let repository = temp.path().join("repo");
     fs::create_dir_all(&repository).unwrap();
     seed_git_repo(&repository);
-    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../testdata/fixtures/gjc")
-        .canonicalize()
-        .unwrap();
+    let fixture = gjc_fixture();
     add_fixture(&home, &fixture, &temp.path().join("scratch"));
     fs::write(repository.join("README"), "selected edit\n").unwrap();
     fs::write(repository.join("selected.txt"), "new selected file\n").unwrap();
@@ -3798,10 +3643,7 @@ fn selected_tracked_deletion_is_reproduced_in_task_worktree() {
             .success()
     );
     fs::remove_file(repository.join("remove.txt")).unwrap();
-    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../testdata/fixtures/gjc")
-        .canonicalize()
-        .unwrap();
+    let fixture = gjc_fixture();
     add_fixture(&home, &fixture, &temp.path().join("scratch"));
     let result = json_output(&run(
         &home,
@@ -4283,13 +4125,6 @@ fn git_branches(repository: &Path) -> String {
         .unwrap();
     assert!(output.status.success());
     String::from_utf8_lossy(&output.stdout).into_owned()
-}
-
-fn gjc_fixture() -> std::path::PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../testdata/fixtures/gjc")
-        .canonicalize()
-        .unwrap()
 }
 
 #[test]
