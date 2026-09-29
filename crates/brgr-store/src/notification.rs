@@ -1,7 +1,7 @@
 use brgr_protocol::{OwnerId, ResultId, TaskId};
 use rusqlite::{OptionalExtension as _, params};
 
-use super::{Store, StoreError, assert_owner_binding};
+use super::{Store, StoreError, owner::assert_owner_binding};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PendingNotification {
