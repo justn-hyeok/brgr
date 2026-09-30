@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.9.0 — 2026-09-30
 
 Cline no longer takes `brgr run --model`; it runs its configured model, as
 Devin does. Cline documents `--model` as applying to one session, but Cline
