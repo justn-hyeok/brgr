@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.9.1 — 2026-09-30
 
 A pane-mode run now completes as soon as the agent is idle and its report
 exists. It also required having seen the agent working, and Herdr may never
