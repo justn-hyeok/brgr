@@ -15,8 +15,16 @@ fn brgr() -> &'static str {
     env!("CARGO_BIN_EXE_brgr")
 }
 
-fn run(home: &Path, args: &[&str], envs: &[(&str, &str)]) -> std::process::Output {
+/// brgr for a test. Debug builds trust a faked `HERDR_PANE_ID` only with this
+/// variable: a test's own process chain never runs inside the pane it claims.
+fn brgr_command() -> Command {
     let mut command = Command::new(brgr());
+    command.env("BRGR_TEST_TRUST_HERDR_PANE", "1");
+    command
+}
+
+fn run(home: &Path, args: &[&str], envs: &[(&str, &str)]) -> std::process::Output {
+    let mut command = brgr_command();
     command.arg("--home").arg(home).arg("--json").args(args);
     command.env_remove("CODEX_THREAD_ID");
     for name in [
@@ -246,7 +254,7 @@ fn plugin_codex_bridge_runs_a_fixture_outside_the_codex_process() {
     )
     .unwrap();
     let context = json!({"workspace_id": "w1", "workspace_cwd": workspace});
-    let launched = Command::new(brgr())
+    let launched = brgr_command()
         .args(["plugin", "codex"])
         .env("HERDR_ENV", "1")
         .env("HERDR_PLUGIN_ID", "brgr")
@@ -346,7 +354,7 @@ fn plugin_codex_uses_pinned_workspace_not_live_plugin_cwd() {
         "workspace_cwd": plugin_checkout,
         "focused_pane_cwd": plugin_checkout
     });
-    let launched = Command::new(brgr())
+    let launched = brgr_command()
         .args(["plugin", "codex"])
         .env("HERDR_ENV", "1")
         .env("HERDR_PLUGIN_ID", "brgr")
@@ -930,6 +938,14 @@ case "$1 $2" in
     s=$(/bin/cat "$d/state")
     printf '{"result":{"agent":{"agent":"claude","agent_status":"%s","pane_id":"w9:p2"}}}\n' "$s"
     if [ "$s" = working ]; then echo idle > "$d/state"; fi;;
+  'pane read')
+    n=$(/bin/cat "$d/menu" 2>/dev/null || echo 0)
+    if [ "$n" -gt 0 ]; then
+      echo $((n - 1)) > "$d/menu"
+      printf '%s\n' '  Update available' '› 1. Update now' '  2. Skip'
+    else
+      printf '%s\n' '› Ask anything'
+    fi;;
   'pane close') echo closed > "$d/closed"; echo '{"result":{"type":"ok"}}';;
   *) exit 2;;
 esac
@@ -1152,7 +1168,7 @@ fn cancelling_a_pane_mode_task_closes_its_pane() {
     let fixture = pane_fixture();
     fs::create_dir_all(&fixture.state).unwrap();
     fs::write(fixture.state.join("hang"), "").unwrap();
-    let mut command = Command::new(brgr());
+    let mut command = brgr_command();
     command
         .arg("--home")
         .arg(&fixture.home)
@@ -1204,6 +1220,70 @@ fn cancelling_a_pane_mode_task_closes_its_pane() {
         .filter(|name| name.ends_with(".pane.json"))
         .collect();
     assert!(receipts.is_empty(), "{receipts:?}");
+}
+
+/// A Herdr pane id this process does not provably run in — what a Codex tool
+/// command inherits from its shared daemon — keeps the run headless instead of
+/// splitting beside the wrong pane.
+#[test]
+fn an_unverified_caller_pane_runs_headless() {
+    let fixture = pane_fixture();
+    let output = Command::new(brgr())
+        .arg("--home")
+        .arg(&fixture.home)
+        .arg("--json")
+        .args(["run", "Explain the build", "--harness", "local.claude-code"])
+        .arg("--workspace")
+        .arg(&fixture.workspace)
+        .arg("--foreground")
+        .env_remove("CODEX_THREAD_ID")
+        .env_remove("BRGR_TEST_TRUST_HERDR_PANE")
+        .env("BRGR_SESSION_ID", "fixture-session")
+        .env("BRGR_OWNER_ID", "codex:pane-test")
+        .env("HERDR_ENV", "1")
+        .env("HERDR_PANE_ID", "w9:p1")
+        .env("HERDR_BIN_PATH", &fixture.herdr)
+        .output()
+        .unwrap();
+    let ran: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(ran["outcome"], "candidate", "{ran}");
+    assert!(
+        !fixture.state("calls.log").contains("pane split"),
+        "a pane was split beside an unverified caller: {}",
+        fixture.state("calls.log")
+    );
+}
+
+/// Herdr may call an agent ready while it shows a menu — Codex opened on an
+/// update offer. The prompt's Enter would pick the highlighted option, so the
+/// run asks its owner and waits for the menu to go.
+#[test]
+fn pane_mode_does_not_prompt_into_a_menu() {
+    let fixture = pane_fixture();
+    fs::create_dir_all(&fixture.state).unwrap();
+    fs::write(fixture.state.join("menu"), "3\n").unwrap();
+    let ran = fixture.run(&[]);
+    assert_eq!(ran["outcome"], "candidate", "{ran}");
+    let calls = fixture.state("calls.log");
+    let last_menu_read = calls.rfind("pane read").unwrap();
+    let prompt = calls.find("agent prompt").unwrap();
+    assert!(
+        last_menu_read < prompt,
+        "prompted while the menu showed: {calls}"
+    );
+    let task = ran["task_id"].as_str().unwrap();
+    let messages = json_output(&run(
+        &fixture.home,
+        &["message", "list", task, "--for", "owner"],
+        &[("BRGR_OWNER_ID", "codex:pane-test")],
+    ));
+    assert!(
+        messages[0]["body"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("menu"),
+        "{messages}"
+    );
 }
 
 /// A run that fails still closes the pane it opened, and says why it failed.
@@ -1673,7 +1753,7 @@ fn relative_control_home_is_canonical_before_worker_delegation() {
     fs::write(&executable, RECURSIVE_GJC_FIXTURE).unwrap();
     fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
     add_fixture(&home, &executable, &temp.path().join("scratch"));
-    let output = Command::new(brgr())
+    let output = brgr_command()
         .current_dir(temp.path())
         .args([
             "--home",
@@ -2273,7 +2353,7 @@ fn a_dispatcher_exits_when_its_control_home_is_removed() {
         &owner,
     ));
     let task = launched["task_id"].as_str().unwrap();
-    let mut dispatcher = Command::new(brgr())
+    let mut dispatcher = brgr_command()
         .arg("--home")
         .arg(&home)
         .args(["__notify", task])
@@ -2366,6 +2446,71 @@ esac
         thread::sleep(Duration::from_millis(20));
     }
     assert_eq!(fs::read_to_string(&reported).unwrap(), "session-a");
+    let task = result["task_id"].as_str().unwrap();
+    json_output(&run(&home, &["accept", task], &envs));
+}
+
+/// The owner-surface registration must not trust an unverified pane either:
+/// binding this session to another Codex's pane would push its notices there.
+#[test]
+fn an_unverified_pane_is_never_bound_to_a_codex_session() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("brgr");
+    let workspace = temp.path().join("work");
+    let herdr = temp.path().join("herdr");
+    let reported = temp.path().join("reported-session");
+    fs::create_dir_all(&workspace).unwrap();
+    fs::write(&herdr, r#"#!/bin/sh
+case "$1 $2" in
+ 'agent get')
+  if [ -s "$BRGR_TEST_SESSION_FILE" ]; then
+   printf '{"result":{"agent":{"agent":"codex","pane_id":"w1:p1","agent_status":"working","agent_session":{"value":"%s"}}}}\n' "$(/bin/cat "$BRGR_TEST_SESSION_FILE")"
+  else
+   printf '%s\n' '{"result":{"agent":{"agent":"codex","pane_id":"w1:p1","agent_status":"working"}}}'
+  fi;;
+ 'pane report-agent-session')
+  test "$3" = w1:p1 || exit 7
+  while [ "$#" -gt 0 ]; do
+   if [ "$1" = --source ]; then test "$2" = herdr:codex || exit 8; fi
+   if [ "$1" = --agent-session-id ]; then printf '%s' "$2" > "$BRGR_TEST_SESSION_FILE"; fi
+   shift
+  done
+  printf '%s\n' '{}';;
+ *) exit 9;;
+esac
+"#).unwrap();
+    fs::set_permissions(&herdr, fs::Permissions::from_mode(0o700)).unwrap();
+    let fixture = gjc_fixture();
+    add_fixture(&home, &fixture, &temp.path().join("scratch"));
+    let envs = [
+        ("CODEX_THREAD_ID", "session-a"),
+        ("BRGR_OWNER_ID", "codex:session-a"),
+        ("BRGR_SESSION_ID", "session-a"),
+        ("HERDR_ENV", "1"),
+        ("HERDR_PANE_ID", "w1:p1"),
+        ("HERDR_BIN_PATH", herdr.to_str().unwrap()),
+        ("BRGR_TEST_SESSION_FILE", reported.to_str().unwrap()),
+        // A pane id this process does not run in, as a hook run by Codex's
+        // shared daemon inherits.
+        ("BRGR_TEST_TRUST_HERDR_PANE", "0"),
+    ];
+    let result = json_output(&run(
+        &home,
+        &[
+            "run",
+            "BRGR_FIXTURE_OK",
+            "--workspace",
+            workspace.to_str().unwrap(),
+            "--foreground",
+        ],
+        &envs,
+    ));
+    assert_eq!(result["outcome"], "candidate");
+    thread::sleep(Duration::from_secs(2));
+    assert!(
+        !reported.exists(),
+        "a Codex session was bound to a pane this process does not run in"
+    );
     let task = result["task_id"].as_str().unwrap();
     json_output(&run(&home, &["accept", task], &envs));
 }
@@ -2491,7 +2636,7 @@ fn invoke_hook_with_herdr(
     event: &str,
 ) -> (std::process::Output, Duration) {
     let started = Instant::now();
-    let mut child = Command::new(brgr())
+    let mut child = brgr_command()
         .arg("--home")
         .arg(home)
         .args(["__hook", event])
@@ -2514,7 +2659,7 @@ fn invoke_hook_with_herdr(
 }
 
 fn assert_duplicate_notification_dispatcher_exits(home: &Path, task: &str, envs: &[(&str, &str)]) {
-    let mut duplicate = Command::new(brgr())
+    let mut duplicate = brgr_command()
         .arg("--home")
         .arg(home)
         .arg("__notify")
@@ -2561,7 +2706,7 @@ fn final_failed_result_does_not_leave_a_notification_dispatcher_running() {
     assert_eq!(result["outcome"], "failed");
     let task = result["task_id"].as_str().unwrap();
     json_output(&run(&home, &["result", task, "--ack"], &owner));
-    let mut dispatcher = Command::new(brgr())
+    let mut dispatcher = brgr_command()
         .arg("--home")
         .arg(&home)
         .arg("__notify")
@@ -2834,7 +2979,7 @@ fn plugin_codex_missing_binary_fails_visibly_without_launching() {
     fs::create_dir_all(&workspace).unwrap();
     fs::create_dir_all(&empty_bin).unwrap();
     let context = json!({"workspace_id": "w1", "workspace_cwd": workspace});
-    let launched = Command::new(brgr())
+    let launched = brgr_command()
         .args(["plugin", "codex"])
         .env("HERDR_ENV", "1")
         .env("HERDR_PLUGIN_ID", "brgr")
@@ -2878,7 +3023,7 @@ fn plugin_codex_uses_configured_executable_with_minimal_herdr_path() {
         executable.to_str().unwrap()
     );
     let context = json!({"workspace_id":"w1", "workspace_cwd":workspace});
-    let launched = Command::new(brgr())
+    let launched = brgr_command()
         .args(["plugin", "codex"])
         .env("HERDR_ENV", "1")
         .env("HERDR_PLUGIN_ID", "brgr")
@@ -2925,7 +3070,7 @@ fn plugin_open_surfaces_herdr_launch_failure() {
     fs::write(&herdr, "#!/bin/sh\necho 'pane refused' >&2\nexit 7\n").unwrap();
     fs::set_permissions(&herdr, fs::Permissions::from_mode(0o700)).unwrap();
     let context = json!({"workspace_id": "w1", "workspace_cwd": workspace});
-    let launched = Command::new(brgr())
+    let launched = brgr_command()
         .args(["plugin", "open", "--no-focus", "--codex"])
         .env("HERDR_ENV", "1")
         .env("HERDR_PLUGIN_ID", "brgr")
@@ -3028,7 +3173,7 @@ fn codex_integration_accepts_an_equivalent_caller_and_detects_hook_binary_drift(
 fn missing_plugin_bridge_fails_before_task_admission() {
     let temp = TempDir::new().unwrap();
     let home = temp.path().join("brgr");
-    let output = Command::new(brgr())
+    let output = brgr_command()
         .arg("--home")
         .arg(&home)
         .args(["run", "BRGR_FIXTURE_OK"])

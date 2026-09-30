@@ -26,14 +26,18 @@ pub async fn register_current_surface(
     owner_id: &OwnerId,
     session_id: &str,
 ) -> Result<bool> {
-    if env::var("HERDR_ENV").as_deref() != Ok("1") || !owner_id.as_str().starts_with("codex:") {
+    if !owner_id.as_str().starts_with("codex:") {
         return Ok(false);
     }
-    let (Some(pane), Some(binary)) = (env::var_os("HERDR_PANE_ID"), env::var_os("HERDR_BIN_PATH"))
-    else {
+    // A hook Codex runs from its shared app-server daemon carries the Herdr
+    // environment of whichever pane started that daemon. Registering that pane
+    // would push this session's notices into another session.
+    let (Some(pane), Some(binary)) = (
+        crate::caller_pane::verified(),
+        env::var_os("HERDR_BIN_PATH"),
+    ) else {
         return Ok(false);
     };
-    let pane = pane.to_string_lossy();
     let binary = PathBuf::from(binary);
     if pane.is_empty() || !binary.is_absolute() || !binary.is_file() {
         return Ok(false);
@@ -104,9 +108,8 @@ pub async fn register_current_surface(
 
 pub fn spawn_registration_and_delivery(paths: &Paths, task: &TaskSpec, session: Option<&str>) {
     if session.is_none()
-        || env::var("HERDR_ENV").as_deref() != Ok("1")
         || !task.owner_id.as_str().starts_with("codex:")
-        || env::var_os("HERDR_PANE_ID").is_none()
+        || crate::caller_pane::verified().is_none()
         || env::var_os("HERDR_BIN_PATH").is_none()
     {
         return;

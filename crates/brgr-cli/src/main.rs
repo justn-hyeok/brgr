@@ -2,6 +2,7 @@ mod admission;
 #[cfg(test)]
 mod adversary;
 mod bridge_host;
+mod caller_pane;
 mod cli;
 mod codex_integration;
 mod config;

@@ -65,7 +65,12 @@ If the agent in that pane stops at an approval or question prompt, or on a
 screen Herdr cannot classify, brgr sends you a question naming the pane. Read
 it with `herdr agent read` or `herdr pane read`, then ask the user before
 answering an approval; never approve a prompt on the user's behalf. Once the
-agent is ready again, brgr withdraws the question itself.
+agent is ready again, brgr withdraws the question itself. brgr trusts
+`HERDR_PANE_ID` only when it provably runs inside that pane. Codex runs shell
+commands and hooks in a shared app-server daemon that carries another pane's
+Herdr environment, so from Codex a task usually runs headless and no
+`FROM BRGR` notice reaches you: check `brgr status TASK --tree` and
+`brgr wait TASK` for the result instead of waiting for a push.
 In an ordinary Herdr pane, set `brgr config set-auto-worker-pane true` once to
 make detached `brgr run` open a brgr worker pane beside the exact caller.
 The brgr plugin Codex pane already uses this path. Set
