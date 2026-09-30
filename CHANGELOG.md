@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+A pane-mode run now completes as soon as the agent is idle and its report
+exists. It also required having seen the agent working, and Herdr may never
+show that: running three pane tasks at once, Cursor went from unknown straight
+to idle after finishing between two polls, and brgr waited on a finished task
+until its deadline. An agent never seen working that sits idle without a report
+for a minute is reminded once, as one seen working already is after 15 seconds.
+
+A cancelled or killed pane-mode run no longer leaves its pane open with the
+agent still in it. The runner records the pane it opened, and the supervisor
+closes a recorded pane once the attempt is over, whatever ended it. A run with
+`--keep-pane` keeps it. Such a run is still recorded lost, as every
+Herdr-backed run stopped early is.
+
 ## 2.9.0 — 2026-09-30
 
 Cline no longer takes `brgr run --model`; it runs its configured model, as

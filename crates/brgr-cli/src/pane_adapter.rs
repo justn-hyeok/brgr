@@ -28,9 +28,10 @@ use brgr_runner::{
     PermissionArgv, ProbeSpec, ResultSource, ResultSpec,
 };
 use brgr_store::Store;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{LaunchEnvelope, Paths, cli::PaneRunArgs};
+use crate::{LaunchEnvelope, Paths, cli::PaneRunArgs, write_json_atomic};
 
 /// How often the agent's state is read.
 const POLL: Duration = Duration::from_secs(1);
@@ -40,6 +41,9 @@ const REPORT_GRACE: Duration = Duration::from_secs(15);
 /// How long a freshly split pane may take to show its shell prompt. Until it
 /// does, Herdr refuses to start an agent there (`agent_pane_busy`).
 const SHELL_READY: Duration = Duration::from_secs(20);
+/// How long an agent Herdr never showed working may sit idle without a report
+/// before it is reminded, as one that was seen working is after `REPORT_GRACE`.
+const UNSEEN_WORK_GRACE: Duration = Duration::from_mins(1);
 const SHELL_POLL: Duration = Duration::from_millis(250);
 
 /// Whether a task should run in pane mode: inside Herdr, with a harness that
@@ -176,6 +180,15 @@ pub(crate) fn run_pane_adapter(paths: &Paths, run: &PaneRunArgs) -> Result<()> {
     let _ = fs::remove_file(&report);
 
     let pane = herdr.open_pane(&caller, &run.workspace)?;
+    let receipt = paths.pane_receipt(run.task, run.revision);
+    write_json_atomic(
+        &receipt,
+        &PaneReceipt {
+            pane: pane.clone(),
+            binary: PathBuf::from(&herdr.binary),
+            session: herdr.session.clone(),
+        },
+    )?;
     eprintln!("brgr pane mode · {} agent {name} in pane {pane}", run.kind);
     let mut notices = Notices {
         paths,
@@ -205,6 +218,7 @@ pub(crate) fn run_pane_adapter(paths: &Paths, run: &PaneRunArgs) -> Result<()> {
     if !run.keep_pane {
         let _ = herdr.call(&["pane", "close", &pane]);
     }
+    let _ = fs::remove_file(receipt);
     finished
 }
 
@@ -296,6 +310,7 @@ fn drive(
         .map_err(|failure| anyhow::anyhow!("Herdr did not accept the prompt: {failure}"))?;
     eprintln!("brgr pane mode · prompted: {}", first_line(objective));
 
+    let prompted = Instant::now();
     let mut worked = false;
     let mut blocked = false;
     let mut reminded = false;
@@ -319,10 +334,12 @@ fn drive(
                 }
                 idle_since = None;
             }
-            "idle" | "done" if worked => {
-                if report.is_file() {
-                    return Ok(());
-                }
+            // The report is the completion signal. The runner removed any old
+            // one before starting, and Herdr may never have shown this agent
+            // working: Cursor went straight from unknown to idle once it had
+            // finished between two polls.
+            "idle" | "done" if report.is_file() => return Ok(()),
+            "idle" | "done" if worked || prompted.elapsed() >= UNSEEN_WORK_GRACE => {
                 let since = *idle_since.get_or_insert_with(Instant::now);
                 if since.elapsed() >= REPORT_GRACE {
                     if reminded {
@@ -460,6 +477,43 @@ impl std::fmt::Display for HerdrFailure {
             Self::Code(code, message) => write!(formatter, "{code}: {message}"),
             Self::Other(message) => formatter.write_str(message),
         }
+    }
+}
+
+/// Records the pane a run opened until the run closes it. Cancellation kills
+/// the runner before it can, so the supervisor closes whatever is still
+/// recorded once the attempt is over.
+#[derive(Serialize, Deserialize)]
+struct PaneReceipt {
+    pane: String,
+    binary: PathBuf,
+    session: Option<String>,
+}
+
+/// Closes the pane a pane-mode run left open when it was stopped — cancelled,
+/// out of time, or killed — and forgets it. A run asked to keep its pane keeps
+/// it. Best effort: the task is over either way.
+pub(crate) fn close_leftover_pane(paths: &Paths, task: TaskId, revision: u32, keep_pane: bool) {
+    let path = paths.pane_receipt(task, revision);
+    let Some(receipt) = fs::read(&path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<PaneReceipt>(&bytes).ok())
+    else {
+        return;
+    };
+    let _ = fs::remove_file(&path);
+    if keep_pane {
+        return;
+    }
+    let herdr = Herdr {
+        binary: receipt.binary.into_os_string(),
+        session: receipt.session,
+    };
+    if herdr.call(&["pane", "close", &receipt.pane]).is_ok() {
+        eprintln!(
+            "brgr pane mode · closed pane {} left by a stopped run",
+            receipt.pane
+        );
     }
 }
 

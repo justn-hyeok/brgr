@@ -92,6 +92,11 @@ impl Paths {
         self.runs.join(format!("{task}.pid"))
     }
 
+    /// The Herdr pane a pane-mode run opened, while that run owns it.
+    fn pane_receipt(&self, task: TaskId, revision: u32) -> PathBuf {
+        self.runs.join(format!("{task}-r{revision}.pane.json"))
+    }
+
     fn supervisor(&self, task: TaskId) -> PathBuf {
         self.runs.join(format!("{task}.supervisor.json"))
     }
