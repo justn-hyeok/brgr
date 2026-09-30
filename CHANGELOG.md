@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+Cline no longer takes `brgr run --model`; it runs its configured model, as
+Devin does. Cline documents `--model` as applying to one session, but Cline
+3.0.65 saved an unknown name as its provider default: every later Cline run,
+inside brgr or not, failed with "model not found" until the setting was fixed
+by hand. brgr does not change a CLI's own configuration, so it no longer passes
+a model to Cline at all. A task that asks for one is refused before it runs.
+Re-register Cline to pick up the change.
+
 ## 2.8.0 — 2026-09-30
 
 `brgr prune` now deletes a task branch when every commit on it also lives on

@@ -356,16 +356,17 @@ pub(crate) const RECIPES: &[Recipe] = &[
             "--thinking <level>",
         ],
         argv: &["${input.prompt}"],
-        catalog: Some((&[], Catalog::CliValidated)),
-        model_argv: &["--model", "${route.model}"],
         effort_argv: &["--thinking", "${route.effort}"],
         env_allow: &BASE_ENV,
         capabilities: &[
             PROCESS_CAPS[0],
             PROCESS_CAPS[1],
-            // Cline has no model list, but it refuses a malformed or unknown
-            // `provider/model` ("model not found") before any paid request.
-            ("model_select", Cap::Supported("--model")),
+            // Cline's `--model` is documented as per session, but Cline 3.0.65
+            // saved an unknown name as the provider's default: every later
+            // run, with or without brgr, failed "model not found" until the
+            // setting was restored by hand. brgr never changes a CLI's own
+            // configuration, so Cline runs its configured model only.
+            ("model_select", Cap::Unsupported("configured_default_only")),
             ("effort_select", Cap::Supported("--thinking")),
         ],
         full: Some(&["--auto-approve", "true"]),

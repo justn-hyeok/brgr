@@ -1243,11 +1243,14 @@ mod tests {
             "-p, --plan --auto-approve <boolean> -m, --model <model-id> --thinking <level>",
         )
         .unwrap();
-        assert_eq!(cline.launch.model_argv, ["--model", "${route.model}"]);
-        registry
-            .preflight_model(&cline, Some("anthropic/claude-haiku-4-5"))
-            .await
-            .unwrap();
+        // Cline would save the name as its own default, so brgr never passes one.
+        assert!(cline.launch.model_argv.is_empty());
+        assert!(matches!(
+            registry
+                .preflight_model(&cline, Some("anthropic/claude-haiku-4-5"))
+                .await,
+            Err(RegistryError::ModelCatalogMissing(_))
+        ));
     }
 
     #[tokio::test]
