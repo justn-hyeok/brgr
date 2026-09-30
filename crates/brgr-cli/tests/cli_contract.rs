@@ -3,7 +3,7 @@ use std::{
     io::Write as _,
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
     thread,
     time::{Duration, Instant},
 };
@@ -914,10 +914,19 @@ case "$1 $2" in
     echo '{"result":{"agent":{"agent":"claude","agent_status":"idle","pane_id":"w9:p2"}}}';;
   'agent prompt')
     report=$(printf '%s\n' "$4" | /usr/bin/grep -E '^/.*\.md$' | /usr/bin/tail -1)
+    if [ -e "$d/hang" ]; then
+      echo working > "$d/state.hang"
+      echo '{"result":{"type":"ok"}}'
+      exit 0
+    fi
     printf '%s' 'PANE_REPORT_OK' > "$report"
-    echo working > "$d/state"
+    if [ -e "$d/unseen" ]; then echo idle > "$d/state"; else echo working > "$d/state"; fi
     echo '{"result":{"type":"ok"}}';;
   'agent get')
+    if [ -e "$d/state.hang" ]; then
+      printf '{"result":{"agent":{"agent":"claude","agent_status":"working","pane_id":"w9:p2"}}}\n'
+      exit 0
+    fi
     s=$(/bin/cat "$d/state")
     printf '{"result":{"agent":{"agent":"claude","agent_status":"%s","pane_id":"w9:p2"}}}\n' "$s"
     if [ "$s" = working ]; then echo idle > "$d/state"; fi;;
@@ -1116,6 +1125,85 @@ fn pane_mode_keeps_an_effort_the_interactive_command_cannot_take() {
     assert!(fixture.state("calls.log").contains("pane split"));
     assert!(fixture.state("start-args").contains("--kind\nopencode"));
     assert!(fixture.state("start-args").contains("--auto"));
+}
+
+/// Herdr may never show an agent working: Cursor went from unknown straight to
+/// idle once it had finished between two polls. The report is what completes
+/// the run, so it must not wait for a working state it will never see.
+#[test]
+fn pane_mode_completes_on_the_report_without_ever_seeing_work() {
+    let fixture = pane_fixture();
+    fs::create_dir_all(&fixture.state).unwrap();
+    fs::write(fixture.state.join("unseen"), "").unwrap();
+    let started = Instant::now();
+    let ran = fixture.run(&[]);
+    assert_eq!(ran["outcome"], "candidate", "{ran}");
+    assert!(
+        started.elapsed() < Duration::from_secs(30),
+        "{:?}",
+        started.elapsed()
+    );
+}
+
+/// Cancelling a pane-mode task kills its runner before the runner can close
+/// its pane, so the supervisor closes the pane the runner recorded.
+#[test]
+fn cancelling_a_pane_mode_task_closes_its_pane() {
+    let fixture = pane_fixture();
+    fs::create_dir_all(&fixture.state).unwrap();
+    fs::write(fixture.state.join("hang"), "").unwrap();
+    let mut command = Command::new(brgr());
+    command
+        .arg("--home")
+        .arg(&fixture.home)
+        .arg("--json")
+        .args(["run", "Explain the build", "--harness", "local.claude-code"])
+        .arg("--workspace")
+        .arg(&fixture.workspace)
+        .arg("--foreground")
+        .env_remove("CODEX_THREAD_ID")
+        .env("BRGR_SESSION_ID", "fixture-session")
+        .env("BRGR_OWNER_ID", "codex:pane-test")
+        .env("HERDR_ENV", "1")
+        .env("HERDR_PANE_ID", "w9:p1")
+        .env("HERDR_BIN_PATH", &fixture.herdr)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let child = command.spawn().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !fixture.state("calls.log").contains("agent prompt") {
+        assert!(Instant::now() < deadline, "{}", fixture.state("calls.log"));
+        thread::sleep(Duration::from_millis(100));
+    }
+    let task = fs::read_dir(fixture.home.join("launches"))
+        .unwrap()
+        .find_map(|entry| {
+            let name = entry.unwrap().file_name().into_string().unwrap();
+            name.strip_suffix(".json").map(str::to_owned)
+        })
+        .unwrap();
+    json_output(&run(
+        &fixture.home,
+        &["cancel", &task],
+        &[("BRGR_OWNER_ID", "codex:pane-test")],
+    ));
+    let output = child.wait_with_output().unwrap();
+    let ran: Value = serde_json::from_slice(&output.stdout).unwrap();
+    // Like every Herdr-backed run, a stopped one is recorded lost rather than
+    // cancelled: its agent was outside the runner's process group.
+    assert_eq!(ran["outcome"], "lost", "{ran}");
+    assert_eq!(
+        fixture.state("closed").trim(),
+        "closed",
+        "{}",
+        fixture.state("calls.log")
+    );
+    let receipts: Vec<_> = fs::read_dir(fixture.home.join("runs"))
+        .unwrap()
+        .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
+        .filter(|name| name.ends_with(".pane.json"))
+        .collect();
+    assert!(receipts.is_empty(), "{receipts:?}");
 }
 
 /// A run that fails still closes the pane it opened, and says why it failed.

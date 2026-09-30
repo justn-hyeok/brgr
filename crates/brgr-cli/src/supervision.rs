@@ -66,6 +66,7 @@ pub(crate) async fn supervise(paths: &Paths, launch_path: &Path, json_output: bo
     // for its original live supervisor and remain unfinished forever.
     supervisor.reconcile_after_restart(|attempt| observe_attempt(paths, attempt))?;
     write_json_atomic(&paths.supervisor(launch.spec.task_id), &receipt)?;
+    let (task_id, revision) = (launch.spec.task_id, launch.spec.revision);
     let result = supervisor
         .run_fresh_controlled(
             launch.spec,
@@ -74,7 +75,11 @@ pub(crate) async fn supervise(paths: &Paths, launch_path: &Path, json_output: bo
             Some(&pid_path),
             Some(&receipt.identity),
         )
-        .await?;
+        .await;
+    if launch.pane_mode {
+        crate::pane_adapter::close_leftover_pane(paths, task_id, revision, launch.keep_pane);
+    }
+    let result = result?;
     let _ = fs::remove_file(cancel_path);
     let _ = fs::remove_file(paths.supervisor(result.task_id));
     print_value(&serde_json::to_value(result)?, json_output);
