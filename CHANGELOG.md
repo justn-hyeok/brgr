@@ -10,6 +10,33 @@ by hand. brgr does not change a CLI's own configuration, so it no longer passes
 a model to Cline at all. A task that asks for one is refused before it runs.
 Re-register Cline to pick up the change.
 
+Pane mode now covers Cursor, Devin, Cline, OMP, and OpenCode as well as Claude
+Code: inside Herdr each runs as its own interactive session in a pane beside
+the caller. Every one was started in a real Herdr pane and completed a task,
+with its report sealed and its pane closed, before its recipe gained the
+launch. Cursor starts with `--trust` and Devin with
+`--respect-workspace-trust false`, as their print modes already do. OpenCode's
+TUI takes no effort flag, so an OpenCode task with `--effort` runs headless
+rather than without the effort; a new manifest field,
+`launch.interactive.effort_print_only`, records that. GJC and Command Code are
+not agents Herdr recognizes and stay headless. Re-register a harness to pick
+up its interactive launch.
+
+A pane-mode agent that starts on a screen Herdr cannot classify — Cline opens
+with a product notice waiting for a key — no longer fails the run after a
+minute. The owner gets a question naming the pane, and the run waits for the
+agent to be ready.
+
+A question a pane-mode run sends its owner is now withdrawn once the agent is
+ready again. It used to stay unanswered after someone dealt with the prompt in
+the pane, and brgr then failed the finished task with "question(s) remain
+unanswered". Only the run that asked a question can withdraw it, and a
+withdrawn question is no longer pushed to the owner.
+
+Harness registration's scratch run may now take three minutes instead of one.
+A free model behind a queue took 89 seconds to answer a one-line prompt, so a
+working harness could not be registered.
+
 ## 2.8.0 — 2026-09-30
 
 `brgr prune` now deletes a task branch when every commit on it also lives on

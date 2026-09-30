@@ -853,6 +853,17 @@ esac
 echo CLAUDE_PRINT_MODE_OK
 "#;
 
+/// An `opencode` stand-in: its interactive command takes no effort flag, which
+/// only `opencode run` accepts.
+const OPENCODE_FIXTURE: &str = r#"#!/bin/sh
+case "$1 $2" in
+  '--version '*) echo '1.18.0'; exit 0;;
+  'run --help') printf '%s\n' '--model' '--variant' '--agent' '--auto'; exit 0;;
+  'models '*) echo 'opencode/big-pickle'; exit 0;;
+esac
+echo OPENCODE_PRINT_MODE_OK
+"#;
+
 /// A Herdr stand-in. It opens a pane, starts an agent, and — standing in for
 /// the agent too — writes the report named in the prompt, then goes from
 /// working to idle. Every call and the pane's environment are recorded beside
@@ -881,6 +892,18 @@ case "$1 $2" in
         echo '{"error":{"code":"agent_pane_busy","message":"agent target pane w9:p2 is not an available shell"}}' >&2
         exit 1
       fi
+    fi
+    if [ -e "$d/start-blocked" ]; then
+      /bin/rm "$d/start-blocked"
+      echo idle > "$d/state"
+      echo '{"error":{"code":"agent_not_ready","message":"agent is blocked during startup"}}' >&2
+      exit 1
+    fi
+    if [ -e "$d/start-timeout" ]; then
+      /bin/rm "$d/start-timeout"
+      echo idle > "$d/state"
+      echo '{"error":{"code":"timeout","message":"timed out waiting for agent startup"}}' >&2
+      exit 1
     fi
     if [ -e "$d/start-fails" ]; then
       echo '{"error":{"code":"agent_kind_unknown","message":"no such agent kind"}}' >&2
@@ -918,11 +941,16 @@ fn pane_fixture() -> PaneFixture {
     let bin = temp.path().join("bin");
     fs::create_dir_all(&workspace).unwrap();
     fs::create_dir_all(&bin).unwrap();
-    for (name, body) in [("claude", CLAUDE_FIXTURE), ("herdr", PANE_HERDR_FIXTURE)] {
+    for (name, body) in [
+        ("claude", CLAUDE_FIXTURE),
+        ("opencode", OPENCODE_FIXTURE),
+        ("herdr", PANE_HERDR_FIXTURE),
+    ] {
         fs::write(bin.join(name), body).unwrap();
         fs::set_permissions(bin.join(name), fs::Permissions::from_mode(0o700)).unwrap();
     }
     add_fixture(&home, &bin.join("claude"), &temp.path().join("scratch"));
+    add_fixture(&home, &bin.join("opencode"), &temp.path().join("scratch"));
     PaneFixture {
         home,
         workspace,
@@ -934,12 +962,16 @@ fn pane_fixture() -> PaneFixture {
 
 impl PaneFixture {
     fn run(&self, extra: &[&str]) -> Value {
+        self.run_on("local.claude-code", extra)
+    }
+
+    fn run_on(&self, harness: &str, extra: &[&str]) -> Value {
         let herdr = self.herdr.to_str().unwrap();
         let mut args = vec![
             "run",
             "Explain the build",
             "--harness",
-            "local.claude-code",
+            harness,
             "--workspace",
             self.workspace.to_str().unwrap(),
             "--foreground",
@@ -1018,6 +1050,72 @@ fn pane_mode_waits_for_the_new_pane_shell() {
             .count(),
         4
     );
+}
+
+/// An agent that starts but stops on a screen Herdr cannot classify — Cline's
+/// product notice — times out as "not ready" rather than "blocked". The run
+/// asks its owner to look at the pane and waits, instead of failing.
+#[test]
+fn pane_mode_asks_the_owner_about_an_unrecognized_startup_screen() {
+    let fixture = pane_fixture();
+    fs::create_dir_all(&fixture.state).unwrap();
+    fs::write(fixture.state.join("start-timeout"), "").unwrap();
+    let ran = fixture.run(&[]);
+    assert_eq!(ran["outcome"], "candidate", "{ran}");
+    let task = ran["task_id"].as_str().unwrap();
+    let messages = json_output(&run(
+        &fixture.home,
+        &["message", "list", task, "--for", "owner"],
+        &[("BRGR_OWNER_ID", "codex:pane-test")],
+    ));
+    let body = messages[0]["body"].as_str().unwrap_or_default();
+    assert!(body.contains("does not recognize"), "{messages}");
+    assert_eq!(messages[0]["kind"], "question", "{messages}");
+}
+
+/// An approval at startup — a folder trust or MCP prompt — is the owner's to
+/// answer in the pane. Once the agent is ready the run withdraws its question,
+/// so a finished result is not held back by one nobody needed to reply to.
+#[test]
+fn pane_mode_withdraws_its_question_once_the_agent_is_unblocked() {
+    let fixture = pane_fixture();
+    fs::create_dir_all(&fixture.state).unwrap();
+    fs::write(fixture.state.join("start-blocked"), "").unwrap();
+    let ran = fixture.run(&[]);
+    assert_eq!(ran["outcome"], "candidate", "{ran}");
+    let task = ran["task_id"].as_str().unwrap();
+    let messages = json_output(&run(
+        &fixture.home,
+        &["message", "list", task, "--for", "owner"],
+        &[("BRGR_OWNER_ID", "codex:pane-test")],
+    ));
+    assert!(
+        messages[0]["body"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("waiting for an approval"),
+        "{messages}"
+    );
+}
+
+/// The `opencode` TUI has no effort flag. A task that asks for an effort runs
+/// headless, where the effort is honoured, rather than in a pane without it.
+#[test]
+fn pane_mode_keeps_an_effort_the_interactive_command_cannot_take() {
+    let fixture = pane_fixture();
+    let headless = fixture.run_on("local.opencode", &["--effort", "high"]);
+    assert_eq!(headless["outcome"], "candidate", "{headless}");
+    assert!(
+        !fixture.state("calls.log").contains("pane split"),
+        "a pane was opened for an effort OpenCode's TUI cannot take: {}",
+        fixture.state("calls.log")
+    );
+
+    let paned = fixture.run_on("local.opencode", &[]);
+    assert_eq!(paned["outcome"], "candidate", "{paned}");
+    assert!(fixture.state("calls.log").contains("pane split"));
+    assert!(fixture.state("start-args").contains("--kind\nopencode"));
+    assert!(fixture.state("start-args").contains("--auto"));
 }
 
 /// A run that fails still closes the pane it opened, and says why it failed.

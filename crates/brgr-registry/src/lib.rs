@@ -86,6 +86,10 @@ use tempfile::NamedTempFile;
 /// executables, a parallel build) reported a working harness as timed out and
 /// refused the run.
 const PROBE_DEADLINE: Duration = Duration::from_secs(15);
+/// How long the registration scratch run may take. A free model behind a
+/// queue took 89 seconds to answer a one-line prompt, past the old minute, so
+/// a working harness could not be registered.
+const SCRATCH_DEADLINE: Duration = Duration::from_mins(3);
 
 #[derive(Clone, Debug)]
 pub struct Registry {
@@ -391,7 +395,7 @@ impl Registry {
                 model,
                 effort,
                 permission: None,
-                deadline: Duration::from_mins(1),
+                deadline: SCRATCH_DEADLINE,
                 cancel_path: None,
                 pid_path: None,
             },
@@ -1251,6 +1255,66 @@ mod tests {
                 .await,
             Err(RegistryError::ModelCatalogMissing(_))
         ));
+    }
+
+    /// Each of these was started in a real Herdr pane and completed a task
+    /// before its recipe gained an interactive launch.
+    #[test]
+    fn verified_harnesses_declare_their_interactive_launch() {
+        for (name, help, kind, argv, effort_print_only) in [
+            (
+                "claude",
+                "-p, --print --output-format <format> --model <model> --permission-mode <mode> --effort <level>",
+                "claude",
+                &[][..],
+                false,
+            ),
+            (
+                "cursor-agent",
+                "-p, --print --output-format <format> --model <model> --trust --mode <mode> -f, --force",
+                "cursor",
+                &["--trust"][..],
+                false,
+            ),
+            (
+                "devin",
+                "--prompt-file <FILE> -p, --print --permission-mode <PERMISSION_MODE> --respect-workspace-trust [<RESPECT_WORKSPACE_TRUST>]",
+                "devin",
+                &["--respect-workspace-trust", "false"][..],
+                false,
+            ),
+            (
+                "cline",
+                "-p, --plan --auto-approve <boolean> -m, --model <model-id> --thinking <level>",
+                "cline",
+                &[][..],
+                false,
+            ),
+            (
+                "omp",
+                "-p, --print --mode=<value> --no-session --no-prewalk --no-extensions --no-title --model=<value> --thinking=<value>",
+                "omp",
+                &[][..],
+                false,
+            ),
+            (
+                "opencode",
+                "--model --variant --agent --auto",
+                "opencode",
+                &[][..],
+                true,
+            ),
+        ] {
+            let manifest = generate_manifest(name, PathBuf::from("/bin/echo"), help)
+                .unwrap_or_else(|error| panic!("{name}: {error}"));
+            let interactive = manifest
+                .launch
+                .interactive
+                .unwrap_or_else(|| panic!("{name} has no interactive launch"));
+            assert_eq!(interactive.herdr_kind, kind, "{name}");
+            assert_eq!(interactive.argv, argv, "{name}");
+            assert_eq!(interactive.effort_print_only, effort_print_only, "{name}");
+        }
     }
 
     #[tokio::test]

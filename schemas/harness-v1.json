@@ -48,7 +48,8 @@
           "required": ["herdr_kind"],
           "properties": {
             "herdr_kind": { "type": "string", "pattern": "^[a-z0-9-]+$" },
-            "argv": { "$ref": "#/$defs/argv" }
+            "argv": { "$ref": "#/$defs/argv" },
+            "effort_print_only": { "type": "boolean" }
           }
         },
         "permission_argv": {

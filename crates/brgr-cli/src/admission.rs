@@ -274,11 +274,11 @@ fn bind_owner_session(store: &Store, owner: &OwnerId, session: Option<&str>) -> 
 fn pane_mode_and_placement(
     paths: &Paths,
     activated: &HarnessManifest,
-    permission: Option<PermissionLevel>,
+    spec: &TaskSpec,
     execution: &ExecutionDisposition,
 ) -> Result<(bool, Option<WorkerPlacement>)> {
     let pane_mode = !Config::load(&paths.config)?.herdr.prefer_print_mode
-        && crate::pane_adapter::applies(activated, permission);
+        && crate::pane_adapter::applies(activated, spec);
     let placement = if pane_mode {
         None
     } else {
@@ -304,7 +304,7 @@ pub(crate) async fn start_task(
         bail!("--capture-diff requires a Git workspace before task admission");
     }
     let (pane_mode, plugin_placement) =
-        pane_mode_and_placement(paths, activated, spec.permission, &options.execution)?;
+        pane_mode_and_placement(paths, activated, &spec, &options.execution)?;
     let admission = workspace::acquire_admission_lock(&paths.worktrees, options.source_workspace)?;
     let store = Store::open(&paths.store)?;
     if let Some((parent_task, parent_attempt)) = options.parent {

@@ -90,6 +90,10 @@ pub struct InteractiveSpec {
     /// same ones the print-mode launch uses.
     #[serde(default)]
     pub argv: Vec<String>,
+    /// The effort arguments work only in print mode. A task that asks for an
+    /// effort then runs headless rather than silently without it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub effort_print_only: bool,
 }
 
 /// Per-level arguments. `Some(vec![])` is a level the harness honours with no

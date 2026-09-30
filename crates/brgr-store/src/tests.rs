@@ -1927,6 +1927,24 @@ fn a_question_notice_is_owed_until_answered_once_per_session() {
     );
 }
 
+/// A module added without being listed in `SCANNED` would silently stop being
+/// covered, which is the failure mode the write-path guards exist to prevent.
+fn assert_every_module_is_scanned() {
+    let declared: Vec<&str> = include_str!("lib.rs")
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("mod "))
+        .filter_map(|rest| rest.strip_suffix(';'))
+        .collect();
+    for module in &declared {
+        assert!(
+            SCANNED
+                .iter()
+                .any(|(name, _)| *name == format!("{module}.rs")),
+            "module {module} is not scanned by the write-path guards; add it to SCANNED"
+        );
+    }
+}
+
 /// Every write path must have a recorded decision about waiting for a lock.
 ///
 /// The rule this encodes: retry a write a running attempt depends on, do not
@@ -1963,6 +1981,8 @@ fn every_write_path_has_a_recorded_retry_decision() {
         ("record_cancellation_intents", false),
         ("post_message", false),
         ("acknowledge_message", false),
+        // Pane mode withdraws its question; losing that fails a finished run.
+        ("withdraw_question_once", true),
         // Notification delivery carries its own claim and lease protocol, which
         // already re-drives a lost step. Left alone deliberately.
         ("register_owner_surface", false),
@@ -1974,21 +1994,7 @@ fn every_write_path_has_a_recorded_retry_decision() {
         ("record_question_notice", false),
     ];
 
-    // A module added without being listed here would silently stop being
-    // covered, which is the failure mode these guards exist to prevent.
-    let declared: Vec<&str> = include_str!("lib.rs")
-        .lines()
-        .filter_map(|line| line.trim().strip_prefix("mod "))
-        .filter_map(|rest| rest.strip_suffix(';'))
-        .collect();
-    for module in &declared {
-        assert!(
-            SCANNED
-                .iter()
-                .any(|(name, _)| *name == format!("{module}.rs")),
-            "module {module} is not scanned by the write-path guards; add it to SCANNED"
-        );
-    }
+    assert_every_module_is_scanned();
 
     let sources = SCANNED;
     // Assembled at runtime so this test's own text is not a match.
@@ -2226,5 +2232,89 @@ fn an_acknowledged_failure_without_a_retry_is_settled() {
             .revision_settlement(task.task_id, task.revision)
             .unwrap(),
         Settlement::Acknowledged(TerminalOutcome::Lost)
+    );
+}
+
+/// A worker may withdraw its own question once what it asked about resolved:
+/// the question stops holding the result back and stops being pushed. Nobody
+/// else's message can be withdrawn this way.
+#[test]
+fn a_withdrawn_question_no_longer_holds_the_result_or_gets_pushed() {
+    let root = TempDir::new().unwrap();
+    let mut store = Store::open(root.path()).unwrap();
+    let task = task();
+    store.record_task(&task, "withdraw").unwrap();
+    let attempt_id = AttemptId::new();
+    store
+        .claim_attempt(task.task_id, task.revision, attempt_id)
+        .unwrap();
+    store
+        .set_attempt_state(attempt_id, AttemptState::Starting)
+        .unwrap();
+    store
+        .set_attempt_state(attempt_id, AttemptState::Running)
+        .unwrap();
+    let epoch = store.rebind_owner(&task.owner_id, "session-a").unwrap();
+    store
+        .register_owner_surface(
+            &task.owner_id,
+            "session-a",
+            epoch,
+            "w1:p1",
+            None,
+            "/bin/herdr",
+        )
+        .unwrap();
+    let draft = |direction, kind| MessageDraft {
+        message_id: uuid::Uuid::new_v4().to_string(),
+        task_id: task.task_id,
+        attempt_id,
+        direction,
+        kind,
+        body: "Look at pane w1:p2".to_owned(),
+        in_reply_to: None,
+    };
+    let question = draft(MessageDirection::WorkerToOwner, MessageKind::Question);
+    store.post_message(&question).unwrap();
+    assert_eq!(
+        store.unsettled_questions(task.task_id, attempt_id).unwrap(),
+        1
+    );
+    assert_eq!(
+        store.pending_question_notices(task.task_id).unwrap().len(),
+        1
+    );
+
+    // Only this attempt's own question.
+    assert!(
+        store
+            .withdraw_question(task.task_id, AttemptId::new(), &question.message_id)
+            .is_err()
+    );
+    let note = draft(MessageDirection::WorkerToOwner, MessageKind::Note);
+    store.post_message(&note).unwrap();
+    assert!(
+        store
+            .withdraw_question(task.task_id, attempt_id, &note.message_id)
+            .is_err(),
+        "only a question can be withdrawn"
+    );
+
+    store
+        .withdraw_question(task.task_id, attempt_id, &question.message_id)
+        .unwrap();
+    // Idempotent.
+    store
+        .withdraw_question(task.task_id, attempt_id, &question.message_id)
+        .unwrap();
+    assert_eq!(
+        store.unsettled_questions(task.task_id, attempt_id).unwrap(),
+        0
+    );
+    assert!(
+        store
+            .pending_question_notices(task.task_id)
+            .unwrap()
+            .is_empty()
     );
 }

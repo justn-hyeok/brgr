@@ -10,6 +10,16 @@ use brgr_runner::{
 
 use crate::{RegistryError, validate_harness_id};
 
+/// How a recipe runs as its own TUI in a Herdr pane.
+pub(crate) struct Interactive {
+    /// The agent kind `herdr agent start` recognizes; Herdr runs the CLI of
+    /// that name.
+    pub(crate) kind: &'static str,
+    /// Arguments before the permission, model, and effort ones.
+    pub(crate) argv: &'static [&'static str],
+    pub(crate) effort_print_only: bool,
+}
+
 /// A harness brgr recognizes by name, and the process manifest it drafts.
 ///
 /// Data rather than one function per harness: the seven drafts were ~500 lines
@@ -42,7 +52,7 @@ pub(crate) struct Recipe {
     pub(crate) read_only: Option<&'static [&'static str]>,
     /// The Herdr agent kind and leading arguments for running it as its own
     /// TUI in a pane. Set only after a live run in a Herdr pane.
-    pub(crate) interactive: Option<(&'static str, &'static [&'static str])>,
+    pub(crate) interactive: Option<Interactive>,
 }
 
 #[derive(Clone, Copy)]
@@ -171,6 +181,11 @@ pub(crate) const RECIPES: &[Recipe] = &[
         full: Some(&["--approval-mode=yolo"]),
         edits: Some(&["--approval-mode=write"]),
         read_only: None,
+        interactive: Some(Interactive {
+            kind: "omp",
+            argv: &[],
+            effort_print_only: false,
+        }),
         ..GENERIC
     },
     Recipe {
@@ -203,6 +218,11 @@ pub(crate) const RECIPES: &[Recipe] = &[
         full: Some(&["--force"]),
         edits: Some(&[]),
         read_only: Some(&["--mode", "plan"]),
+        interactive: Some(Interactive {
+            kind: "cursor",
+            argv: &["--trust"],
+            effort_print_only: false,
+        }),
         ..GENERIC
     },
     Recipe {
@@ -271,6 +291,11 @@ pub(crate) const RECIPES: &[Recipe] = &[
         full: Some(&["--permission-mode", "dangerous"]),
         edits: Some(&["--permission-mode", "accept-edits"]),
         read_only: Some(&["--permission-mode", "auto"]),
+        interactive: Some(Interactive {
+            kind: "devin",
+            argv: &["--respect-workspace-trust", "false"],
+            effort_print_only: false,
+        }),
         ..GENERIC
     },
     Recipe {
@@ -343,7 +368,11 @@ pub(crate) const RECIPES: &[Recipe] = &[
         full: Some(&["--permission-mode", "bypassPermissions"]),
         edits: Some(&["--permission-mode", "acceptEdits"]),
         read_only: Some(&["--permission-mode", "plan"]),
-        interactive: Some(("claude", &[])),
+        interactive: Some(Interactive {
+            kind: "claude",
+            argv: &[],
+            effort_print_only: false,
+        }),
         ..GENERIC
     },
     Recipe {
@@ -372,6 +401,11 @@ pub(crate) const RECIPES: &[Recipe] = &[
         full: Some(&["--auto-approve", "true"]),
         edits: None,
         read_only: Some(&["--plan"]),
+        interactive: Some(Interactive {
+            kind: "cline",
+            argv: &[],
+            effort_print_only: false,
+        }),
         ..GENERIC
     },
     Recipe {
@@ -393,6 +427,11 @@ pub(crate) const RECIPES: &[Recipe] = &[
         full: Some(&["--auto"]),
         edits: None,
         read_only: Some(&["--agent", "plan"]),
+        interactive: Some(Interactive {
+            kind: "opencode",
+            argv: &[],
+            effort_print_only: true,
+        }),
         ..GENERIC
     },
 ];
@@ -478,10 +517,14 @@ pub(crate) fn draft(
                 edits: recipe.edits.map(strings),
                 read_only: recipe.read_only.map(strings),
             },
-            interactive: recipe.interactive.map(|(kind, argv)| InteractiveSpec {
-                herdr_kind: kind.to_owned(),
-                argv: strings(argv),
-            }),
+            interactive: recipe
+                .interactive
+                .as_ref()
+                .map(|interactive| InteractiveSpec {
+                    herdr_kind: interactive.kind.to_owned(),
+                    argv: strings(interactive.argv),
+                    effort_print_only: interactive.effort_print_only,
+                }),
         },
         result: ResultSpec {
             source: match recipe.source {

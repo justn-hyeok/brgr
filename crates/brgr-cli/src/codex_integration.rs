@@ -56,14 +56,16 @@ arbitrary commands. `brgr config set-max-permission LEVEL` caps every task. A
 request above the cap, or above the parent task's level, is refused rather
 than lowered; do not work around the refusal by dropping the flag.
 
-Inside Herdr, a harness that supports it (Claude Code today) runs as its own
-interactive session in a pane beside yours, so the user can watch it work.
-brgr opens and closes that pane; do not create or close it yourself. A
-`read-only` task, and every task after `brgr config set-pane-mode false`,
-runs headless instead. If the agent in that pane stops at an approval or
-question prompt, brgr sends you a question naming the pane. Read the prompt
-with `herdr agent read` or `herdr pane read`, then ask the user before
-answering it; never approve a prompt on the user's behalf.
+Inside Herdr, Claude Code, Cursor, Devin, Cline, OMP, and OpenCode run as
+their own interactive session in a pane beside yours, so the user can watch
+them work. brgr opens and closes that pane; do not create or close it yourself.
+A `read-only` task, an OpenCode task with `--effort` (its TUI cannot take one),
+and every task after `brgr config set-pane-mode false` run headless instead.
+If the agent in that pane stops at an approval or question prompt, or on a
+screen Herdr cannot classify, brgr sends you a question naming the pane. Read
+it with `herdr agent read` or `herdr pane read`, then ask the user before
+answering an approval; never approve a prompt on the user's behalf. Once the
+agent is ready again, brgr withdraws the question itself.
 In an ordinary Herdr pane, set `brgr config set-auto-worker-pane true` once to
 make detached `brgr run` open a brgr worker pane beside the exact caller.
 The brgr plugin Codex pane already uses this path. Set
