@@ -3,7 +3,7 @@ use rusqlite::{OptionalExtension as _, Transaction, params};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use super::{Store, StoreError};
+use super::{Store, StoreError, contention::retry_busy};
 
 const MAX_BODY_BYTES: usize = 8 * 1024;
 
@@ -294,6 +294,55 @@ impl Store {
         Ok(())
     }
 
+    /// Withdraws a question the worker itself sent, once the thing it asked
+    /// about resolved without an answer: a pane-mode agent that someone
+    /// unblocked in its pane. A withdrawn question no longer holds the result
+    /// back and is no longer pushed to the owner.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error unless `message_id` is a worker's question on this
+    /// attempt, or for a database failure.
+    pub fn withdraw_question(
+        &self,
+        task_id: TaskId,
+        attempt_id: AttemptId,
+        message_id: &str,
+    ) -> Result<(), StoreError> {
+        retry_busy(|| self.withdraw_question_once(task_id, attempt_id, message_id))
+    }
+
+    fn withdraw_question_once(
+        &self,
+        task_id: TaskId,
+        attempt_id: AttemptId,
+        message_id: &str,
+    ) -> Result<(), StoreError> {
+        let changed = self.connection.execute(
+            "INSERT OR IGNORE INTO withdrawn_questions (message_id)
+             SELECT message_id FROM task_messages WHERE message_id = ?1
+             AND task_id = ?2 AND attempt_id = ?3
+             AND kind = 'question' AND direction = 'worker_to_owner'",
+            params![message_id, task_id.to_string(), attempt_id.to_string()],
+        )?;
+        let withdrawn = changed == 1
+            || self
+                .connection
+                .query_row(
+                    "SELECT 1 FROM withdrawn_questions w JOIN task_messages q
+                     ON q.message_id = w.message_id
+                     WHERE w.message_id = ?1 AND q.task_id = ?2 AND q.attempt_id = ?3",
+                    params![message_id, task_id.to_string(), attempt_id.to_string()],
+                    |_| Ok(()),
+                )
+                .optional()?
+                .is_some();
+        if !withdrawn {
+            return Err(StoreError::TaskMessageNotFound(message_id.to_owned()));
+        }
+        Ok(())
+    }
+
     /// Counts questions without a reply on the same attempt. A reply is durable
     /// even if its recipient has not acknowledged it yet.
     ///
@@ -311,6 +360,9 @@ impl Store {
                AND NOT EXISTS (
                  SELECT 1 FROM task_messages r
                  WHERE r.in_reply_to = q.message_id AND r.kind = 'reply'
+               )
+               AND NOT EXISTS (
+                 SELECT 1 FROM withdrawn_questions w WHERE w.message_id = q.message_id
                )",
             params![task_id.to_string(), attempt_id.to_string()],
             |row| row.get(0),

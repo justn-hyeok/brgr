@@ -132,6 +132,10 @@ CREATE INDEX IF NOT EXISTS task_messages_inbox
 ON task_messages (task_id, attempt_id, direction, acknowledged);
 CREATE UNIQUE INDEX IF NOT EXISTS task_message_one_reply
 ON task_messages (in_reply_to) WHERE kind = 'reply';
+CREATE TABLE IF NOT EXISTS withdrawn_questions (
+    message_id TEXT PRIMARY KEY,
+    FOREIGN KEY (message_id) REFERENCES task_messages(message_id)
+);
 CREATE TABLE IF NOT EXISTS owner_surfaces (
     owner_id TEXT PRIMARY KEY,
     session_id TEXT NOT NULL,

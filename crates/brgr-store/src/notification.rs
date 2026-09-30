@@ -341,6 +341,9 @@ impl Store {
                  SELECT 1 FROM question_notices n
                  WHERE n.message_id = q.message_id AND n.session_id = b.session_id
                )
+               AND NOT EXISTS (
+                 SELECT 1 FROM withdrawn_questions w WHERE w.message_id = q.message_id
+               )
              ORDER BY q.rowid",
         )?;
         let rows = statement.query_map([task_id.to_string()], |row| {

@@ -122,6 +122,18 @@ native model observation, and none expose a verified effort observation.
 
 ## Standalone Codex and CLI
 
+### Pane mode
+
+Inside Herdr, Claude Code, Cursor, Devin, Cline, OMP, and OpenCode run in pane
+mode: the harness's own interactive session opens in a pane beside the caller,
+without taking focus, and closes when the task ends. brgr sends the prompt,
+seals the report the agent writes, and asks the owner to look at the pane when
+the agent stops at an approval or on a screen Herdr cannot classify; once the
+agent is ready again, brgr withdraws that question. `read-only` tasks, an
+OpenCode task with `--effort` (its TUI cannot take one), and every task after
+`brgr config set-pane-mode false` run headless. GJC and Command Code are not
+agents Herdr recognizes, so they always run headless.
+
 ### Recursive workers
 
 v2.2.1 can open the brgr-owned `worker` plugin pane for a detached run from

@@ -22,7 +22,7 @@ use std::{
 };
 
 use anyhow::{Context as _, Result, bail};
-use brgr_protocol::PermissionLevel;
+use brgr_protocol::{AttemptId, PermissionLevel, TaskId, TaskSpec};
 use brgr_runner::{
     ExecutionMode, HarnessManifest, LaunchSpec, MANIFEST_SCHEMA_V1, PROCESS_ADAPTER_V1,
     PermissionArgv, ProbeSpec, ResultSource, ResultSpec,
@@ -44,12 +44,19 @@ const SHELL_POLL: Duration = Duration::from_millis(250);
 
 /// Whether a task should run in pane mode: inside Herdr, with a harness that
 /// declares an interactive launch, and not read-only — an agent that may not
-/// write cannot write its report.
-pub(crate) fn applies(manifest: &HarnessManifest, permission: Option<PermissionLevel>) -> bool {
+/// write cannot write its report. A requested effort the interactive command
+/// cannot take keeps the task headless, where the effort is honoured.
+pub(crate) fn applies(manifest: &HarnessManifest, spec: &TaskSpec) -> bool {
     env::var("HERDR_ENV").as_deref() == Ok("1")
         && env::var_os("HERDR_PANE_ID").is_some_and(|pane| !pane.is_empty())
-        && manifest.launch.interactive.is_some()
-        && permission != Some(PermissionLevel::ReadOnly)
+        && manifest
+            .launch
+            .interactive
+            .as_ref()
+            .is_some_and(|interactive| {
+                !(interactive.effort_print_only && spec.route.requested_effort.is_some())
+            })
+        && spec.permission != Some(PermissionLevel::ReadOnly)
 }
 
 /// The process manifest the supervisor runs in place of the harness itself.
@@ -170,7 +177,20 @@ pub(crate) fn run_pane_adapter(paths: &Paths, run: &PaneRunArgs) -> Result<()> {
 
     let pane = herdr.open_pane(&caller, &run.workspace)?;
     eprintln!("brgr pane mode · {} agent {name} in pane {pane}", run.kind);
-    let outcome = drive(&herdr, &name, &pane, run, &report, &spec.objective);
+    let mut notices = Notices {
+        paths,
+        task: run.task,
+        outstanding: Vec::new(),
+    };
+    let outcome = drive(
+        &herdr,
+        &name,
+        &pane,
+        run,
+        &report,
+        &spec.objective,
+        &mut notices,
+    );
     let finished = outcome.and_then(|()| {
         let bytes = read_report(&report, spec.artifact_contract.max_bytes)?;
         io::stdout().write_all(&bytes)?;
@@ -188,13 +208,14 @@ pub(crate) fn run_pane_adapter(paths: &Paths, run: &PaneRunArgs) -> Result<()> {
     finished
 }
 
-fn drive(
+/// Starts the agent in the pane, waiting out a slow shell and, through the
+/// owner, any screen that stops it before it is ready.
+fn start_agent(
     herdr: &Herdr,
     name: &str,
     pane: &str,
     run: &PaneRunArgs,
-    report: &Path,
-    objective: &str,
+    notices: &mut Notices<'_>,
 ) -> Result<()> {
     let mut start: Vec<String> = [
         "agent",
@@ -224,13 +245,45 @@ fn drive(
             // Startup stopped at an approval — a folder trust prompt, a new MCP
             // server. The owner answers it in the pane; the run waits.
             Err(HerdrFailure::Code(code, _)) if code == "agent_not_ready" => {
-                announce_blocked(&run.kind, pane, "while starting");
+                notices.blocked(&run.kind, pane, "while starting");
                 wait_ready(herdr, name)?;
+                notices.withdraw();
+                break;
+            }
+            // The agent is up but on a screen Herdr cannot classify, so it is
+            // neither ready nor blocked: Cline opens with a product notice that
+            // waits for a key. Only a person should dismiss it; the run waits.
+            Err(HerdrFailure::Code(code, _)) if code == "timeout" && herdr.status(name).is_ok() => {
+                notices.tell(
+                    &run.kind,
+                    pane,
+                    &format!(
+                        "The {} agent in Herdr pane {pane} started but is on a screen Herdr does \
+                         not recognize, such as a product notice or a first-run question. Look at \
+                         that pane and deal with it; the task continues once the agent is ready.",
+                        run.kind
+                    ),
+                );
+                wait_ready(herdr, name)?;
+                notices.withdraw();
                 break;
             }
             Err(failure) => bail!("Herdr could not start the {} agent: {failure}", run.kind),
         }
     }
+    Ok(())
+}
+
+fn drive(
+    herdr: &Herdr,
+    name: &str,
+    pane: &str,
+    run: &PaneRunArgs,
+    report: &Path,
+    objective: &str,
+    notices: &mut Notices<'_>,
+) -> Result<()> {
+    start_agent(herdr, name, pane, run, notices)?;
 
     let prompt = fs::read_to_string(&run.prompt_file)?;
     let instruction = format!(
@@ -248,15 +301,20 @@ fn drive(
     let mut reminded = false;
     let mut idle_since: Option<Instant> = None;
     loop {
-        match herdr.status(name)?.as_str() {
+        let status = herdr.status(name)?;
+        // Whatever stopped the agent was dealt with in the pane.
+        if blocked && status != "blocked" {
+            notices.withdraw();
+            blocked = false;
+        }
+        match status.as_str() {
             "working" => {
                 worked = true;
-                blocked = false;
                 idle_since = None;
             }
             "blocked" => {
                 if !blocked {
-                    announce_blocked(&run.kind, pane, "while working");
+                    notices.blocked(&run.kind, pane, "while working");
                     blocked = true;
                 }
                 idle_since = None;
@@ -304,27 +362,78 @@ fn wait_ready(herdr: &Herdr, name: &str) -> Result<()> {
 
 /// Tells the owner the agent is waiting on an answer only a person can give,
 /// through the question channel, which reaches an idle Codex owner by itself.
-fn announce_blocked(kind: &str, pane: &str, when: &str) {
+/// The questions this run sent its owner about its pane. Each one is withdrawn
+/// once the agent is ready again: someone dealt with it in the pane, and an
+/// unanswered question would otherwise hold the finished result back.
+struct Notices<'a> {
+    paths: &'a Paths,
+    task: TaskId,
+    outstanding: Vec<String>,
+}
+
+impl Notices<'_> {
+    fn blocked(&mut self, kind: &str, pane: &str, when: &str) {
+        self.outstanding.extend(announce_blocked(kind, pane, when));
+    }
+
+    fn tell(&mut self, kind: &str, pane: &str, body: &str) {
+        self.outstanding.extend(tell_owner(kind, pane, body));
+    }
+
+    fn withdraw(&mut self) {
+        let attempt = env::var("BRGR_PARENT_ATTEMPT_ID")
+            .ok()
+            .and_then(|id| id.parse::<AttemptId>().ok());
+        for message in self.outstanding.drain(..) {
+            let withdrawn = attempt.ok_or(()).and_then(|attempt| {
+                Store::open(&self.paths.store)
+                    .and_then(|store| store.withdraw_question(self.task, attempt, &message))
+                    .map_err(drop)
+            });
+            if withdrawn.is_err() {
+                eprintln!("brgr pane mode · could not withdraw question {message}");
+            }
+        }
+    }
+}
+
+fn announce_blocked(kind: &str, pane: &str, when: &str) -> Option<String> {
+    tell_owner(
+        kind,
+        pane,
+        &format!(
+            "The {kind} agent in Herdr pane {pane} is waiting for an approval {when} (for example \
+             a folder trust or MCP prompt). Answer it in that pane; the task continues once it is \
+             unblocked."
+        ),
+    )
+}
+
+/// Sends the owner a question and returns its id, or prints it when this run
+/// has no owner channel.
+fn tell_owner(kind: &str, pane: &str, body: &str) -> Option<String> {
     let (Some(bin), Some(task)) = (
         env::var_os("BRGR_BIN"),
         env::var("BRGR_PARENT_TASK_ID").ok(),
     ) else {
-        eprintln!("brgr pane mode · the {kind} agent in pane {pane} is blocked {when}");
-        return;
+        eprintln!("brgr pane mode · the {kind} agent in pane {pane} needs attention: {body}");
+        return None;
     };
-    let body = format!(
-        "The {kind} agent in Herdr pane {pane} is waiting for an approval {when} (for example a \
-         folder trust or MCP prompt). Answer it in that pane; the task continues once it is unblocked."
-    );
     let sent = Command::new(bin)
         .args([
             "--json", "message", "send", &task, "--to", "owner", "--kind", "question", "--body",
         ])
         .arg(body)
         .output();
-    if !sent.is_ok_and(|output| output.status.success()) {
-        eprintln!("brgr pane mode · the {kind} agent in pane {pane} is blocked {when}");
+    let id = sent
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| serde_json::from_slice::<Value>(&output.stdout).ok())
+        .and_then(|message| message["message_id"].as_str().map(str::to_owned));
+    if id.is_none() {
+        eprintln!("brgr pane mode · the {kind} agent in pane {pane} needs attention: {body}");
     }
+    id
 }
 
 fn read_report(report: &Path, max_bytes: u64) -> Result<Vec<u8>> {
