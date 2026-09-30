@@ -44,8 +44,9 @@ short handle. Use `brgr status`, `brgr result`, and `brgr cancel` for follow-up.
 `local.omp-herdr`. Use the harness the user names; otherwise follow the
 model-routing policy. Pass `--model` only as the user or policy gives it. brgr
 checks the name before a paid run, against the harness's own model list where
-it has one; Claude Code and Cline reject an unknown name themselves before any
-request. Never retry a refused model under another name.
+it has one; Claude Code rejects an unknown name itself before any request.
+Cline and Devin run only their configured model, so do not pass `--model` to
+them. Never retry a refused model under another name.
 
 A worker runs at a permission level: `--permission full` (the default: every
 tool auto-approved), `edits` (file edits only; commands still need approval),
