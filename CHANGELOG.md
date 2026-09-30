@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.9.2 — 2026-09-30
 
 The Codex Stop hook now blocks as intended when brgr has unprocessed results.
 Its output carried a `hookSpecificOutput` object, and Codex defines none for
