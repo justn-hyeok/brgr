@@ -287,6 +287,24 @@ fn pane_mode_and_placement(
     Ok((pane_mode, placement))
 }
 
+/// Refusals that need the resolved source and the activated harness.
+fn check_admissible(activated: &HarnessManifest, spec: &TaskSpec, source: &Path) -> Result<()> {
+    if spec.evidence.capture_diff && !workspace::is_git_workspace(source)? {
+        bail!("--capture-diff requires a Git workspace before task admission");
+    }
+    if activated.adapter == brgr_runner::OMP_ROLE_ADAPTER_V1
+        && crate::caller_pane::verified().is_none()
+    {
+        bail!(
+            "{} reports back to the Herdr pane it was started from, and this process's pane \
+             cannot be verified (a Codex tool command runs in a shared daemon that carries \
+             another pane's Herdr environment); use local.omp instead",
+            activated.id
+        );
+    }
+    Ok(())
+}
+
 pub(crate) async fn start_task(
     paths: &Paths,
     mut spec: TaskSpec,
@@ -300,9 +318,7 @@ pub(crate) async fn start_task(
     let source = options.source_workspace.canonicalize()?;
     let home = paths.home.canonicalize()?;
     validate_source_home(paths, &source, &home, options.parent, &spec.owner_id)?;
-    if spec.evidence.capture_diff && !workspace::is_git_workspace(&source)? {
-        bail!("--capture-diff requires a Git workspace before task admission");
-    }
+    check_admissible(activated, &spec, &source)?;
     let (pane_mode, plugin_placement) =
         pane_mode_and_placement(paths, activated, &spec, &options.execution)?;
     let admission = workspace::acquire_admission_lock(&paths.worktrees, options.source_workspace)?;
@@ -481,7 +497,7 @@ pub(crate) fn plugin_worker_placement(
     paths: &Paths,
     execution: &ExecutionDisposition,
 ) -> Result<Option<WorkerPlacement>> {
-    if env::var("HERDR_ENV").as_deref() == Ok("1")
+    if crate::caller_pane::verified().is_some()
         && matches!(execution, ExecutionDisposition::Detached)
     {
         let config = Config::load(&paths.config)?;

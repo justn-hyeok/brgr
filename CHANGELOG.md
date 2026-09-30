@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased
+
+brgr now trusts `HERDR_PANE_ID` only when it provably runs inside that pane: its
+process tree must reach the Herdr server with no ancestor naming a different
+pane. Codex runs shell commands and hooks in a shared app-server daemon,
+detached from every terminal, that keeps the Herdr environment of whichever
+pane first started it. From Codex, pane mode split beside a pane that no longer
+existed and the task was lost; and a hook could bind this Codex session to
+another Codex's pane, pushing its completion notices there. An unverified caller
+now runs headless, gets no worker pane, and registers no notification surface;
+`local.omp-herdr`, which reports back to its caller's pane, refuses such a
+caller and points to `local.omp`.
+
+Pane mode no longer sends its prompt into a menu. Herdr reported Codex ready
+while it showed an update offer, and the prompt's Enter would have chosen the
+highlighted "Update now". When the pane shows a numbered menu with its first
+option highlighted, the run asks its owner and waits for the menu to go.
+
 ## 2.9.2 — 2026-09-30
 
 The Codex Stop hook now blocks as intended when brgr has unprocessed results.

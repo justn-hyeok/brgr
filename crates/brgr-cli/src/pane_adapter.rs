@@ -51,8 +51,9 @@ const SHELL_POLL: Duration = Duration::from_millis(250);
 /// write cannot write its report. A requested effort the interactive command
 /// cannot take keeps the task headless, where the effort is honoured.
 pub(crate) fn applies(manifest: &HarnessManifest, spec: &TaskSpec) -> bool {
-    env::var("HERDR_ENV").as_deref() == Ok("1")
-        && env::var_os("HERDR_PANE_ID").is_some_and(|pane| !pane.is_empty())
+    // A caller whose Herdr pane cannot be verified — a Codex tool command run
+    // by its shared daemon — runs headless rather than beside the wrong pane.
+    crate::caller_pane::verified().is_some()
         && manifest
             .launch
             .interactive
@@ -285,6 +286,25 @@ fn start_agent(
             Err(failure) => bail!("Herdr could not start the {} agent: {failure}", run.kind),
         }
     }
+    // Herdr can call an agent ready while it shows a menu: Codex opened on an
+    // update offer and was reported idle. The prompt ends with Enter, which
+    // would pick the highlighted option ("Update now"), so wait for a person.
+    if menu_on_screen(herdr, pane) {
+        notices.tell(
+            &run.kind,
+            pane,
+            &format!(
+                "The {} agent in Herdr pane {pane} opened on a menu, such as an update offer. \
+                 Choose in that pane; brgr will not press Enter on it, and the task continues \
+                 once the menu is gone.",
+                run.kind
+            ),
+        );
+        while menu_on_screen(herdr, pane) {
+            thread::sleep(POLL);
+        }
+        notices.withdraw();
+    }
     Ok(())
 }
 
@@ -366,6 +386,23 @@ fn drive(
         }
         thread::sleep(POLL);
     }
+}
+
+/// Whether the pane shows a numbered menu with its first option highlighted
+/// (`› 1.`, `❯ 1.`), where Enter would choose that option. A banner without a
+/// menu, such as "update available", does not count: it takes no Enter and may
+/// never go away.
+fn menu_on_screen(herdr: &Herdr, pane: &str) -> bool {
+    herdr.screen(pane).is_some_and(|screen| {
+        screen.lines().any(|line| {
+            let line = line.trim_start();
+            ["›", "❯", ">", "▸"].iter().any(|cursor| {
+                line.strip_prefix(cursor)
+                    .map(str::trim_start)
+                    .is_some_and(|rest| rest.starts_with("1.") || rest.starts_with("1)"))
+            })
+        })
+    })
 }
 
 fn wait_ready(herdr: &Herdr, name: &str) -> Result<()> {
@@ -535,6 +572,22 @@ impl Herdr {
 
     fn call(&self, args: &[&str]) -> std::result::Result<Value, HerdrFailure> {
         self.call_owned(&args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>())
+    }
+
+    /// The pane's visible text, or `None` when Herdr cannot read it.
+    fn screen(&self, pane: &str) -> Option<String> {
+        let mut command = Command::new(&self.binary);
+        if let Some(session) = &self.session {
+            command.arg("--session").arg(session);
+        }
+        let output = command
+            .args(["pane", "read", pane, "--source", "visible", "--lines", "60"])
+            .output()
+            .ok()?;
+        output
+            .status
+            .success()
+            .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
     }
 
     fn call_owned(&self, args: &[String]) -> std::result::Result<Value, HerdrFailure> {
