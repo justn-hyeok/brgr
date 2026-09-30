@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.9.3 — 2026-09-30
 
 brgr now trusts `HERDR_PANE_ID` only when it provably runs inside that pane: its
 process tree must reach the Herdr server with no ancestor naming a different
