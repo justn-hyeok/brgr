@@ -2412,10 +2412,12 @@ fn unavailable_herdr_does_not_hide_the_codex_inbox_hook() {
     );
     let (stop, stop_elapsed) = invoke_hook_with_herdr(&home, &herdr, "stop");
     assert!(stop_elapsed < Duration::from_secs(2));
-    assert_eq!(
-        serde_json::from_slice::<Value>(&stop.stdout).unwrap()["decision"],
-        "block"
-    );
+    let stop: Value = serde_json::from_slice(&stop.stdout).unwrap();
+    assert_eq!(stop["decision"], "block");
+    assert!(stop["reason"].as_str().unwrap().contains(task), "{stop}");
+    // Codex defines no hook-specific output for Stop and rejects the whole
+    // object when one is present.
+    assert!(stop.get("hookSpecificOutput").is_none(), "{stop}");
     json_output(&run(&home, &["accept", task], &owner));
 }
 
