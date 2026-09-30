@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+The Codex Stop hook now blocks as intended when brgr has unprocessed results.
+Its output carried a `hookSpecificOutput` object, and Codex defines none for
+Stop, so Codex rejected the whole output as "invalid stop hook JSON output" and
+let the session stop anyway. The hook now emits only `decision` and `reason`,
+and the reason names the pending tasks.
+
 ## 2.9.1 — 2026-09-30
 
 A pane-mode run now completes as soon as the agent is idle and its report

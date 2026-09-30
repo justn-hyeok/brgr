@@ -67,16 +67,17 @@ pub(crate) async fn hook(paths: &Paths, event: HookEvent) -> Result<()> {
         .join(", ");
     let summary = format!("{} pending result(s): {handles}", pending.len());
     match event {
+        // Codex accepts `hookSpecificOutput` only for the events that define
+        // one, and Stop does not: an object carrying it was rejected whole as
+        // "invalid stop hook JSON output", so the block never took effect.
         HookEvent::Stop => println!(
             "{}",
             json!({
                 "decision": "block",
-                "reason": "brgr has unprocessed terminal results; inspect and accept, reject, or acknowledge them before stopping",
-                "hookSpecificOutput": {
-                    "hookEventName": "Stop",
-                    "decision": "block",
-                    "reason": format!("Pending brgr inbox: {summary}. Use brgr result TASK, then accept/reject or ack."),
-                }
+                "reason": format!(
+                    "brgr has unprocessed terminal results. Pending brgr inbox: {summary}. \
+                     Use brgr result TASK, then accept/reject or ack."
+                ),
             })
         ),
         HookEvent::SessionStart | HookEvent::UserPromptSubmit => println!(
