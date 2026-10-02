@@ -53,10 +53,18 @@ separate receipt; an acknowledgment records reading. Busy TUIs and native
 dialogs keep ordinary messages queued. A confirmed unattempted send can retry;
 an interrupted send remains observable rather than being pasted twice.
 
-Owned-workspace folder trust is answered automatically after comparing the
-displayed workspace. Other native dialogs use `input TASK --key KEY` or
-`--text TEXT`. An approval dialog and a mailbox question are separate inputs.
-The skill does not impose another user-approval loop over existing authorization.
+A worker is never left for a person to click. brgr answers the folder-trust
+prompt for the task's own workspace (Claude, Codex), "press Enter to continue"
+notices, update offers (by choosing the skip option) and an already applied
+self-update (Esc), from the rule table in `pane_adapter/screens.rs`, and never
+presses anything while the agent is working. Every key it presses is appended
+to `runs/TASK-rN.screens.log`. OpenCode and Claude Code are launched with their
+self-update disabled. A screen no rule covers is reported to the owner and
+fails the run after three minutes with the screen's text; answer it earlier
+with `input TASK --key KEY` or `--text TEXT`. A native dialog and a mailbox
+question are separate inputs. The skill adds no user-approval loop and no
+permission cap of its own: workers run with the harness's full-permission
+option unless the user asks for a lower level.
 
 Direct sibling communication requires an explicit **debate** group:
 

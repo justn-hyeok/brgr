@@ -129,7 +129,7 @@ Cline, OMP, OpenCode, GJC, and Command Code. The registered executable runs in
 an owned pane without taking focus. brgr connects parent/worker messages to
 that session, seals its final report, and closes the pane after the owner
 handles the result. A momentarily idle TUI can continue the conversation.
-Owned-workspace trust is recognized and answered automatically. Other native
+Owned-workspace trust, "press Enter to continue" notices, update offers (skipped) and an applied self-update are answered automatically; any other screen is reported and fails the run after three minutes. Other native
 input uses `brgr input TASK --key KEY` or `--text TEXT`; conversation messages
 stay queued while the TUI is busy or displaying a native dialog.
 

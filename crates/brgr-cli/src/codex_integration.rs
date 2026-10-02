@@ -28,9 +28,9 @@ Translate the user's request into brgr operations. Preserve the requested harnes
 
 `brgr run "<objective>" --harness <id> --criterion "<check>" --workspace <repo>` starts a task. Defaults are the registered harness's native TUI in an owned Herdr pane and its full/YOLO option. Use `--headless` only when the user specifies headless. Missing TUI support or incompatible options produce an error; they do not select headless.
 
-`brgr doctor` lists registered harnesses. Omitted harness/model/effort/deadline values resolve from harness settings, global settings, then product defaults. Supply `--model`, `--effort`, or `--permission full|edits|read-only` when requested. Permission flags configure the harness; brgr adds no task-type approval policy.
+`brgr doctor` lists registered harnesses. Omitted harness/model/effort/deadline values resolve from harness settings, global settings, then product defaults. Supply `--model` or `--effort` when requested. Workers run with the harness's full-permission option unless the user asks for a lower level with `--permission edits|read-only`; brgr caps nothing and adds no task-type approval policy of its own.
 
-The exact caller pane and owner session connect results to their owner. From a shared daemon, use verified `--owner-session SESSION --source-pane PANE`; hooks expose these options when available. Do not infer a source from focus or newest-pane order.
+The exact caller pane and owner session connect results to their owner. A Claude Code owner is identified as `claude:<CLAUDE_CODE_SESSION_ID>` and receives the same pushes as a Codex owner. From a shared daemon, use verified `--owner-session SESSION --source-pane PANE`; hooks expose these options when available. Do not infer a source from focus or newest-pane order.
 
 `brgr config init` creates missing config/instruction examples and prints their paths. User instructions live at `$BRGR_HOME/BRGR.md`; macOS defaults to `~/Library/Application Support/brgr/BRGR.md`. Calling options live at `$BRGR_HOME/config.toml`.
 
@@ -40,7 +40,7 @@ The exact caller pane and owner session connect results to their owner. From a s
 - `brgr config set worker-placement adjacent|tab` selects pane placement.
 - `brgr config check` checks registered recipes and settings without running a model.
 
-brgr creates the worker's pane itself. Owned-workspace trust is handled automatically. Read other native input with `herdr pane read PANE --source visible`; send it through `brgr input TASK --key KEY` or `--text TEXT` within the user's existing authorization. A native dialog is different from a mailbox question.
+brgr creates the worker's pane itself and answers the screens that would stop it, so nobody has to click: the folder-trust prompt for the task's workspace, "press Enter to continue" notices, update offers (it skips them), and an applied self-update. A screen no rule covers is reported to the owner as a native-input notice and fails the run after three minutes with its text. Read it with `herdr pane read PANE --source visible` and answer with `brgr input TASK --key KEY` or `--text TEXT`. A native dialog is different from a mailbox question. Every key brgr pressed on its own is in `runs/TASK-rN.screens.log`.
 
 Workers can publish an answer with `brgr report TASK --body TEXT`, which sends orchestration output without a source edit. Explicit read-only Claude/Cursor TUIs also receive a native response hook and final-answer markers; their permission mode is retained.
 
@@ -54,7 +54,7 @@ Sibling direct conversation is enabled only when the user specifies **debate**. 
 
 ## Results and cleanup
 
-Use `brgr status TASK --tree`, `wait TASK`, `result TASK`, or `cancel TASK --tree`. Inspect a sealed result against the requested criterion, then `accept` or `reject` with a reason; acknowledge failed/lost results with `result TASK --ack`. A completion notice reports availability, not acceptance. `brgr revise TASK "<objective>"` creates a new revision after rejection.
+Use `brgr status TASK --tree`, `wait TASK`, `result TASK`, or `cancel TASK --tree`. Inspect a sealed result against the requested criterion, then `accept` or `reject` with a reason; acknowledge failed/lost results with `result TASK --ack`. A completion notice reports availability, not acceptance. A failed or lost run arrives as a `brgr_failure` notice and as a stderr note on every brgr command until you acknowledge it; inspect it with `result TASK`, then retry with `revise` or dismiss it with `result TASK --ack`. `brgr errors` lists the failures brgr has recorded. `brgr revise TASK "<objective>"` creates a new revision after rejection.
 
 Request `--capture-diff` for repository changes to integrate. `brgr diff TASK --stat` and `brgr diff TASK` read the sealed patch. `brgr apply TASK --workspace TARGET` checks it; `--execute` applies an accepted result. Requested `--capture-logs` and `--evidence-file PATH` are additional artifacts. `--snapshot-path PATH` carries selected uncommitted source files into the task worktree.
 
