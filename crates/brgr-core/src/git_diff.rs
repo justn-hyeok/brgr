@@ -92,21 +92,31 @@ pub(crate) fn bounded_git_diff_with_executable(
             "untracked file staging",
         )?;
     }
+    let mut arguments = vec![
+        "-c".to_owned(),
+        "diff.noprefix=false".to_owned(),
+        "-c".to_owned(),
+        "diff.relative=false".to_owned(),
+        "diff".to_owned(),
+        "--no-ext-diff".to_owned(),
+        "--no-textconv".to_owned(),
+        "--no-relative".to_owned(),
+        "--binary".to_owned(),
+        "--src-prefix=a/".to_owned(),
+        "--dst-prefix=b/".to_owned(),
+        base_tree.to_owned(),
+    ];
+    if !excluded.is_empty() {
+        arguments.extend(["--".to_owned(), ":(top)**".to_owned()]);
+        arguments.extend(
+            excluded
+                .iter()
+                .map(|path| format!(":(exclude,literal){path}")),
+        );
+    }
+    let arguments = arguments.iter().map(String::as_str).collect::<Vec<_>>();
     git(deadline.saturating_sub(started.elapsed())).run(
-        &[
-            "-c",
-            "diff.noprefix=false",
-            "-c",
-            "diff.relative=false",
-            "diff",
-            "--no-ext-diff",
-            "--no-textconv",
-            "--no-relative",
-            "--binary",
-            "--src-prefix=a/",
-            "--dst-prefix=b/",
-            base_tree,
-        ],
+        &arguments,
         None,
         max_bytes,
         "requested Git diff",
@@ -127,7 +137,8 @@ fn untracked_to_add(listing: &[u8], excluded: &[String]) -> Vec<u8> {
             paths.push(0);
             continue;
         };
-        if entry.is_empty() || excluded.contains(&normal_components(Path::new(text))) {
+        let components = normal_components(Path::new(text));
+        if entry.is_empty() || excluded.iter().any(|prefix| components.starts_with(prefix)) {
             continue;
         }
         paths.extend_from_slice(entry);
@@ -380,6 +391,21 @@ mod tests {
         let patch = diff(root, &["./report.md".to_owned()]);
         assert!(!patch.contains("report.md"));
         assert!(patch.contains("b/kept.md"));
+    }
+
+    #[test]
+    fn staged_managed_report_stays_out_without_hiding_other_source_changes() {
+        let root = repository();
+        let root = root.path();
+        fs::create_dir_all(root.join(".brgr/tasks/owned-r1")).unwrap();
+        fs::write(root.join(".brgr/tasks/owned-r1/report.md"), "report").unwrap();
+        fs::write(root.join(".brgr/source.txt"), "source").unwrap();
+        git(root, &["add", ".brgr"]);
+        let before = git(root, &["status", "--porcelain"]);
+        let patch = diff(root, &[".brgr/tasks/owned-r1".to_owned()]);
+        assert!(!patch.contains("report.md"));
+        assert!(patch.contains("b/.brgr/source.txt"));
+        assert_eq!(git(root, &["status", "--porcelain"]), before);
     }
 
     #[test]

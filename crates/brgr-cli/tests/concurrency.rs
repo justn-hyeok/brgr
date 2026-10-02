@@ -121,6 +121,7 @@ fn register_bench_fixture(home: &Path, scratch: &Path) {
 
 fn brgr(home: &Path) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_brgr"));
+    command.arg("--headless");
     command
         .arg("--home")
         .arg(home)

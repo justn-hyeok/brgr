@@ -17,6 +17,7 @@ brgr-registry = { path = "../brgr-registry" }
 brgr-runner = { path = "../brgr-runner" }
 brgr-store = { path = "../brgr-store" }
 clap.workspace = true
+libc.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

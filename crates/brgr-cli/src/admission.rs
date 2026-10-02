@@ -12,8 +12,8 @@ use crate::harness_commands::{recertify_action_fallback, require_healthy_harness
 use crate::supervision::{record_unstarted_terminal, spawn_supervisor, supervise};
 use crate::{
     Claimant, LaunchEnvelope, Paths, config, current_session, delegation_parent_from_environment,
-    herdr_plugin, notification, owner_from_environment, plugin_bridge, print_value, require_owner,
-    workspace, write_json_atomic, write_json_new,
+    notification, owner_from_environment, print_value, require_owner, workspace, write_json_atomic,
+    write_json_new,
 };
 use anyhow::{Context, Result, bail};
 use brgr_core::TaskRevision;
@@ -24,7 +24,7 @@ use brgr_protocol::{
 use brgr_registry::{ActivationReceipt, Registry};
 use brgr_runner::HarnessManifest;
 use brgr_store::Store;
-use config::{Config, WorkerPlacement};
+use config::Config;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
@@ -45,6 +45,9 @@ pub(crate) struct StartOptions<'a> {
     pub(crate) pane: PaneDisposition,
     pub(crate) execution: ExecutionDisposition,
     pub(crate) json_output: bool,
+    pub(crate) headless: bool,
+    pub(crate) calling_options: config::CallingOptions,
+    pub(crate) instructions_digest: Option<String>,
 }
 
 pub(crate) enum WorkspaceSnapshot {
@@ -62,19 +65,26 @@ pub(crate) enum ExecutionDisposition {
     Foreground,
 }
 
-pub(crate) async fn run_task(paths: &Paths, args: RunArgs, json_output: bool) -> Result<()> {
+pub(crate) async fn run_task(paths: &Paths, mut args: RunArgs, json_output: bool) -> Result<()> {
+    let config = Config::load(&paths.config)?;
+    let harness = args
+        .harness
+        .take()
+        .or(config.defaults.harness.clone())
+        .unwrap_or_else(|| "local.gjc".to_owned());
+    let mut calling = config.calling(&harness);
+    calling.model = args.model.take().or(calling.model);
+    calling.effort = args.effort.take().or(calling.effort);
+    calling.permission = ignored_permission(args.permission.is_some());
+    calling.deadline_seconds = args.deadline_seconds.or(calling.deadline_seconds);
+    config::validate_argv(&calling.argv)?;
+    let (user_instructions, instructions_digest) = read_user_instructions(paths)?;
+    if let Some(instructions) = user_instructions {
+        args.role_instructions.push(instructions);
+    }
     let registry = Registry::open_with_control_home(&paths.registry, &paths.home)?;
-    let probed = registry.health_probed(&args.harness).await?;
-    require_healthy_harness(
-        &args.harness,
-        probed,
-        &registry
-            .recertify_action_for(&args.harness)
-            .unwrap_or_else(|_| recertify_action_fallback()),
-    )?;
-    let (activated, activation) = registry
-        .load_healthy_with_receipt(&args.harness)
-        .with_context(|| format!("harness {} is not active and healthy", args.harness))?;
+    let (activated, activation) = load_harness(&registry, &harness).await?;
+    config::validate_manifest_argv(&calling.argv, &activated)?;
     let task_id = TaskId::new();
     let forward_criteria = args.forwards_criteria();
     let source_workspace = args.workspace.unwrap_or(env::current_dir()?);
@@ -94,9 +104,9 @@ pub(crate) async fn run_task(paths: &Paths, args: RunArgs, json_output: bool) ->
         objective: args.objective,
         workspace: source_workspace.to_string_lossy().into_owned(),
         route: Route {
-            harness_id: args.harness.clone(),
-            requested_model: args.model,
-            requested_effort: args.effort,
+            harness_id: harness,
+            requested_model: calling.model.clone(),
+            requested_effort: calling.effort.clone(),
         },
         required_capabilities: args.capabilities.required_names()?,
         artifact_contract: ArtifactContract {
@@ -105,7 +115,7 @@ pub(crate) async fn run_task(paths: &Paths, args: RunArgs, json_output: bool) ->
         },
         acceptance_criteria: criteria,
         budget: AttemptBudget {
-            deadline_seconds: args.deadline_seconds,
+            deadline_seconds: calling.deadline_seconds.unwrap_or(3_600),
             max_attempts: 2,
         },
         instructions: TaskInstructions {
@@ -115,7 +125,7 @@ pub(crate) async fn run_task(paths: &Paths, args: RunArgs, json_output: bool) ->
         },
         evidence: args.evidence.spec(),
         max_concurrent_children: args.max_children,
-        permission: args.permission.map(Into::into),
+        permission: calling.permission,
     };
     spec.validate()?;
     activated.validate_task_route(&spec)?;
@@ -148,6 +158,9 @@ pub(crate) async fn run_task(paths: &Paths, args: RunArgs, json_output: bool) ->
                 ExecutionDisposition::Detached
             },
             json_output,
+            headless: crate::invocation::current().headless,
+            calling_options: calling,
+            instructions_digest,
         },
     )
     .await
@@ -161,21 +174,7 @@ pub(crate) async fn revise_task(paths: &Paths, args: ReviseArgs, json_output: bo
         .map(|(task, attempt, _depth)| (task, attempt));
     let previous_launch: LaunchEnvelope =
         serde_json::from_slice(&fs::read(paths.launch(args.task, previous.revision))?)?;
-    require_owner(&store, &previous.owner_id)?;
-    let result = store.latest_result(args.task)?;
-    if result.revision != previous.revision {
-        bail!("the latest revision has not produced a terminal result");
-    }
-    let decision = store
-        .decision_for_result(result.result_id)?
-        .context("the previous result has no Codex decision")?;
-    if decision.verdict != DecisionVerdict::Rejected {
-        bail!("only a rejected result can be revised");
-    }
-    let next_revision = previous
-        .revision
-        .checked_add(1)
-        .context("revision overflow")?;
+    let next_revision = rejected_revision(&store, &previous)?;
     let forward_criteria = args.forwards_criteria();
     let source_workspace = args
         .workspace
@@ -185,7 +184,7 @@ pub(crate) async fn revise_task(paths: &Paths, args: ReviseArgs, json_output: bo
     replacement.revision = next_revision;
     replacement.create_request_id = format!("revise-{}-{next_revision}", args.task);
     replacement.objective = args.objective;
-    replacement.permission = args.permission.map(Into::into).or(replacement.permission);
+    replacement.permission = ignored_permission(args.permission.is_some());
     replacement.workspace = source_workspace.to_string_lossy().into_owned();
     let requested = args.capabilities.required_names()?;
     replacement.required_capabilities.extend(requested);
@@ -196,6 +195,16 @@ pub(crate) async fn revise_task(paths: &Paths, args: ReviseArgs, json_output: bo
     }
     if !args.role_instructions.is_empty() {
         replacement.instructions.role = args.role_instructions;
+    }
+    if previous_launch.instructions_digest.is_some() {
+        replacement
+            .instructions
+            .role
+            .retain(|value| !value.starts_with("BRGR USER INSTRUCTIONS\n"));
+    }
+    let (user_instructions, instructions_digest) = read_user_instructions(paths)?;
+    if let Some(instructions) = user_instructions {
+        replacement.instructions.role.push(instructions);
     }
     replacement.instructions.forward_criteria |= forward_criteria;
     args.evidence.extend_task(&mut replacement);
@@ -208,22 +217,20 @@ pub(crate) async fn revise_task(paths: &Paths, args: ReviseArgs, json_output: bo
         .clone();
 
     let registry = Registry::open_with_control_home(&paths.registry, &paths.home)?;
-    let probed = registry
-        .health_probed(&replacement.route.harness_id)
-        .await?;
-    require_healthy_harness(
-        &replacement.route.harness_id,
-        probed,
-        &registry
-            .recertify_action_for(&replacement.route.harness_id)
-            .unwrap_or_else(|_| recertify_action_fallback()),
-    )?;
-    let (activated, activation) =
-        registry.load_healthy_with_receipt(&replacement.route.harness_id)?;
+    let (activated, activation) = load_harness(&registry, &replacement.route.harness_id).await?;
     activated.validate_task_route(&replacement)?;
     registry
         .preflight_model(&activated, replacement.route.requested_model.as_deref())
         .await?;
+    let mut calling = previous_launch.calling_options.clone().unwrap_or_default();
+    calling.harness = Some(replacement.route.harness_id.clone());
+    calling.model.clone_from(&replacement.route.requested_model);
+    calling
+        .effort
+        .clone_from(&replacement.route.requested_effort);
+    calling.permission = replacement.permission;
+    calling.deadline_seconds = Some(replacement.budget.deadline_seconds);
+    config::validate_manifest_argv(&calling.argv, &activated)?;
     start_task(
         paths,
         replacement,
@@ -250,9 +257,53 @@ pub(crate) async fn revise_task(paths: &Paths, args: ReviseArgs, json_output: bo
                 ExecutionDisposition::Detached
             },
             json_output,
+            headless: crate::invocation::current().headless,
+            calling_options: calling,
+            instructions_digest,
         },
     )
     .await
+}
+
+fn rejected_revision(store: &Store, previous: &TaskSpec) -> Result<u32> {
+    require_owner(store, &previous.owner_id)?;
+    let result = store.latest_result(previous.task_id)?;
+    if result.revision != previous.revision {
+        bail!("the latest revision has not produced a terminal result");
+    }
+    let decision = store
+        .decision_for_result(result.result_id)?
+        .context("the previous result has no Codex decision")?;
+    if decision.verdict != DecisionVerdict::Rejected {
+        bail!("only a rejected result can be revised");
+    }
+    let next_revision = previous
+        .revision
+        .checked_add(1)
+        .context("revision overflow")?;
+    Ok(next_revision)
+}
+
+pub(crate) async fn load_harness(
+    registry: &Registry,
+    harness: &str,
+) -> Result<(HarnessManifest, ActivationReceipt)> {
+    let probed = registry.health_probed(harness).await?;
+    require_healthy_harness(
+        harness,
+        probed,
+        &registry
+            .recertify_action_for(harness)
+            .unwrap_or_else(|_| recertify_action_fallback()),
+    )?;
+    let (mut activated, activation) = registry.load_healthy_with_receipt(harness)?;
+    if !crate::invocation::current().headless && activation.registration_mode == "generated" {
+        let current = registry.draft(&activated.executable).await?;
+        if current.id == activated.id {
+            activated.launch.interactive = current.launch.interactive;
+        }
+    }
+    Ok((activated, activation))
 }
 
 fn bind_owner_session(store: &Store, owner: &OwnerId, session: Option<&str>) -> Result<()> {
@@ -271,22 +322,6 @@ fn bind_owner_session(store: &Store, owner: &OwnerId, session: Option<&str>) -> 
 
 /// Pane mode puts the agent's own TUI in the split pane, so brgr's worker
 /// pane would only be a second, empty one.
-fn pane_mode_and_placement(
-    paths: &Paths,
-    activated: &HarnessManifest,
-    spec: &TaskSpec,
-    execution: &ExecutionDisposition,
-) -> Result<(bool, Option<WorkerPlacement>)> {
-    let pane_mode = !Config::load(&paths.config)?.herdr.prefer_print_mode
-        && crate::pane_adapter::applies(activated, spec);
-    let placement = if pane_mode {
-        None
-    } else {
-        plugin_worker_placement(paths, execution)?
-    };
-    Ok((pane_mode, placement))
-}
-
 /// Refusals that need the resolved source and the activated harness.
 fn check_admissible(activated: &HarnessManifest, spec: &TaskSpec, source: &Path) -> Result<()> {
     if spec.evidence.capture_diff && !workspace::is_git_workspace(source)? {
@@ -313,14 +348,35 @@ pub(crate) async fn start_task(
     options: StartOptions<'_>,
 ) -> Result<()> {
     spec.validate()?;
-    spec.permission = effective_permission(paths, &spec, options.parent)?;
+    spec.permission = None;
     activated.validate_task_route(&spec)?;
     let source = options.source_workspace.canonicalize()?;
     let home = paths.home.canonicalize()?;
     validate_source_home(paths, &source, &home, options.parent, &spec.owner_id)?;
     check_admissible(activated, &spec, &source)?;
-    let (pane_mode, plugin_placement) =
-        pane_mode_and_placement(paths, activated, &spec, &options.execution)?;
+    let source_pane = if options.headless {
+        None
+    } else {
+        if activated.adapter != brgr_runner::OMP_ROLE_ADAPTER_V1 {
+            crate::pane_adapter::require_tui(activated, &spec)?;
+        }
+        // A Codex call cannot be placed while it runs, so its pane is looked up
+        // once the call has finished; the worker pane opens then, beside it.
+        let source_pane = crate::caller_pane::verified()
+            .or_else(|| {
+                (spec.owner_id.as_str().starts_with("codex:")
+                    && std::env::var("HERDR_ENV").as_deref() == Ok("1")
+                    && crate::caller_pane::binary().is_some())
+                .then(|| crate::current_session().ok().flatten())
+                    .flatten()
+                    .map(|session| crate::caller_pane::pending_marker(&session))
+            })
+            .context(
+                "default TUI execution needs an exact Herdr source; run it from a Herdr pane, or from a Codex session start the command with `--as SESSION` (the session in your calling context) so brgr can find your pane",
+            )?;
+        Some(source_pane)
+    };
+    let pane_mode = source_pane.is_some() && activated.adapter != brgr_runner::OMP_ROLE_ADAPTER_V1;
     let admission = workspace::acquire_admission_lock(&paths.worktrees, options.source_workspace)?;
     let store = Store::open(&paths.store)?;
     if let Some((parent_task, parent_attempt)) = options.parent {
@@ -339,19 +395,15 @@ pub(crate) async fn start_task(
         harness_id,
         protocol_generation: "brgr-v1".to_owned(),
         keep_pane: matches!(options.pane, PaneDisposition::Keep),
-        delegation_enabled: options.enable_delegation
-            || plugin_placement.is_some()
-            || options.parent.is_some(),
+        delegation_enabled: pane_mode || options.enable_delegation || options.parent.is_some(),
         manifest: Some(activated.clone()),
         executable_digest: Some(activation.executable_digest.clone()),
         pane_mode,
-        claimant: if plugin_placement.is_some()
-            && !matches!(options.execution, ExecutionDisposition::Foreground)
-        {
-            Claimant::WorkerPane
-        } else {
-            Claimant::Supervisor
-        },
+        claimant: Claimant::Supervisor,
+        source_pane,
+        source_session: session.clone(),
+        calling_options: Some(options.calling_options),
+        instructions_digest: options.instructions_digest,
     };
     let launch_path = paths.launch(task_id, launch.spec.revision);
     write_json_new(&launch_path, &launch)?;
@@ -373,25 +425,25 @@ pub(crate) async fn start_task(
         store.record_task(&launch.spec, &request_digest_text)?;
     }
     drop(admission);
+    // Claude Code has no hook that binds its pane, and the detached dispatcher
+    // cannot prove it runs inside that pane. This shell can, so record the
+    // owner's pane now.
+    if launch.spec.owner_id.as_str().starts_with("claude:")
+        && let Some(session) = session.as_deref()
+        && let Err(error) =
+            notification::register_current_surface(paths, &store, &launch.spec.owner_id, session)
+                .await
+    {
+        eprintln!("brgr completion notification remains queued: {error}");
+    }
     notification::spawn_registration_and_delivery(paths, &launch.spec, session.as_deref());
 
     if matches!(options.execution, ExecutionDisposition::Foreground) {
         return supervise(paths, &launch_path, options.json_output).await;
     }
-    if let Some(placement) = plugin_placement {
-        return start_herdr_worker(
-            paths,
-            &launch_path,
-            &workspace,
-            &launch,
-            placement,
-            &mut store,
-            options.json_output,
-        )
-        .await;
-    }
     if let Err(error) = spawn_supervisor(paths, &launch_path) {
         record_unstarted_terminal(
+            paths,
             &mut store,
             &launch.spec,
             TerminalOutcome::Failed,
@@ -399,17 +451,49 @@ pub(crate) async fn start_task(
         )?;
         return Err(error);
     }
+    print_launch_receipt(&launch, &workspace, options.json_output);
+    Ok(())
+}
+
+fn print_launch_receipt(launch: &LaunchEnvelope, workspace: &Path, json_output: bool) {
     let receipt = json!({
-        "task_id": task_id,
+        "task_id": launch.spec.task_id,
         "state": "starting",
         "workspace": workspace,
         "harness": launch.harness_id,
         "revision": launch.spec.revision,
         "requested_model": launch.spec.route.requested_model,
         "requested_effort": launch.spec.route.requested_effort,
+        "presentation": if launch.pane_mode { "tui" } else { "headless" },
+        "permission": launch.spec.permission.unwrap_or(PermissionLevel::Full),
+        "source_pane": launch.source_pane,
+        "instructions_digest": launch.instructions_digest,
     });
-    print_value(&receipt, options.json_output);
-    Ok(())
+    print_value(&receipt, json_output);
+}
+
+fn read_user_instructions(paths: &Paths) -> Result<(Option<String>, Option<String>)> {
+    let path = paths.home.join("BRGR.md");
+    let metadata = match fs::symlink_metadata(&path) {
+        Ok(value) => value,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok((None, None)),
+        Err(error) => return Err(error.into()),
+    };
+    if !metadata.is_file() || metadata.len() > 16_384 {
+        bail!("BRGR.md must be a regular file of at most 16 KiB");
+    }
+    let text = fs::read_to_string(path)?;
+    if text.len() > 16_384 {
+        bail!("BRGR.md exceeds 16 KiB");
+    }
+    let mut digest = "sha256:".to_owned();
+    for byte in Sha256::digest(text.as_bytes()) {
+        write!(&mut digest, "{byte:02x}")?;
+    }
+    Ok((
+        Some(format!("BRGR USER INSTRUCTIONS\n{text}")),
+        Some(digest),
+    ))
 }
 
 pub(crate) fn prepare_task_workspace(
@@ -493,81 +577,7 @@ pub(crate) fn task_request_digest(spec: &TaskSpec) -> Result<String> {
     Ok(text)
 }
 
-pub(crate) fn plugin_worker_placement(
-    paths: &Paths,
-    execution: &ExecutionDisposition,
-) -> Result<Option<WorkerPlacement>> {
-    if crate::caller_pane::verified().is_some()
-        && matches!(execution, ExecutionDisposition::Detached)
-    {
-        let config = Config::load(&paths.config)?;
-        let plugin_caller = env::var("HERDR_PLUGIN_ID").as_deref() == Ok("brgr")
-            && (env::var_os(plugin_bridge::BRIDGE_HOST_HOME_ENV).is_some()
-                || env::var("BRGR_WORKER_HERDR_CONTEXT").as_deref() == Ok("1"));
-        Ok((plugin_caller || config.herdr.auto_worker_pane)
-            .then_some(config.herdr.worker_placement))
-    } else {
-        Ok(None)
-    }
-}
-
-pub(crate) async fn start_herdr_worker(
-    paths: &Paths,
-    launch_path: &Path,
-    workspace: &Path,
-    launch: &LaunchEnvelope,
-    placement: WorkerPlacement,
-    store: &mut Store,
-    json_output: bool,
-) -> Result<()> {
-    let task_id = launch.spec.task_id;
-    match herdr_plugin::open_worker(paths, launch_path, workspace, placement).await {
-        Ok(pane) => {
-            write_json_atomic(
-                &paths.runs.join(format!("{task_id}.worker-pane.json")),
-                &pane,
-            )
-            .with_context(|| {
-                format!(
-                    "Herdr opened worker pane {} for task {task_id}, but brgr could not persist its receipt; inspect that exact pane and do not repeat the task",
-                    pane.pointer("/result/plugin_pane/pane/pane_id")
-                        .and_then(serde_json::Value::as_str)
-                        .unwrap_or("unknown")
-                )
-            })?;
-            print_value(
-                &json!({
-                    "task_id": task_id,
-                    "state": "starting",
-                    "workspace": workspace,
-                    "harness": launch.harness_id,
-                    "revision": launch.spec.revision,
-                    "worker_placement": placement.as_str(),
-                    "worker_pane": pane.pointer("/result/plugin_pane/pane/pane_id"),
-                }),
-                json_output,
-            );
-            Ok(())
-        }
-        Err(error) => {
-            record_unstarted_terminal(
-                store,
-                &launch.spec,
-                TerminalOutcome::Lost,
-                format!("Herdr worker pane launch could not be confirmed: {error}"),
-            )?;
-            Err(error)
-        }
-    }
-}
-
-/// Refuses a child of a task that was not started with delegation.
-///
-/// Every managed worker now carries its identity so it can message its owner,
-/// which also means it could name itself as a parent. Before that, a worker
-/// without delegation simply had no identity to name; the permission has to be
-/// checked here instead, against the launch the parent was started with.
-fn require_parent_may_delegate(
+pub(crate) fn require_parent_may_delegate(
     paths: &Paths,
     store: &Store,
     parent_task: TaskId,
@@ -587,56 +597,13 @@ fn require_parent_may_delegate(
     Ok(())
 }
 
-/// The level a task runs at.
-///
-/// Whatever was asked for, bounded by the configured cap and by the parent
-/// task's own level: a child never gets more than the worker that started it.
-/// Asking for more is an error rather than a quiet downgrade, so the caller
-/// finds out. Asking for nothing yields the tightest bound, if any; a bound of
-/// `full` is no bound, which keeps a task that asked for nothing running
-/// exactly as it did before levels existed.
-fn effective_permission(
-    paths: &Paths,
-    spec: &TaskSpec,
-    parent: Option<(TaskId, AttemptId)>,
-) -> Result<Option<PermissionLevel>> {
-    let cap = Config::load(&paths.config)?.worker.max_permission;
-    let parent_level = match parent {
-        Some((_, attempt)) => {
-            Store::open(&paths.store)?
-                .task_for_attempt(attempt)?
-                .permission
-        }
-        None => None,
-    };
-    bound_permission(spec.permission, cap, parent_level)
-}
-
-/// The rule behind [`effective_permission`], without the lookups.
-pub(crate) fn bound_permission(
-    requested: Option<PermissionLevel>,
-    cap: Option<PermissionLevel>,
-    parent: Option<PermissionLevel>,
-) -> Result<Option<PermissionLevel>> {
-    let bounds = [
-        ("the configured maximum", cap),
-        ("the parent task's level", parent),
-    ];
-    if let Some(requested) = requested {
-        for (source, bound) in bounds {
-            if let Some(bound) = bound
-                && requested > bound
-            {
-                bail!("permission {requested:?} exceeds {source}, {bound:?}");
-            }
-        }
-        return Ok(Some(requested));
+/// Workers always run with full permissions, so a requested level (from an
+/// old script, a stored task or a config value) is accepted and ignored.
+fn ignored_permission(requested: bool) -> Option<PermissionLevel> {
+    if requested {
+        eprintln!("brgr: --permission is ignored; workers always run with full permissions");
     }
-    Ok(bounds
-        .into_iter()
-        .filter_map(|(_, bound)| bound)
-        .min()
-        .filter(|level| *level != PermissionLevel::Full))
+    None
 }
 
 /// The attempt a new task is delegated from: named on the command line or

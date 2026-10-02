@@ -71,6 +71,32 @@ fn diff_names_the_missing_flag_when_no_patch_was_requested() {
 }
 
 #[test]
+fn empty_sealed_diff_can_be_reviewed_and_applied_as_a_noop() {
+    let fixture = Fixture::new();
+    let result = fixture.json(&[
+        "run",
+        "READ_TASK",
+        "--workspace",
+        fixture.repo(),
+        "--foreground",
+        "--capture-diff",
+    ]);
+    let task = result["task_id"].as_str().unwrap();
+    assert_eq!(fixture.text(&["diff", task]), "");
+    let summary = fixture.json(&["diff", task, "--stat"]);
+    assert!(summary["files"].as_array().unwrap().is_empty());
+    fixture.accept(task);
+    let head = fixture.head();
+    let applied = fixture.json(&["apply", task, "--workspace", fixture.repo(), "--execute"]);
+    assert_eq!(applied["status"], "applied");
+    assert_eq!(fixture.head(), head);
+    assert_eq!(
+        fs::read_to_string(fixture.repository.join("README")).unwrap(),
+        "seed\n"
+    );
+}
+
+#[test]
 fn apply_follows_the_owner_onto_a_later_commit() {
     let fixture = Fixture::new();
     let task = fixture.run_editing_task(true);
@@ -236,6 +262,7 @@ impl Fixture {
     fn command(&self) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_brgr"));
         command
+            .arg("--headless")
             .arg("--home")
             .arg(&self.home)
             .env_remove("CODEX_THREAD_ID")

@@ -204,6 +204,11 @@ pub(crate) fn is_retryable_spawn_failure(
 /// error, which says why the run failed far better than the outcome alone.
 pub(crate) fn delegated_lost_reason(output: Option<&brgr_runner::ExecutionOutput>) -> String {
     let reason = "the Herdr-backed worker did not provide a valid final result";
+    // A run stopped at its deadline leaves whatever the adapter last printed,
+    // which says nothing about why it stopped.
+    if output.is_some_and(|output| output.timed_out) {
+        return format!("{reason}: the attempt deadline elapsed");
+    }
     match output.and_then(|output| last_stderr_line(&output.stderr)) {
         Some(line) => format!("{reason}: {line}"),
         None => reason.to_owned(),

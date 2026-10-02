@@ -1,11 +1,14 @@
-# Recursive worker bridge (development)
+# Recursive worker bridge
+
+Current native TUI behavior is described in [orchestration](orchestration.md).
+The dated receipts below preserve the earlier process-bridge evidence.
 
 The intended topology is `Codex ↔ OMP ↔ GJC ↔ GJC`, with the same brgr
 delegation contract at every edge. A child result belongs to the exact parent
 attempt that created it. A child can become a parent without a pair-specific
 OMP-to-GJC or GJC-to-GJC adapter.
 
-## Implemented in this branch
+## Delegation contract
 
 - `brgr run --enable-delegation` gives a one-shot worker `$BRGR_BIN`,
   `BRGR_HOME`, its parent task/attempt IDs, and an owner session. A worker's
@@ -19,19 +22,10 @@ OMP-to-GJC or GJC-to-GJC adapter.
   must reference an opposite-direction question on that attempt. Unanswered
   questions prevent the worker's successful exit from becoming a candidate;
   an unacknowledged reply remains available to its recipient after exit.
-- With `herdr.auto_worker_pane = true`, detached runs from ordinary Herdr
-  panes open a manifest-declared `worker` pane. The brgr plugin Codex pane
-  always opens one. Placement is `adjacent` by default, splitting the exact caller pane
-  without focus. A
-  `tab` preference keeps the worker visible in a new tab. The selection is
-  stored in `BRGR_HOME/config.toml` and captured in the launch receipt:
-
-  ```toml
-  [herdr]
-  worker_placement = "adjacent"
-  ```
-
-  Use `brgr config show` and `brgr config set-worker-placement adjacent|tab`.
+- Native TUI is the default. `--headless` explicitly selects the process recipe.
+  brgr creates one owned native pane from the exact caller. Placement is
+  configured as adjacent or tab and persists at `$BRGR_HOME/config.toml`.
+  Messages queue while native input is busy; results are handled before cleanup.
 
 The deterministic CLI fixture exercises `OMP → GJC → GJC` routing and
 `GJC → GJC → GJC` recursion, each child's explicit decision, and the failure
@@ -54,27 +48,11 @@ deadlines after an earlier middle GJC timed out.
 An [ordinary Herdr pane receipt](../evidence/live-ordinary-herdr-pane-2026-09-23.md)
 records the v2.2.1 caller path using a deterministic fixture.
 
-## Remaining product gates
+## Current verification limits
 
-- The worker pane currently runs brgr's bounded process supervisor. It is not
-  an interactive GJC TUI. Herdr detected the underlying GJC process as working
-  in the live test, but a follow-up-capable GJC session has not been proven.
-- The message path is a cooperative CLI mailbox, not a live interactive GJC
-  TUI follow-up channel. Integrate pane custody and conservative cleanup for
-  new worker panes.
-- Improve placement for deep chains: the live four-pane tab narrowed the final
-  two panes to 15 columns each.
-- Confirm behavior for dirty parent worktrees, lost worker panes, cancellation,
-  restart recovery, and concurrent admissions across a nested chain. The
-  current fixture covers clean Git worktrees and existing crash-window tests;
-  live nested Herdr/model execution is covered only for the recorded runs.
-- The v2.3.0 completion loop adds selected-file dirty snapshots, explicit
-  capability admission, sealed evidence, separate conflict-checked integration,
-  a bounded subtree cancel, and exact-session Herdr completion callbacks.
-  See [completion loop plan](completion-loop-plan.md). Fake-Herdr fixtures
-  cover callback retry and recipient identity; a fresh real Codex pane wake
-  has not yet been run for this branch.
-
-Herdr owns terminal layout and observed pane state. brgr owns task identity,
-attempts, sealed artifacts, inboxes, and decisions. Neither a pane returning
-to idle nor a process exiting successfully is an acceptance decision.
+The process-chain receipts above establish their recorded revisions. They do
+not prove a mixed-harness native TUI chain for the current build. The current
+[orchestration receipt](../evidence/orchestration-rework-2026-10-01.md) records
+live Claude parent-message delivery, explicit sibling debate, read-only output,
+and cleanup, plus provider-blocked GJC evidence. Fixture recovery and source
+identity checks are separate from live provider availability.
