@@ -372,7 +372,7 @@ pub(crate) async fn start_task(
                     .map(|session| crate::caller_pane::pending_marker(&session))
             })
             .context(
-                "default TUI execution needs an exact Herdr source; run it from a Herdr pane or pass --owner-session from a Codex session",
+                "default TUI execution needs an exact Herdr source; run it from a Herdr pane, or from a Codex session start the command with `--as SESSION` (the session in your calling context) so brgr can find your pane",
             )?;
         Some(source_pane)
     };

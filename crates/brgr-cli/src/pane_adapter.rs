@@ -58,6 +58,9 @@ const REPORT_GRACE: Duration = Duration::from_secs(15);
 /// before it counts as finished.
 const UNSEEN_WORK_GRACE: Duration = Duration::from_mins(1);
 
+/// A caller pane narrower than this many columns gets its worker below it.
+const NARROW_CALLER: u64 = 100;
+
 /// How long a pane run waits for its calling Codex pane to show the call. The
 /// call that started the task ends within seconds, so this is generous.
 const CALLER_WAIT: Duration = Duration::from_secs(40);
@@ -866,7 +869,7 @@ impl Herdr {
                 "--pane".into(),
                 caller.into(),
                 "--direction".into(),
-                "right".into(),
+                self.split_direction(caller).into(),
                 "--cwd".into(),
                 workspace.to_string_lossy().into_owned(),
                 "--no-focus".into(),
@@ -894,6 +897,28 @@ impl Herdr {
             .and_then(Value::as_str)
             .map(str::to_owned)
             .context("Herdr did not report the new pane")
+    }
+
+    /// A wide caller splits to the right, so the worker sits beside it. Once the
+    /// caller is narrow, splitting right again would squeeze both below what a
+    /// TUI can show, so the worker goes below it instead.
+    fn split_direction(&self, caller: &str) -> &'static str {
+        let width = self
+            .call(&["pane", "layout", "--pane", caller])
+            .ok()
+            .and_then(|layout| {
+                layout
+                    .pointer("/result/layout/panes")?
+                    .as_array()?
+                    .iter()
+                    .find(|pane| pane.get("pane_id").and_then(Value::as_str) == Some(caller))?
+                    .pointer("/rect/width")?
+                    .as_u64()
+            });
+        match width {
+            Some(columns) if columns < NARROW_CALLER => "down",
+            _ => "right",
+        }
     }
 
     fn status(&self, name: &str) -> Result<String> {

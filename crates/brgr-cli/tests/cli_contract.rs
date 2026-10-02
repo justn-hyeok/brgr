@@ -729,6 +729,9 @@ kind=pathlib.Path(config['executable']).name
 PY
     test $? = 0 || exit 9
     echo '{"result":{"type":"ok"}}';;
+  'pane layout')
+    w=$(/bin/cat "$d/caller-width" 2>/dev/null || echo 200)
+    printf '{"result":{"layout":{"panes":[{"pane_id":"w9:p1","rect":{"width":%s,"height":50}}]}}}\n' "$w";;
   'pane get') echo '{"result":{"pane":{"pane_id":"w9:p2","terminal_id":"terminal-native-fixture"}}}';;
   'pane send-text') printf '%s' "$4" > "$d/paste"; echo '{}';;
   'pane send-keys')
@@ -1435,6 +1438,21 @@ fn pane_mode_failure_closes_the_pane_and_names_the_cause() {
         "{error}"
     );
     assert_eq!(fixture.state("closed").trim(), "closed");
+}
+
+/// A wide caller gets its worker beside it; a narrow one gets it below, so
+/// repeated workers do not squeeze the caller down to nothing.
+#[test]
+fn a_narrow_caller_gets_its_worker_below_and_a_wide_one_beside() {
+    for (width, direction) in [("200", "--direction right"), ("60", "--direction down")] {
+        let fixture = pane_fixture();
+        fs::create_dir_all(&fixture.state).unwrap();
+        fs::write(fixture.state.join("caller-width"), width).unwrap();
+        let ran = fixture.run(&[]);
+        assert_eq!(ran["outcome"], "candidate", "{ran}");
+        let calls = fixture.state("calls.log");
+        assert!(calls.contains(direction), "width {width}: {calls}");
+    }
 }
 
 /// An agent that stops without ever writing its report is reminded once and
