@@ -345,7 +345,7 @@ fn marker(fingerprint: &str) -> String {
 }
 
 fn issue_text(entry: &Entry) -> (String, String) {
-    let title = format!("[brgr auto] {}", redact(&entry.class, 80));
+    let title = format!("[brgr auto] {}", title_of(&entry.class));
     let mut body = String::new();
     let _ = write!(
         body,
@@ -373,6 +373,17 @@ fn issue_text(entry: &Entry) -> (String, String) {
         marker(&entry.fingerprint),
     );
     (title, body)
+}
+
+/// The class cut at a word boundary, so a long one does not end mid-word.
+fn title_of(class: &str) -> String {
+    let text = redact(class, 200);
+    if text.chars().count() <= 80 {
+        return text;
+    }
+    let cut: String = text.chars().take(80).collect();
+    let words = cut.rsplit_once(' ').map_or(cut.as_str(), |(head, _)| head);
+    format!("{words}…")
 }
 
 fn memo(ledger: &Ledger) -> String {
@@ -665,6 +676,19 @@ mod tests {
         };
         let (title, body) = issue_text(&entry);
         assert!(!title.contains("Rotate") && !body.contains("Rotate") && !body.contains("TOKEN"));
+    }
+
+    #[test]
+    fn a_long_issue_title_is_cut_at_a_word_boundary() {
+        let class = "the Herdr-backed worker did not provide a valid final result: task pane no longer exists";
+        let title = title_of(class);
+        assert!(
+            title.ends_with('…') && title.chars().count() <= 81,
+            "{title}"
+        );
+        assert!(class.starts_with(title.trim_end_matches('…')), "{title}");
+        assert!(!title.contains("longe"), "{title}");
+        assert_eq!(title_of("short class"), "short class");
     }
 
     #[test]

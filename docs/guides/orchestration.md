@@ -55,7 +55,8 @@ an interrupted send remains observable rather than being pasted twice.
 
 A worker is never left for a person to click. brgr answers the folder-trust
 prompt for the task's own workspace (Claude, Codex), "press Enter to continue"
-notices, update offers (by choosing the skip option) and an already applied
+notices, Claude Code's bypass-permissions warning and new-MCP-server prompt (accepted),
+update offers (by choosing the skip option) and an already applied
 self-update (Esc), from the rule table in `pane_adapter/screens.rs`, and never
 presses anything while the agent is working. Every key it presses is appended
 to `runs/TASK-rN.screens.log`. OpenCode and Claude Code are launched with their

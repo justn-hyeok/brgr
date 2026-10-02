@@ -18,6 +18,8 @@ use uuid::Uuid;
 use crate::{Paths, plugin_bridge};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
+/// The longest wait between delivery attempts while the owner stays busy.
+const MAX_BACKOFF: Duration = Duration::from_secs(3);
 const MAX_LIFETIME: Duration = Duration::from_hours(24);
 const HERDR_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -278,6 +280,7 @@ pub async fn deliver_pending(paths: &Paths, task: TaskId) -> Result<()> {
     let started = Instant::now();
     let store = registered_store(paths, task, started).await?;
     let database = paths.store.join("brgr.sqlite3");
+    let mut backoff = POLL_INTERVAL;
     while started.elapsed() < MAX_LIFETIME {
         // An open connection keeps reading a deleted database, so a dispatcher
         // whose control home was removed polled a dead store for a day. Test
@@ -317,6 +320,7 @@ pub async fn deliver_pending(paths: &Paths, task: TaskId) -> Result<()> {
             sleep(POLL_INTERVAL).await;
             continue;
         }
+        let mut failed = false;
         for notice in pending {
             let token = Uuid::new_v4().to_string();
             let now = i64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs())?;
@@ -329,24 +333,9 @@ pub async fn deliver_pending(paths: &Paths, task: TaskId) -> Result<()> {
                 continue;
             };
             match try_deliver(paths, &target).await {
-                Ok(()) => {
-                    // The prompt was accepted. Keep the lease while retrying its receipt,
-                    // so transient database contention does not trigger another prompt.
-                    let receipt_started = Instant::now();
-                    loop {
-                        match store.mark_notification_delivered(&target, &token) {
-                            Ok(()) | Err(StoreError::NotificationClaimStale) => break,
-                            Err(error)
-                                if error.is_retryable_database_contention()
-                                    && receipt_started.elapsed() < Duration::from_secs(15) =>
-                            {
-                                sleep(POLL_INTERVAL).await;
-                            }
-                            Err(error) => return Err(error.into()),
-                        }
-                    }
-                }
+                Ok(()) => mark_delivered(&store, &target, &token).await?,
                 Err(error) => {
+                    failed = true;
                     if let Err(release_error) = store.release_notification_claim(
                         notice.result_id,
                         &token,
@@ -358,9 +347,33 @@ pub async fn deliver_pending(paths: &Paths, task: TaskId) -> Result<()> {
                 }
             }
         }
-        sleep(POLL_INTERVAL).await;
+        // A busy owner is retried at a growing interval, not twice a second.
+        backoff = if failed {
+            (backoff * 2).min(MAX_BACKOFF)
+        } else {
+            POLL_INTERVAL
+        };
+        sleep(backoff).await;
     }
     Ok(())
+}
+
+/// The prompt was accepted. Keep the lease while retrying its receipt, so
+/// transient database contention does not trigger another prompt.
+async fn mark_delivered(store: &Store, target: &NotificationTarget, token: &str) -> Result<()> {
+    let started = Instant::now();
+    loop {
+        match store.mark_notification_delivered(target, token) {
+            Ok(()) | Err(StoreError::NotificationClaimStale) => return Ok(()),
+            Err(error)
+                if error.is_retryable_database_contention()
+                    && started.elapsed() < Duration::from_secs(15) =>
+            {
+                sleep(POLL_INTERVAL).await;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
 }
 
 fn notifications_enabled(paths: &Paths, task: TaskId) -> Result<bool> {

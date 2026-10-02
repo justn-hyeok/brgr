@@ -145,12 +145,12 @@ Documentation that overclaimed, corrected in `AGENTS.md` rather than in code: th
 
 - Observed: Codex 0.160 on a new folder shows "Trust this folder? ... > 1. Trust and continue / 2. Back to Agent Command Center". Added as rule `codex-trust` (accepted only for the task's workspace, moves to "Trust and continue" whichever option the cursor is on); covered by tests on the verbatim screen, not yet by a brgr-launched Codex worker.
 
-### D14 · Cross-session leak: a second Codex pane acts as the first one
+### D14 · Cross-session leak: Herdr's record put a new Codex session on another Codex's pane
 
-- Run: a Codex owner pane started by hand (`herdr agent start --kind codex`) while another Codex session (`ap-codex`) was already running; the new Codex ran `brgr run` from its tool shell.
-- Actual: Codex took `--owner-session` and `--source-pane` from its tool environment. Codex runs tool commands in a shared daemon whose environment belongs to the first session, so the task was attributed to **the other session** (`codex:01a0fb33...`), the worker pane opened beside the other session's pane, and the `brgr_failure` notice was pushed into **the other session's pane**, where that session started working on it. brgr's identity check passed because the session id and that pane really match; the wrong part is who made the call.
-- Why brgr cannot fix this alone: nothing in a tool call's environment tells it which pane its Codex session lives in. Herdr only learns a Codex pane's session from that pane's own hooks, and those run in the same shared daemon. Avoid two Codex panes that both orchestrate through brgr until Codex or Herdr gives each tool call its own pane and session.
-- Level: observed live; this test caused the injection into the other session.
+- Run: a Codex pane started by hand (`herdr agent start --kind codex`) while another Codex session (`ap-codex`, pane `w6G:p1`) was running; the new Codex ran `brgr run`.
+- **Corrected diagnosis (the first version of this entry was wrong).** The new Codex did not read the other session's environment: the session id it passed (`01a0fb33...`) was its own, as its rollout file (`~/.codex/sessions/.../rollout-...-01a0fb33...jsonl`, cwd = the scratch repo) shows. The wrong value was the **pane**. Herdr's Codex hook script (`~/.codex/herdr-agent-state.sh`) reports `pane_id` from the hook's environment, and Codex runs hooks in the shared daemon, whose `HERDR_PANE_ID` is the first session's pane. So Herdr recorded the new session's id as the agent session of `w6G:p1`. brgr's `caller_pane::for_session` treats "Herdr says this pane's agent_session equals the session" as proof, so brgr's own hook told the model `--source-pane w6G:p1`, the model used it, and the task, the worker pane and the `brgr_failure` notice went to the other session's pane. brgr also writes the same kind of record itself (`report-agent-session` in `notification.rs`).
+- Consequence: any code path that trusts Herdr's `agent_session` as pane proof for Codex is exploitable whenever two Codex panes exist; a nonce or token alone would not help while those paths remain.
+- Level: observed live (independent review traced it through the rollout file, the hook script and the daemon's environment; the rollout cwd and the hook script's pane source were re-checked by hand); this test caused the injection into the other session.
 
 ### D15 · A deadline-elapsed pane run reported its progress line, including the task objective
 

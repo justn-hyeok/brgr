@@ -40,7 +40,7 @@ The exact caller pane and owner session connect results to their owner. A Claude
 - `brgr config set worker-placement adjacent|tab` selects pane placement.
 - `brgr config check` checks registered recipes and settings without running a model.
 
-brgr creates the worker's pane itself and answers the screens that would stop it, so nobody has to click: the folder-trust prompt for the task's workspace, "press Enter to continue" notices, update offers (it skips them), and an applied self-update. A screen no rule covers is reported to the owner as a native-input notice and fails the run after three minutes with its text. Read it with `herdr pane read PANE --source visible` and answer with `brgr input TASK --key KEY` or `--text TEXT`. A native dialog is different from a mailbox question. Every key brgr pressed on its own is in `runs/TASK-rN.screens.log`.
+brgr creates the worker's pane itself and answers the screens that would stop it, so nobody has to click: the folder-trust prompt for the task's workspace, "press Enter to continue" notices, Claude Code's bypass-permissions warning and new-MCP-server prompt (it accepts them), update offers (it skips them), and an applied self-update. A screen no rule covers is reported to the owner as a native-input notice and fails the run after three minutes with its text. Read it with `herdr pane read PANE --source visible` and answer with `brgr input TASK --key KEY` or `--text TEXT`. A native dialog is different from a mailbox question. Every key brgr pressed on its own is in `runs/TASK-rN.screens.log`.
 
 Workers can publish an answer with `brgr report TASK --body TEXT`, which sends orchestration output without a source edit. 
 

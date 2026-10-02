@@ -75,18 +75,18 @@ pub(super) fn classify(screen: &str, workspace: &Path) -> Screen {
     }
     let options = menu_options(screen);
     let selected = options.iter().position(|option| option.selected);
+    if let (Some(selected), Some((rule, target))) = (selected, accepting_option(&lower, &options)) {
+        let mut keys = keys_between(selected, target);
+        keys.push("enter");
+        return Screen::Resolve { rule, keys };
+    }
     // An update menu comes first: its highlighted option is "Update now", so a
     // stray "press Enter" line on the same screen must not become Enter.
     if let Some(selected) = selected
         && (lower.contains("update") || lower.contains("upgrade"))
         && let Some(skip) = options.iter().position(|option| is_skip(&option.text))
     {
-        let mut keys = Vec::new();
-        if skip > selected {
-            keys.extend(std::iter::repeat_n("down", skip - selected));
-        } else {
-            keys.extend(std::iter::repeat_n("up", selected - skip));
-        }
+        let mut keys = keys_between(selected, skip);
         keys.push("enter");
         return Screen::Resolve {
             rule: "update-offer-skip",
@@ -104,6 +104,29 @@ pub(super) fn classify(screen: &str, workspace: &Path) -> Screen {
         };
     }
     Screen::Unknown(head(screen))
+}
+
+/// The cursor presses that move from option `from` to option `to`.
+fn keys_between(from: usize, to: usize) -> Vec<&'static str> {
+    let key = if to > from { "down" } else { "up" };
+    std::iter::repeat_n(key, to.abs_diff(from)).collect()
+}
+
+/// Claude Code's own gates in front of a run, answered by accepting: the
+/// Bypass Permissions warning and a newly found MCP server.
+fn accepting_option(lower: &str, options: &[MenuOption]) -> Option<(&'static str, usize)> {
+    let position = |prefix: &str| {
+        options
+            .iter()
+            .position(|option| option.text.to_lowercase().starts_with(prefix))
+    };
+    if lower.contains("bypass permissions mode") {
+        return position("yes, i accept").map(|at| ("bypass-warning", at));
+    }
+    if lower.contains("mcp server") {
+        return position("use this").map(|at| ("mcp-trust", at));
+    }
+    None
 }
 
 fn has_continue_notice(screen: &str) -> bool {
@@ -485,6 +508,33 @@ mod tests {
     fn an_update_menu_without_a_skip_option_is_not_guessed() {
         let screen = "Update available\n› 1. Update now\n  2. Show release notes\n";
         assert!(matches!(classify(screen, work()), Screen::Unknown(_)));
+    }
+
+    /// Synthetic: Claude Code's documented Bypass Permissions warning, not
+    /// captured from a pane here.
+    #[test]
+    fn the_bypass_permissions_warning_is_accepted() {
+        let screen = "WARNING: Claude Code running in Bypass Permissions mode\n\nIn Bypass Permissions mode, Claude Code will not ask for your approval.\n\n❯ 1. No, exit\n  2. Yes, I accept\n";
+        assert_eq!(
+            classify(screen, work()),
+            Screen::Resolve {
+                rule: "bypass-warning",
+                keys: vec!["down", "enter"],
+            }
+        );
+    }
+
+    /// Synthetic: Claude Code's documented new-MCP-server prompt.
+    #[test]
+    fn a_new_mcp_server_prompt_is_trusted() {
+        let screen = "New MCP server found in .mcp.json: docs\n\n❯ 1. Use this and all future MCP servers in this project\n  2. Use this MCP server\n  3. Continue without using this MCP server\n";
+        assert_eq!(
+            classify(screen, work()),
+            Screen::Resolve {
+                rule: "mcp-trust",
+                keys: vec!["enter"],
+            }
+        );
     }
 
     /// Synthetic: a stray notice line must not turn an update menu into Enter.
