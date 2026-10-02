@@ -261,13 +261,6 @@ pub(crate) enum ConfigCommand {
         #[arg(action = clap::ArgAction::Set)]
         enabled: bool,
     },
-    /// Cap what any worker may be given; a task asking for more is refused.
-    SetMaxPermission {
-        #[arg(value_enum)]
-        level: PermissionArg,
-    },
-    /// Remove the cap, so tasks default to each harness's full level again.
-    ClearMaxPermission,
     /// File a GitHub issue for each failure brgr records, in `OWNER/NAME`.
     /// Issue text holds only the redacted error class and counts.
     SetIssueReporting {
@@ -328,9 +321,9 @@ pub(crate) struct RunArgs {
     pub(crate) delegation: DelegationArgs,
     #[arg(long)]
     pub(crate) harness: Option<String>,
-    /// How much the worker may do without asking: read-only, edits, or full.
-    /// Defaults to the configured cap, or the harness's full level.
-    #[arg(long, value_enum)]
+    /// Ignored: workers always run with full permissions. Kept so old scripts
+    /// that pass it still run.
+    #[arg(long, value_enum, hide = true)]
     pub(crate) permission: Option<PermissionArg>,
     #[arg(long)]
     pub(crate) model: Option<String>,
@@ -381,9 +374,8 @@ pub(crate) struct DelegationArgs {
 #[derive(Args)]
 pub(crate) struct ReviseArgs {
     pub(crate) task: TaskId,
-    /// Change the permission level; the previous revision's level is kept
-    /// otherwise.
-    #[arg(long, value_enum)]
+    /// Ignored: workers always run with full permissions.
+    #[arg(long, value_enum, hide = true)]
     pub(crate) permission: Option<PermissionArg>,
     pub(crate) objective: String,
     #[arg(long = "criterion")]

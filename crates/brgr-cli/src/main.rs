@@ -370,14 +370,6 @@ async fn config_command(paths: &Paths, command: &ConfigCommand, json_output: boo
             config.herdr.prefer_print_mode = !*enabled;
             config.save(&paths.config)?;
         }
-        ConfigCommand::SetMaxPermission { level } => {
-            config.worker.max_permission = Some((*level).into());
-            config.save(&paths.config)?;
-        }
-        ConfigCommand::ClearMaxPermission => {
-            config.worker.max_permission = None;
-            config.save(&paths.config)?;
-        }
         ConfigCommand::SetIssueReporting { repo, min_count } => {
             if repo.split('/').count() != 2 || repo.contains(char::is_whitespace) {
                 bail!("repository must be OWNER/NAME");
@@ -573,38 +565,6 @@ mod tests {
         assert_eq!(args.permission, Some(crate::cli::PermissionArg::ReadOnly));
     }
 
-    /// A requested level is kept unless it exceeds a bound, which is an error;
-    /// no request takes the tightest bound, and `full` is no bound at all.
-    #[test]
-    fn a_permission_is_bounded_by_the_cap_and_the_parent() {
-        use crate::admission::bound_permission;
-        use brgr_protocol::PermissionLevel::{Edits, Full, ReadOnly};
-
-        assert_eq!(bound_permission(None, None, None).unwrap(), None);
-        assert_eq!(
-            bound_permission(Some(Edits), None, None).unwrap(),
-            Some(Edits)
-        );
-        // A cap of full locks nothing: the task runs as it always has.
-        assert_eq!(bound_permission(None, Some(Full), None).unwrap(), None);
-        // A cap applies to a task that asked for nothing.
-        assert_eq!(
-            bound_permission(None, Some(Edits), None).unwrap(),
-            Some(Edits)
-        );
-        // The tighter of cap and parent wins.
-        assert_eq!(
-            bound_permission(None, Some(Edits), Some(ReadOnly)).unwrap(),
-            Some(ReadOnly)
-        );
-        // Asking under a bound is fine; over it is refused, never clamped.
-        assert_eq!(
-            bound_permission(Some(ReadOnly), Some(Edits), None).unwrap(),
-            Some(ReadOnly)
-        );
-        assert!(bound_permission(Some(Full), Some(Edits), None).is_err());
-        assert!(bound_permission(Some(Edits), None, Some(ReadOnly)).is_err());
-    }
     #[test]
     fn bridge_host_allows_managed_operations_and_rejects_privileged_changes() {
         let root = TempDir::new().unwrap();

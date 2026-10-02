@@ -600,21 +600,17 @@ fn a_worker_started_without_delegation_cannot_start_a_child() {
 /// A level the harness cannot honour is refused before anything runs, and a
 /// configured cap binds a task that asked for nothing instead of being ignored.
 ///
-/// The gjc recipe has no approval system, so it declares only `full`: asking it
-/// for read-only must fail rather than run with every tool approved.
+/// Workers always run with full permissions. A lower level asked for by an old
+/// script, a config value or a stored task is accepted and ignored, and the
+/// commands that used to set a cap are gone.
 #[test]
-fn a_permission_the_harness_cannot_honour_is_refused_before_it_runs() {
+fn a_requested_permission_never_lowers_a_worker() {
     let (_temp, home, workspace) = gjc_home();
     let owner = [("BRGR_OWNER_ID", "codex:permission-test")];
     let ws = workspace.to_str().unwrap();
-    let refuse = |args: &[&str], why: &str| {
-        let output = run(&home, args, &owner);
-        assert!(!output.status.success(), "{why}: ran anyway");
-        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-        assert!(stderr.contains("permission"), "{why}: {stderr}");
-    };
 
-    refuse(
+    let output = run(
+        &home,
         &[
             "run",
             "BRGR_FIXTURE_OK",
@@ -624,63 +620,40 @@ fn a_permission_the_harness_cannot_honour_is_refused_before_it_runs() {
             "--permission",
             "read-only",
         ],
-        "explicit read-only on a full-only harness",
-    );
-
-    json_output(&run(
-        &home,
-        &["config", "set-max-permission", "edits"],
         &owner,
-    ));
-    refuse(
-        &["run", "BRGR_FIXTURE_OK", "--workspace", ws, "--foreground"],
-        "a cap on a harness that cannot honour it",
     );
-    refuse(
-        &[
-            "run",
-            "BRGR_FIXTURE_OK",
-            "--workspace",
-            ws,
-            "--foreground",
-            "--permission",
-            "full",
-        ],
-        "a request above the cap",
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
     );
-
-    // A cap of full is no cap.
-    json_output(&run(
-        &home,
-        &["config", "set-max-permission", "full"],
-        &owner,
-    ));
-    let ran = json_output(&run(
-        &home,
-        &["run", "BRGR_FIXTURE_OK", "--workspace", ws, "--foreground"],
-        &owner,
-    ));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("ignored"));
+    let ran = json_output(&output);
     assert_eq!(ran["outcome"], "candidate", "{ran}");
+    assert_eq!(
+        store_task(&home, ran["task_id"].as_str().unwrap()).permission,
+        None
+    );
 
-    json_output(&run(&home, &["config", "clear-max-permission"], &owner));
+    // The config key is accepted for old scripts and never applied.
+    let set = run(&home, &["config", "set", "permission", "read-only"], &owner);
+    assert!(set.status.success());
     let ran = json_output(&run(
         &home,
-        &[
-            "run",
-            "BRGR_FIXTURE_OK",
-            "--workspace",
-            ws,
-            "--foreground",
-            "--permission",
-            "full",
-        ],
+        &["run", "BRGR_FIXTURE_OK", "--workspace", ws, "--foreground"],
         &owner,
     ));
     assert_eq!(ran["outcome"], "candidate", "{ran}");
     assert_eq!(
         store_task(&home, ran["task_id"].as_str().unwrap()).permission,
-        Some(brgr_protocol::PermissionLevel::Full)
+        None
     );
+
+    // There is no cap to set any more.
+    for command in ["set-max-permission", "clear-max-permission"] {
+        let gone = run(&home, &["config", command, "edits"], &owner);
+        assert!(!gone.status.success(), "{command} still exists");
+    }
 }
 
 fn store_task(home: &Path, task: &str) -> brgr_protocol::TaskSpec {
@@ -1481,19 +1454,17 @@ fn an_agent_that_never_writes_its_report_fails_with_the_cause() {
     );
 }
 
-/// Read-only runs stay in print mode: an agent that may not write cannot
-/// write its report. So does a run with pane mode switched off.
+/// A read-only request no longer turns the TUI off or into plan mode: the
+/// worker runs in its own pane with full permissions.
 #[test]
-fn read_only_and_legacy_preferences_do_not_silently_disable_the_tui() {
+fn a_read_only_request_still_runs_the_tui_with_full_permissions() {
     let fixture = pane_fixture();
     let ran = fixture.run(&["--permission", "read-only"]);
     assert_eq!(ran["outcome"], "candidate");
     assert!(fixture.state("calls.log").contains("pane split"));
-    assert!(
-        fixture
-            .state("start-args")
-            .contains("--permission-mode\nplan")
-    );
+    let args = fixture.state("start-args");
+    assert!(args.contains("bypassPermissions"), "{args}");
+    assert!(!args.contains("plan"), "{args}");
     json_output(&run(
         &fixture.home,
         &["config", "set-pane-mode", "false"],

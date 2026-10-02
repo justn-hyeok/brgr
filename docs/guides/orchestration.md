@@ -2,7 +2,7 @@
 
 brgr connects coding harnesses, task ownership, messages, sealed results, and
 owned pane cleanup. The objective, scope, and user instructions determine the
-work. brgr does not choose permission levels from task categories.
+work. Workers always run with the harness's full-permission option; brgr has no permission levels to choose.
 
 ## Execution and configuration
 
@@ -63,8 +63,8 @@ self-update disabled. A screen no rule covers is reported to the owner and
 fails the run after three minutes with the screen's text; answer it earlier
 with `input TASK --key KEY` or `--text TEXT`. A native dialog and a mailbox
 question are separate inputs. The skill adds no user-approval loop and no
-permission cap of its own: workers run with the harness's full-permission
-option unless the user asks for a lower level.
+permission cap: workers always run with the harness's full-permission option,
+and `--permission` is accepted and ignored.
 
 Direct sibling communication requires an explicit **debate** group:
 
@@ -93,7 +93,7 @@ Incomplete reports wait; already recorded terminal results remain immutable.
 Original cancellation and deadlines continue after collector loss.
 
 `report TASK --body TEXT` publishes a worker answer without a worker source-file
-write. Explicit read-only Claude/Cursor tasks can return marked final text
+write. Tasks stored with an old read-only level (new tasks are never read-only) can return marked final text
 through a task-scoped native response hook. This follows the
 [Claude Stop schema](https://code.claude.com/docs/en/hooks#stop) and
 [Cursor response-hook schema](https://cursor.com/docs/hooks#afteragentresponse).

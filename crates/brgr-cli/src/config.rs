@@ -133,13 +133,10 @@ impl Config {
                         .context("notifications must be true or false")?,
                 );
             }
+            // Workers always run with full permissions; a stored level is
+            // accepted for old scripts and never applied.
             "permission" => {
-                options.permission = Some(match value {
-                    "full" | "yolo" => brgr_protocol::PermissionLevel::Full,
-                    "edits" => brgr_protocol::PermissionLevel::Edits,
-                    "read-only" => brgr_protocol::PermissionLevel::ReadOnly,
-                    _ => bail!("permission must be full, edits, or read-only"),
-                });
+                eprintln!("brgr: permission is ignored; workers always run with full permissions");
             }
             "deadline-seconds" => {
                 let seconds: u64 = value.parse()?;
