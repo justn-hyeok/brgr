@@ -58,6 +58,21 @@ const REPORT_GRACE: Duration = Duration::from_secs(15);
 /// before it counts as finished.
 const UNSEEN_WORK_GRACE: Duration = Duration::from_mins(1);
 
+/// How long a pane run waits for its calling Codex pane to show the call. The
+/// call that started the task ends within seconds, so this is generous.
+const CALLER_WAIT: Duration = Duration::from_secs(40);
+
+fn caller_wait() -> Duration {
+    #[cfg(debug_assertions)]
+    if let Some(millis) = env::var("BRGR_TEST_CALLER_WAIT_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+    {
+        return Duration::from_millis(millis);
+    }
+    CALLER_WAIT
+}
+
 /// The two report waits, shortened for tests only.
 fn report_waits() -> (Duration, Duration) {
     #[cfg(debug_assertions)]
@@ -138,6 +153,7 @@ pub(crate) fn pane_process_manifest(
                 )
                 // Lets a test shorten the report waits in the detached runner.
                 .chain(cfg!(debug_assertions).then(|| "BRGR_TEST_REPORT_GRACE_MS".to_owned()))
+                .chain(cfg!(debug_assertions).then(|| "BRGR_TEST_CALLER_WAIT_MS".to_owned()))
                 .collect::<std::collections::BTreeSet<_>>()
                 .into_iter()
                 .collect(),
@@ -220,11 +236,16 @@ pub(crate) fn run_pane_adapter(paths: &Paths, run: &PaneRunArgs) -> Result<()> {
     if env::var("HERDR_ENV").as_deref() != Ok("1") && run.caller.is_none() {
         bail!("pane mode requires a Herdr caller");
     }
-    let caller = run
-        .caller
-        .clone()
-        .or_else(crate::caller_pane::verified)
-        .context("Herdr caller pane id is absent")?;
+    let caller = match run.caller.as_deref() {
+        Some(marker) if crate::caller_pane::pending_session(marker).is_some() => {
+            let session = crate::caller_pane::pending_session(marker).unwrap_or_default();
+            crate::caller_pane::wait_for_session(session, caller_wait()).context(
+                "could not find the calling Codex pane: no Codex pane shows this session's brgr call",
+            )?
+        }
+        Some(pane) => pane.to_owned(),
+        None => crate::caller_pane::verified().context("Herdr caller pane id is absent")?,
+    };
     let spec = Store::open(&paths.store)?.task(run.task)?;
     if spec.revision != run.revision {
         bail!("pane runner revision differs from the admitted task revision");

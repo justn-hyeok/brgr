@@ -152,6 +152,12 @@ Documentation that overclaimed, corrected in `AGENTS.md` rather than in code: th
 - Consequence: any code path that trusts Herdr's `agent_session` as pane proof for Codex is exploitable whenever two Codex panes exist; a nonce or token alone would not help while those paths remain.
 - Level: observed live (independent review traced it through the rollout file, the hook script and the daemon's environment; the rollout cwd and the hook script's pane source were re-checked by hand); this test caused the injection into the other session.
 
+#### D14 fix and live result
+
+- Change: for Codex, Herdr's recorded `agent_session` is no longer pane proof. `caller_pane::for_session` reads the Codex panes and accepts the one pane whose screen shows `Ran brgr ... <first 13 characters of the session>`; zero or several matches prove nothing. The hook now tells the model `brgr --as SESSION` (short, so a narrow pane still shows the id) and no longer names a pane. Codex prints a command only after it finishes, so the call that starts a task cannot be placed while it runs: the task is admitted with the pane unresolved, the worker's pane runner waits up to 40 s for the call to show on a screen and then opens the pane beside it, and the notification dispatcher keeps retrying registration with a growing gap. No headless fallback is involved.
+- Live (two Codex panes sharing one daemon, plus four other Codex panes that must not be touched): each Codex started a failing worker; both workers opened in TUI panes; each owner was registered to its own pane (`w5G:p46`, `w5G:p47`); each `brgr_failure` notice reached only its own owner, which then read it and saw the stderr failure note; none of the other Codex panes received anything.
+- Limits seen: a pane narrower than about 35 columns cuts the `Ran` line before the id; a Codex that does not put `--as SESSION` first leaves nothing to trace (the run then fails with "could not find the calling Codex pane" after 40 s); Herdr's own hook still writes the wrong pane for new sessions, which brgr now ignores but other Herdr users of that record would not. Not verified: worker pane placement beside the owner by layout (same resolver as the notices, not inspected on its own).
+
 ### D15 · A deadline-elapsed pane run reported its progress line, including the task objective
 
 - Run: `brgr run ... --deadline-seconds 20` on OpenCode.
@@ -165,7 +171,7 @@ Documentation that overclaimed, corrected in `AGENTS.md` rather than in code: th
 
 ## Verification state of the screen-rule work (friction worktree, uncommitted)
 
-- Checks: `cargo fmt --check`, `cargo clippy --workspace --all-targets --all-features -D warnings`, `cargo test --workspace --locked` = 383 passed, 0 failed (baseline before the change: 345 passed).
+- Checks: `cargo fmt --check`, `cargo clippy --workspace --all-targets --all-features -D warnings`, `cargo test --workspace --locked` = 392 passed, 0 failed (baseline before the change: 345 passed).
 - Live panes: OpenCode and Claude tasks reached `candidate` with sealed output. In fresh scratch repos whose path contains a space, Claude's trust prompt appeared and brgr pressed it: `screens.log` shows `workspace-trust down enter` for `f9ffa2c0` (twice, before the redraw delay) and `38f4248d` (once).
 - Installed: `~/.local/bin/brgr` is this build (installed by new file and `mv`); earlier binaries are in the scratchpad as `brgr-installed-before`, `-2`, `-3`. `brgr integrate codex install` was run and `brgr doctor` says `ok`.
 - Checked separately: Claude Code's docs name `DISABLE_AUTOUPDATER` (also in `claude doctor` output) as the env switch for background updates. Herdr's key names reach a real terminal as the bytes the rules rely on (`down` = `ESC [ B`, `up` = `ESC [ A`, `esc` = `ESC`, `enter` = newline), checked with a raw-mode reader in a live pane.

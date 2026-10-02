@@ -49,7 +49,7 @@ fn default_call_does_not_silently_run_headless_without_a_tui_source() {
         !output.status.success(),
         "default call unexpectedly ran headless"
     );
-    assert!(String::from_utf8_lossy(&output.stderr).contains("--headless"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("exact Herdr source"));
     let output = command(&home)
         .args([
             "run",

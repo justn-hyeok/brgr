@@ -30,7 +30,7 @@ Translate the user's request into brgr operations. Preserve the requested harnes
 
 `brgr doctor` lists registered harnesses. Omitted harness/model/effort/deadline values resolve from harness settings, global settings, then product defaults. Supply `--model` or `--effort` when requested. Workers always run with the harness's full-permission option; `--permission` and the `permission` config key are ignored, and brgr has no cap or approval policy.
 
-The exact caller pane and owner session connect results to their owner. A Claude Code owner is identified as `claude:<CLAUDE_CODE_SESSION_ID>` and receives the same pushes as a Codex owner. From a shared daemon, use verified `--owner-session SESSION --source-pane PANE`; hooks expose these options when available. Do not infer a source from focus or newest-pane order.
+The exact caller pane and owner session connect results to their owner. A Claude Code owner is identified as `claude:<CLAUDE_CODE_SESSION_ID>` and receives the same pushes as a Codex owner. From a shared daemon, start every brgr command with `--as SESSION` (the session from the hook's calling context) and do not add `--source-pane`: brgr finds your pane by reading what the Codex panes show, and when it cannot tell, it runs without a pane instead of guessing. Do not infer a source from focus or newest-pane order.
 
 `brgr config init` creates missing config/instruction examples and prints their paths. User instructions live at `$BRGR_HOME/BRGR.md`; macOS defaults to `~/Library/Application Support/brgr/BRGR.md`. Calling options live at `$BRGR_HOME/config.toml`.
 

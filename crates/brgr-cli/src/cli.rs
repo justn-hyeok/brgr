@@ -18,7 +18,9 @@ pub(crate) struct Cli {
     #[arg(long, global = true)]
     pub(crate) json: bool,
     /// Exact calling harness session, for commands executed by a shared daemon.
-    #[arg(long, global = true)]
+    /// `--as` is the short form: it keeps the session near the front of the
+    /// command line Codex prints, where a narrow pane still shows it.
+    #[arg(long, global = true, alias = "as")]
     pub(crate) owner_session: Option<String>,
     /// Exact source Herdr pane. Its session is verified before use.
     #[arg(long, global = true)]

@@ -62,10 +62,12 @@ pub(crate) async fn hook(paths: &Paths, event: HookEvent) -> Result<()> {
         if event == HookEvent::Stop {
             println!("{{}}");
         } else {
-            let pane = source.map_or_else(String::new, |pane| format!(" --source-pane {pane}"));
+            // The pane is never named here: brgr works it out from what the panes
+            // show, because the hook's own idea of the pane can be another
+            // session's.
             println!(
                 "{}",
-                json!({"hookSpecificOutput":{"hookEventName":format!("{event:?}"),"additionalContext":format!("brgr calling context for this session: brgr --owner-session {session_id}{pane}. Use these exact calling options for brgr commands from the shared daemon.")}})
+                json!({"hookSpecificOutput":{"hookEventName":format!("{event:?}"),"additionalContext":format!("brgr calling context for this session: brgr --as {session_id}. Put exactly these options right after `brgr` in every brgr command, and do not add --source-pane.")}})
             );
         }
         return Ok(());

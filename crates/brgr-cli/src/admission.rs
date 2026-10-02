@@ -360,9 +360,20 @@ pub(crate) async fn start_task(
         if activated.adapter != brgr_runner::OMP_ROLE_ADAPTER_V1 {
             crate::pane_adapter::require_tui(activated, &spec)?;
         }
-        let source_pane = crate::caller_pane::verified().context(
-            "default TUI execution needs an exact Herdr source; provide --owner-session and --source-pane, or explicitly request --headless"
-        )?;
+        // A Codex call cannot be placed while it runs, so its pane is looked up
+        // once the call has finished; the worker pane opens then, beside it.
+        let source_pane = crate::caller_pane::verified()
+            .or_else(|| {
+                (spec.owner_id.as_str().starts_with("codex:")
+                    && std::env::var("HERDR_ENV").as_deref() == Ok("1")
+                    && crate::caller_pane::binary().is_some())
+                .then(|| crate::current_session().ok().flatten())
+                    .flatten()
+                    .map(|session| crate::caller_pane::pending_marker(&session))
+            })
+            .context(
+                "default TUI execution needs an exact Herdr source; run it from a Herdr pane or pass --owner-session from a Codex session",
+            )?;
         Some(source_pane)
     };
     let pane_mode = source_pane.is_some() && activated.adapter != brgr_runner::OMP_ROLE_ADAPTER_V1;

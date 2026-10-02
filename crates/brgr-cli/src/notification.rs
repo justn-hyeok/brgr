@@ -236,6 +236,7 @@ pub fn spawn_for_task(paths: &Paths, task: TaskId) -> Result<()> {
             .ok()
             .and_then(|bytes| serde_json::from_slice::<crate::LaunchEnvelope>(&bytes).ok())
             .and_then(|launch| launch.source_pane)
+            .filter(|pane| crate::caller_pane::pending_session(pane).is_none())
         {
             command.args(["--source-pane", &pane]);
         }
@@ -278,7 +279,9 @@ pub async fn deliver_pending(paths: &Paths, task: TaskId) -> Result<()> {
     // lock after a crash, so a later hook may resume the durable queue.
     let _lock = lock;
     let started = Instant::now();
-    let store = registered_store(paths, task, started).await?;
+    let (store, mut registered) = registered_store(paths, task, started).await?;
+    let mut next_try = Instant::now() + Duration::from_secs(2);
+    let mut gap = Duration::from_secs(2);
     let database = paths.store.join("brgr.sqlite3");
     let mut backoff = POLL_INTERVAL;
     while started.elapsed() < MAX_LIFETIME {
@@ -287,6 +290,13 @@ pub async fn deliver_pending(paths: &Paths, task: TaskId) -> Result<()> {
         // suites delete their homes; each run left one such process behind.
         if !database.exists() {
             return Ok(());
+        }
+        // The owner's pane may only be provable once the call that started this
+        // task has finished and shown up on its screen, so keep trying.
+        if !registered && Instant::now() >= next_try {
+            registered = register_for_task(paths, &store, task).await;
+            gap = (gap * 2).min(Duration::from_mins(1));
+            next_try = Instant::now() + gap;
         }
         deliver_questions(paths, &store, task).await;
         let pending = match store.pending_notifications_for_task(task) {
@@ -385,7 +395,7 @@ fn notifications_enabled(paths: &Paths, task: TaskId) -> Result<bool> {
         != Some(false))
 }
 
-async fn registered_store(paths: &Paths, task: TaskId, started: Instant) -> Result<Store> {
+async fn registered_store(paths: &Paths, task: TaskId, started: Instant) -> Result<(Store, bool)> {
     let store = loop {
         match Store::open(&paths.store) {
             Ok(store) => break store,
@@ -397,11 +407,21 @@ async fn registered_store(paths: &Paths, task: TaskId, started: Instant) -> Resu
             Err(error) => return Err(error.into()),
         }
     };
-    let spec = store.task(task)?;
-    if let Some((session, _)) = store.owner_binding(&spec.owner_id)? {
-        register_current_surface(paths, &store, &spec.owner_id, &session).await?;
-    }
-    Ok(store)
+    let registered = register_for_task(paths, &store, task).await;
+    Ok((store, registered))
+}
+
+/// Registers the task owner's pane when it can be proven now.
+async fn register_for_task(paths: &Paths, store: &Store, task: TaskId) -> bool {
+    let Ok(spec) = store.task(task) else {
+        return false;
+    };
+    let Ok(Some((session, _))) = store.owner_binding(&spec.owner_id) else {
+        return false;
+    };
+    register_current_surface(paths, store, &spec.owner_id, &session)
+        .await
+        .unwrap_or(false)
 }
 
 /// The owner's Codex pane, as the store recorded it for the bound session.
