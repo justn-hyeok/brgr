@@ -275,6 +275,17 @@ pub(crate) fn cleanup(paths: &Paths, command: CleanupCommand, json_output: bool)
     let store = Store::open(&paths.store)?;
     let spec = store.task(task)?;
     require_owner(&store, &spec.owner_id)?;
+    if crate::pane_adapter::session_status(paths, task, spec.revision).is_some() {
+        if matches!(command, CleanupCommand::Run { .. }) {
+            crate::pane_adapter::cleanup_settled(paths, task, spec.revision)?;
+        }
+        print_value(
+            &crate::pane_adapter::session_status(paths, task, spec.revision)
+                .unwrap_or(serde_json::Value::Null),
+            json_output,
+        );
+        return Ok(());
+    }
     let status = match command {
         CleanupCommand::Status { .. } => pane_cleanup::status(&store, &paths.runs, task)?,
         CleanupCommand::Run { .. } => pane_cleanup::close_if_eligible(&store, &paths.runs, task)?,

@@ -14,10 +14,34 @@
 //! different `HERDR_PANE_ID`. A daemon's chain ends at launchd and never
 //! reaches Herdr.
 
-use std::{collections::HashMap, env, path::Path, process::Command};
+use serde_json::Value;
+use std::{
+    collections::HashMap,
+    env, fs,
+    io::{Read as _, Seek as _},
+    path::Path,
+    process::Command,
+};
 
 /// The caller's Herdr pane, when this process provably runs inside it.
 pub(crate) fn verified() -> Option<String> {
+    if let Some(pane) = crate::invocation::current().pane.as_deref() {
+        return crate::current_session()
+            .ok()
+            .flatten()
+            .and_then(|session| for_session(&session, Some(pane)));
+    }
+    let native = inherited();
+    if native.is_some() {
+        return native;
+    }
+    crate::current_session()
+        .ok()
+        .flatten()
+        .and_then(|session| for_session(&session, crate::invocation::current().pane.as_deref()))
+}
+
+fn inherited() -> Option<String> {
     if env::var("HERDR_ENV").as_deref() != Ok("1") {
         return None;
     }
@@ -29,6 +53,165 @@ pub(crate) fn verified() -> Option<String> {
         return Some(pane);
     }
     runs_inside(&pane).then_some(pane)
+}
+
+/// Resolve only a native session match, never focus, cwd uniqueness, or recency.
+pub(crate) fn for_session(session: &str, explicit: Option<&str>) -> Option<String> {
+    if let Some(pane) = explicit {
+        let live = herdr_json(&["agent", "get", pane])?;
+        let agent = live.pointer("/result/agent")?;
+        if agent.get("agent").and_then(Value::as_str) == Some("codex")
+            && agent.get("pane_id").and_then(Value::as_str) == Some(pane)
+            && agent
+                .pointer("/agent_session/value")
+                .and_then(Value::as_str)
+                .is_some_and(|id| id == session)
+        {
+            return Some(pane.to_owned());
+        }
+        if agent
+            .pointer("/agent_session/value")
+            .and_then(Value::as_str)
+            .is_some()
+        {
+            return None;
+        }
+        if inherited().as_deref() == Some(pane) {
+            return Some(pane.to_owned());
+        }
+    }
+    let agent = herdr_json(&["agent", "list"])?;
+    let records = agent.pointer("/result/agents").and_then(Value::as_array);
+    if let Some(records) = records {
+        let matches: Vec<_> = records
+            .iter()
+            .filter(|item| {
+                item.pointer("/agent_session/value").and_then(Value::as_str) == Some(session)
+                    && explicit.is_none_or(|pane| {
+                        item.get("pane_id").and_then(Value::as_str) == Some(pane)
+                    })
+            })
+            .collect();
+        if let [record] = matches.as_slice() {
+            return record.get("pane_id")?.as_str().map(str::to_owned);
+        }
+    }
+    // Optional native frontend receipts also cover Codex versions where Herdr
+    // has not reported the session yet. Match the exact session and live PID.
+    let cwd = env::current_dir().ok()?;
+    let mut roots = vec![cwd.clone()];
+    if let Some(primary) = crate::workspace::primary_checkout(&cwd) {
+        roots.push(primary);
+    }
+    for root in roots {
+        let Ok(entries) = fs::read_dir(root.join(".agent-progress/bridges")) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().is_none_or(|v| v != "json") {
+                continue;
+            }
+            let Ok(metadata) = fs::symlink_metadata(&path) else {
+                continue;
+            };
+            if !metadata.is_file() || metadata.len() > 65_536 {
+                continue;
+            }
+            let Some(record) = fs::read(&path)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+            else {
+                continue;
+            };
+            if record.get("native_session").and_then(Value::as_str) != Some(session)
+                || record.get("session").and_then(Value::as_str) != Some(session)
+            {
+                continue;
+            }
+            let Some(pane) = record.get("pane").and_then(Value::as_str) else {
+                continue;
+            };
+            if explicit.is_some_and(|expected| expected != pane) {
+                continue;
+            }
+            let Some(pid) = record.get("pid").and_then(Value::as_u64) else {
+                continue;
+            };
+            let Some(process) = herdr_json(&["pane", "process-info", "--pane", pane]) else {
+                continue;
+            };
+            if contains_pid(&process, pid) {
+                return Some(pane.to_owned());
+            }
+        }
+    }
+    None
+}
+
+fn contains_pid(value: &Value, pid: u64) -> bool {
+    match value {
+        Value::Object(fields) => fields.iter().any(|(key, value)| {
+            (matches!(key.as_str(), "pid" | "foreground_process_group")
+                && value.as_u64() == Some(pid))
+                || contains_pid(value, pid)
+        }),
+        Value::Array(values) => values.iter().any(|v| contains_pid(v, pid)),
+        _ => false,
+    }
+}
+
+fn herdr_json(args: &[&str]) -> Option<Value> {
+    let binary = binary()?;
+    let mut command = Command::new(binary);
+    if let Ok(session) = env::var("HERDR_SESSION") {
+        command.args(["--session", &session]);
+    }
+    let mut out = tempfile::tempfile().ok()?;
+    let err = tempfile::tempfile().ok()?;
+    let mut child = command
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .stdout(out.try_clone().ok()?)
+        .stderr(err)
+        .spawn()
+        .ok()?;
+    let started = std::time::Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait().ok()? {
+            break status;
+        }
+        let budget = if crate::invocation::is_hook() {
+            200
+        } else {
+            2000
+        };
+        if started.elapsed() > std::time::Duration::from_millis(budget) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    };
+    if !status.success() || out.metadata().ok()?.len() > 1024 * 1024 {
+        return None;
+    }
+    out.rewind().ok()?;
+    let mut bytes = Vec::new();
+    out.take(1024 * 1024 + 1).read_to_end(&mut bytes).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+pub(crate) fn binary() -> Option<std::ffi::OsString> {
+    if let Some(path) = env::var_os("HERDR_BIN_PATH") {
+        return Some(path);
+    }
+    let path = env::var_os("PATH")?;
+    env::split_paths(&path)
+        .map(|dir| dir.join("herdr"))
+        .find(|p| p.is_file())
+        .and_then(|p| p.canonicalize().ok())
+        .map(std::path::PathBuf::into_os_string)
 }
 
 /// Walks this process's ancestors to the Herdr server.

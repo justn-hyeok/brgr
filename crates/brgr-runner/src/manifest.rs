@@ -94,6 +94,10 @@ pub struct InteractiveSpec {
     /// effort then runs headless rather than silently without it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub effort_print_only: bool,
+    /// Run the registered executable inside a native host when Herdr does not
+    /// have a built-in agent kind for this harness.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub native_host: bool,
 }
 
 /// Per-level arguments. `Some(vec![])` is a level the harness honours with no

@@ -369,6 +369,24 @@ impl Store {
         )?;
         u64::try_from(count).map_err(|_| StoreError::NumericOverflow)
     }
+
+    /// Questions awaiting an answer or withdrawal, including those already read.
+    /// # Errors
+    /// Returns an error on invalid stored data or database failure.
+    pub fn unanswered_questions(
+        &self,
+        task: TaskId,
+        attempt: AttemptId,
+        direction: MessageDirection,
+    ) -> Result<Vec<TaskMessage>, StoreError> {
+        let mut statement = self.connection.prepare("SELECT q.message_id FROM task_messages q WHERE q.task_id=?1 AND q.attempt_id=?2 AND q.direction=?3 AND q.kind='question' AND NOT EXISTS(SELECT 1 FROM task_messages r WHERE r.in_reply_to=q.message_id AND r.kind='reply') AND NOT EXISTS(SELECT 1 FROM withdrawn_questions w WHERE w.message_id=q.message_id) ORDER BY q.rowid")?;
+        let ids = statement.query_map(
+            params![task.to_string(), attempt.to_string(), direction.as_str()],
+            |row| row.get::<_, String>(0),
+        )?;
+        ids.map(|id| load_message(&self.connection, &id?)?.ok_or(StoreError::InvalidTaskMessage))
+            .collect()
+    }
 }
 
 fn validate_draft(draft: &MessageDraft) -> Result<(), StoreError> {

@@ -8,13 +8,15 @@ use std::{
 use anyhow::{Context as _, Result, bail};
 
 use crate::{
-    cli::{ArtifactCommand, Cli, Command, HarnessCommand},
+    cli::{ArtifactCommand, Cli, Command, ConfigCommand, ErrorsCommand, HarnessCommand},
     message, plugin_bridge,
 };
 
 pub(crate) fn bridge_budget_seconds(command: &Command) -> u64 {
     match command {
-        Command::Run(args) if args.foreground => args.deadline_seconds,
+        Command::Run(args) if args.foreground => args
+            .deadline_seconds
+            .unwrap_or(plugin_bridge::MAX_BRIDGE_SECONDS - 120),
         Command::Revise(args) if args.foreground => {
             plugin_bridge::MAX_BRIDGE_SECONDS.saturating_sub(120)
         }
@@ -78,16 +80,28 @@ pub(crate) fn validate_bridge_host_command(
             }
             Ok(())
         }
+        // Turning on issue filing publishes text from this machine.
+        Command::Config {
+            command: ConfigCommand::SetIssueReporting { .. },
+        } => bail!(
+            "this brgr command is unavailable through the Herdr host bridge; run it explicitly outside the plugin Codex pane"
+        ),
         Command::Status { .. }
         | Command::Result { .. }
         | Command::Diff { .. }
         | Command::Wait { .. }
         | Command::Message { .. }
+        | Command::Debate { .. }
+        | Command::Input { .. }
+        | Command::Report { .. }
         | Command::Cancel { .. }
         | Command::Bind { .. }
         | Command::Accept { .. }
         | Command::Reject { .. }
         | Command::Doctor
+        | Command::Errors {
+            command: None | Some(ErrorsCommand::List | ErrorsCommand::Preview),
+        }
         | Command::Config { .. }
         | Command::Cleanup { .. }
         | Command::Harness {
@@ -98,13 +112,22 @@ pub(crate) fn validate_bridge_host_command(
             command: ArtifactCommand::Export { output, .. },
         } => require_bridge_workspace(output.parent().unwrap_or(current_dir), &workspace_root),
         Command::Apply { workspace, .. } => require_bridge_workspace(workspace, &workspace_root),
-        Command::Harness { .. } | Command::Integrate { .. } | Command::Prune { .. } => bail!(
+        Command::Harness { .. }
+        | Command::Integrate { .. }
+        | Command::Prune { .. }
+        | Command::Errors {
+            command: Some(ErrorsCommand::File),
+        } => bail!(
             "this brgr command is unavailable through the Herdr host bridge; run it explicitly outside the plugin Codex pane"
         ),
         Command::Plugin { .. }
         | Command::Hook { .. }
         | Command::Notify { .. }
         | Command::PaneRun(_)
+        | Command::TuiHost { .. }
+        | Command::Session { .. }
+        | Command::SealReport { .. }
+        | Command::NativeResult { .. }
         | Command::OmpRun { .. } => {
             bail!("internal brgr commands are unavailable through the Herdr host bridge")
         }

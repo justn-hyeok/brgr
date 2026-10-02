@@ -148,6 +148,11 @@ pub(crate) const RECIPES: &[Recipe] = &[
         full: Some(&[]),
         edits: None,
         read_only: None,
+        interactive: Some(Interactive {
+            kind: "gjc",
+            argv: &[],
+            effort_print_only: false,
+        }),
         ..GENERIC
     },
     Recipe {
@@ -260,6 +265,11 @@ pub(crate) const RECIPES: &[Recipe] = &[
         full: Some(&["--permission-mode", "yolo"]),
         edits: Some(&["--permission-mode", "accept-edits"]),
         read_only: Some(&["--permission-mode", "plan"]),
+        interactive: Some(Interactive {
+            kind: "command-code",
+            argv: &["--trust", "--no-auto-update", "--skip-onboarding"],
+            effort_print_only: false,
+        }),
         ..GENERIC
     },
     Recipe {
@@ -524,6 +534,7 @@ pub(crate) fn draft(
                     herdr_kind: interactive.kind.to_owned(),
                     argv: strings(interactive.argv),
                     effort_print_only: interactive.effort_print_only,
+                    native_host: true,
                 }),
         },
         result: ResultSpec {

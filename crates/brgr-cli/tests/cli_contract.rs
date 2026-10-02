@@ -26,7 +26,17 @@ fn brgr_command() -> Command {
 fn run(home: &Path, args: &[&str], envs: &[(&str, &str)]) -> std::process::Output {
     let mut command = brgr_command();
     command.arg("--home").arg(home).arg("--json").args(args);
+    // These fixtures certify one-shot process behavior. Native TUI tests opt
+    // into the pane fixture below; a production default call is tested separately.
+    if matches!(args.first(), Some(&"run" | &"revise"))
+        && !args.contains(&"local.omp-herdr")
+        && !(envs.iter().any(|(name, _)| *name == "HERDR_PANE_ID")
+            && (args.contains(&"local.claude-code") || args.contains(&"local.opencode")))
+    {
+        command.arg("--headless");
+    }
     command.env_remove("CODEX_THREAD_ID");
+    command.env_remove("CLAUDE_CODE_SESSION_ID");
     for name in [
         "HERDR_ENV",
         "HERDR_PANE_ID",
@@ -39,7 +49,13 @@ fn run(home: &Path, args: &[&str], envs: &[(&str, &str)]) -> std::process::Outpu
     ] {
         command.env_remove(name);
     }
-    command.env("BRGR_SESSION_ID", "fixture-session");
+    // A Claude Code owner is identified by its own session variable instead.
+    if !envs
+        .iter()
+        .any(|(name, _)| *name == "CLAUDE_CODE_SESSION_ID")
+    {
+        command.env("BRGR_SESSION_ID", "fixture-session");
+    }
     for (name, value) in envs {
         command.env(name, value);
     }
@@ -132,7 +148,10 @@ fn gjc_home() -> (TempDir, PathBuf, PathBuf) {
 fn assert_worker_prompt(echoed: &str, objective: &str) {
     assert_eq!(echoed.lines().next(), Some(objective), "{echoed}");
     assert!(echoed.contains("BRGR OWNER MESSAGES"), "{echoed}");
-    assert!(echoed.contains("may not start child tasks"), "{echoed}");
+    assert!(
+        echoed.contains("Child delegation is not enabled"),
+        "{echoed}"
+    );
 }
 
 fn write_devin_fixture(executable: &Path) {
@@ -244,7 +263,7 @@ fn plugin_codex_bridge_runs_a_fixture_outside_the_codex_process() {
     let fake_codex = fake_bin.join("codex");
     fs::write(
         &fake_codex,
-        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$BRGR_TEST_CODEX_ARGS\"\nexport CODEX_THREAD_ID=bridge-test\n\"$BRGR_BIN\" --json harness add /bin/echo --presentation-only > /dev/null 2> \"$BRGR_TEST_DENIED_HARNESS\"\nprintf '%s\\n' \"$?\" >> \"$BRGR_TEST_DENIED_HARNESS\"\n\"$BRGR_BIN\" --json run ESCAPE --harness local.gjc --workspace \"$BRGR_TEST_OUTSIDE\" --foreground > /dev/null 2> \"$BRGR_TEST_DENIED_WORKSPACE\"\nprintf '%s\\n' \"$?\" >> \"$BRGR_TEST_DENIED_WORKSPACE\"\nexec \"$BRGR_BIN\" --json run BRGR_FIXTURE_OK --harness local.gjc --criterion 'artifact text equals BRGR_FIXTURE_OK' --workspace \"$BRGR_TEST_WORKSPACE\" --foreground > \"$BRGR_TEST_OUTPUT\"\n",
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$BRGR_TEST_CODEX_ARGS\"\nexport CODEX_THREAD_ID=bridge-test\n\"$BRGR_BIN\" --json harness add /bin/echo --presentation-only > /dev/null 2> \"$BRGR_TEST_DENIED_HARNESS\"\nprintf '%s\\n' \"$?\" >> \"$BRGR_TEST_DENIED_HARNESS\"\n\"$BRGR_BIN\" --json --headless run ESCAPE --harness local.gjc --workspace \"$BRGR_TEST_OUTSIDE\" --foreground > /dev/null 2> \"$BRGR_TEST_DENIED_WORKSPACE\"\nprintf '%s\\n' \"$?\" >> \"$BRGR_TEST_DENIED_WORKSPACE\"\nexec \"$BRGR_BIN\" --json --headless run BRGR_FIXTURE_OK --harness local.gjc --criterion 'artifact text equals BRGR_FIXTURE_OK' --workspace \"$BRGR_TEST_WORKSPACE\" --foreground > \"$BRGR_TEST_OUTPUT\"\n",
     )
     .unwrap();
     fs::set_permissions(&fake_codex, fs::Permissions::from_mode(0o700)).unwrap();
@@ -400,224 +419,44 @@ fn plugin_entrypoints_fail_closed_without_herdr_host() {
     assert!(String::from_utf8_lossy(&open.stderr).contains("brgr Herdr plugin host"));
 }
 
-fn ordinary_herdr_pane_opens_a_brgr_worker(
-    home: &Path,
-    workspace: &Path,
-    fake_herdr: &Path,
-    herdr_args: &Path,
-) {
-    json_output(&run(
-        home,
-        &["config", "set-worker-placement", "adjacent"],
-        &[],
-    ));
-    let ordinary_herdr_env = [
-        ("BRGR_OWNER_ID", "codex:plugin-worker"),
-        ("HERDR_ENV", "1"),
-        ("HERDR_WORKSPACE_ID", "w1"),
-        ("HERDR_PANE_ID", "w1:p9"),
-        ("HERDR_BIN_PATH", fake_herdr.to_str().unwrap()),
-        ("BRGR_TEST_HERDR_ARGS", herdr_args.to_str().unwrap()),
-    ];
-    let disabled = json_output(&run(
-        home,
-        &[
-            "run",
-            "BRGR_FIXTURE_OK",
-            "--workspace",
-            workspace.to_str().unwrap(),
-        ],
-        &ordinary_herdr_env,
-    ));
-    assert!(disabled.get("worker_pane").is_none());
-    let disabled_task = disabled["task_id"].as_str().unwrap();
-    let owner = [("BRGR_OWNER_ID", "codex:plugin-worker")];
-    assert_eq!(
-        json_output(&run(
-            home,
-            &["wait", disabled_task, "--timeout-seconds", "10"],
-            &owner,
-        ))["outcome"],
-        "candidate"
-    );
-    assert_eq!(
-        json_output(&run(home, &["accept", disabled_task], &owner))["verdict"],
-        "accepted"
-    );
-    let enabled = json_output(&run(home, &["config", "set-auto-worker-pane", "true"], &[]));
-    assert_eq!(enabled["herdr"]["auto_worker_pane"], true);
-    let ordinary = json_output(&run(
-        home,
-        &[
-            "run",
-            "BRGR_FIXTURE_OK",
-            "--workspace",
-            workspace.to_str().unwrap(),
-        ],
-        &ordinary_herdr_env,
-    ));
-    assert_eq!(ordinary["worker_placement"], "adjacent");
-    assert_eq!(ordinary["worker_pane"], "w1:p2");
-    let ordinary_args = fs::read_to_string(herdr_args).unwrap();
-    assert!(ordinary_args.contains("--target-pane\nw1:p9\n"));
-    assert!(!ordinary_args.contains("--workspace\n"));
-}
-
 /// A task placed in a Herdr worker pane is claimed only once Herdr has opened
 /// the pane and started `brgr plugin worker` in it. Another brgr command in the
 /// meantime must not record it lost after the detached supervisor's five-second
 /// window; it gets a minute.
 #[test]
-fn a_worker_pane_task_is_not_reaped_before_its_pane_can_claim_it() {
-    let temp = TempDir::new().unwrap();
-    let home = temp.path().join("brgr");
-    let workspace = temp.path().join("work");
-    let fake_herdr = temp.path().join("herdr");
-    fs::create_dir_all(&workspace).unwrap();
-    fs::write(
-        &fake_herdr,
-        "#!/bin/sh\nprintf '%s\\n' '{\"result\":{\"type\":\"plugin_pane_opened\",\"plugin_pane\":{\"plugin_id\":\"brgr\",\"entrypoint\":\"worker\",\"pane\":{\"pane_id\":\"w1:p2\"}}}}'\n",
-    )
-    .unwrap();
-    fs::set_permissions(&fake_herdr, fs::Permissions::from_mode(0o700)).unwrap();
-    add_fixture(&home, &gjc_fixture(), &temp.path().join("scratch"));
-    let host_env = [
-        ("BRGR_OWNER_ID", "codex:claim-grace"),
-        ("HERDR_ENV", "1"),
-        ("HERDR_PLUGIN_ID", "brgr"),
-        ("HERDR_WORKSPACE_ID", "w1"),
-        ("HERDR_PANE_ID", "w1:p1"),
-        ("HERDR_BIN_PATH", fake_herdr.to_str().unwrap()),
-        ("BRGR_PLUGIN_HOST_HOME", home.to_str().unwrap()),
-        ("BRGR_PLUGIN_HOST_WORKSPACE", workspace.to_str().unwrap()),
-    ];
-    let admitted = json_output(&run(
-        &home,
-        &[
-            "run",
-            "BRGR_FIXTURE_OK",
-            "--workspace",
-            workspace.to_str().unwrap(),
-        ],
-        &host_env,
+fn explicit_headless_does_not_open_a_second_worker_pane() {
+    let fixture = pane_fixture();
+    json_output(&run(
+        &fixture.home,
+        &["config", "set-auto-worker-pane", "true"],
+        &[],
     ));
-    assert_eq!(admitted["worker_pane"], "w1:p2", "{admitted}");
-    let task = admitted["task_id"].as_str().unwrap();
-    let launch = home.join("launches").join(format!("{task}.json"));
-    let age = |seconds: u64| {
-        fs::File::options()
-            .write(true)
-            .open(&launch)
-            .unwrap()
-            .set_modified(std::time::SystemTime::now() - Duration::from_secs(seconds))
-            .unwrap();
-    };
-    let owner = [("BRGR_OWNER_ID", "codex:claim-grace")];
-
-    age(10);
-    let waiting = json_output(&run(&home, &["status", task], &owner));
-    assert_ne!(waiting["state"], "terminal", "{waiting}");
-
-    age(120);
-    let reaped = json_output(&run(&home, &["status", task], &owner));
-    assert_eq!(reaped["state"], "terminal", "{reaped}");
+    let ran = fixture.run(&["--headless"]);
+    assert_eq!(ran["outcome"], "candidate");
+    assert!(!fixture.state("calls.log").contains("pane split"));
 }
-
 #[test]
-fn plugin_worker_placement_respects_config_and_reaches_owner_decision() {
-    let temp = TempDir::new().unwrap();
-    let home = temp.path().join("brgr");
-    let workspace = temp.path().join("work");
-    let fake_herdr = temp.path().join("herdr");
-    let herdr_args = temp.path().join("herdr-args");
-    fs::create_dir_all(&workspace).unwrap();
-    fs::write(
-        &fake_herdr,
-        "#!/bin/sh\nif [ \"$1\" = --session ]; then\n case \"$3 $4\" in 'agent get'|'pane report-agent-session') exit 7;; esac\nelse\n case \"$1 $2\" in 'agent get'|'pane report-agent-session') exit 7;; esac\nfi\nprintf '%s\\n' \"$@\" > \"$BRGR_TEST_HERDR_ARGS\"\nprintf '%s\\n' '{\"result\":{\"type\":\"plugin_pane_opened\",\"plugin_pane\":{\"plugin_id\":\"brgr\",\"entrypoint\":\"worker\",\"pane\":{\"pane_id\":\"w1:p2\"}}}}'\n",
-    )
-    .unwrap();
-    fs::set_permissions(&fake_herdr, fs::Permissions::from_mode(0o700)).unwrap();
-    let fixture = gjc_fixture();
-    add_fixture(&home, &fixture, &temp.path().join("scratch"));
-    let host_home = home.to_str().unwrap();
-    let host_env = [
-        ("BRGR_OWNER_ID", "codex:plugin-worker"),
-        ("HERDR_ENV", "1"),
-        ("HERDR_PLUGIN_ID", "brgr"),
-        ("HERDR_WORKSPACE_ID", "w1"),
-        ("HERDR_PANE_ID", "w1:p1"),
-        ("HERDR_SESSION", "fixture-session"),
-        ("HERDR_BIN_PATH", fake_herdr.to_str().unwrap()),
-        ("BRGR_PLUGIN_HOST_HOME", host_home),
-        ("BRGR_PLUGIN_HOST_WORKSPACE", workspace.to_str().unwrap()),
-        ("BRGR_TEST_HERDR_ARGS", herdr_args.to_str().unwrap()),
-    ];
-    let first = json_output(&run(
-        &home,
-        &[
-            "run",
-            "BRGR_FIXTURE_OK",
-            "--workspace",
-            workspace.to_str().unwrap(),
-        ],
-        &host_env,
+fn native_worker_placement_uses_config_and_reaches_owner_decision() {
+    let fixture = pane_fixture();
+    json_output(&run(
+        &fixture.home,
+        &["config", "set-worker-placement", "tab"],
+        &[],
     ));
-    assert_eq!(first["worker_placement"], "adjacent");
-    assert_eq!(first["worker_pane"], "w1:p2");
-    let first_args = fs::read_to_string(&herdr_args).unwrap();
-    assert!(first_args.starts_with("--session\nfixture-session\n"));
-    assert!(first_args.contains("--target-pane\nw1:p1\n"));
-    assert!(first_args.contains("--placement\nsplit\n"));
-    assert!(!first_args.contains("--workspace\n"));
-    assert!(first_args.contains("--no-focus\n"));
-
-    let config = json_output(&run(&home, &["config", "set-worker-placement", "tab"], &[]));
-    assert_eq!(config["herdr"]["worker_placement"], "tab");
-    let second = json_output(&run(
-        &home,
-        &[
-            "run",
-            "BRGR_FIXTURE_OK",
-            "--workspace",
-            workspace.to_str().unwrap(),
-        ],
-        &host_env,
+    let ran = fixture.run(&[]);
+    assert_eq!(ran["outcome"], "candidate");
+    let calls = fixture.state("calls.log");
+    assert!(calls.contains("tab create --workspace w9"), "{calls}");
+    assert!(!calls.contains("pane split"));
+    assert!(calls.contains("--no-focus"));
+    assert!(fixture.state("closed").is_empty());
+    json_output(&run(
+        &fixture.home,
+        &["accept", ran["task_id"].as_str().unwrap()],
+        &[("BRGR_OWNER_ID", "codex:pane-test")],
     ));
-    assert_eq!(second["worker_placement"], "tab");
-    let second_args = fs::read_to_string(&herdr_args).unwrap();
-    assert!(second_args.contains("--placement\ntab\n"));
-    assert!(second_args.contains("--workspace\nw1\n"));
-    assert!(!second_args.contains("--target-pane\n"));
-
-    ordinary_herdr_pane_opens_a_brgr_worker(&home, &workspace, &fake_herdr, &herdr_args);
-
-    let task = first["task_id"].as_str().unwrap();
-    let launch = home.join("launches").join(format!("{task}.json"));
-    let worker = run(
-        &home,
-        &["plugin", "worker"],
-        &[
-            ("HERDR_ENV", "1"),
-            ("HERDR_PLUGIN_ID", "brgr"),
-            ("BRGR_PLUGIN_WORKER_LAUNCH", launch.to_str().unwrap()),
-        ],
-    );
-    assert!(
-        worker.status.success(),
-        "{}",
-        String::from_utf8_lossy(&worker.stderr)
-    );
-    let result = json_output(&run(&home, &["result", task], &host_env));
-    assert_eq!(result["result"]["outcome"], "candidate");
-    assert_eq!(result["artifacts"][0]["text"], "BRGR_FIXTURE_OK");
-    let decision = json_output(&run(
-        &home,
-        &["accept", task, "--reason", "fixture output verified"],
-        &host_env,
-    ));
-    assert_eq!(decision["verdict"], "accepted");
+    assert_eq!(fixture.state("closed").trim(), "closed");
 }
-
 /// A worker that asks its owner, or tries to delegate, as its prompt says.
 ///
 /// Runs as a real harness process, so what it can do is exactly what brgr gave
@@ -643,7 +482,7 @@ if test -n "${BRGR_PARENT_ATTEMPT_ID:-}"; then
     "$BRGR_BIN" --json message ack "$BRGR_PARENT_TASK_ID" "$reply_id" --for worker >/dev/null
     answer=$(printf '%s\n' "$reply" | /usr/bin/sed -n 's/.*"body":"\([^"]*\)".*/\1/p')
   elif /usr/bin/grep -q '^SPAWN' "$prompt_file"; then
-    if "$BRGR_BIN" --json run LEAF --harness local.gjc --workspace "$PWD" --foreground >/dev/null 2>"$PWD/../spawn.err"; then
+    if "$BRGR_BIN" --json --headless run LEAF --harness local.gjc --workspace "$PWD" --foreground >/dev/null 2>"$PWD/../spawn.err"; then
       answer=SPAWN_ALLOWED
     elif /usr/bin/grep -q 'not started with delegation' "$PWD/../spawn.err"; then
       answer=SPAWN_REFUSED
@@ -879,10 +718,17 @@ echo OPENCODE_PRINT_MODE_OK
 const PANE_HERDR_FIXTURE: &str = r#"#!/bin/sh
 d="$(/usr/bin/dirname "$0")/herdr-state"
 /bin/mkdir -p "$d"
+seal_report() {
+  /usr/bin/python3 - "$d/native-config.json" <<'PY'
+import pathlib,json,subprocess,sys,os
+c=json.loads(pathlib.Path(sys.argv[1]).read_text());e=dict(os.environ);e.update(c['environment']);revision=pathlib.Path(c['state']).name.split('-r')[1].split('.')[0]
+p=subprocess.run([e['BRGR_BIN'],'--home',e['BRGR_HOME'],'__seal-report',e['BRGR_PARENT_TASK_ID'],revision],env=e,capture_output=True);assert p.returncode==0,p.stderr
+PY
+}
 if [ "$1" = --session ]; then shift 2; fi
 printf '%s\n' "$*" >> "$d/calls.log"
 case "$1 $2" in
-  'pane split')
+  'pane split'|'tab create')
     shift 2
     while [ $# -gt 0 ]; do
       case "$1" in
@@ -892,6 +738,38 @@ case "$1 $2" in
       esac
     done
     echo '{"result":{"pane":{"pane_id":"w9:p2"}}}';;
+  'pane run')
+    /usr/bin/python3 - "$4" "$d" <<'PY'
+import json,sys,shlex,pathlib,subprocess,os
+config=json.loads(pathlib.Path(shlex.split(sys.argv[1])[-1]).read_text())
+root=pathlib.Path(sys.argv[2]);pid=int(subprocess.check_output(['/bin/ps','-p',str(os.getppid()),'-o','ppid='],text=True).strip())
+(root/'native-config.json').write_text(json.dumps(config))
+birth=subprocess.check_output(['/bin/ps','-p',str(pid),'-o','lstart='],text=True).strip()
+
+if (root/'start-fails').exists():
+ print('registered native executable could not start',file=sys.stderr);sys.exit(9)
+pathlib.Path(config['state']).write_text(json.dumps({'pid':pid,'birth':birth,'phase':'running','exit_code':None}))
+kind=pathlib.Path(config['executable']).name
+(root/'start-args').write_text('\n'.join(['agent','start','--kind',kind,*config['argv']]))
+(root/'start-attempts').write_text('native host started once\n')
+(root/'state').write_text('blocked' if (root/'start-blocked').exists() else 'idle')
+PY
+    test $? = 0 || exit 9
+    echo '{"result":{"type":"ok"}}';;
+  'pane get') echo '{"result":{"pane":{"pane_id":"w9:p2","terminal_id":"terminal-native-fixture"}}}';;
+  'pane send-text') printf '%s' "$4" > "$d/paste"; echo '{}';;
+  'pane send-keys')
+    /bin/rm -f "$d/start-blocked"
+    if [ -s "$d/paste" ] && [ -e "$d/slow-seal" ]; then
+      report=$(/usr/bin/grep -E '^/.*\.md$' "$d/paste" | /usr/bin/tail -1)
+      ( /bin/sleep 4; test -z "$report" || printf '%s' PANE_REPORT_OK > "$report"; test -z "$report" || seal_report ) >/dev/null 2>&1 &
+    elif [ -s "$d/paste" ] && [ ! -e "$d/no-report" ]; then
+      report=$(/usr/bin/grep -E '^/.*\.md$' "$d/paste" | /usr/bin/tail -1)
+      test -z "$report" || printf '%s' PANE_REPORT_OK > "$report"
+      test -z "$report" || seal_report
+    fi
+    echo idle > "$d/state"
+    echo '{"result":{"type":"ok"}}';;
   'agent start')
     printf '%s\n' "$@" >> "$d/start-attempts"
     if [ -s "$d/busy" ]; then
@@ -921,30 +799,59 @@ case "$1 $2" in
     echo idle > "$d/state"
     echo '{"result":{"agent":{"agent":"claude","agent_status":"idle","pane_id":"w9:p2"}}}';;
   'agent prompt')
+    if printf '%s' "$4" | /usr/bin/grep -q 'BRGR RESULT CHANNEL'; then
+      /usr/bin/python3 - "$d/native-config.json" <<'PY'
+import json,pathlib,sys,subprocess,shlex,os
+c=json.loads(pathlib.Path(sys.argv[1]).read_text());settings=json.loads(pathlib.Path(c['argv'][c['argv'].index('--settings')+1]).read_text())
+a=c['environment']['BRGR_PARENT_ATTEMPT_ID'];payload={'hook_event_name':'Stop','session_id':a,'cwd':c['workspace'],'last_assistant_message':f'BRGR_REPORT_BEGIN_{a}\nPANE_REPORT_OK\nBRGR_REPORT_END_{a}'}
+env=dict(os.environ);env.update(c['environment']);command=settings['hooks']['Stop'][-1]['hooks'][0]['command']
+p=subprocess.run(shlex.split(command),input=json.dumps(payload),text=True,env=env,capture_output=True);assert p.returncode==0,p.stderr
+PY
+      echo unknown > "$d/state"
+      echo '{}'; exit 0
+    fi
+    if [ -e "$d/no-report" ]; then echo idle > "$d/state"; echo '{"result":{"type":"ok"}}'; exit 0; fi
     report=$(printf '%s\n' "$4" | /usr/bin/grep -E '^/.*\.md$' | /usr/bin/tail -1)
+    if [ -n "$report" ]; then printf '%s' "$report" > "$d/report-path"; else report=$(/bin/cat "$d/report-path"); fi
     if [ -e "$d/hang" ]; then
       echo working > "$d/state.hang"
       echo '{"result":{"type":"ok"}}'
       exit 0
     fi
+    if [ -e "$d/partial-report" ]; then
+      printf '%s' PARTIAL_REPORT > "$report"
+      echo unknown > "$d/state"; echo '{}'; exit 0
+    fi
     printf '%s' 'PANE_REPORT_OK' > "$report"
+    seal_report
     if [ -e "$d/unseen" ]; then echo idle > "$d/state"; else echo working > "$d/state"; fi
     echo '{"result":{"type":"ok"}}';;
   'agent get')
+    if [ -e "$d/unclassified" ]; then
+      echo '{"error":{"code":"agent_not_found","message":"native detection is not registered yet"}}' >&2; exit 1
+    fi
     if [ -e "$d/state.hang" ]; then
-      printf '{"result":{"agent":{"agent":"claude","agent_status":"working","pane_id":"w9:p2"}}}\n'
+      printf '{"result":{"agent":{"agent":"claude","agent_status":"%s","pane_id":"w9:p2"}}}\n' "$(/bin/cat "$d/state.hang")"
       exit 0
     fi
     s=$(/bin/cat "$d/state")
     printf '{"result":{"agent":{"agent":"claude","agent_status":"%s","pane_id":"w9:p2"}}}\n' "$s"
     if [ "$s" = working ]; then echo idle > "$d/state"; fi;;
   'pane read')
+    if [ -e "$d/blockquote" ] && [ -s "$d/paste" ]; then
+      printf '%s\n' 'Working on it' '> 1. update the config, then skip later steps' '  2. next'
+      exit 0
+    fi
     n=$(/bin/cat "$d/menu" 2>/dev/null || echo 0)
     if [ "$n" -gt 0 ]; then
       echo $((n - 1)) > "$d/menu"
       printf '%s\n' '  Update available' '› 1. Update now' '  2. Skip'
     else
-      printf '%s\n' '› Ask anything'
+      if [ -e "$d/start-blocked" ]; then
+        printf '%s\n' 'Claude Code fixture' 'Accessing workspace:' '' "$(/bin/cat "$d/pane-cwd")" '' '❯ No, exit' 'Yes, I trust this folder'
+      else
+        printf '%s\n' 'Claude Code fixture' '› Ask anything'
+      fi
     fi;;
   'pane close') echo closed > "$d/closed"; echo '{"result":{"type":"ok"}}';;
   *) exit 2;;
@@ -990,7 +897,15 @@ impl PaneFixture {
         self.run_on("local.claude-code", extra)
     }
 
+    fn run_with_env(&self, extra: &[&str], env: &[(&str, &str)]) -> Value {
+        self.run_on_with_env("local.claude-code", extra, env)
+    }
+
     fn run_on(&self, harness: &str, extra: &[&str]) -> Value {
+        self.run_on_with_env(harness, extra, &[])
+    }
+
+    fn run_on_with_env(&self, harness: &str, extra: &[&str], more: &[(&str, &str)]) -> Value {
         let herdr = self.herdr.to_str().unwrap();
         let mut args = vec![
             "run",
@@ -1006,11 +921,15 @@ impl PaneFixture {
             &self.home,
             &args,
             &[
-                ("BRGR_OWNER_ID", "codex:pane-test"),
-                ("HERDR_ENV", "1"),
-                ("HERDR_PANE_ID", "w9:p1"),
-                ("HERDR_BIN_PATH", herdr),
-            ],
+                &[
+                    ("BRGR_OWNER_ID", "codex:pane-test"),
+                    ("HERDR_ENV", "1"),
+                    ("HERDR_PANE_ID", "w9:p1"),
+                    ("HERDR_BIN_PATH", herdr),
+                ][..],
+                more,
+            ]
+            .concat(),
         ))
     }
 
@@ -1054,7 +973,14 @@ fn pane_mode_runs_the_agent_in_a_pane_and_seals_its_report() {
         env.contains(&format!("BRGR_PARENT_TASK_ID={task}")),
         "{env}"
     );
-    // The report is sealed and removed, and the pane closed.
+    // Keep the completed TUI until its owner reviews the sealed result.
+    assert!(fixture.workspace.join(".brgr").exists());
+    assert!(fixture.state("closed").is_empty());
+    json_output(&run(
+        &fixture.home,
+        &["accept", task],
+        &[("BRGR_OWNER_ID", "codex:pane-test")],
+    ));
     assert!(!fixture.workspace.join(".brgr").exists());
     assert_eq!(fixture.state("closed").trim(), "closed");
 }
@@ -1062,85 +988,318 @@ fn pane_mode_runs_the_agent_in_a_pane_and_seals_its_report() {
 /// A pane that has not drawn its shell prompt yet refuses an agent; the runner
 /// waits for it instead of failing the task.
 #[test]
-fn pane_mode_waits_for_the_new_pane_shell() {
+fn native_tui_bootstrap_starts_once_even_with_a_slow_shell() {
     let fixture = pane_fixture();
     fs::create_dir_all(&fixture.state).unwrap();
     fs::write(fixture.state.join("busy"), "3\n").unwrap();
     let ran = fixture.run(&[]);
+    assert_eq!(ran["outcome"], "candidate");
+    assert_eq!(fixture.state("start-attempts").lines().count(), 1);
+}
+
+/// Herdr does not classify every harness (GJC, Command Code), so a native run
+/// can report `unknown` for its whole life. Output that looks like a menu then
+/// must be left alone while the agent works.
+#[test]
+fn menu_like_output_from_an_unclassified_agent_is_not_pressed_mid_run() {
+    let fixture = pane_fixture();
+    fs::create_dir_all(&fixture.state).unwrap();
+    for flag in ["unclassified", "blockquote", "slow-seal"] {
+        fs::write(fixture.state.join(flag), "").unwrap();
+    }
+    let ran = fixture.run(&[]);
     assert_eq!(ran["outcome"], "candidate", "{ran}");
+    let calls = fixture.state("calls.log");
     assert_eq!(
-        fixture
-            .state("start-attempts")
-            .matches("agent\nstart")
-            .count(),
-        4
+        calls.matches("pane send-keys").count(),
+        1,
+        "only the prompt's own Enter may be sent: {calls}"
     );
+}
+
+#[test]
+fn owned_native_editor_accepts_input_before_herdr_registers_the_agent() {
+    let fixture = pane_fixture();
+    fs::create_dir_all(&fixture.state).unwrap();
+    fs::write(fixture.state.join("unclassified"), "").unwrap();
+    let ran = fixture.run(&[]);
+    assert_eq!(ran["outcome"], "candidate", "{ran}");
+    let calls = fixture.state("calls.log");
+    assert!(calls.contains("pane send-text w9:p2"), "{calls}");
+    assert!(!calls.contains("agent prompt"));
+    assert!(calls.contains("pane send-keys w9:p2 enter"));
+    // A real native TUI remains alive after its collector exits. Give the
+    // transport stand-in an independent lifetime for its cleanup check.
+    let mut native = Command::new("/bin/sleep").arg("15").spawn().unwrap();
+    let task = ran["task_id"].as_str().unwrap();
+    let state_path = fixture
+        .home
+        .join("runs")
+        .join(format!("{task}-r1.native-state.json"));
+    let mut state: Value = serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
+    state["pid"] = native.id().into();
+    state["birth"] = String::from_utf8(
+        Command::new("/bin/ps")
+            .args(["-p", &native.id().to_string(), "-o", "lstart="])
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap()
+    .trim()
+    .into();
+    fs::write(&state_path, serde_json::to_vec(&state).unwrap()).unwrap();
+    json_output(&run(
+        &fixture.home,
+        &["accept", ran["task_id"].as_str().unwrap()],
+        &[("BRGR_OWNER_ID", "codex:pane-test")],
+    ));
+    assert_eq!(fixture.state("closed").trim(), "closed");
+    let _ = native.kill();
+    let _ = native.wait();
+}
+
+#[test]
+fn native_partial_file_is_not_a_completed_report() {
+    let fixture = pane_fixture();
+    fs::create_dir_all(&fixture.state).unwrap();
+    fs::write(fixture.state.join("partial-report"), "").unwrap();
+    let env = [
+        ("BRGR_OWNER_ID", "codex:pane-test"),
+        ("HERDR_ENV", "1"),
+        ("HERDR_PANE_ID", "w9:p1"),
+        ("HERDR_BIN_PATH", fixture.herdr.to_str().unwrap()),
+    ];
+    let launched = json_output(&run(
+        &fixture.home,
+        &[
+            "run",
+            "Partial report probe",
+            "--harness",
+            "local.claude-code",
+            "--workspace",
+            fixture.workspace.to_str().unwrap(),
+        ],
+        &env,
+    ));
+    let task = launched["task_id"].as_str().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while !fixture.state("calls.log").contains("agent prompt") {
+        assert!(Instant::now() < deadline);
+        thread::sleep(Duration::from_millis(50));
+    }
+    thread::sleep(Duration::from_millis(1200));
+    let result = run(&fixture.home, &["result", task], &env);
+    assert!(
+        !result.status.success(),
+        "partial report was published: {}",
+        String::from_utf8_lossy(&result.stdout)
+    );
+    json_output(&run(&fixture.home, &["cancel", task], &env));
+}
+
+#[test]
+fn native_conversation_waits_while_busy_then_delivers_once() {
+    let fixture = pane_fixture();
+    fs::create_dir_all(&fixture.state).unwrap();
+    fs::write(fixture.state.join("hang"), "").unwrap();
+    let env = [
+        ("BRGR_OWNER_ID", "codex:pane-test"),
+        ("HERDR_ENV", "1"),
+        ("HERDR_PANE_ID", "w9:p1"),
+        ("HERDR_BIN_PATH", fixture.herdr.to_str().unwrap()),
+    ];
+    let launched = json_output(&run(
+        &fixture.home,
+        &[
+            "run",
+            "Explain the build",
+            "--harness",
+            "local.claude-code",
+            "--workspace",
+            fixture.workspace.to_str().unwrap(),
+        ],
+        &env,
+    ));
+    let task = launched["task_id"].as_str().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while !fixture.state("calls.log").contains("agent prompt") {
+        assert!(Instant::now() < deadline);
+        thread::sleep(Duration::from_millis(50));
+    }
+    json_output(&run(
+        &fixture.home,
+        &[
+            "message",
+            "send",
+            task,
+            "--to",
+            "worker",
+            "--kind",
+            "note",
+            "--body",
+            "NATIVE_FOLLOWUP",
+        ],
+        &env,
+    ));
+    thread::sleep(Duration::from_millis(1200));
+    let calls = fixture.state("calls.log");
+    assert_eq!(calls.matches("agent prompt w9:p2").count(), 1);
+    assert!(
+        !calls.contains("pane send-text"),
+        "busy TUI received raw input"
+    );
+    fs::remove_file(fixture.state.join("hang")).unwrap();
+    fs::write(fixture.state.join("state.hang"), "idle").unwrap();
+    let result = json_output(&run(
+        &fixture.home,
+        &["wait", task, "--timeout-seconds", "15"],
+        &env,
+    ));
+    assert_eq!(result["outcome"], "candidate");
+    let calls = fixture.state("calls.log");
+    assert_eq!(calls.matches("agent prompt w9:p2").count(), 2, "{calls}");
+    assert!(calls.contains("NATIVE_FOLLOWUP"));
+    json_output(&run(&fixture.home, &["accept", task], &env));
 }
 
 /// An agent that starts but stops on a screen Herdr cannot classify — Cline's
 /// product notice — times out as "not ready" rather than "blocked". The run
 /// asks its owner to look at the pane and waits, instead of failing.
 #[test]
-fn pane_mode_asks_the_owner_about_an_unrecognized_startup_screen() {
+fn native_tui_uses_the_registered_executable_and_full_arguments() {
     let fixture = pane_fixture();
-    fs::create_dir_all(&fixture.state).unwrap();
-    fs::write(fixture.state.join("start-timeout"), "").unwrap();
     let ran = fixture.run(&[]);
-    assert_eq!(ran["outcome"], "candidate", "{ran}");
+    assert_eq!(ran["outcome"], "candidate");
     let task = ran["task_id"].as_str().unwrap();
-    let messages = json_output(&run(
-        &fixture.home,
-        &["message", "list", task, "--for", "owner"],
-        &[("BRGR_OWNER_ID", "codex:pane-test")],
-    ));
-    let body = messages[0]["body"].as_str().unwrap_or_default();
-    assert!(body.contains("does not recognize"), "{messages}");
-    assert_eq!(messages[0]["kind"], "question", "{messages}");
+    let config: Value = serde_json::from_slice(
+        &fs::read(
+            fixture
+                .home
+                .join("runs")
+                .join(format!("{task}-r1.native-launch.json")),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert!(config["executable"].as_str().unwrap().ends_with("/claude"));
+    assert_eq!(config["argv"][0], "--permission-mode");
+    assert_eq!(config["argv"][1], "bypassPermissions");
+    assert!(
+        !config["argv"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|arg| arg == "-p")
+    );
 }
 
 /// An approval at startup — a folder trust or MCP prompt — is the owner's to
 /// answer in the pane. Once the agent is ready the run withdraws its question,
 /// so a finished result is not held back by one nobody needed to reply to.
 #[test]
-fn pane_mode_withdraws_its_question_once_the_agent_is_unblocked() {
+fn native_trust_for_the_owned_workspace_is_resolved_without_a_user_question() {
     let fixture = pane_fixture();
     fs::create_dir_all(&fixture.state).unwrap();
     fs::write(fixture.state.join("start-blocked"), "").unwrap();
     let ran = fixture.run(&[]);
-    assert_eq!(ran["outcome"], "candidate", "{ran}");
-    let task = ran["task_id"].as_str().unwrap();
+    assert_eq!(ran["outcome"], "candidate");
     let messages = json_output(&run(
         &fixture.home,
-        &["message", "list", task, "--for", "owner"],
+        &[
+            "message",
+            "list",
+            ran["task_id"].as_str().unwrap(),
+            "--for",
+            "owner",
+        ],
         &[("BRGR_OWNER_ID", "codex:pane-test")],
     ));
+    assert!(messages.as_array().unwrap().is_empty(), "{messages}");
     assert!(
-        messages[0]["body"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("waiting for an approval"),
-        "{messages}"
+        fixture
+            .state("calls.log")
+            .contains("pane send-keys w9:p2 down enter")
     );
 }
 
 /// The `opencode` TUI has no effort flag. A task that asks for an effort runs
 /// headless, where the effort is honoured, rather than in a pane without it.
 #[test]
-fn pane_mode_keeps_an_effort_the_interactive_command_cannot_take() {
+fn unsupported_tui_effort_requires_an_explicit_headless_request() {
     let fixture = pane_fixture();
-    let headless = fixture.run_on("local.opencode", &["--effort", "high"]);
-    assert_eq!(headless["outcome"], "candidate", "{headless}");
-    assert!(
-        !fixture.state("calls.log").contains("pane split"),
-        "a pane was opened for an effort OpenCode's TUI cannot take: {}",
-        fixture.state("calls.log")
+    let output = run(
+        &fixture.home,
+        &[
+            "run",
+            "Explain",
+            "--harness",
+            "local.opencode",
+            "--effort",
+            "high",
+            "--workspace",
+            fixture.workspace.to_str().unwrap(),
+            "--foreground",
+        ],
+        &[
+            ("HERDR_ENV", "1"),
+            ("HERDR_PANE_ID", "w9:p1"),
+            ("HERDR_BIN_PATH", fixture.herdr.to_str().unwrap()),
+            ("BRGR_OWNER_ID", "codex:pane-test"),
+        ],
     );
-
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--headless"));
+    let headless = fixture.run_on("local.opencode", &["--effort", "high", "--headless"]);
+    assert_eq!(headless["outcome"], "candidate");
+    assert!(!fixture.state("calls.log").contains("pane split"));
     let paned = fixture.run_on("local.opencode", &[]);
-    assert_eq!(paned["outcome"], "candidate", "{paned}");
+    assert_eq!(paned["outcome"], "candidate");
     assert!(fixture.state("calls.log").contains("pane split"));
-    assert!(fixture.state("start-args").contains("--kind\nopencode"));
-    assert!(fixture.state("start-args").contains("--auto"));
+}
+
+#[test]
+fn extra_argv_cannot_bypass_a_harness_effort_selector() {
+    let fixture = pane_fixture();
+    json_output(&run(
+        &fixture.home,
+        &["config", "set", "harness", "local.opencode"],
+        &[],
+    ));
+    json_output(&run(
+        &fixture.home,
+        &[
+            "config",
+            "set",
+            "argv",
+            "[\"--variant\",\"high\"]",
+            "--harness",
+            "local.opencode",
+        ],
+        &[],
+    ));
+    let check = run(&fixture.home, &["config", "check"], &[]);
+    assert!(!check.status.success());
+    assert!(String::from_utf8_lossy(&check.stderr).contains("--variant"));
+    let output = run(
+        &fixture.home,
+        &[
+            "run",
+            "Explain",
+            "--harness",
+            "local.opencode",
+            "--workspace",
+            fixture.workspace.to_str().unwrap(),
+        ],
+        &[
+            ("HERDR_ENV", "1"),
+            ("HERDR_PANE_ID", "w9:p1"),
+            ("HERDR_BIN_PATH", fixture.herdr.to_str().unwrap()),
+        ],
+    );
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--variant"));
+    assert!(!fixture.state("calls.log").contains("pane split"));
 }
 
 /// Herdr may never show an agent working: Cursor went from unknown straight to
@@ -1219,23 +1378,32 @@ fn cancelling_a_pane_mode_task_closes_its_pane() {
         .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
         .filter(|name| name.ends_with(".pane.json"))
         .collect();
-    assert!(receipts.is_empty(), "{receipts:?}");
+    assert_eq!(receipts.len(), 1);
+    let receipt: Value =
+        serde_json::from_slice(&fs::read(fixture.home.join("runs").join(&receipts[0])).unwrap())
+            .unwrap();
+    assert_eq!(receipt["cleanup"], "closed");
 }
 
 /// A Herdr pane id this process does not provably run in — what a Codex tool
 /// command inherits from its shared daemon — keeps the run headless instead of
 /// splitting beside the wrong pane.
 #[test]
-fn an_unverified_caller_pane_runs_headless() {
+fn an_unverified_caller_requires_an_explicit_headless_request() {
     let fixture = pane_fixture();
     let output = Command::new(brgr())
         .arg("--home")
         .arg(&fixture.home)
         .arg("--json")
-        .args(["run", "Explain the build", "--harness", "local.claude-code"])
-        .arg("--workspace")
+        .args([
+            "run",
+            "Explain",
+            "--harness",
+            "local.claude-code",
+            "--foreground",
+            "--workspace",
+        ])
         .arg(&fixture.workspace)
-        .arg("--foreground")
         .env_remove("CODEX_THREAD_ID")
         .env_remove("BRGR_TEST_TRUST_HERDR_PANE")
         .env("BRGR_SESSION_ID", "fixture-session")
@@ -1245,44 +1413,30 @@ fn an_unverified_caller_pane_runs_headless() {
         .env("HERDR_BIN_PATH", &fixture.herdr)
         .output()
         .unwrap();
-    let ran: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(ran["outcome"], "candidate", "{ran}");
-    assert!(
-        !fixture.state("calls.log").contains("pane split"),
-        "a pane was split beside an unverified caller: {}",
-        fixture.state("calls.log")
-    );
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--headless"));
+    assert!(!fixture.state("calls.log").contains("pane split"));
 }
 
 /// Herdr may call an agent ready while it shows a menu — Codex opened on an
-/// update offer. The prompt's Enter would pick the highlighted option, so the
-/// run asks its owner and waits for the menu to go.
+/// update offer. The prompt's Enter would pick the highlighted "Update now", so
+/// the run first moves to the offer's skip option, and only then prompts.
 #[test]
-fn pane_mode_does_not_prompt_into_a_menu() {
+fn pane_mode_skips_an_update_offer_before_it_prompts() {
     let fixture = pane_fixture();
     fs::create_dir_all(&fixture.state).unwrap();
     fs::write(fixture.state.join("menu"), "3\n").unwrap();
     let ran = fixture.run(&[]);
     assert_eq!(ran["outcome"], "candidate", "{ran}");
     let calls = fixture.state("calls.log");
-    let last_menu_read = calls.rfind("pane read").unwrap();
     let prompt = calls.find("agent prompt").unwrap();
+    let skip = calls
+        .find("pane send-keys w9:p2 down enter")
+        .unwrap_or_else(|| panic!("the update offer was not skipped: {calls}"));
+    assert!(skip < prompt, "prompted before skipping the offer: {calls}");
     assert!(
-        last_menu_read < prompt,
-        "prompted while the menu showed: {calls}"
-    );
-    let task = ran["task_id"].as_str().unwrap();
-    let messages = json_output(&run(
-        &fixture.home,
-        &["message", "list", task, "--for", "owner"],
-        &[("BRGR_OWNER_ID", "codex:pane-test")],
-    ));
-    assert!(
-        messages[0]["body"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("menu"),
-        "{messages}"
+        !calls[..prompt].contains("pane send-keys w9:p2 enter"),
+        "Enter alone would have chosen Update now: {calls}"
     );
 }
 
@@ -1295,42 +1449,65 @@ fn pane_mode_failure_closes_the_pane_and_names_the_cause() {
     let ran = fixture.run(&[]);
     assert_eq!(ran["outcome"], "lost", "{ran}");
     let error = ran["error"].as_str().unwrap();
+    assert!(error.contains("native host bootstrap failed"), "{error}");
     assert!(
-        error.contains("could not start the claude agent"),
+        error.contains("registered native executable could not start"),
         "{error}"
     );
-    assert!(error.contains("agent_kind_unknown"), "{error}");
     assert_eq!(fixture.state("closed").trim(), "closed");
+}
+
+/// An agent that stops without ever writing its report is reminded once and
+/// then fails with that cause, instead of the run waiting for its deadline.
+#[test]
+fn an_agent_that_never_writes_its_report_fails_with_the_cause() {
+    let fixture = pane_fixture();
+    fs::create_dir_all(&fixture.state).unwrap();
+    fs::write(fixture.state.join("no-report"), "").unwrap();
+    let started = Instant::now();
+    let ran = fixture.run_with_env(&[], &[("BRGR_TEST_REPORT_GRACE_MS", "300")]);
+    assert_eq!(ran["outcome"], "lost", "{ran}");
+    let error = ran["error"].as_str().unwrap();
+    assert!(
+        error.contains("finished without writing its report"),
+        "{error}"
+    );
+    assert!(started.elapsed() < Duration::from_mins(1));
+    let calls = fixture.state("calls.log");
+    assert_eq!(
+        calls.matches("agent prompt").count(),
+        2,
+        "the task prompt plus exactly one reminder: {calls}"
+    );
 }
 
 /// Read-only runs stay in print mode: an agent that may not write cannot
 /// write its report. So does a run with pane mode switched off.
 #[test]
-fn pane_mode_is_skipped_for_read_only_and_when_switched_off() {
+fn read_only_and_legacy_preferences_do_not_silently_disable_the_tui() {
     let fixture = pane_fixture();
     let ran = fixture.run(&["--permission", "read-only"]);
-    assert_eq!(ran["outcome"], "candidate", "{ran}");
-    // Only pane mode opens a pane; the completion notice may still ask Herdr
-    // about the owner's own pane.
+    assert_eq!(ran["outcome"], "candidate");
+    assert!(fixture.state("calls.log").contains("pane split"));
     assert!(
-        !fixture.state("calls.log").contains("pane split"),
-        "a pane was opened for a read-only run: {}",
-        fixture.state("calls.log")
+        fixture
+            .state("start-args")
+            .contains("--permission-mode\nplan")
     );
-
     json_output(&run(
         &fixture.home,
         &["config", "set-pane-mode", "false"],
         &[],
     ));
     let ran = fixture.run(&[]);
-    assert_eq!(ran["outcome"], "candidate", "{ran}");
-    // Only pane mode opens a pane; the completion notice may still ask Herdr
-    // about the owner's own pane.
-    assert!(
-        !fixture.state("calls.log").contains("pane split"),
-        "a pane was opened with pane mode off: {}",
-        fixture.state("calls.log")
+    assert_eq!(ran["outcome"], "candidate");
+    assert_eq!(
+        fixture
+            .state("start-args")
+            .lines()
+            .filter(|line| *line == "bypassPermissions")
+            .count(),
+        1
     );
 }
 
@@ -1349,16 +1526,16 @@ done
 test -f "$prompt_file"
 if test -n "${BRGR_PARENT_ATTEMPT_ID:-}"; then
   if /usr/bin/grep -q UNSETTLED "$prompt_file"; then
-    "$BRGR_BIN" --json run LEAF --harness local.gjc --workspace "$PWD" --foreground >/dev/null
+    "$BRGR_BIN" --json --headless run LEAF --harness local.gjc --workspace "$PWD" --foreground >/dev/null
   elif /usr/bin/grep -q ROOT "$prompt_file"; then
-    child_json=$("$BRGR_BIN" --json run CHILD --harness local.gjc --workspace "$PWD")
+    child_json=$("$BRGR_BIN" --json --headless run CHILD --harness local.gjc --workspace "$PWD")
     child_task=$(printf '%s\n' "$child_json" | /usr/bin/sed -n 's/.*"task_id":"\([^"]*\)".*/\1/p')
     test -n "$child_task"
     "$BRGR_BIN" --json wait "$child_task" --timeout-seconds 10 >/dev/null
     "$BRGR_BIN" --json result "$child_task" >/dev/null
     "$BRGR_BIN" --json accept "$child_task" --reason 'child artifact checked' >/dev/null
   elif /usr/bin/grep -q CHILD "$prompt_file"; then
-    child_json=$("$BRGR_BIN" --json run LEAF --harness local.gjc --workspace "$PWD")
+    child_json=$("$BRGR_BIN" --json --headless run LEAF --harness local.gjc --workspace "$PWD")
     child_task=$(printf '%s\n' "$child_json" | /usr/bin/sed -n 's/.*"task_id":"\([^"]*\)".*/\1/p')
     test -n "$child_task"
     "$BRGR_BIN" --json wait "$child_task" --timeout-seconds 10 >/dev/null
@@ -1759,6 +1936,7 @@ fn relative_control_home_is_canonical_before_worker_delegation() {
             "--home",
             "relative-home",
             "--json",
+            "--headless",
             "run",
             "ROOT",
             "--harness",
@@ -2230,6 +2408,71 @@ fn idle_codex_parent_receives_completion_without_another_user_turn() {
     assert_eq!(fs::read_to_string(prompts).unwrap(), prompt);
 }
 
+#[test]
+fn idle_codex_parent_is_told_a_run_failed_with_its_reason() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("brgr");
+    let workspace = temp.path().join("work");
+    let scratch = temp.path().join("scratch");
+    let herdr = temp.path().join("herdr");
+    let agent_state = temp.path().join("agent-state");
+    let prompts = temp.path().join("prompts");
+    fs::create_dir_all(&workspace).unwrap();
+    fs::write(&agent_state, "working").unwrap();
+    fs::write(
+        &herdr,
+        "#!/bin/sh\nif [ \"$1\" = --session ]; then shift 2; fi\ncase \"$1 $2\" in\n 'agent get') state=$(/bin/cat \"$BRGR_TEST_AGENT_STATE\"); printf '{\"result\":{\"agent\":{\"agent\":\"codex\",\"pane_id\":\"w1:p1\",\"agent_status\":\"%s\",\"agent_session\":{\"value\":\"session-a\"}}}}\\n' \"$state\";;\n 'agent prompt') printf '%s\\n' \"$4\" >> \"$BRGR_TEST_PROMPTS\"; printf '{}\\n';;\n *) exit 2;;\nesac\n",
+    )
+    .unwrap();
+    fs::set_permissions(&herdr, fs::Permissions::from_mode(0o700)).unwrap();
+    let executable = temp.path().join("gjc");
+    fs::write(&executable, "#!/bin/sh\ncase \"$1\" in\n --version) echo 'gjc v-failed-notice-fixture'; exit 0;;\n --help) printf '%s\\n' '-p, --print' '--mode=<value>' '--no-session' '--no-mcp' '--model' '--thinking'; exit 0;;\nesac\nfor item in \"$@\"; do case \"$item\" in @*) prompt=${item#@};; esac; done\nif /usr/bin/grep -q BRGR_FIXTURE_OK \"$prompt\"; then\n printf '%s\\n' '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"BRGR_FIXTURE_OK\"}]}}'\n printf '%s\\n' '{\"type\":\"agent_end\",\"stopReason\":\"completed\"}'\nelse\n exit 7\nfi\n").unwrap();
+    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+    add_fixture(&home, &executable, &scratch);
+    let envs = [
+        ("CODEX_THREAD_ID", "session-a"),
+        ("BRGR_OWNER_ID", "codex:session-a"),
+        ("BRGR_SESSION_ID", "session-a"),
+        ("HERDR_ENV", "1"),
+        ("HERDR_PANE_ID", "w1:p1"),
+        ("HERDR_WORKSPACE_ID", "w1"),
+        ("HERDR_BIN_PATH", herdr.to_str().unwrap()),
+        ("HERDR_SESSION", "fixture-herdr"),
+        ("BRGR_TEST_AGENT_STATE", agent_state.to_str().unwrap()),
+        ("BRGR_TEST_PROMPTS", prompts.to_str().unwrap()),
+    ];
+    let launch = json_output(&run(
+        &home,
+        &["run", "FAIL", "--workspace", workspace.to_str().unwrap()],
+        &envs,
+    ));
+    let task = launch["task_id"].as_str().unwrap();
+    let store = brgr_store::Store::open(home.join("store")).unwrap();
+    for _ in 0..100 {
+        if store.latest_result(task.parse().unwrap()).is_ok() {
+            break;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    assert!(store.latest_result(task.parse().unwrap()).is_ok());
+    thread::sleep(Duration::from_millis(700));
+    assert!(!prompts.exists(), "busy Codex parent was prompted");
+    assert_duplicate_notification_dispatcher_exits(&home, task, &envs);
+    fs::write(&agent_state, "idle").unwrap();
+    for _ in 0..100 {
+        if prompts.exists() {
+            break;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    let prompt = fs::read_to_string(&prompts).expect("completion was not delivered");
+    assert!(prompt.contains("FROM BRGR"), "{prompt}");
+    assert!(prompt.contains("\"type\":\"brgr_failure\""), "{prompt}");
+    assert!(prompt.contains("\"outcome\":\"failed\""), "{prompt}");
+    assert!(prompt.contains(task), "{prompt}");
+    assert!(prompt.contains("brgr result"), "{prompt}");
+}
+
 /// A worker's question reaches an idle Codex owner without another user turn.
 ///
 /// Only completions used to be pushed, so a question waited until the worker's
@@ -2313,6 +2556,115 @@ fn idle_codex_owner_is_told_when_a_worker_asks() {
 
     thread::sleep(Duration::from_millis(1_200));
     assert!(!prompts.exists(), "a busy Codex owner was prompted");
+    fs::write(&agent_state, "idle").unwrap();
+    let delivered = (0..100)
+        .find_map(|_| {
+            let text = fs::read_to_string(&prompts).unwrap_or_default();
+            if text.contains(&question_id) {
+                return Some(text);
+            }
+            thread::sleep(Duration::from_millis(50));
+            None
+        })
+        .expect("the question was not delivered");
+    assert!(delivered.contains("FROM BRGR"), "{delivered}");
+    assert!(delivered.contains("brgr_question"), "{delivered}");
+    assert!(delivered.contains(task), "{delivered}");
+
+    // Several more polls while the question is still open: told once, not again.
+    thread::sleep(Duration::from_millis(1_500));
+    let text = fs::read_to_string(&prompts).unwrap();
+    // The id also appears inside the notice's own instructions, so count
+    // notices by their `message_id` field.
+    let field = format!("\"message_id\":\"{question_id}\"");
+    assert_eq!(text.matches(field.as_str()).count(), 1, "{text}");
+
+    json_output(&run(&home, &["cancel", task], &owner));
+}
+
+/// A worker's question reaches an idle Claude Code owner too. Herdr keeps no
+/// session id for Claude Code, so its pane and agent kind are the identity, and
+/// the owner id comes from `CLAUDE_CODE_SESSION_ID`.
+///
+/// Only completions used to be pushed, so a question waited until the worker's
+/// own `message wait` timed out unless the owner happened to poll. The notice is
+/// held while Codex is busy, sent once per session, and stops once answered.
+#[test]
+fn idle_claude_owner_is_told_when_a_worker_asks() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("brgr");
+    let workspace = temp.path().join("work");
+    let herdr = temp.path().join("herdr");
+    let agent_state = temp.path().join("agent-state");
+    let prompts = temp.path().join("prompts");
+    fs::create_dir_all(&workspace).unwrap();
+    fs::write(&agent_state, "working").unwrap();
+    fs::write(
+        &herdr,
+        "#!/bin/sh\nif [ \"$1\" = --session ]; then shift 2; fi\ncase \"$1 $2\" in\n 'agent get') state=$(/bin/cat \"$BRGR_TEST_AGENT_STATE\"); printf '{\"result\":{\"agent\":{\"agent\":\"claude\",\"pane_id\":\"w1:p1\",\"agent_status\":\"%s\"}}}\\n' \"$state\";;\n 'agent prompt') printf '%s\\n' \"$4\" >> \"$BRGR_TEST_PROMPTS\"; printf '{}\\n';;\n *) exit 2;;\nesac\n",
+    )
+    .unwrap();
+    fs::set_permissions(&herdr, fs::Permissions::from_mode(0o700)).unwrap();
+    add_fixture(&home, &gjc_fixture(), &temp.path().join("scratch"));
+    let owner = [
+        ("CLAUDE_CODE_SESSION_ID", "session-q"),
+        ("HERDR_ENV", "1"),
+        ("HERDR_PANE_ID", "w1:p1"),
+        ("HERDR_WORKSPACE_ID", "w1"),
+        ("HERDR_BIN_PATH", herdr.to_str().unwrap()),
+        ("HERDR_SESSION", "fixture-herdr"),
+        ("BRGR_TEST_AGENT_STATE", agent_state.to_str().unwrap()),
+        ("BRGR_TEST_PROMPTS", prompts.to_str().unwrap()),
+    ];
+    let launch = json_output(&run(
+        &home,
+        &[
+            "run",
+            "SLOW",
+            "--workspace",
+            workspace.to_str().unwrap(),
+            "--enable-delegation",
+        ],
+        &owner,
+    ));
+    let task = launch["task_id"].as_str().unwrap();
+    let store = brgr_store::Store::open(home.join("store")).unwrap();
+    let attempt = (0..100)
+        .find_map(|_| {
+            let found = store.active_message_attempt(task.parse().unwrap()).ok();
+            if found.is_none() {
+                thread::sleep(Duration::from_millis(20));
+            }
+            found
+        })
+        .expect("worker attempt did not become active")
+        .to_string();
+    let worker_owner = format!("worker:{attempt}");
+    let worker = [
+        ("BRGR_OWNER_ID", worker_owner.as_str()),
+        ("BRGR_SESSION_ID", worker_owner.as_str()),
+        ("BRGR_PARENT_TASK_ID", task),
+        ("BRGR_PARENT_ATTEMPT_ID", attempt.as_str()),
+    ];
+    let question = json_output(&run(
+        &home,
+        &[
+            "message",
+            "send",
+            task,
+            "--to",
+            "owner",
+            "--kind",
+            "question",
+            "--body",
+            "Which token?",
+        ],
+        &worker,
+    ));
+    let question_id = question["message_id"].as_str().unwrap().to_owned();
+
+    thread::sleep(Duration::from_millis(1_200));
+    assert!(!prompts.exists(), "a busy Claude owner was prompted");
     fs::write(&agent_state, "idle").unwrap();
     let delivered = (0..100)
         .find_map(|_| {
@@ -2679,6 +3031,52 @@ fn assert_duplicate_notification_dispatcher_exits(home: &Path, task: &str, envs:
         duplicate.wait().unwrap();
         panic!("duplicate notification dispatcher stayed active");
     }
+}
+
+#[test]
+fn a_failed_run_is_reported_on_every_owner_command_until_acknowledged() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("brgr");
+    let workspace = temp.path().join("work");
+    let executable = temp.path().join("gjc");
+    fs::create_dir_all(&workspace).unwrap();
+    fs::write(&executable, "#!/bin/sh\ncase \"$1\" in\n --version) echo 'gjc v-failed-notice-fixture'; exit 0;;\n --help) printf '%s\\n' '-p, --print' '--mode=<value>' '--no-session' '--no-mcp' '--model' '--thinking'; exit 0;;\nesac\nfor item in \"$@\"; do case \"$item\" in @*) prompt=${item#@};; esac; done\nif /usr/bin/grep -q BRGR_FIXTURE_OK \"$prompt\"; then\n printf '%s\\n' '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"BRGR_FIXTURE_OK\"}]}}'\n printf '%s\\n' '{\"type\":\"agent_end\",\"stopReason\":\"completed\"}'\nelse\n exit 7\nfi\n").unwrap();
+    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+    add_fixture(&home, &executable, &temp.path().join("scratch"));
+    let owner = [
+        ("BRGR_OWNER_ID", "codex:failed-banner"),
+        ("BRGR_SESSION_ID", "banner-session"),
+    ];
+    let result = json_output(&run(
+        &home,
+        &[
+            "run",
+            "FAIL",
+            "--workspace",
+            workspace.to_str().unwrap(),
+            "--foreground",
+        ],
+        &owner,
+    ));
+    assert_eq!(result["outcome"], "failed");
+    let task = result["task_id"].as_str().unwrap();
+    let stderr_of =
+        |args: &[&str]| String::from_utf8_lossy(&run(&home, args, &owner).stderr).into_owned();
+    // Any later command of the owner carries the note, not only `result`.
+    for args in [&["status"][..], &["doctor"][..]] {
+        let text = stderr_of(args);
+        assert!(text.contains("failed or were lost"), "{args:?}: {text}");
+        assert!(text.contains(task), "{args:?}: {text}");
+    }
+    // Another owner is not told about it.
+    let other = [
+        ("BRGR_OWNER_ID", "codex:someone-else"),
+        ("BRGR_SESSION_ID", "other-session"),
+    ];
+    assert!(!String::from_utf8_lossy(&run(&home, &["status"], &other).stderr).contains(task));
+    json_output(&run(&home, &["result", task, "--ack"], &owner));
+    let text = stderr_of(&["status"]);
+    assert!(!text.contains("failed or were lost"), "{text}");
 }
 
 #[test]

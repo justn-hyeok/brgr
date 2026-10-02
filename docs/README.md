@@ -28,6 +28,10 @@ so moving a file breaks a test rather than a reader.
   workers, and the verified scope of it.
 - [Completion loop plan](guides/completion-loop-plan.md) — how a run reaches a
   terminal state and what reconciles one that did not.
+- [Orchestration](guides/orchestration.md) — native TUI defaults, messages,
+  debate, settings, and verification limits.
+- [Orchestration rework plan](guides/orchestration-rework-plan.md) — the accepted
+  implementation scope and its verification criteria.
 - [Unsigned macOS distribution](guides/unsigned-distribution.md) — what a
   release archive is and is not, and what to check before running one.
 

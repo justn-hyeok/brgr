@@ -17,6 +17,15 @@ pub(crate) struct Cli {
     /// Emit one machine-readable JSON receipt instead of human output.
     #[arg(long, global = true)]
     pub(crate) json: bool,
+    /// Exact calling harness session, for commands executed by a shared daemon.
+    #[arg(long, global = true)]
+    pub(crate) owner_session: Option<String>,
+    /// Exact source Herdr pane. Its session is verified before use.
+    #[arg(long, global = true)]
+    pub(crate) source_pane: Option<String>,
+    /// Explicitly run a one-shot process instead of the default native TUI.
+    #[arg(long, global = true)]
+    pub(crate) headless: bool,
     #[command(subcommand)]
     pub(crate) command: Command,
 }
@@ -55,6 +64,19 @@ pub(crate) enum Command {
     Message {
         #[command(subcommand)]
         command: message::MessageCommand,
+    },
+    /// Explicit direct conversation between sibling TUI workers.
+    Debate {
+        #[command(subcommand)]
+        command: crate::debate::DebateCommand,
+    },
+    /// Send native input to the task's owned TUI, such as an answer to a menu.
+    Input {
+        task: TaskId,
+        #[arg(long, conflicts_with = "key", required_unless_present = "key")]
+        text: Option<String>,
+        #[arg(long, conflicts_with = "text", required_unless_present = "text")]
+        key: Option<String>,
     },
     /// Stop an owned in-flight run and settle it as a terminal result.
     Cancel {
@@ -111,6 +133,11 @@ pub(crate) enum Command {
     },
     /// Probe every registered harness, the Codex integration, and the store.
     Doctor,
+    /// Show the failures brgr recorded in `brgr_error_issue_memo.md`.
+    Errors {
+        #[command(subcommand)]
+        command: Option<ErrorsCommand>,
+    },
     /// Show or change local brgr configuration.
     Config {
         #[command(subcommand)]
@@ -144,6 +171,24 @@ pub(crate) enum Command {
     Notify { task: TaskId },
     #[command(name = "__pane-run", hide = true)]
     PaneRun(PaneRunArgs),
+    #[command(name = "__tui-host", hide = true)]
+    TuiHost { config: PathBuf },
+    #[command(name = "__session", hide = true)]
+    Session { task: TaskId },
+    #[command(name = "__seal-report", hide = true)]
+    SealReport { task: TaskId, revision: u32 },
+    /// Publish a managed worker's final answer without modifying source files.
+    Report {
+        task: TaskId,
+        #[arg(long)]
+        body: String,
+    },
+    #[command(name = "__native-result", hide = true)]
+    NativeResult {
+        task: TaskId,
+        revision: u32,
+        kind: String,
+    },
     #[command(name = "__omp-run", hide = true)]
     OmpRun {
         #[arg(long)]
@@ -187,7 +232,18 @@ pub(crate) enum PluginCommand {
 
 #[derive(Subcommand)]
 pub(crate) enum ConfigCommand {
+    /// Create configuration and BRGR.md examples without overwriting user files.
+    Init,
     Show,
+    /// Set a global default or a default for one registered harness.
+    Set {
+        key: String,
+        value: String,
+        #[arg(long)]
+        harness: Option<String>,
+    },
+    /// Validate calling options against registered harnesses without running a model.
+    Check,
     SetCodexExecutable {
         executable: PathBuf,
     },
@@ -212,6 +268,26 @@ pub(crate) enum ConfigCommand {
     },
     /// Remove the cap, so tasks default to each harness's full level again.
     ClearMaxPermission,
+    /// File a GitHub issue for each failure brgr records, in `OWNER/NAME`.
+    /// Issue text holds only the redacted error class and counts.
+    SetIssueReporting {
+        repo: String,
+        /// Sightings of one failure before its issue is filed.
+        #[arg(long, default_value_t = 2)]
+        min_count: u64,
+    },
+    /// Stop filing issues; the memo keeps recording.
+    ClearIssueReporting,
+}
+
+#[derive(Subcommand)]
+pub(crate) enum ErrorsCommand {
+    /// Print the recorded failures.
+    List,
+    /// Print the exact issue text that would be filed, without sending it.
+    Preview,
+    /// File the issues now, if issue reporting is on.
+    File,
 }
 
 /// A worker permission level as typed on the command line.
@@ -250,8 +326,8 @@ pub(crate) struct RunArgs {
     pub(crate) objective: String,
     #[command(flatten)]
     pub(crate) delegation: DelegationArgs,
-    #[arg(long, default_value = "local.gjc")]
-    pub(crate) harness: String,
+    #[arg(long)]
+    pub(crate) harness: Option<String>,
     /// How much the worker may do without asking: read-only, edits, or full.
     /// Defaults to the configured cap, or the harness's full level.
     #[arg(long, value_enum)]
@@ -270,8 +346,8 @@ pub(crate) struct RunArgs {
     pub(crate) capabilities: CapabilityArgs,
     #[command(flatten)]
     pub(crate) evidence: EvidenceArgs,
-    #[arg(long, default_value_t = 3_600)]
-    pub(crate) deadline_seconds: u64,
+    #[arg(long)]
+    pub(crate) deadline_seconds: Option<u64>,
     #[arg(long)]
     pub(crate) max_children: Option<u8>,
     #[arg(long)]
@@ -507,6 +583,10 @@ pub(crate) enum HookEvent {
 /// Arguments the supervisor passes to the hidden pane-mode runner.
 #[derive(Args)]
 pub(crate) struct PaneRunArgs {
+    #[arg(long)]
+    pub(crate) caller: Option<String>,
+    #[arg(long)]
+    pub(crate) native_executable: Option<PathBuf>,
     #[arg(long)]
     pub(crate) prompt_file: PathBuf,
     #[arg(long)]

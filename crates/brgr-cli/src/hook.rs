@@ -13,6 +13,7 @@ use serde_json::json;
 use crate::{HookInput, Paths, cli::HookEvent, notification, supervision::reconcile_pending};
 
 pub(crate) async fn hook(paths: &Paths, event: HookEvent) -> Result<()> {
+    crate::invocation::mark_hook();
     let mut input = String::new();
     io::stdin().read_to_string(&mut input)?;
     let input: HookInput = serde_json::from_str(&input).unwrap_or(HookInput { session_id: None });
@@ -21,6 +22,8 @@ pub(crate) async fn hook(paths: &Paths, event: HookEvent) -> Result<()> {
         return Ok(());
     };
     let owner = OwnerId::new(format!("codex:{session_id}"))?;
+    let source = crate::caller_pane::for_session(&session_id, None);
+    crate::invocation::capture_hook(session_id.clone(), source.clone());
     reconcile_pending(paths)?;
     let store = Store::open(&paths.store)?;
     if event == HookEvent::SessionStart {
@@ -32,7 +35,7 @@ pub(crate) async fn hook(paths: &Paths, event: HookEvent) -> Result<()> {
     } else {
         match tokio::time::timeout(
             Duration::from_millis(500),
-            notification::register_current_surface(&store, &owner, &session_id),
+            notification::register_current_surface(paths, &store, &owner, &session_id),
         )
         .await
         {
@@ -56,7 +59,15 @@ pub(crate) async fn hook(paths: &Paths, event: HookEvent) -> Result<()> {
     }
     let pending = store.pending_for_session(&session_id)?;
     if pending.is_empty() {
-        println!("{{}}");
+        if event == HookEvent::Stop {
+            println!("{{}}");
+        } else {
+            let pane = source.map_or_else(String::new, |pane| format!(" --source-pane {pane}"));
+            println!(
+                "{}",
+                json!({"hookSpecificOutput":{"hookEventName":format!("{event:?}"),"additionalContext":format!("brgr calling context for this session: brgr --owner-session {session_id}{pane}. Use these exact calling options for brgr commands from the shared daemon.")}})
+            );
+        }
         return Ok(());
     }
     let handles = pending

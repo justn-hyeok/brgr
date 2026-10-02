@@ -6,11 +6,16 @@ mod caller_pane;
 mod cli;
 mod codex_integration;
 mod config;
+mod debate;
+mod error_memo;
 mod evidence;
+mod failure_banner;
 mod harness_commands;
 mod herdr_plugin;
 mod hook;
+mod invocation;
 mod message;
+mod native_result;
 mod notification;
 mod omp_adapter;
 mod pane_adapter;
@@ -19,6 +24,7 @@ mod plugin_bridge;
 mod supervision;
 mod task_commands;
 mod tree_status;
+mod tui_host;
 mod workspace;
 mod worktree_prune;
 
@@ -128,6 +134,14 @@ struct LaunchEnvelope {
     pane_mode: bool,
     #[serde(default)]
     claimant: Claimant,
+    #[serde(default)]
+    source_pane: Option<String>,
+    #[serde(default)]
+    source_session: Option<String>,
+    #[serde(default)]
+    calling_options: Option<config::CallingOptions>,
+    #[serde(default)]
+    instructions_digest: Option<String>,
 }
 
 /// What claims an admitted task by starting its supervisor.
@@ -153,15 +167,41 @@ struct HookInput {
     session_id: Option<String>,
 }
 
+fn calling_cli() -> Cli {
+    let cli = Cli::parse();
+    invocation::initialize(
+        cli.owner_session.clone(),
+        cli.source_pane.clone(),
+        cli.headless,
+    );
+    cli
+}
+
+fn write_bytes_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+    let parent = path.parent().context("output path has no parent")?;
+    fs::create_dir_all(parent)?;
+    let mut file = NamedTempFile::new_in(parent)?;
+    file.as_file()
+        .set_permissions(fs::Permissions::from_mode(0o600))?;
+    file.write_all(bytes)?;
+    file.as_file().sync_all()?;
+    file.persist(path)?;
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
-    let cli = Cli::parse();
+    let cli = calling_cli();
     if !matches!(
         &cli.command,
         Command::Plugin { .. }
             | Command::Supervise { .. }
             | Command::Hook { .. }
             | Command::Notify { .. }
+            | Command::TuiHost { .. }
+            | Command::Session { .. }
+            | Command::SealReport { .. }
+            | Command::NativeResult { .. }
     ) && let Some(dir) = env::var_os(plugin_bridge::BRIDGE_DIR_ENV)
     {
         let budget_seconds = bridge_host::bridge_budget_seconds(&cli.command);
@@ -169,56 +209,107 @@ async fn main() -> Result<()> {
     }
     bridge_host::validate_bridge_host_preflight(&cli)?;
     let paths = Paths::new(cli.home.clone())?;
-    match cli.command {
-        Command::Run(args) => run_task(&paths, args, cli.json).await,
-        Command::Revise(args) => revise_task(&paths, args, cli.json).await,
-        Command::Status { task, tree } => status(&paths, task, tree, cli.json),
-        Command::Result { task, ack } => result(&paths, task, ack, cli.json),
-        Command::Artifact { command } => evidence::artifact_command(&paths, command, cli.json),
+    let internal = matches!(
+        &cli.command,
+        Command::Plugin { .. }
+            | Command::Supervise { .. }
+            | Command::Hook { .. }
+            | Command::Notify { .. }
+            | Command::PaneRun(_)
+            | Command::TuiHost { .. }
+            | Command::Session { .. }
+            | Command::SealReport { .. }
+            | Command::NativeResult { .. }
+            | Command::OmpRun { .. }
+    );
+    let outcome = Box::pin(execute(&paths, cli.command, cli.json)).await;
+    if !internal {
+        failure_banner::print(&paths);
+    }
+    outcome
+}
+
+async fn plugin_command(paths: &Paths, command: PluginCommand) -> Result<()> {
+    match command {
+        PluginCommand::Open { no_focus, codex } => herdr_plugin::open(no_focus, codex).await,
+        PluginCommand::Board { once } => herdr_plugin::board(paths, once).await,
+        PluginCommand::Codex => herdr_plugin::codex(paths).await,
+        PluginCommand::Worker => herdr_plugin::worker(paths).await,
+    }
+}
+
+async fn execute(paths: &Paths, command: Command, json_output: bool) -> Result<()> {
+    match command {
+        Command::Run(args) => run_task(paths, args, json_output).await,
+        Command::Revise(args) => revise_task(paths, args, json_output).await,
+        Command::Status { task, tree } => status(paths, task, tree, json_output),
+        Command::Result { task, ack } => result(paths, task, ack, json_output),
+        Command::Artifact { command } => evidence::artifact_command(paths, command, json_output),
         Command::Wait {
             task,
             timeout_seconds,
-        } => wait_for_result(&paths, task, timeout_seconds, cli.json).await,
-        Command::Message { command } => message::run(&paths, command, cli.json).await,
-        Command::Cancel { task, tree } => cancel(&paths, task, tree, cli.json),
-        Command::Bind { task, session } => bind(&paths, task, session, cli.json).await,
+        } => wait_for_result(paths, task, timeout_seconds, json_output).await,
+        Command::Message { command } => message::run(paths, command, json_output).await,
+        Command::Debate { command } => debate::run(paths, command, json_output).await,
+        Command::Input { task, text, key } => pane_adapter::send_native_input(
+            paths,
+            task,
+            text.as_deref(),
+            key.as_deref(),
+            json_output,
+        ),
+        Command::Cancel { task, tree } => cancel(paths, task, tree, json_output),
+        Command::Bind { task, session } => bind(paths, task, session, json_output).await,
         Command::Accept { task, reason } => {
-            decide(&paths, task, DecisionVerdict::Accepted, reason, cli.json)
+            decide(paths, task, DecisionVerdict::Accepted, reason, json_output)
         }
         Command::Reject { task, reason } => {
-            decide(&paths, task, DecisionVerdict::Rejected, reason, cli.json)
+            decide(paths, task, DecisionVerdict::Rejected, reason, json_output)
         }
-        Command::Diff { task, stat } => evidence::show_diff(&paths, task, stat, cli.json),
+        Command::Diff { task, stat } => evidence::show_diff(paths, task, stat, json_output),
         Command::Apply {
             task,
             workspace,
             execute,
-        } => evidence::apply_result(&paths, task, &workspace, execute, cli.json),
-        Command::Harness { command } => harness(&paths, command, cli.json).await,
-        Command::Integrate { command } => integrate(&paths, command, cli.json),
-        Command::Doctor => doctor(&paths, cli.json).await,
-        Command::Config { command } => config_command(&paths, &command, cli.json),
+        } => evidence::apply_result(paths, task, &workspace, execute, json_output),
+        Command::Harness { command } => harness(paths, command, json_output).await,
+        Command::Integrate { command } => integrate(paths, command, json_output),
+        Command::Doctor => doctor(paths, json_output).await,
+        Command::Errors { command } => error_memo::run(paths, command.as_ref()),
+        Command::Config { command } => config_command(paths, &command, json_output).await,
         Command::Prune {
             apply,
             include_ignored,
-        } => worktree_prune::command(&paths, apply, include_ignored, cli.json),
-        Command::Plugin { command } => match command {
-            PluginCommand::Open { no_focus, codex } => herdr_plugin::open(no_focus, codex).await,
-            PluginCommand::Board { once } => herdr_plugin::board(&paths, once).await,
-            PluginCommand::Codex => herdr_plugin::codex(&paths).await,
-            PluginCommand::Worker => herdr_plugin::worker(&paths).await,
-        },
-        Command::Cleanup { command } => cleanup(&paths, command, cli.json),
-        Command::Supervise { launch } => supervise(&paths, &launch, cli.json).await,
+        } => worktree_prune::command(paths, apply, include_ignored, json_output),
+        Command::Plugin { command } => plugin_command(paths, command).await,
+        Command::Cleanup { command } => cleanup(paths, command, json_output),
+        Command::Supervise { launch } => supervise(paths, &launch, json_output).await,
         Command::Hook { event } => {
-            if hook::hook(&paths, event).await.is_err() {
+            if hook::hook(paths, event).await.is_err() {
                 eprintln!("brgr hook could not read the inbox; run `brgr doctor`");
                 println!("{{}}");
             }
             Ok(())
         }
-        Command::Notify { task } => notification::deliver_pending(&paths, task).await,
-        Command::PaneRun(args) => pane_adapter::run_pane_adapter(&paths, &args),
+        Command::Notify { task } => notification::deliver_pending(paths, task).await,
+        Command::PaneRun(args) => pane_adapter::run_pane_adapter(paths, &args),
+        Command::TuiHost { config } => tui_host::run(&config),
+        Command::Session { task } => pane_adapter::serve_session(paths, task),
+        Command::SealReport { task, revision } => {
+            pane_adapter::seal_native_report(paths, task, revision)
+        }
+        Command::Report { task, body } => native_result::submit(paths, task, &body),
+        Command::NativeResult {
+            task,
+            revision,
+            kind,
+        } => {
+            if native_result::hook(paths, task, revision, &kind).is_err() {
+                eprintln!("brgr native result remains pending");
+            }
+            println!("{{}}");
+            Ok(())
+        }
         Command::OmpRun {
             prompt_file,
             workspace,
@@ -229,7 +320,7 @@ async fn main() -> Result<()> {
             effort,
             keep_pane,
         } => run_omp_adapter(
-            &paths,
+            paths,
             &prompt_file,
             &workspace,
             task,
@@ -244,9 +335,19 @@ async fn main() -> Result<()> {
     }
 }
 
-fn config_command(paths: &Paths, command: &ConfigCommand, json_output: bool) -> Result<()> {
+async fn config_command(paths: &Paths, command: &ConfigCommand, json_output: bool) -> Result<()> {
     let mut config = Config::load(&paths.config)?;
     match command {
+        ConfigCommand::Init => return config::initialize(paths, json_output),
+        ConfigCommand::Set {
+            key,
+            value,
+            harness,
+        } => {
+            config.set(key, value, harness.as_deref())?;
+            config.save(&paths.config)?;
+        }
+        ConfigCommand::Check => return config::check(paths, &config, json_output).await,
         ConfigCommand::Show => {}
         ConfigCommand::SetCodexExecutable { executable } => {
             config::validate_codex_executable(executable)?;
@@ -277,6 +378,22 @@ fn config_command(paths: &Paths, command: &ConfigCommand, json_output: bool) -> 
             config.worker.max_permission = None;
             config.save(&paths.config)?;
         }
+        ConfigCommand::SetIssueReporting { repo, min_count } => {
+            if repo.split('/').count() != 2 || repo.contains(char::is_whitespace) {
+                bail!("repository must be OWNER/NAME");
+            }
+            if *min_count == 0 {
+                bail!("--min-count must be at least 1");
+            }
+            config.issues.auto_file = true;
+            config.issues.repo = Some(repo.clone());
+            config.issues.min_count = *min_count;
+            config.save(&paths.config)?;
+        }
+        ConfigCommand::ClearIssueReporting => {
+            config.issues.auto_file = false;
+            config.save(&paths.config)?;
+        }
     }
     if json_output {
         print_value(&serde_json::to_value(&config)?, true);
@@ -291,7 +408,7 @@ fn owner_from_environment() -> Result<OwnerId> {
     let owner = env::var("BRGR_OWNER_ID")
         .ok()
         .filter(|value| !value.trim().is_empty())
-        .or_else(|| session.map(|id| format!("codex:{id}")))
+        .or_else(|| session.map(|id| format!("{}:{id}", owner_kind())))
         .unwrap_or_else(|| "codex:manual".to_owned());
     Ok(OwnerId::new(owner)?)
 }
@@ -312,7 +429,25 @@ fn delegation_parent_from_environment() -> Result<Option<(TaskId, AttemptId)>> {
     }
 }
 
+/// Which kind of harness owns this shell. A Codex or explicit brgr session keeps
+/// the `codex` owner prefix; a Claude Code session, which has neither, is a
+/// `claude` owner.
+fn owner_kind() -> &'static str {
+    let set = |name: &str| env::var(name).is_ok_and(|value| !value.trim().is_empty());
+    if !set("CODEX_THREAD_ID") && !set("BRGR_SESSION_ID") && set("CLAUDE_CODE_SESSION_ID") {
+        "claude"
+    } else {
+        "codex"
+    }
+}
+
 fn current_session() -> Result<Option<String>> {
+    if let Some(session) = &invocation::current().session {
+        if session.trim().is_empty() {
+            bail!("owner session must not be empty");
+        }
+        return Ok(Some(session.clone()));
+    }
     let codex = env::var("CODEX_THREAD_ID")
         .ok()
         .filter(|value| !value.trim().is_empty());
@@ -326,7 +461,10 @@ fn current_session() -> Result<Option<String>> {
     {
         bail!("CODEX_THREAD_ID and BRGR_SESSION_ID disagree");
     }
-    Ok(codex.or(explicit))
+    let claude = env::var("CLAUDE_CODE_SESSION_ID")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+    Ok(codex.or(explicit).or(claude))
 }
 
 fn require_owner(store: &Store, expected: &OwnerId) -> Result<(String, u64)> {

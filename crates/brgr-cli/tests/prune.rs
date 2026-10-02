@@ -796,6 +796,7 @@ impl Fixture {
     fn command(&self) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_brgr"));
         command
+            .arg("--headless")
             .arg("--home")
             .arg(&self.home)
             .arg("--json")

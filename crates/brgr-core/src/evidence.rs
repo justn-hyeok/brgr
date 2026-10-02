@@ -25,6 +25,8 @@ pub(crate) fn seal_requested_evidence(
     let mut artifacts = Vec::new();
     let mut total = 0_u64;
     if spec.evidence.capture_diff {
+        let mut excluded = spec.evidence.files.clone();
+        excluded.push(format!(".brgr/tasks/{}-r{}", spec.task_id, spec.revision));
         let patch = git_diff::bounded_git_diff(
             Path::new(&spec.workspace),
             spec.evidence
@@ -32,13 +34,10 @@ pub(crate) fn seal_requested_evidence(
                 .as_deref()
                 .or(spec.evidence.base_commit.as_deref())
                 .unwrap_or("HEAD"),
-            &spec.evidence.files,
+            &excluded,
             limit,
             remaining,
         )?;
-        if patch.is_empty() {
-            return Err("requested Git diff is empty".to_owned());
-        }
         let reference = store
             .seal_artifact_reader(Cursor::new(patch), "text/x-diff", limit)
             .map_err(|error| error.to_string())?;

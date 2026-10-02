@@ -115,6 +115,7 @@ dependencies = [
  "brgr-runner",
  "brgr-store",
  "clap",
+ "libc",
  "predicates",
  "rusqlite",
  "serde",

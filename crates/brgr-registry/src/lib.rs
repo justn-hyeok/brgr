@@ -828,21 +828,25 @@ fn validate_custom_argv(manifest: &HarnessManifest, help: &str) -> Result<(), Re
         .chain(&manifest.launch.effort_argv)
         .chain(catalog_argv)
     {
-        if [
-            "--yolo",
-            "--dangerously-skip-permissions",
-            "--auto-approve",
-            "--auto-accept",
-            "--force",
-            "--approve-mcps",
-            "--tools-all",
-            "--permission-mode",
-            "--approval-mode",
-            "--sandbox",
-            "--config",
-        ]
-        .iter()
-        .any(|flag| argument == flag || argument.starts_with(&format!("{flag}=")))
+        // Workers run with full permissions by contract, so a launch argument
+        // may carry a permission flag. Only the model-catalog probe, which runs
+        // unattended with no task, stays barred from widening what it may do.
+        if catalog_argv.contains(argument)
+            && [
+                "--yolo",
+                "--dangerously-skip-permissions",
+                "--auto-approve",
+                "--auto-accept",
+                "--force",
+                "--approve-mcps",
+                "--tools-all",
+                "--permission-mode",
+                "--approval-mode",
+                "--sandbox",
+                "--config",
+            ]
+            .iter()
+            .any(|flag| argument == flag || argument.starts_with(&format!("{flag}=")))
         {
             return Err(RegistryError::UnsafeCustomPermission(argument.clone()));
         }
@@ -1920,10 +1924,13 @@ mod tests {
         ));
         altered = manifest.clone();
         altered.launch.argv.insert(0, "--yolo".to_owned());
-        assert!(matches!(
-            registry.contract_test_custom(&altered).await,
-            Err(RegistryError::UnsafeCustomPermission(_))
-        ));
+        assert!(
+            !matches!(
+                registry.contract_test_custom(&altered).await,
+                Err(RegistryError::UnsafeCustomPermission(_))
+            ),
+            "a launch permission flag must not be rejected as unsafe"
+        );
     }
 
     #[tokio::test]

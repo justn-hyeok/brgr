@@ -41,11 +41,18 @@ pub(crate) fn status(
             Err(StoreError::TaskNotFound(_)) => AttemptState::Queued,
             Err(error) => return Err(error.into()),
         };
+        let launch = fs::read(paths.launch(task_id, spec.revision))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<LaunchEnvelope>(&bytes).ok());
         print_value(
             &json!({
                 "task": spec,
                 "state": format!("{state:?}").to_lowercase(),
                 "workspace_present": workspace::workspace_is_present(&spec.workspace),
+                "session": crate::pane_adapter::session_status(paths, task_id, spec.revision),
+                "calling_options": launch.as_ref().and_then(|value|value.calling_options.as_ref()),
+                "source_pane": launch.as_ref().and_then(|value|value.source_pane.as_ref()),
+                "source_session": launch.as_ref().and_then(|value|value.source_session.as_ref()),
             }),
             json_output,
         );
@@ -98,6 +105,7 @@ pub(crate) fn result(paths: &Paths, task: TaskId, ack: bool, json_output: bool) 
         } else if let Err(error) = pane_cleanup::close_if_eligible(&store, &paths.runs, task) {
             eprintln!("brgr pane cleanup remains pending: {error}");
         }
+        crate::pane_adapter::cleanup_settled(paths, task, spec.revision)?;
     }
     print_value(
         &json!({"result": result, "artifacts": artifacts, "route_observation": route_observation}),
@@ -140,6 +148,20 @@ pub(crate) async fn wait_for_result(
             }
             Err(StoreError::TaskNotFound(_)) => {}
             Err(error) => return Err(error.into()),
+        }
+        if let Ok(attempt) = store.latest_message_attempt(task) {
+            let questions = store.unanswered_questions(
+                task,
+                attempt,
+                brgr_store::MessageDirection::WorkerToOwner,
+            )?;
+            if !questions.is_empty() {
+                print_value(
+                    &json!({"task_id":task,"state":"awaiting_input","waiting_for":"question","messages":questions}),
+                    json_output,
+                );
+                return Ok(());
+            }
         }
         if tokio::time::Instant::now() >= deadline {
             bail!("task {task} did not produce a terminal result before the wait timeout");
@@ -229,7 +251,8 @@ pub(crate) async fn bind(
     }
     let epoch = store.rebind_owner(&spec.owner_id, &session)?;
     let surface_ready =
-        match notification::register_current_surface(&store, &spec.owner_id, &session).await {
+        match notification::register_current_surface(paths, &store, &spec.owner_id, &session).await
+        {
             Ok(ready) => ready,
             Err(error) => {
                 eprintln!("brgr completion notification remains queued: {error}");
@@ -287,6 +310,7 @@ pub(crate) fn decide(
         reason,
     };
     store.record_decision_and_ack(&decision)?;
+    crate::pane_adapter::cleanup_settled(paths, task, spec.revision)?;
     let persisted = store
         .decision_for_result(result.result_id)?
         .context("decision was not readable after commit")?;

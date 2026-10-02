@@ -23,7 +23,7 @@ use tokio::{
 
 use crate::{
     Paths, codex_integration,
-    config::{Config, WorkerPlacement, validate_codex_executable},
+    config::{Config, validate_codex_executable},
     plugin_bridge,
 };
 
@@ -276,94 +276,6 @@ pub async fn worker(paths: &Paths) -> Result<()> {
     }
     println!("brgr worker · {}", canonical.display());
     crate::supervise(paths, &canonical, true).await
-}
-
-pub async fn open_worker(
-    paths: &Paths,
-    launch: &Path,
-    workspace: &Path,
-    placement: WorkerPlacement,
-) -> Result<serde_json::Value> {
-    if env::var("HERDR_ENV").as_deref() != Ok("1") {
-        bail!("brgr worker pane requires a Herdr caller");
-    }
-    let parent_pane = env::var("HERDR_PANE_ID").context("Herdr parent pane id is absent")?;
-    let workspace_id = env::var("HERDR_WORKSPACE_ID").context("Herdr workspace id is absent")?;
-    if parent_pane.trim().is_empty() || workspace_id.trim().is_empty() {
-        bail!("Herdr parent pane or workspace id is empty");
-    }
-    let herdr = PathBuf::from(env::var_os("HERDR_BIN_PATH").context("HERDR_BIN_PATH is absent")?);
-    if !herdr.is_absolute() || !herdr.is_file() {
-        bail!("HERDR_BIN_PATH is not an absolute Herdr executable");
-    }
-    let mut command = Command::new(herdr);
-    if let Ok(session) = env::var("HERDR_SESSION")
-        && !session.trim().is_empty()
-    {
-        command.arg("--session").arg(session);
-    }
-    command.args([
-        "plugin",
-        "pane",
-        "open",
-        "--plugin",
-        PLUGIN_ID,
-        "--entrypoint",
-        "worker",
-        "--placement",
-        if placement == WorkerPlacement::Adjacent {
-            "split"
-        } else {
-            "tab"
-        },
-    ]);
-    if placement == WorkerPlacement::Adjacent {
-        command.args(["--target-pane", &parent_pane, "--direction", "right"]);
-    } else {
-        command.args(["--workspace", &workspace_id]);
-    }
-    command
-        .arg("--cwd")
-        .arg(workspace)
-        .arg("--env")
-        .arg(format!("BRGR_HOME={}", paths.home.display()))
-        .arg("--env")
-        .arg(format!("{WORKER_LAUNCH_ENV}={}", launch.display()))
-        .arg("--no-focus");
-    let output = timeout(HERDR_CALL_DEADLINE, command.kill_on_drop(true).output())
-        .await
-        .context("Herdr worker pane open timed out")??;
-    if !output.status.success() {
-        bail!(
-            "Herdr worker pane could not open: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-    if output.stdout.len() > 65_536 {
-        bail!("Herdr worker pane response exceeds 64 KiB");
-    }
-    let receipt: serde_json::Value =
-        serde_json::from_slice(&output.stdout).context("Herdr worker pane response is not JSON")?;
-    if receipt
-        .pointer("/result/type")
-        .and_then(serde_json::Value::as_str)
-        != Some("plugin_pane_opened")
-        || receipt
-            .pointer("/result/plugin_pane/plugin_id")
-            .and_then(serde_json::Value::as_str)
-            != Some(PLUGIN_ID)
-        || receipt
-            .pointer("/result/plugin_pane/entrypoint")
-            .and_then(serde_json::Value::as_str)
-            != Some("worker")
-        || receipt
-            .pointer("/result/plugin_pane/pane/pane_id")
-            .and_then(serde_json::Value::as_str)
-            .is_none()
-    {
-        bail!("Herdr worker pane response has no matching worker identity");
-    }
-    Ok(receipt)
 }
 
 async fn launch_codex(paths: &Paths) -> Result<()> {

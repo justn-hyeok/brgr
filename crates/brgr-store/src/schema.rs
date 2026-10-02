@@ -169,6 +169,38 @@ CREATE INDEX IF NOT EXISTS completion_notifications_owner
 ON completion_notifications (owner_id, resolved, delivered_session);
 CREATE INDEX IF NOT EXISTS results_task_revision ON results (task_id, revision);
 CREATE INDEX IF NOT EXISTS attempts_task_revision ON attempts (task_id, revision);
+CREATE TABLE IF NOT EXISTS native_message_deliveries (
+    message_id TEXT PRIMARY KEY,
+    attempt_id TEXT NOT NULL,
+    pane_id TEXT NOT NULL,
+    state TEXT NOT NULL,
+    error TEXT
+);
+CREATE TABLE IF NOT EXISTS debate_groups (
+    group_id TEXT PRIMARY KEY,
+    owner_id TEXT NOT NULL,
+    active INTEGER NOT NULL DEFAULT 1
+);
+CREATE TABLE IF NOT EXISTS debate_members (
+    group_id TEXT NOT NULL,
+    task_id TEXT NOT NULL,
+    attempt_id TEXT NOT NULL,
+    PRIMARY KEY (group_id, task_id),
+    FOREIGN KEY (group_id) REFERENCES debate_groups(group_id)
+);
+CREATE TABLE IF NOT EXISTS peer_messages (
+    message_id TEXT PRIMARY KEY,
+    group_id TEXT NOT NULL,
+    from_task TEXT NOT NULL,
+    to_task TEXT NOT NULL,
+    from_attempt TEXT NOT NULL,
+    to_attempt TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    body TEXT NOT NULL,
+    in_reply_to TEXT,
+    acknowledged INTEGER NOT NULL DEFAULT 0,
+    FOREIGN KEY (group_id) REFERENCES debate_groups(group_id)
+);
 ";
 
 /// Identifies the exact [`SCHEMA`] a store was last initialized with, so an

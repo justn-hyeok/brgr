@@ -4,13 +4,14 @@ use super::fixtures::{result, sealed_result, task};
 
 /// Every source file the write-path guards read. Checked against the modules
 /// `lib.rs` declares, so a new module cannot quietly escape them.
-const SCANNED: [(&str, &str); 16] = [
+const SCANNED: [(&str, &str); 17] = [
     ("lib.rs", include_str!("lib.rs")),
     ("artifact.rs", include_str!("artifact.rs")),
     ("attempt.rs", include_str!("attempt.rs")),
     ("board.rs", include_str!("board.rs")),
     ("contention.rs", include_str!("contention.rs")),
     ("delegation.rs", include_str!("delegation.rs")),
+    ("debate.rs", include_str!("debate.rs")),
     ("error.rs", include_str!("error.rs")),
     ("fixtures.rs", include_str!("fixtures.rs")),
     ("message.rs", include_str!("message.rs")),
@@ -1992,6 +1993,15 @@ fn every_write_path_has_a_recorded_retry_decision() {
         // The dispatcher re-reads pending questions every poll, so a lost
         // notice record costs one repeated notice, not a lost question.
         ("record_question_notice", false),
+        // Debate commands are idempotent and reissuable. Native delivery
+        // retains uncertain claims and releases confirmed unattempted ones.
+        ("create_debate", false),
+        ("stop_debate", false),
+        ("post_peer_message_from", false),
+        ("acknowledge_peer", false),
+        ("claim_native_delivery", false),
+        ("finish_native_delivery", false),
+        ("release_native_delivery", false),
     ];
 
     assert_every_module_is_scanned();
@@ -2311,10 +2321,7 @@ fn a_withdrawn_question_no_longer_holds_the_result_or_gets_pushed() {
         store.unsettled_questions(task.task_id, attempt_id).unwrap(),
         0
     );
-    assert!(
-        store
-            .pending_question_notices(task.task_id)
-            .unwrap()
-            .is_empty()
-    );
+    let notices = store.pending_question_notices(task.task_id).unwrap();
+    assert_eq!(notices.len(), 1);
+    assert_eq!(notices[0].message_id, note.message_id);
 }
