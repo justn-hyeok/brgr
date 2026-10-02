@@ -69,7 +69,10 @@ pub(crate) async fn supervise(paths: &Paths, launch_path: &Path, json_output: bo
     // Reconcile before publishing our own task receipt. Otherwise a previous
     // crashed attempt without a launch identity could mistake this new process
     // for its original live supervisor and remain unfinished forever.
-    supervisor.reconcile_after_restart(|attempt| observe_attempt(paths, attempt))?;
+    record_recovered(
+        paths,
+        &supervisor.reconcile_after_restart(|attempt| observe_attempt(paths, attempt))?,
+    );
     write_json_atomic(&paths.supervisor(launch.spec.task_id), &receipt)?;
     let (task_id, revision) = (launch.spec.task_id, launch.spec.revision);
     let harness = launch.spec.route.harness_id.clone();
@@ -90,23 +93,7 @@ pub(crate) async fn supervise(paths: &Paths, launch_path: &Path, json_output: bo
         crate::pane_adapter::close_leftover_pane(paths, task_id, revision, launch.keep_pane);
     }
     let result = result?;
-    if matches!(
-        result.outcome,
-        TerminalOutcome::Failed | TerminalOutcome::Lost
-    ) {
-        crate::error_memo::record(
-            paths,
-            &crate::error_memo::Failure {
-                outcome: if result.outcome == TerminalOutcome::Lost {
-                    "lost"
-                } else {
-                    "failed"
-                },
-                harness: &harness,
-                error: result.error.as_deref().unwrap_or("no error text"),
-            },
-        );
-    }
+    crate::error_memo::record_result(paths, &harness, &result);
     let _ = fs::remove_file(cancel_path);
     let _ = fs::remove_file(paths.supervisor(result.task_id));
     print_value(&serde_json::to_value(result)?, json_output);
@@ -154,6 +141,19 @@ pub(crate) fn spawn_supervisor(paths: &Paths, launch_path: &Path) -> Result<()> 
     Ok(())
 }
 
+/// Failures settled by recovery after a crashed supervisor go to the memo too.
+fn record_recovered(paths: &Paths, results: &[ResultEnvelope]) {
+    let Ok(store) = Store::open(&paths.store) else {
+        return;
+    };
+    for result in results {
+        let harness = store
+            .task(result.task_id)
+            .map_or_else(|_| "unknown".to_owned(), |spec| spec.route.harness_id);
+        crate::error_memo::record_result(paths, &harness, result);
+    }
+}
+
 pub(crate) fn reconcile_pending(paths: &Paths) -> Result<()> {
     let mut supervisor = Supervisor::open(&paths.store)?;
     for attempt in supervisor.store().unfinished_attempts()? {
@@ -176,13 +176,17 @@ pub(crate) fn reconcile_pending(paths: &Paths) -> Result<()> {
             }
         }
     }
-    supervisor.reconcile_after_restart(|attempt| observe_attempt(paths, attempt))?;
+    record_recovered(
+        paths,
+        &supervisor.reconcile_after_restart(|attempt| observe_attempt(paths, attempt))?,
+    );
     let mut store = Store::open(&paths.store)?;
     for task in store.unstarted_tasks()? {
         if unstarted_admission_is_stale(paths, &task)? {
             let cancelled = paths.cancel(task.task_id).exists()
                 || store.cancellation_requested(task.task_id)?;
             record_unstarted_terminal(
+                paths,
                 &mut store,
                 &task,
                 if cancelled {
@@ -285,6 +289,7 @@ pub(crate) fn unstarted_admission_is_stale(paths: &Paths, task: &TaskSpec) -> Re
 }
 
 pub(crate) fn record_unstarted_terminal(
+    paths: &Paths,
     store: &mut Store,
     task: &TaskSpec,
     outcome: TerminalOutcome,
@@ -325,6 +330,7 @@ pub(crate) fn record_unstarted_terminal(
         },
     };
     store.commit_terminal_result_final(&task.owner_id, &result)?;
+    crate::error_memo::record_result(paths, &task.route.harness_id, &result);
     Ok(true)
 }
 

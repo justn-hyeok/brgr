@@ -432,6 +432,7 @@ pub(crate) async fn start_task(
     }
     if let Err(error) = spawn_supervisor(paths, &launch_path) {
         record_unstarted_terminal(
+            paths,
             &mut store,
             &launch.spec,
             TerminalOutcome::Failed,

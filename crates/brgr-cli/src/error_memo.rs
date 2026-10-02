@@ -24,6 +24,22 @@ use crate::{Paths, config::Config};
 
 /// The pane adapter's progress line, which older runs left as the error's tail.
 const PROGRESS_MARK: &str = "brgr pane mode";
+/// An unknown-screen failure ends with a quote of what the pane showed, which
+/// can hold anything the worker displayed. The text before the quote names the
+/// failure; the quote never leaves the machine.
+const SCREEN_MARK: &str = "no brgr rule answers";
+/// Applies every cut that keeps free text out of an error class or sample.
+fn without_free_text(error: &str) -> &str {
+    let error = error.split(PROGRESS_MARK).next().unwrap_or(error);
+    match error.find(SCREEN_MARK) {
+        Some(at) => {
+            let rest = &error[at..];
+            let end = rest.find(": ").unwrap_or(rest.len());
+            &error[..at + end]
+        }
+        None => error,
+    }
+}
 const LEDGER: &str = "error-ledger.json";
 const MEMO: &str = "brgr_error_issue_memo.md";
 const SAMPLE_LIMIT: usize = 300;
@@ -58,6 +74,24 @@ pub(crate) struct Failure<'a> {
     pub(crate) outcome: &'a str,
     pub(crate) harness: &'a str,
     pub(crate) error: &'a str,
+}
+
+/// Records a sealed failed or lost result; other outcomes are not failures.
+pub(crate) fn record_result(paths: &Paths, harness: &str, result: &brgr_protocol::ResultEnvelope) {
+    use brgr_protocol::TerminalOutcome;
+    let outcome = match result.outcome {
+        TerminalOutcome::Lost => "lost",
+        TerminalOutcome::Failed => "failed",
+        TerminalOutcome::Candidate | TerminalOutcome::Cancelled => return,
+    };
+    record(
+        paths,
+        &Failure {
+            outcome,
+            harness,
+            error: result.error.as_deref().unwrap_or("no error text"),
+        },
+    );
 }
 
 /// Records a failure and, when reporting is on, starts the issue filer.
@@ -151,17 +185,25 @@ pub(crate) fn file_issues(paths: &Paths) -> Result<()> {
         return Ok(());
     }
     let mut ledger = load(paths);
+    let mut first_error = None;
     for entry in &mut ledger.entries {
-        if entry.issue_url.is_none() && entry.count >= config.issues.min_count {
-            entry.issue_url = Some(find_or_create(&repo, entry)?);
-            entry.commented_at = entry.count;
-        } else if let Some(url) = &entry.issue_url
+        let step = if entry.issue_url.is_none() && entry.count >= config.issues.min_count {
+            find_or_create(&repo, entry).map(|url| {
+                entry.issue_url = Some(url);
+                entry.commented_at = entry.count;
+            })
+        } else if let Some(url) = entry.issue_url.clone()
             && COMMENT_AT
                 .iter()
                 .any(|at| entry.count >= *at && entry.commented_at < *at)
         {
-            comment(&repo, url, entry)?;
-            entry.commented_at = entry.count;
+            comment(&repo, &url, entry).map(|()| entry.commented_at = entry.count)
+        } else {
+            Ok(())
+        };
+        // One failing call must not drop the issue addresses already found.
+        if let Err(error) = step {
+            first_error.get_or_insert(error);
         }
     }
     // Merge counts recorded while the filer ran instead of overwriting them.
@@ -179,7 +221,7 @@ pub(crate) fn file_issues(paths: &Paths) -> Result<()> {
     }
     save(paths, &latest)?;
     fs::write(paths.home.join(MEMO), memo(&latest))?;
-    Ok(())
+    first_error.map_or(Ok(()), Err)
 }
 
 fn find_or_create(repo: &str, entry: &Entry) -> Result<String> {
@@ -378,7 +420,7 @@ fn classify(error: &str) -> String {
     // Older runs also ended with the adapter's progress line, which quoted the
     // task's objective; it is never part of an error class.
     let head = error.split(" | ").next().unwrap_or(error);
-    let head = head.split(PROGRESS_MARK).next().unwrap_or(head);
+    let head = without_free_text(head);
     let mut out = Vec::new();
     for token in head.split_whitespace() {
         out.push(normalize_token(token));
@@ -436,7 +478,7 @@ fn is_pane_id(text: &str) -> bool {
 /// Masks what must not leave the machine: home directories, ids, addresses,
 /// tokens, then cuts the text to `limit` characters.
 pub(crate) fn redact(text: &str, limit: usize) -> String {
-    let text = text.split(PROGRESS_MARK).next().unwrap_or(text);
+    let text = without_free_text(text);
     let home = std::env::var("HOME").unwrap_or_default();
     let mut words = Vec::new();
     for word in text.split_whitespace() {
@@ -558,9 +600,10 @@ mod tests {
             "the claude agent stayed on a screen no brgr rule answers for 90s: exec '/Users/b/y' | 22aa11bb on dev",
         );
         assert_eq!(fingerprint(&a), fingerprint(&b));
+        // The quoted screen is cut: it is free text from the pane.
         assert_eq!(
             a,
-            "the claude agent stayed on a screen no brgr rule answers for <n>s: exec '<path>'"
+            "the claude agent stayed on a screen no brgr rule answers for <n>s"
         );
     }
 
@@ -598,6 +641,30 @@ mod tests {
         let error = "the Herdr-backed worker did not provide a valid final result: brgr pane mode · prompted: Rotate the production API key for acme";
         assert!(!classify(error).contains("Rotate"));
         assert!(!redact(error, 300).contains("Rotate"));
+    }
+
+    #[test]
+    fn a_quoted_pane_screen_never_reaches_a_class_a_sample_or_an_issue() {
+        let error = "the claude agent stayed on a screen no brgr rule answers for 180s: Rotate the production key | export TOKEN=abc | more";
+        let class = classify(error);
+        assert_eq!(
+            class,
+            "the claude agent stayed on a screen no brgr rule answers for <n>s"
+        );
+        let sample = redact(error, 300);
+        assert!(
+            !sample.contains("Rotate") && !sample.contains("TOKEN"),
+            "{sample}"
+        );
+        let entry = Entry {
+            fingerprint: "abc".to_owned(),
+            class,
+            sample,
+            count: 1,
+            ..Entry::default()
+        };
+        let (title, body) = issue_text(&entry);
+        assert!(!title.contains("Rotate") && !body.contains("Rotate") && !body.contains("TOKEN"));
     }
 
     #[test]
@@ -672,6 +739,44 @@ mod tests {
         );
         let memo = fs::read_to_string(paths.home.join(MEMO)).unwrap();
         assert!(memo.contains("issues/7"), "{memo}");
+    }
+
+    #[test]
+    fn one_failing_gh_call_keeps_the_issue_addresses_already_found() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let temp = tempfile::tempdir().unwrap();
+        let paths = Paths::new(Some(temp.path().join("home"))).unwrap();
+        let gh = temp.path().join("gh");
+        // The first create succeeds; every later one fails.
+        fs::write(
+            &gh,
+            "#!/bin/sh\ncase \"$2\" in\n list) echo '[]';;\n create) if [ -e \"$0.made\" ]; then echo boom >&2; exit 1; fi; : > \"$0.made\"; /bin/cat >/dev/null; echo https://github.com/o/r/issues/1;;\nesac\n",
+        )
+        .unwrap();
+        fs::set_permissions(&gh, fs::Permissions::from_mode(0o700)).unwrap();
+        GH_PROGRAM.with(|program| *program.borrow_mut() = Some(gh));
+        let mut config = Config::load(&paths.config).unwrap();
+        config.issues.auto_file = true;
+        config.issues.repo = Some("o/r".to_owned());
+        config.issues.min_count = 1;
+        config.save(&paths.config).unwrap();
+        for error in ["first distinct failure", "second distinct failure"] {
+            record(
+                &paths,
+                &Failure {
+                    outcome: "failed",
+                    harness: "local.x",
+                    error,
+                },
+            );
+        }
+        assert!(file_issues(&paths).is_err());
+        let urls: Vec<_> = load(&paths)
+            .entries
+            .iter()
+            .filter_map(|entry| entry.issue_url.clone())
+            .collect();
+        assert_eq!(urls, ["https://github.com/o/r/issues/1"]);
     }
 
     #[test]

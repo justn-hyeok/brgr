@@ -122,6 +122,12 @@ evidence · level.
 - Live: with the derived identity, `owner_surfaces` holds `claude:b54b7525-...` -> `w5G:p1`, and the completion notice for task `10716914` reached the identity check and waited on "parent agent is not idle" (17 attempts while this session was working). **Confirmed live afterwards:** once this session went idle, the notice for task `10716914` arrived as a new prompt (`FROM BRGR {"type":"brgr_completion",...}`) and `completion_notifications` shows `delivered=1` after 398 attempts (the dispatcher polls every 500 ms while the owner is busy; there is no backoff).
 - Level: observed live up to the idle wait; fixed.
 
+### Independent review of the first PR (`/code-review`, 2026-10-03) and what was done
+
+Real code defects, fixed with tests: (1) issue text could carry a quote of the pane: the unknown-screen error ends with the screen rows, and the class, title and sample kept the first row. Class and sample are now cut before the quote (`a_quoted_pane_screen_never_reaches_a_class_a_sample_or_an_issue`). (2) A "press Enter to continue" line was matched before an update menu, so Enter could land on "Update now"; the update menu is now checked first (`an_update_menu_with_a_continue_line_is_skipped_not_confirmed`). (3) Only the success path of `supervise()` reached the memo; recovered lost runs and runs that never started now do too. (4) One failing `gh` call dropped issue addresses already found in the same pass; progress is now kept and the error reported afterwards (`one_failing_gh_call_keeps_the_issue_addresses_already_found`). (5) A failed write to `screens.log` was swallowed; it is now reported.
+
+Documentation that overclaimed, corrected in `AGENTS.md` rather than in code: the permission rule (an unset level is the harness's full level; explicit `--permission` and the cap remain opt-in), the rule table (no rule exists for MCP trust or bypass-mode warnings; they are reported and fail after three minutes), `self_update_env` (OpenCode and Claude only), the log (prompt submission is not logged), the failure note (bound owners only, three listed), pending messages (`brgr status TASK --tree`), the reviewer-suppression sentence (narrowed to tool permissions; owner decisions unaffected), and precedence against the parent workspace policy. Not changed: main's installed skill text still tells agents to cap permissions and to ask before approving prompts; the branch rewrites it, so the contradiction ends when the branch merges.
+
 ### Feature: failures reach the owner immediately
 
 - Gap: a failed or lost run reached the owner only as a generic "verify this result" push, and only when the owner pane was idle and registered; otherwise nothing told it.
@@ -153,7 +159,7 @@ evidence · level.
 
 ## Verification state of the screen-rule work (friction worktree, uncommitted)
 
-- Checks: `cargo fmt --check`, `cargo clippy --workspace --all-targets --all-features -D warnings`, `cargo test --workspace --locked` = 381 passed, 0 failed (baseline before the change: 345 passed).
+- Checks: `cargo fmt --check`, `cargo clippy --workspace --all-targets --all-features -D warnings`, `cargo test --workspace --locked` = 384 passed, 0 failed (baseline before the change: 345 passed).
 - Live panes: OpenCode and Claude tasks reached `candidate` with sealed output. In fresh scratch repos whose path contains a space, Claude's trust prompt appeared and brgr pressed it: `screens.log` shows `workspace-trust down enter` for `f9ffa2c0` (twice, before the redraw delay) and `38f4248d` (once).
 - Installed: `~/.local/bin/brgr` is this build (installed by new file and `mv`); earlier binaries are in the scratchpad as `brgr-installed-before`, `-2`, `-3`. `brgr integrate codex install` was run and `brgr doctor` says `ok`.
 - Checked separately: Claude Code's docs name `DISABLE_AUTOUPDATER` (also in `claude doctor` output) as the env switch for background updates. Herdr's key names reach a real terminal as the bytes the rules rely on (`down` = `ESC [ B`, `up` = `ESC [ A`, `esc` = `ESC`, `enter` = newline), checked with a raw-mode reader in a live pane.

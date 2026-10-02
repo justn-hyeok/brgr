@@ -73,7 +73,41 @@ pub(super) fn classify(screen: &str, workspace: &Path) -> Screen {
             keys: vec!["esc"],
         };
     }
-    if screen.lines().any(|line| {
+    let options = menu_options(screen);
+    let selected = options.iter().position(|option| option.selected);
+    // An update menu comes first: its highlighted option is "Update now", so a
+    // stray "press Enter" line on the same screen must not become Enter.
+    if let Some(selected) = selected
+        && (lower.contains("update") || lower.contains("upgrade"))
+        && let Some(skip) = options.iter().position(|option| is_skip(&option.text))
+    {
+        let mut keys = Vec::new();
+        if skip > selected {
+            keys.extend(std::iter::repeat_n("down", skip - selected));
+        } else {
+            keys.extend(std::iter::repeat_n("up", selected - skip));
+        }
+        keys.push("enter");
+        return Screen::Resolve {
+            rule: "update-offer-skip",
+            keys,
+        };
+    }
+    if selected.is_none() {
+        return if has_continue_notice(screen) {
+            Screen::Resolve {
+                rule: "continue-notice",
+                keys: vec!["enter"],
+            }
+        } else {
+            Screen::Clear
+        };
+    }
+    Screen::Unknown(head(screen))
+}
+
+fn has_continue_notice(screen: &str) -> bool {
+    screen.lines().any(|line| {
         let line = line
             .trim()
             .trim_matches(['│', '┃', '║'])
@@ -86,34 +120,7 @@ pub(super) fn classify(screen: &str, workspace: &Path) -> Screen {
         ]
         .iter()
         .any(|notice| line.contains(notice))
-    }) {
-        return Screen::Resolve {
-            rule: "continue-notice",
-            keys: vec!["enter"],
-        };
-    }
-    let options = menu_options(screen);
-    let Some(selected) = options.iter().position(|option| option.selected) else {
-        return Screen::Clear;
-    };
-    if (lower.contains("update") || lower.contains("upgrade"))
-        && let Some(skip) = options.iter().position(|option| is_skip(&option.text))
-    {
-        {
-            let mut keys = Vec::new();
-            if skip > selected {
-                keys.extend(std::iter::repeat_n("down", skip - selected));
-            } else {
-                keys.extend(std::iter::repeat_n("up", selected - skip));
-            }
-            keys.push("enter");
-            return Screen::Resolve {
-                rule: "update-offer-skip",
-                keys,
-            };
-        }
-    }
-    Screen::Unknown(head(screen))
+    })
 }
 
 /// Codex's own folder prompt ("Trust this folder? ... 1. Trust and continue").
@@ -193,8 +200,13 @@ fn record(path: &Path, pane: &str, rule: &str, keys: &[&str]) {
     let at = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_secs());
-    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
-        let _ = writeln!(file, "{at} {pane} {rule} {}", keys.join(" "));
+    let written = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .and_then(|mut file| writeln!(file, "{at} {pane} {rule} {}", keys.join(" ")));
+    if let Err(error) = written {
+        eprintln!("brgr pane mode · could not log the {rule} key press: {error}");
     }
 }
 
@@ -473,6 +485,19 @@ mod tests {
     fn an_update_menu_without_a_skip_option_is_not_guessed() {
         let screen = "Update available\n› 1. Update now\n  2. Show release notes\n";
         assert!(matches!(classify(screen, work()), Screen::Unknown(_)));
+    }
+
+    /// Synthetic: a stray notice line must not turn an update menu into Enter.
+    #[test]
+    fn an_update_menu_with_a_continue_line_is_skipped_not_confirmed() {
+        let screen = "Update available\n› 1. Update now\n  2. Skip\nPress Enter to continue\n";
+        assert_eq!(
+            classify(screen, work()),
+            Screen::Resolve {
+                rule: "update-offer-skip",
+                keys: vec!["down", "enter"],
+            }
+        );
     }
 
     /// Synthetic.
