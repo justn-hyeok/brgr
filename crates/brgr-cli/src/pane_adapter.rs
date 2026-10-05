@@ -60,6 +60,31 @@ const REPORT_GRACE: Duration = Duration::from_secs(15);
 /// before it counts as finished.
 const UNSEEN_WORK_GRACE: Duration = Duration::from_mins(1);
 
+/// How many polls an unclassified agent's screen must stay exactly the same
+/// before it counts as a dialog. A working agent redraws: its output grows, a
+/// spinner turns, an elapsed counter ticks.
+const STILL_POLLS: u32 = 10;
+
+/// Counts how long a pane's screen has stood unchanged.
+#[derive(Default)]
+struct Stillness {
+    last: Option<String>,
+    polls: u32,
+}
+
+impl Stillness {
+    /// Records this poll's screen and returns how many polls it has stood.
+    fn see(&mut self, screen: Option<String>) -> u32 {
+        if screen.is_some() && screen == self.last {
+            self.polls = self.polls.saturating_add(1);
+        } else {
+            self.last = screen;
+            self.polls = 0;
+        }
+        self.polls
+    }
+}
+
 /// How long a pane run waits for its calling Codex pane to show the call. The
 /// call that started the task ends within seconds, so this is generous.
 const CALLER_WAIT: Duration = Duration::from_secs(40);
@@ -156,6 +181,7 @@ pub(crate) fn pane_process_manifest(
                 // Lets a test shorten the report waits in the detached runner.
                 .chain(cfg!(debug_assertions).then(|| "BRGR_TEST_REPORT_GRACE_MS".to_owned()))
                 .chain(cfg!(debug_assertions).then(|| "BRGR_TEST_CALLER_WAIT_MS".to_owned()))
+                .chain(cfg!(debug_assertions).then(|| "BRGR_TEST_SCREEN_DEADLINE_MS".to_owned()))
                 .collect::<std::collections::BTreeSet<_>>()
                 .into_iter()
                 .collect(),
@@ -242,7 +268,7 @@ pub(crate) fn run_pane_adapter(paths: &Paths, run: &PaneRunArgs) -> Result<()> {
         Some(marker) if crate::caller_pane::pending_session(marker).is_some() => {
             let session = crate::caller_pane::pending_session(marker).unwrap_or_default();
             crate::caller_pane::wait_for_session(session, caller_wait()).context(
-                "could not find the calling Codex pane: no Codex pane shows this session's brgr call",
+                "could not find the calling Codex pane: no Codex pane shows this session's brgr call (start the command with `--as SESSION`; `brgr doctor` shows whether this Codex release was checked)",
             )?
         }
         Some(pane) => pane.to_owned(),
@@ -434,6 +460,53 @@ fn settle(
     }
 }
 
+/// One poll of an agent Herdr does not classify. Herdr never says whether it
+/// waits on a dialog, so a screen that stands still for `STILL_POLLS` is read
+/// like a blocked one: a rule's dialog is answered, any other is reported and
+/// starts the unknown-screen deadline. A moving screen clears both.
+#[allow(clippy::too_many_arguments)]
+fn poll_unclassified(
+    herdr: &Herdr,
+    pane: &str,
+    run: &PaneRunArgs,
+    notices: &mut Notices<'_>,
+    status: &str,
+    still: &mut Stillness,
+    watch: &mut ScreenWatch,
+    blocked: &mut bool,
+) -> Result<()> {
+    if still.see(herdr.screen(pane)) < STILL_POLLS {
+        if *blocked {
+            notices.withdraw();
+            *blocked = false;
+            set_phase(notices.paths, run, "working");
+        }
+        watch.restart_clock();
+        return Ok(());
+    }
+    match screens::resolve(herdr, pane, run, notices.paths, Some(status))? {
+        Screen::Resolve { rule, .. } => {
+            if *blocked {
+                notices.withdraw();
+                *blocked = false;
+                set_phase(notices.paths, run, "working");
+            }
+            watch.pressed(rule)?;
+            *still = Stillness::default();
+        }
+        Screen::Unknown(text) => {
+            if !*blocked {
+                notices.blocked(&run.kind, pane, "while working");
+                *blocked = true;
+                set_phase(notices.paths, run, "awaiting_input");
+            }
+            watch.observe(&Screen::Unknown(text))?;
+        }
+        Screen::Clear => watch.restart_clock(),
+    }
+    Ok(())
+}
+
 fn drive(
     herdr: &Herdr,
     name: &str,
@@ -458,6 +531,7 @@ fn drive(
     let mut blocked = false;
     let mut watch = ScreenWatch::new(&run.kind);
     let mut idle = IdleReport::new();
+    let mut still = Stillness::default();
     loop {
         let receipt: PaneReceipt = serde_json::from_slice(&fs::read(
             notices.paths.pane_receipt(run.task, run.revision),
@@ -483,8 +557,10 @@ fn drive(
         if run.native_executable.is_some() || matches!(status.as_str(), "idle" | "done") {
             deliver_worker_messages(herdr, name, pane, run, notices.paths)?;
         }
-        // Whatever stopped the agent was dealt with in the pane.
-        if blocked && status != "blocked" {
+        let unclassified = !matches!(status.as_str(), "blocked" | "working" | "idle" | "done");
+        // Whatever stopped the agent was dealt with in the pane. An
+        // unclassified agent's dialog is cleared when its screen moves, below.
+        if blocked && status != "blocked" && !unclassified {
             notices.withdraw();
             blocked = false;
             set_phase(notices.paths, run, "working");
@@ -537,7 +613,16 @@ fn drive(
                 if run.native_executable.is_some() {
                     idle.seal_stable_report(report, notices.paths, run)?;
                 }
-                watch.reset();
+                poll_unclassified(
+                    herdr,
+                    pane,
+                    run,
+                    notices,
+                    &status,
+                    &mut still,
+                    &mut watch,
+                    &mut blocked,
+                )?;
             }
         }
         thread::sleep(POLL);
@@ -1041,6 +1126,17 @@ impl Herdr {
 #[cfg(test)]
 mod lifecycle_tests {
     use super::*;
+
+    #[test]
+    fn a_screen_counts_as_still_only_while_it_is_unchanged() {
+        let mut still = Stillness::default();
+        assert_eq!(still.see(Some("a".into())), 0);
+        assert_eq!(still.see(Some("a".into())), 1);
+        assert_eq!(still.see(Some("a".into())), 2);
+        assert_eq!(still.see(Some("b".into())), 0);
+        assert_eq!(still.see(None), 0);
+        assert_eq!(still.see(None), 0, "an unreadable screen is never still");
+    }
     use std::os::unix::fs::PermissionsExt as _;
 
     #[test]

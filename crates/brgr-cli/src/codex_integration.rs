@@ -551,11 +551,16 @@ mod tests {
         }
     }
 
-    /// The README's commands are what a new reader copies first.
+    /// The README's commands, and the reference split out of it, are what a
+    /// new reader copies first.
     #[test]
     fn every_brgr_command_in_the_readme_parses() {
         use clap::Parser as _;
-        let readme = include_str!("../../../README.md");
+        let readme = concat!(
+            include_str!("../../../README.md"),
+            "\n",
+            include_str!("../../../docs/guides/reference.md")
+        );
         let mut commands: Vec<String> = Vec::new();
         let mut prose = String::new();
         let mut fenced = false;

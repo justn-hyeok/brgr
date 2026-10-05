@@ -1,5 +1,22 @@
 # Changelog
 
+## 2.11.0 — 2026-10-05
+
+Fixes from an outside review.
+- An agent Herdr never classifies (GJC, Command Code) now gets the
+  three-minute unknown-screen deadline once its screen stands still.
+- The update-offer rule no longer answers an agent's own "update …?" questions.
+- A Claude Code owner's notices go only to the Claude Code process that
+  registered it.
+- The Codex caller trace accepts more command shapes, and `brgr doctor`
+  reports the Codex release.
+- A finished task's notification dispatcher exits at once.
+- `brgr doctor` accepts a Claude Code-only setup.
+- The OMP Herdr adapter uses `python3`, and the default home outside macOS
+  follows XDG.
+
+The README is shorter, and its reference part moved to `docs/guides/reference.md`.
+
 ## 2.10.6 — 2026-10-05
 
 Every brgr command evens out the worker column beside each caller after it

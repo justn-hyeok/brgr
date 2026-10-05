@@ -824,6 +824,10 @@ PY
     printf '{"result":{"agent":{"agent":"claude","agent_status":"%s","pane_id":"w9:p2"}}}\n' "$s"
     if [ "$s" = working ]; then echo idle > "$d/state"; fi;;
   'pane read')
+    if [ -e "$d/dialog" ] && [ -s "$d/paste" ]; then
+      printf '%s\n' 'Pick a region' '› 1. us-east' '  2. eu-west'
+      exit 0
+    fi
     if [ -e "$d/blockquote" ] && [ -s "$d/paste" ]; then
       printf '%s\n' 'Working on it' '> 1. update the config, then skip later steps' '  2. next'
       exit 0
@@ -853,9 +857,13 @@ struct PaneFixture {
 }
 
 fn pane_fixture() -> PaneFixture {
+    pane_fixture_named("brgr", "work")
+}
+
+fn pane_fixture_named(home: &str, workspace: &str) -> PaneFixture {
     let temp = TempDir::new().unwrap();
-    let home = temp.path().join("brgr");
-    let workspace = temp.path().join("work");
+    let home = temp.path().join(home);
+    let workspace = temp.path().join(workspace);
     let bin = temp.path().join("bin");
     fs::create_dir_all(&workspace).unwrap();
     fs::create_dir_all(&bin).unwrap();
@@ -1030,6 +1038,52 @@ fn menu_like_output_from_an_unclassified_agent_is_not_pressed_mid_run() {
         calls.matches("pane send-keys").count(),
         1,
         "only the prompt's own Enter may be sent: {calls}"
+    );
+}
+
+/// An agent Herdr never classifies still gets the unknown-screen deadline: a
+/// dialog that stands still is reported and fails the run, instead of waiting
+/// out the hour-long task deadline. Nothing is pressed on it.
+#[test]
+fn an_unclassified_agent_stuck_on_an_unknown_dialog_fails_on_the_screen_deadline() {
+    let fixture = pane_fixture();
+    fs::create_dir_all(&fixture.state).unwrap();
+    for flag in ["unclassified", "dialog", "no-report"] {
+        fs::write(fixture.state.join(flag), "").unwrap();
+    }
+    let started = Instant::now();
+    let ran = fixture.run_with_env(
+        &[],
+        &[
+            ("BRGR_TEST_SCREEN_DEADLINE_MS", "500"),
+            ("BRGR_TEST_REPORT_GRACE_MS", "600000"),
+        ],
+    );
+    assert_ne!(ran["outcome"], "candidate", "{ran}");
+    let error = ran["error"].as_str().unwrap_or_default();
+    assert!(error.contains("no brgr rule answers"), "{error}");
+    assert!(error.contains("Pick a region"), "{error}");
+    assert!(started.elapsed() < Duration::from_mins(1));
+    let calls = fixture.state("calls.log");
+    assert_eq!(
+        calls.matches("pane send-keys").count(),
+        1,
+        "only the prompt's own Enter may be sent: {calls}"
+    );
+}
+
+/// The default control home on macOS is `~/Library/Application Support/brgr`,
+/// so every worktree path has a space. A pane run must survive one in both the
+/// control home and the workspace (dogfood bug D4 was a space in that path).
+#[test]
+fn a_pane_run_works_with_spaces_in_the_home_and_workspace_paths() {
+    let fixture = pane_fixture_named("Application Support/brgr", "work space");
+    let ran = fixture.run(&[]);
+    assert_eq!(ran["outcome"], "candidate", "{ran}");
+    assert!(
+        fixture.state("pane-cwd").contains("work space"),
+        "{}",
+        fixture.state("pane-cwd")
     );
 }
 
