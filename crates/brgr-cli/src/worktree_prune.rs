@@ -607,8 +607,11 @@ fn changes_objection(
     found: &mut Assessment,
 ) -> Option<String> {
     // One status call answers both questions: tracked or untracked changes, and
-    // the ignored set that git's own clean check does not look at.
-    let status = match git(worktree, &["status", "--porcelain", "--ignored"]) {
+    // the ignored set that git's own clean check does not look at. `matching`
+    // lists each ignored path at the level its pattern matched: the default
+    // folds a directory whose files are all ignored into one entry, so a
+    // `build/prod.env` caught by `*.env` would read as `build/`.
+    let status = match git(worktree, &["status", "--porcelain", "--ignored=matching"]) {
         Ok(status) => status,
         Err(reason) => return Some(format!("worktree status is unreadable: {reason}")),
     };
@@ -665,9 +668,9 @@ fn harness_cache(status_line: &str) -> bool {
         .is_some_and(|path| CACHES.iter().any(|cache| path.starts_with(cache)))
 }
 
-/// An ignored path that a build or a package manager recreates, never a
-/// secret: every component up to it is an ordinary name, and one of them is a
-/// well-known output or dependency directory.
+/// An ignored directory a build or a package manager recreates: an entry git
+/// reported as a directory whose own name is a well-known output or dependency
+/// directory. A file is never regenerable, wherever it sits.
 fn regenerable(path: &str) -> bool {
     const REGENERABLE: [&str; 12] = [
         "node_modules",
@@ -683,7 +686,9 @@ fn regenerable(path: &str) -> bool {
         ".gradle",
         "coverage",
     ];
-    path.split('/').any(|part| REGENERABLE.contains(&part))
+    path.strip_suffix('/')
+        .map(|directory| directory.rsplit('/').next().unwrap_or(directory))
+        .is_some_and(|name| REGENERABLE.contains(&name))
 }
 
 /// Whether the worktree's changes are exactly the patch sealed with the
@@ -1247,6 +1252,10 @@ mod tests {
         assert!(!regenerable(".env"));
         assert!(!regenerable("secrets/credentials.json"));
         assert!(!regenerable("node_modules_backup.tar"));
+        // A secret inside one of those directories is still a file.
+        assert!(!regenerable("build/prod.env"));
+        assert!(!regenerable("dist/.env"));
+        assert!(!regenerable("node_modules/x/.env"));
     }
     use crate::adversary::Adversary;
 

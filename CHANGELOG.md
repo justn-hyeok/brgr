@@ -1,5 +1,14 @@
 # Changelog
 
+## 2.12.1 — 2026-10-06
+
+Hotfix: worktree reclamation could delete a secret. git folds a directory
+whose files are all ignored into one entry, so a `dist/.env` or a
+`build/prod.env` read as the regenerable `dist/` or `build/`, and the worktree
+was removed with it. brgr now reads ignored paths at the level their pattern
+matched, and only a directory entry named like a build or dependency directory
+is regenerable; a file inside one still keeps the worktree.
+
 ## 2.12.0 — 2026-10-06
 
 Deciding a result reclaims its task worktree and branch when nothing in it

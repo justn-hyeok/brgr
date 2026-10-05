@@ -767,6 +767,22 @@ fn a_harness_cache_alone_does_not_keep_the_worktree() {
     assert!(!fixture.worktree(&task).exists());
 }
 
+/// git folds a directory whose files are all ignored into one entry, so a
+/// `.env` alone in `dist/` used to read as the regenerable `dist/`.
+#[test]
+fn a_dotenv_alone_in_a_build_directory_keeps_the_worktree() {
+    let fixture = Fixture::new();
+    let task = fixture.run_with("clean", &[]);
+    let dist = fixture.worktree(&task).join("dist");
+    fs::create_dir_all(&dist).unwrap();
+    fs::write(dist.join(".env"), b"TOKEN=secret\n").unwrap();
+    fixture.accept(&task);
+    assert!(
+        dist.join(".env").is_file(),
+        "a secret inside dist/ was deleted with the worktree"
+    );
+}
+
 #[test]
 fn installed_dependencies_do_not_keep_the_worktree_but_a_dotenv_does() {
     let fixture = Fixture::new();
