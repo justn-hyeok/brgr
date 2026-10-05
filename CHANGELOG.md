@@ -1,5 +1,16 @@
 # Changelog
 
+## 2.10.2 — 2026-10-05
+
+The brgr skill is rewritten around the rules brgr runs by: workers open as
+Herdr panes beside the caller (never headless), Claude work goes to
+`local.claude-code`, workers always run with full permissions, and every result
+is decided so its pane closes. It drops two wrong statements (permission as a
+carried-over option, and running without a pane when the caller is unknown) and
+adds the task loop, notice handling, and failure handling. A test parses every
+command the skill shows. `brgr integrate claude install|status|uninstall`
+installs the same skill for Claude Code.
+
 ## 2.10.1 — 2026-10-05
 
 The release workflow's smoke test now runs headless: since 2.10.0 the default

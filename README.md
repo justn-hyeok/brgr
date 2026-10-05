@@ -41,7 +41,7 @@ here instead of being waived.
 Install the current public v2 plugin from GitHub:
 
 ```bash
-herdr plugin install justn-hyeok/brgr --ref v2.10.1
+herdr plugin install justn-hyeok/brgr --ref v2.10.2
 ```
 
 The plugin builds `brgr` from the pinned Cargo lockfile, so a Rust toolchain is
@@ -191,6 +191,7 @@ Install the local binary and Codex integration, then start a new Codex session:
 ```bash
 cargo install --path crates/brgr-cli --locked --root "$HOME/.local"
 brgr integrate codex install
+brgr integrate claude install   # same skill for Claude Code
 ```
 
 Ask Codex, for example, “GJC를 작은 scratch 작업으로 검증해 등록하고,
@@ -223,8 +224,8 @@ before reading or deciding; the old session's epoch is then stale. For a CLI
 fixture, set both `BRGR_OWNER_ID=codex:example` and
 `BRGR_SESSION_ID=example-session` on run and follow-up commands.
 
-`brgr integrate codex status|uninstall` checks or removes only brgr-owned
-entries. For OMP, Cursor CLI, Command Code, Devin CLI, or an approved unfamiliar CLI, use
+`brgr integrate codex|claude status|uninstall` checks or removes only brgr-owned
+entries; the Claude Code skill goes to `$CLAUDE_CONFIG_DIR` or `~/.claude`. For OMP, Cursor CLI, Command Code, Devin CLI, or an approved unfamiliar CLI, use
 `brgr harness draft`, `brgr harness test`, then an authorized scratch run with
 `brgr harness activate` and `brgr harness status`. Pass `--model MODEL` when
 that exact manifest supports model selection. Do not infer support for flags
