@@ -186,6 +186,39 @@ pub(crate) async fn run_task(paths: &Paths, mut args: RunArgs, json_output: bool
     .await
 }
 
+/// A revision keeps what its task was asked to keep, plus what `revise` adds.
+fn inherited_retention(
+    requested: &crate::cli::RetentionArgs,
+    previous: &LaunchEnvelope,
+) -> crate::cli::RetentionArgs {
+    crate::cli::RetentionArgs {
+        keep_pane: requested.keep_pane || previous.keep_pane,
+        keep_worktree: requested.keep_worktree || previous.keep_worktree,
+    }
+}
+
+/// Where a revision starts. A brgr task worktree lies under the control home,
+/// which admission never takes as a source, and is removed once its result is
+/// decided: a revision of a Git task starts again from the repository it was
+/// checked out from.
+fn revise_source(
+    paths: &Paths,
+    store: &Store,
+    previous: &TaskSpec,
+    requested: Option<PathBuf>,
+) -> Result<PathBuf> {
+    match requested {
+        Some(workspace) => Ok(workspace),
+        None if Path::new(&previous.workspace).starts_with(paths.worktrees.canonicalize()?) => store
+            .task_checkout(previous.task_id, previous.revision)?
+            .map(PathBuf::from)
+            .context(
+                "the previous revision's repository was not recorded; pass --workspace to revise it",
+            ),
+        None => Ok(PathBuf::from(&previous.workspace)),
+    }
+}
+
 pub(crate) async fn revise_task(paths: &Paths, args: ReviseArgs, json_output: bool) -> Result<()> {
     let store = Store::open(&paths.store)?;
     let previous = store.task(args.task)?;
@@ -199,16 +232,8 @@ pub(crate) async fn revise_task(paths: &Paths, args: ReviseArgs, json_output: bo
     // A brgr task worktree lies under the control home, which admission never
     // takes as a source, and is removed once its result is decided: a revision
     // of a Git task starts again from the repository it was checked out from.
-    let source_workspace = match args.workspace {
-        Some(workspace) => workspace,
-        None if Path::new(&previous.workspace).starts_with(paths.worktrees.canonicalize()?) => store
-            .task_checkout(previous.task_id, previous.revision)?
-            .map(PathBuf::from)
-            .context(
-                "the previous revision's repository was not recorded; pass --workspace to revise it",
-            )?,
-        None => PathBuf::from(&previous.workspace),
-    };
+    let keep = inherited_retention(&args.keep, &previous_launch);
+    let source_workspace = revise_source(paths, &store, &previous, args.workspace)?;
     let mut replacement = previous.clone();
     replacement.acceptance_criteria = acceptance_criteria(&args.objective, args.criteria);
     replacement.revision = next_revision;
@@ -274,8 +299,8 @@ pub(crate) async fn revise_task(paths: &Paths, args: ReviseArgs, json_output: bo
             } else {
                 WorkspaceSnapshot::RequireClean
             },
-            worktree: args.keep.worktree(),
-            pane: args.keep.pane(),
+            worktree: keep.worktree(),
+            pane: keep.pane(),
             execution: if args.foreground {
                 ExecutionDisposition::Foreground
             } else {
