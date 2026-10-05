@@ -558,6 +558,11 @@ pub(crate) enum IntegrateCommand {
         #[command(subcommand)]
         command: CodexCommand,
     },
+    /// Manage the brgr-owned Claude Code skill.
+    Claude {
+        #[command(subcommand)]
+        command: CodexCommand,
+    },
 }
 
 #[derive(Subcommand)]

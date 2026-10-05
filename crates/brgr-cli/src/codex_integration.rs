@@ -17,52 +17,61 @@ use tempfile::NamedTempFile;
 
 const SKILL_TEXT: &str = r#"---
 name: brgr
-description: Orchestrate registered coding harnesses through brgr, with native Herdr TUI sessions, parent-worker messages, opt-in debate, and sealed results.
+description: Delegate bounded coding work through brgr. Workers open as Herdr panes beside you, run with full permissions, and report back as sealed results you accept or reject. Use for Claude Code, OpenCode, Cursor, Devin, Cline, GJC and OMP workers.
 ---
 
 # brgr
 
-Translate the user's request into brgr operations. Preserve the requested harness, model, effort, permission, and scope. brgr supplies orchestration; user instructions determine the work.
+brgr hands bounded work to registered coding agents and seals what they return for you to decide. The user's request says what to do; these rules say how.
 
-## Run and configure
+## Rules
 
-`brgr run "<objective>" --harness <id> --criterion "<check>" --workspace <repo>` starts a task. Defaults are the registered harness's native TUI in an owned Herdr pane and its full/YOLO option. Use `--headless` only when the user specifies headless. Missing TUI support or incompatible options produce an error; they do not select headless.
+1. Every worker opens as a Herdr pane split beside your pane, running the harness's own TUI: to the right of a wide pane, below a narrow one, or in its own tab after `brgr config set worker-placement tab`. Do not use `--headless`.
+2. When the work should be done by Claude, use `--harness local.claude-code`. Do not run Claude through another harness.
+3. Workers always run with full permissions (yolo). Nothing lowers it; `--permission` is ignored.
+4. Close what you open. Decide every result (`accept`, `reject`, or `result TASK --ack`) so brgr closes the worker's pane. Use `--keep-pane` only when the user asks to keep one.
+5. From Codex, start every brgr command with `--as SESSION`, the session in your calling context, and never add `--source-pane`. brgr finds your pane from what the Codex panes show; if it cannot, the run fails instead of opening beside someone else.
+6. Leave a worker's screens to brgr. It accepts the workspace trust prompt, continue notices, Claude Code's bypass warning and new-MCP-server prompt, and skips update offers.
 
-`brgr doctor` lists registered harnesses. Omitted harness/model/effort/deadline values resolve from harness settings, global settings, then product defaults. Supply `--model` or `--effort` when requested. Workers always run with the harness's full-permission option; `--permission` and the `permission` config key are ignored, and brgr has no cap or approval policy.
+## The loop
 
-The exact caller pane and owner session connect results to their owner. A Claude Code owner is identified as `claude:<CLAUDE_CODE_SESSION_ID>` and receives the same pushes as a Codex owner. From a shared daemon, start every brgr command with `--as SESSION` (the session from the hook's calling context) and do not add `--source-pane`: brgr finds your pane by reading what the Codex panes show, and when it cannot tell, it runs without a pane instead of guessing. Do not infer a source from focus or newest-pane order.
+1. Start: `brgr run "<objective>" --harness <id> --criterion "<observable check>"`. Add `--capture-diff` when you will keep code changes. It returns a task id at once.
+2. Wait: do not poll. A `FROM BRGR` notice arrives in your pane when you are idle. If you must block, `brgr wait TASK` returns early with `state: awaiting_input` while the worker has a question for you.
+3. Read: `brgr result TASK`, and for code `brgr diff TASK --stat` then `brgr diff TASK`.
+4. Decide: `brgr accept TASK --reason "<why>"` or `brgr reject TASK --reason "<why>"`. To try again, `brgr revise TASK "<corrected objective>"`.
+5. Integrate: `brgr apply TASK --workspace <repo>` checks the sealed diff; add `--execute` after accepting. Use the brgr-diff-review skill for code you keep.
 
-`brgr config init` creates missing config/instruction examples and prints their paths. User instructions live at `$BRGR_HOME/BRGR.md`; macOS defaults to `~/Library/Application Support/brgr/BRGR.md`. Calling options live at `$BRGR_HOME/config.toml`.
+## Notices
 
-- `brgr config show` shows settings.
-- `brgr config set harness ID`, `model NAME`, `effort VALUE`, or `deadline-seconds N` changes defaults; `--harness ID` scopes native options to a harness.
-- `brgr config set argv '["--native-option","value"]'` supplies argv without a shell.
-- `brgr config set worker-placement adjacent|tab` selects pane placement.
-- `brgr config check` checks registered recipes and settings without running a model.
+- `brgr_completion`: a result is ready. Check it against the criterion, then decide. It is not acceptance.
+- `brgr_failure`: the run failed or was lost, and `reason` says why. Inspect with `brgr result TASK`; retry with `brgr revise TASK "<corrected objective>"`, or dismiss with `brgr result TASK --ack`. Until you do, every brgr command ends with a stderr note listing it.
+- `brgr_question`: the worker is waiting on you. Read it with `brgr message list TASK --for owner`, answer with `brgr message send TASK --to worker --kind reply --reply-to MESSAGE_ID --body "<answer>"`, then `brgr message ack TASK MESSAGE_ID --for owner`.
+- A repeated id is the same notice, not a new one.
 
-brgr creates the worker's pane itself and answers the screens that would stop it, so nobody has to click: the folder-trust prompt for the task's workspace, "press Enter to continue" notices, Claude Code's bypass-permissions warning and new-MCP-server prompt (it accepts them), update offers (it skips them), and an applied self-update. A screen no rule covers is reported to the owner as a native-input notice and fails the run after three minutes with its text. Read it with `herdr pane read PANE --source visible` and answer with `brgr input TASK --key KEY` or `--text TEXT`. A native dialog is different from a mailbox question. Every key brgr pressed on its own is in `runs/TASK-rN.screens.log`.
+## When a run fails
 
-Workers can publish an answer with `brgr report TASK --body TEXT`, which sends orchestration output without a source edit. 
+- The quoted screen says "insufficient credits", a usage limit, or an HTTP 4xx: the harness or its model failed, not brgr. Use another harness, or set a model with `brgr config set model <name> --harness <id>`.
+- "a screen no brgr rule answers": the quote shows the screen (`herdr pane read PANE --source visible` shows it live). If a key clears it, answer before the three-minute deadline with `brgr input TASK --key <key>` or `--text <text>`, and tell the user so a rule can be added.
+- "could not find the calling Codex pane": the command did not start with `--as SESSION`, or the pane is too narrow to show it.
+- "finished without writing its report": the agent stopped early; the quoted screen says why.
+- `brgr doctor` reports a harness as unhealthy after its CLI updated: register it again with `brgr harness add <executable> --workspace <scratch> --prompt "<small probe>"`.
 
-## Conversation
+## Messages and debate
 
-Parent and worker communicate with `brgr message send TASK --to owner|worker --kind note|question|reply --body TEXT`. A reply includes `--reply-to MESSAGE_ID`. Receive with `message list` or `message wait TASK --for owner|worker`; acknowledge reading with `message ack TASK MESSAGE_ID --for owner|worker`.
+Owner and worker talk with `brgr message send TASK --to owner|worker --kind note|question|reply --body "<text>"`; a reply adds `--reply-to MESSAGE_ID`. Read with `brgr message list TASK --for owner|worker` or `brgr message wait TASK --for owner|worker`, and acknowledge with `brgr message ack TASK MESSAGE_ID --for owner|worker`. Messages wait while the recipient is busy. A native screen is not a message: answer it with `brgr input TASK --key <key>`. A worker can hand back its answer without editing files with `brgr report TASK --body "<text>"`.
 
-FROM BRGR notices carry stable IDs. Native-input notices use `brgr input`; mailbox questions use `message send`. Messages wait while a recipient is busy or showing native input. Results remain in the durable inbox while the owner is disconnected.
+Siblings talk directly only when the user asks for a **debate**: `brgr debate start TASK_A TASK_B`. Participants receive the group id and use `brgr debate send GROUP --to TASK --kind question --body "<text>"`, `brgr debate list`, `brgr debate wait` and `brgr debate ack MESSAGE_ID`; a reply adds `--kind reply --reply-to MESSAGE_ID`. The owner uses `brgr debate status GROUP` and `brgr debate stop GROUP`.
 
-Sibling direct conversation is enabled only when the user specifies **debate**. Connect the requested sibling tasks with `brgr debate start TASK_A TASK_B ...`. Participants receive the group ID and use `debate send GROUP --to TASK --kind question --body TEXT`, `debate list|wait`, and `debate ack MESSAGE_ID`. Replies include `--kind reply --reply-to MESSAGE_ID`. The owner uses `debate status GROUP` and `debate stop GROUP`; stopping retains history.
+## More
 
-## Results and cleanup
-
-Use `brgr status TASK --tree`, `wait TASK`, `result TASK`, or `cancel TASK --tree`. Inspect a sealed result against the requested criterion, then `accept` or `reject` with a reason; acknowledge failed/lost results with `result TASK --ack`. A completion notice reports availability, not acceptance. A failed or lost run arrives as a `brgr_failure` notice and as a stderr note on every brgr command until you acknowledge it; inspect it with `result TASK`, then retry with `revise` or dismiss it with `result TASK --ack`. `brgr errors` lists the failures brgr has recorded. `brgr revise TASK "<objective>"` creates a new revision after rejection.
-
-Request `--capture-diff` for repository changes to integrate. `brgr diff TASK --stat` and `brgr diff TASK` read the sealed patch. `brgr apply TASK --workspace TARGET` checks it; `--execute` applies an accepted result. Requested `--capture-logs` and `--evidence-file PATH` are additional artifacts. `--snapshot-path PATH` carries selected uncommitted source files into the task worktree.
-
-After the owner handles the result, brgr closes its owned idle worker pane and retains the ownership receipt. Failed closes are retried. `--keep-pane` retains a pane for follow-up. `brgr bind TASK` associates a retained task with the current owner session.
-
-## Harness registration
-
-`brgr harness draft EXECUTABLE`, `test --manifest FILE`, and `activate --manifest FILE --workspace SCRATCH --prompt PROBE` register a declarative process recipe. `brgr harness add EXECUTABLE --workspace SCRATCH --prompt PROBE` combines these steps. Scratch activation runs the native CLI and may use the configured model. `harness status ID` checks its activation. Native config, authentication, and sessions remain owned by each harness.
+- Parallel attempts: start the same objective on several harnesses, compare with `brgr diff TASK --stat`, accept the best and reject the rest so every pane closes.
+- Child tasks: `--enable-delegation` lets a worker start its own workers, and `--max-children <n>` caps them.
+- Workspace: a clean Git repository gets a task worktree. `--snapshot-path <file>` carries chosen uncommitted files; `--evidence-file <file>` and `--capture-logs` add artifacts.
+- Status: `brgr status`, `brgr status TASK --tree`, `brgr cancel TASK --tree`.
+- Config: `brgr config init`, `brgr config show`, `brgr config set model <name> --harness <id>`, `brgr config set worker-placement tab`, `brgr config check`. User instructions live in `$BRGR_HOME/BRGR.md`.
+- Housekeeping: `brgr errors` lists recorded failures; `brgr prune` reports settled task worktrees and `brgr prune --apply` removes them.
+- Registration: `brgr harness draft <executable>`, `brgr harness add <executable> --workspace <scratch> --prompt "<probe>"`, `brgr harness status <id>`, `brgr doctor`. Each harness keeps its own login and configuration.
+- Owners: Codex sessions and Claude Code sessions (`claude:<CLAUDE_CODE_SESSION_ID>`) both receive notices.
 "#;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -89,7 +98,12 @@ pub fn install(brgr_home: &Path) -> Result<Value> {
     } else {
         None
     };
-    let original_skill = load_owned_skill(&skill_path, previous_receipt.as_ref())?;
+    let original_skill = load_owned_skill(
+        &skill_path,
+        previous_receipt
+            .as_ref()
+            .map(|receipt| (receipt.skill_path.as_path(), receipt.skill_text.as_str())),
+    )?;
     let original_hooks = if hooks_path.exists() {
         Some(fs::read(&hooks_path)?)
     } else {
@@ -193,18 +207,95 @@ fn installation_receipt(
     })
 }
 
-fn load_owned_skill(path: &Path, previous: Option<&Receipt>) -> Result<Option<Vec<u8>>> {
+fn load_owned_skill(path: &Path, previous: Option<(&Path, &str)>) -> Result<Option<Vec<u8>>> {
     if !path.exists() {
         return Ok(None);
     }
     let bytes = fs::read(path)?;
     let current = String::from_utf8(bytes.clone())?;
-    let owned_previous =
-        previous.is_some_and(|receipt| receipt.skill_path == path && receipt.skill_text == current);
+    let owned_previous = previous
+        .is_some_and(|(skill_path, skill_text)| skill_path == path && skill_text == current);
     if current != SKILL_TEXT && !owned_previous {
-        bail!("refusing to overwrite a modified ~/.codex/skills/brgr/SKILL.md");
+        bail!("refusing to overwrite a modified {}", path.display());
     }
     Ok(Some(bytes))
+}
+
+/// The Claude Code side installs only the skill: Claude Code owners receive
+/// notices in their pane, so they need no hooks.
+#[derive(Debug, Serialize, Deserialize)]
+struct SkillReceipt {
+    skill_path: PathBuf,
+    skill_text: String,
+}
+
+const CLAUDE_RECEIPT: &str = "claude-integration.json";
+
+pub fn claude_install(brgr_home: &Path) -> Result<Value> {
+    let skill_path = claude_home()?.join("skills/brgr/SKILL.md");
+    let receipt_path = brgr_home.join(CLAUDE_RECEIPT);
+    let previous = read_skill_receipt(&receipt_path)?;
+    load_owned_skill(
+        &skill_path,
+        previous
+            .as_ref()
+            .map(|receipt| (receipt.skill_path.as_path(), receipt.skill_text.as_str())),
+    )?;
+    let skill_dir = skill_path.parent().context("skill path has no parent")?;
+    fs::create_dir_all(skill_dir)?;
+    fs::set_permissions(skill_dir, fs::Permissions::from_mode(0o700))?;
+    write_bytes_atomic(&skill_path, SKILL_TEXT.as_bytes())?;
+    let receipt = SkillReceipt {
+        skill_path: skill_path.clone(),
+        skill_text: SKILL_TEXT.to_owned(),
+    };
+    write_json_atomic(&receipt_path, &serde_json::to_value(&receipt)?)?;
+    Ok(json!({"status": "installed", "skill": skill_path, "receipt": receipt_path}))
+}
+
+pub fn claude_status(brgr_home: &Path) -> Result<Value> {
+    let Some(receipt) = read_skill_receipt(&brgr_home.join(CLAUDE_RECEIPT))? else {
+        return Ok(json!({"status": "not_installed"}));
+    };
+    let skill_matches = receipt.skill_path.exists()
+        && fs::read_to_string(&receipt.skill_path)? == receipt.skill_text;
+    let current_skill = receipt.skill_text == SKILL_TEXT;
+    Ok(json!({
+        "status": if skill_matches && current_skill { "installed" } else { "drifted" },
+        "skill_matches": skill_matches,
+        "current_skill": current_skill,
+    }))
+}
+
+pub fn claude_uninstall(brgr_home: &Path) -> Result<Value> {
+    let receipt_path = brgr_home.join(CLAUDE_RECEIPT);
+    let Some(receipt) = read_skill_receipt(&receipt_path)? else {
+        return Ok(json!({"status": "not_installed"}));
+    };
+    let skill_removed = if receipt.skill_path.exists()
+        && fs::read_to_string(&receipt.skill_path)? == receipt.skill_text
+    {
+        fs::remove_file(&receipt.skill_path)?;
+        true
+    } else {
+        false
+    };
+    fs::remove_file(receipt_path)?;
+    Ok(json!({"status": "uninstalled", "skill_removed": skill_removed}))
+}
+
+fn read_skill_receipt(path: &Path) -> Result<Option<SkillReceipt>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    Ok(Some(serde_json::from_slice(&fs::read(path)?)?))
+}
+
+fn claude_home() -> Result<PathBuf> {
+    if let Some(path) = env::var_os("CLAUDE_CONFIG_DIR") {
+        return Ok(PathBuf::from(path));
+    }
+    Ok(PathBuf::from(env::var_os("HOME").context("HOME is not set")?).join(".claude"))
 }
 
 fn remove_obsolete_hooks(
@@ -404,6 +495,69 @@ fn write_bytes_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Splits one skill command into argv, filling its placeholders with
+    /// sample values so the command line can be parsed.
+    fn sample_argv(command: &str) -> Vec<String> {
+        let mut argv = Vec::new();
+        let mut word = String::new();
+        let mut quoted = false;
+        for character in command.chars() {
+            match character {
+                '"' => quoted = !quoted,
+                ' ' if !quoted => argv.push(std::mem::take(&mut word)),
+                _ => word.push(character),
+            }
+        }
+        argv.push(word);
+        argv.retain(|word| !word.is_empty());
+        argv.into_iter()
+            .map(|word| {
+                if !word.is_empty()
+                    && word
+                        .chars()
+                        .all(|character| character.is_ascii_uppercase() || character == '_')
+                {
+                    "00000000-0000-4000-8000-000000000000".to_owned()
+                } else if word.starts_with('<') && word.ends_with('>') {
+                    "sample".to_owned()
+                } else if word.contains('|') {
+                    word.split('|').next().unwrap_or_default().to_owned()
+                } else {
+                    word
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn every_brgr_command_in_the_skill_parses() {
+        use clap::Parser as _;
+        let commands: Vec<&str> = SKILL_TEXT
+            .split('`')
+            .skip(1)
+            .step_by(2)
+            .filter(|span| span.starts_with("brgr "))
+            .collect();
+        assert!(
+            commands.len() > 30,
+            "found only {} commands",
+            commands.len()
+        );
+        for command in commands {
+            if let Err(error) = crate::cli::Cli::try_parse_from(sample_argv(command)) {
+                panic!("skill command `{command}` does not parse: {error}");
+            }
+        }
+    }
+
+    #[test]
+    fn skill_states_the_operating_rules() {
+        for rule in ["--headless", "local.claude-code", "--keep-pane", "yolo"] {
+            assert!(SKILL_TEXT.contains(rule), "skill no longer mentions {rule}");
+        }
+        assert!(!SKILL_TEXT.contains("without a pane"));
+    }
 
     #[test]
     fn shell_quote_handles_spaces_and_apostrophes() {

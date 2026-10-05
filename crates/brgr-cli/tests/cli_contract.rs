@@ -3564,6 +3564,45 @@ fn stale_codex_skill_or_hooks_report_drift_until_reinstall() {
 }
 
 #[test]
+fn claude_skill_installs_reports_drift_and_refuses_a_modified_copy() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("brgr");
+    let claude_home = temp.path().join("claude");
+    let envs = [("CLAUDE_CONFIG_DIR", claude_home.to_str().unwrap())];
+    let skill_path = claude_home.join("skills/brgr/SKILL.md");
+
+    let installed = json_output(&run(&home, &["integrate", "claude", "install"], &envs));
+    assert_eq!(installed["status"], "installed");
+    assert!(
+        fs::read_to_string(&skill_path)
+            .unwrap()
+            .contains("name: brgr")
+    );
+    assert_eq!(
+        json_output(&run(&home, &["integrate", "claude", "status"], &envs))["status"],
+        "installed"
+    );
+
+    fs::write(&skill_path, "hand-edited\n").unwrap();
+    assert_eq!(
+        json_output(&run(&home, &["integrate", "claude", "status"], &envs))["status"],
+        "drifted"
+    );
+    let refused = run(&home, &["integrate", "claude", "install"], &envs);
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("refusing to overwrite"));
+    assert_eq!(fs::read_to_string(&skill_path).unwrap(), "hand-edited\n");
+
+    let removed = json_output(&run(&home, &["integrate", "claude", "uninstall"], &envs));
+    assert_eq!(removed["skill_removed"], false);
+    assert!(skill_path.exists());
+    assert_eq!(
+        json_output(&run(&home, &["integrate", "claude", "status"], &envs))["status"],
+        "not_installed"
+    );
+}
+
+#[test]
 fn codex_integration_accepts_an_equivalent_caller_and_detects_hook_binary_drift() {
     let temp = TempDir::new().unwrap();
     let home = temp.path().join("brgr");

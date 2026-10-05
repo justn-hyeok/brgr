@@ -172,6 +172,14 @@ pub(crate) fn integrate(paths: &Paths, command: IntegrateCommand, json_output: b
             };
             print_value(&outcome, json_output);
         }
+        IntegrateCommand::Claude { command } => {
+            let outcome = match command {
+                CodexCommand::Install => codex_integration::claude_install(&paths.home)?,
+                CodexCommand::Status => codex_integration::claude_status(&paths.home)?,
+                CodexCommand::Uninstall => codex_integration::claude_uninstall(&paths.home)?,
+            };
+            print_value(&outcome, json_output);
+        }
     }
     Ok(())
 }
