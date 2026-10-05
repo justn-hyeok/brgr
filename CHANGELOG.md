@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.12.3 — 2026-10-06
+
+Hotfix: the source documentation of `reclaim_task` began with `brgr prune`'s
+description, and `brgr prune`'s entry point had none, because v2.12.0 inserted
+the new function between that comment and its function. Each now documents
+itself. No behavior changes.
+
 ## 2.12.2 — 2026-10-06
 
 Hotfix: worktree reclamation could delete a worker's deliverable. v2.12.0

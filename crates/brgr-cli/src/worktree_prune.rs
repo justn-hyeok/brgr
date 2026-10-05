@@ -1064,11 +1064,6 @@ fn lossy(path: &Path) -> String {
     path.to_string_lossy().into_owned()
 }
 
-/// Runs `brgr prune` and prints its report.
-/// Reports, and with `apply` removes, task worktrees whose revision is decided.
-///
-/// Nothing in the store is removed: a worktree is a rebuildable checkout, while
-/// a sealed result and its decision are the durable record brgr exists to keep.
 /// Removes one decided revision's worktree when nothing in it would be lost,
 /// with the same checks as `brgr prune --apply` and never `--include-ignored`.
 /// Returns what happened, for a note on stderr; `None` when there was nothing
@@ -1140,6 +1135,11 @@ fn pane_closed(paths: &Paths, task: TaskId, revision: u32) -> bool {
         .is_some_and(|receipt| receipt["cleanup"] == "closed")
 }
 
+/// Runs `brgr prune` and prints its report.
+/// Reports, and with `apply` removes, task worktrees whose revision is decided.
+///
+/// Nothing in the store is removed: a worktree is a rebuildable checkout, while
+/// a sealed result and its decision are the durable record brgr exists to keep.
 pub(crate) fn command(
     paths: &Paths,
     apply: bool,
