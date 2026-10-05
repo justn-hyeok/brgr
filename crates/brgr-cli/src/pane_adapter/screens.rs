@@ -27,6 +27,18 @@ const REDRAW: Duration = Duration::from_millis(1500);
 /// How long a screen no rule covers may stand before the run fails.
 pub(super) const SCREEN_DEADLINE: Duration = Duration::from_mins(3);
 
+/// The unknown-screen deadline, shortened for tests only.
+fn screen_deadline() -> Duration {
+    #[cfg(debug_assertions)]
+    if let Some(millis) = std::env::var("BRGR_TEST_SCREEN_DEADLINE_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+    {
+        return Duration::from_millis(millis);
+    }
+    SCREEN_DEADLINE
+}
+
 #[derive(Debug, Eq, PartialEq)]
 pub(super) enum Screen {
     /// No dialog brgr recognizes.
@@ -101,7 +113,7 @@ pub(super) fn classify(screen: &str, workspace: &Path) -> Screen {
     // An update menu comes first: its highlighted option is "Update now", so a
     // stray "press Enter" line on the same screen must not become Enter.
     if let Some(selected) = selected
-        && (lower.contains("update") || lower.contains("upgrade"))
+        && is_update_offer(&lower)
         && let Some(skip) = options.iter().position(|option| is_skip(&option.text))
     {
         let mut keys = keys_between(selected, skip);
@@ -122,6 +134,25 @@ pub(super) fn classify(screen: &str, workspace: &Path) -> Screen {
         };
     }
     Screen::Unknown(head(screen))
+}
+
+/// A harness offering to update itself, not an agent asking about updating
+/// something: "update" or "upgrade" with an offer's wording or a version.
+fn is_update_offer(lower: &str) -> bool {
+    (lower.contains("update") || lower.contains("upgrade"))
+        && (lower.contains("available")
+            || lower.contains("new version")
+            || lower.contains("newer version")
+            || has_version_number(lower))
+}
+
+/// A dotted version such as `0.2.0` or `v2.0.15`.
+fn has_version_number(text: &str) -> bool {
+    text.split(|character: char| !(character.is_ascii_digit() || character == '.'))
+        .any(|token| {
+            let parts: Vec<&str> = token.trim_matches('.').split('.').collect();
+            parts.len() >= 3 && parts.iter().all(|part| !part.is_empty())
+        })
 }
 
 /// The cursor presses that move from option `from` to option `to`.
@@ -273,7 +304,7 @@ const PRESS_BUDGET: u32 = 5;
 
 impl ScreenWatch {
     pub(super) fn new(kind: &str) -> Self {
-        Self::with_limit(kind, SCREEN_DEADLINE)
+        Self::with_limit(kind, screen_deadline())
     }
 
     pub(super) fn with_limit(kind: &str, limit: Duration) -> Self {
@@ -328,6 +359,12 @@ impl ScreenWatch {
     pub(super) fn reset(&mut self) {
         self.since = None;
         self.presses.clear();
+    }
+
+    /// Stops the unknown-screen clock but keeps the press counts, for an
+    /// agent whose screen moved without Herdr saying it works.
+    pub(super) fn restart_clock(&mut self) {
+        self.since = None;
     }
 
     fn stuck(&mut self, text: &str) -> Result<()> {
@@ -569,6 +606,28 @@ mod tests {
     }
 
     /// Synthetic.
+    #[test]
+    fn an_agent_question_about_updating_something_is_not_an_update_offer() {
+        for screen in [
+            "Update the schema now?\n› 1. Yes\n  2. Later\n",
+            "Upgrade the dependencies too?\n› 1. Yes\n  2. Skip\n",
+            "> 1. update the config, then skip later steps\n  2. next\n",
+        ] {
+            assert!(
+                matches!(classify(screen, work()), Screen::Unknown(_)),
+                "{screen}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_update_offer_is_known_by_its_wording_or_version() {
+        assert!(is_update_offer("a new version of codex is ready, update?"));
+        assert!(is_update_offer("upgrade to v2.0.15"));
+        assert!(!is_update_offer("update the 2.0 schema"));
+        assert!(!is_update_offer("update readme.md and 1.2 notes"));
+    }
+
     #[test]
     fn an_update_menu_without_a_skip_option_is_not_guessed() {
         let screen = "Update available\n› 1. Update now\n  2. Show release notes\n";

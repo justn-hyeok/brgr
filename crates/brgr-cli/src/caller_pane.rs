@@ -148,13 +148,62 @@ fn traced(session: &str) -> Option<String> {
     }
 }
 
+/// The Codex release whose command lines these traces were checked against.
+/// `brgr doctor` reports an installed Codex that differs from it.
+pub(crate) const VERIFIED_CODEX: &str = "codex-cli 0.160";
+
 /// A line where Codex says it ran (or is running) `brgr` with this session.
 /// The id alone is not enough: any pane can print it.
 fn shows_brgr_call(screen: &str, prefix: &str) -> bool {
     screen.lines().any(|line| {
-        let line = line.trim_start().trim_start_matches('•').trim_start();
-        (line.starts_with("Ran brgr ") || line.starts_with("Running brgr "))
-            && line.contains(prefix)
+        let line = line
+            .trim_start()
+            .trim_start_matches(['•', '└', '│'])
+            .trim_start();
+        ["Ran ", "Running ", "Run "]
+            .iter()
+            .find_map(|verb| line.strip_prefix(verb))
+            .is_some_and(|command| command.contains(prefix) && invokes_brgr(command))
+    })
+}
+
+/// Whether a shown command line runs brgr: as `brgr`, a path ending in
+/// `/brgr`, or `$BRGR_BIN`, as the program of any `&&`, `;` or `|` segment,
+/// after any `NAME=value` assignments. A command that only mentions brgr as an
+/// argument (`grep brgr notes`) does not.
+fn invokes_brgr(command: &str) -> bool {
+    command.split(['&', ';', '|']).any(|segment| {
+        segment
+            .split_whitespace()
+            .find(|word| !word.contains('='))
+            .is_some_and(|program| {
+                let program = program.trim_matches(['"', '\'']);
+                program == "brgr"
+                    || program.ends_with("/brgr")
+                    || program == "$BRGR_BIN"
+                    || program == "${BRGR_BIN}"
+            })
+    })
+}
+
+/// The installed Codex and whether it is the release the trace was checked
+/// against. Informational: a newer Codex usually prints the same lines.
+pub(crate) fn codex_trace_status() -> Value {
+    let installed = std::process::Command::new("codex")
+        .arg("--version")
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .map(|text| text.trim().to_owned())
+        .filter(|text| !text.is_empty());
+    let verified = installed.as_deref().is_some_and(|version| {
+        version == VERIFIED_CODEX || version.starts_with(&format!("{VERIFIED_CODEX}."))
+    });
+    serde_json::json!({
+        "codex": installed,
+        "verified_with": VERIFIED_CODEX,
+        "verified": verified,
     })
 }
 
@@ -381,6 +430,31 @@ mod tests {
         ));
         assert!(shows_brgr_call(
             &format!("• Running brgr --as {SESSION} status"),
+            "01a0fb33-447c"
+        ));
+    }
+
+    #[test]
+    fn a_path_variable_or_cd_prefixed_call_is_a_trace() {
+        for line in [
+            format!("• Ran /Users/me/.local/bin/brgr --as {SESSION} status"),
+            format!("• Ran $BRGR_BIN --as {SESSION} result"),
+            format!("• Ran cd /repo && brgr --as {SESSION} run \"x\""),
+            format!("• Ran BRGR_HOME=/tmp/h brgr --as {SESSION} status"),
+            format!("  └ Run brgr --as {SESSION} wait"),
+        ] {
+            assert!(shows_brgr_call(&line, "01a0fb33-447c"), "{line}");
+        }
+    }
+
+    #[test]
+    fn brgr_as_an_argument_is_not_a_trace() {
+        assert!(!shows_brgr_call(
+            &format!("• Ran grep brgr notes.txt {SESSION}"),
+            "01a0fb33-447c"
+        ));
+        assert!(!shows_brgr_call(
+            &format!("• Ran echo brgr --as {SESSION}"),
             "01a0fb33-447c"
         ));
     }

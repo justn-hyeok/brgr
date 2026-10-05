@@ -11,6 +11,7 @@ use std::{
 use anyhow::{Context as _, Result, bail};
 use brgr_protocol::{OwnerId, TaskId, TaskSpec, TerminalOutcome};
 use brgr_store::{NotificationTarget, QuestionTarget, Store, StoreError};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::time::{sleep, timeout};
 use uuid::Uuid;
@@ -70,9 +71,14 @@ pub async fn register_current_surface(
     {
         bail!("recorded Herdr pane is not the current owner agent");
     }
-    // Herdr keeps no session id for a Claude Code agent, so the pane and agent
-    // kind are the identity; Codex is also bound to its exact session.
+    // Herdr keeps no session id for a Claude Code agent. The Claude Code
+    // process this command runs under is recorded instead, so a different
+    // Claude Code started later in the same pane is not taken for the owner.
+    // Codex is bound to its exact session below.
     if claude {
+        if let Some(owner) = claude_ancestor(&pane) {
+            record_claude_owner(paths, session_id, &owner)?;
+        }
         store.register_owner_surface(
             owner_id,
             session_id,
@@ -279,7 +285,13 @@ pub async fn deliver_pending(paths: &Paths, task: TaskId) -> Result<()> {
     // lock after a crash, so a later hook may resume the durable queue.
     let _lock = lock;
     let started = Instant::now();
-    let (store, mut registered) = registered_store(paths, task, started).await?;
+    let store = open_store(paths, started).await?;
+    // A finished task with nothing left to send exits before anything else:
+    // proving the owner's pane reads every Codex pane, which takes seconds.
+    if settled(&store, task)? {
+        return Ok(());
+    }
+    let mut registered = register_for_task(paths, &store, task).await;
     let mut next_try = Instant::now() + Duration::from_secs(2);
     let mut gap = Duration::from_secs(2);
     let database = paths.store.join("brgr.sqlite3");
@@ -308,24 +320,10 @@ pub async fn deliver_pending(paths: &Paths, task: TaskId) -> Result<()> {
             Err(error) => return Err(error.into()),
         };
         if pending.is_empty() {
-            match store.latest_result(task) {
-                Ok(result)
-                    if result.outcome != TerminalOutcome::Failed
-                        || store.run_completed(result.result_id).unwrap_or(false) =>
-                {
-                    // Result and notification commit together. Re-read after seeing
-                    // the result so a concurrent terminal commit cannot be missed.
-                    match store.pending_notifications_for_task(task) {
-                        Ok(pending) if pending.is_empty() => return Ok(()),
-                        Ok(_) => {}
-                        Err(error) if error.is_retryable_database_contention() => {}
-                        Err(error) => return Err(error.into()),
-                    }
-                }
-                // A failed spawn may receive a bounded automatic retry. Its
-                // first result is not proof that this task's run is finished.
-                Ok(_) | Err(StoreError::TaskNotFound(_)) => {}
-                Err(error) => return Err(error.into()),
+            match settled(&store, task) {
+                Ok(true) => return Ok(()),
+                Ok(false) => {}
+                Err(error) => return Err(error),
             }
             sleep(POLL_INTERVAL).await;
             continue;
@@ -395,10 +393,10 @@ fn notifications_enabled(paths: &Paths, task: TaskId) -> Result<bool> {
         != Some(false))
 }
 
-async fn registered_store(paths: &Paths, task: TaskId, started: Instant) -> Result<(Store, bool)> {
-    let store = loop {
+async fn open_store(paths: &Paths, started: Instant) -> Result<Store> {
+    loop {
         match Store::open(&paths.store) {
-            Ok(store) => break store,
+            Ok(store) => return Ok(store),
             Err(error)
                 if error.is_retryable_database_contention() && started.elapsed() < MAX_LIFETIME =>
             {
@@ -406,9 +404,37 @@ async fn registered_store(paths: &Paths, task: TaskId, started: Instant) -> Resu
             }
             Err(error) => return Err(error.into()),
         }
+    }
+}
+
+/// Whether the task's run is over and nothing is left to send.
+fn settled(store: &Store, task: TaskId) -> Result<bool> {
+    let pending = match store.pending_notifications_for_task(task) {
+        Ok(pending) => pending,
+        Err(error) if error.is_retryable_database_contention() => return Ok(false),
+        Err(error) => return Err(error.into()),
     };
-    let registered = register_for_task(paths, &store, task).await;
-    Ok((store, registered))
+    if !pending.is_empty() {
+        return Ok(false);
+    }
+    match store.latest_result(task) {
+        Ok(result)
+            if result.outcome != TerminalOutcome::Failed
+                || store.run_completed(result.result_id).unwrap_or(false) =>
+        {
+            // Result and notification commit together. Re-read after seeing
+            // the result so a concurrent terminal commit cannot be missed.
+            match store.pending_notifications_for_task(task) {
+                Ok(pending) => Ok(pending.is_empty()),
+                Err(error) if error.is_retryable_database_contention() => Ok(false),
+                Err(error) => Err(error.into()),
+            }
+        }
+        // A failed spawn may receive a bounded automatic retry. Its first
+        // result is not proof that this task's run is finished.
+        Ok(_) | Err(StoreError::TaskNotFound(_)) => Ok(false),
+        Err(error) => Err(error.into()),
+    }
 }
 
 /// Registers the task owner's pane when it can be proven now.
@@ -441,6 +467,74 @@ struct OwnerPane<'a> {
     pane_id: &'a str,
     session_id: &'a str,
     owner_is_claude: bool,
+}
+
+/// The Claude Code process that registered an owner session's pane.
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+struct ClaudeOwnerProcess {
+    pane: String,
+    pid: u32,
+    birth: String,
+}
+
+fn claude_owner_path(paths: &Paths, session_id: &str) -> Option<PathBuf> {
+    (!session_id.is_empty()
+        && session_id
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || character == '-'))
+    .then(|| paths.runs.join(format!("claude-owner-{session_id}.json")))
+}
+
+fn record_claude_owner(paths: &Paths, session_id: &str, owner: &ClaudeOwnerProcess) -> Result<()> {
+    if let Some(path) = claude_owner_path(paths, session_id) {
+        crate::write_json_atomic(&path, &serde_json::to_value(owner)?)?;
+    }
+    Ok(())
+}
+
+/// The nearest ancestor of this process that is Claude Code: the session
+/// whose shell ran this brgr command.
+fn claude_ancestor(pane: &str) -> Option<ClaudeOwnerProcess> {
+    let mut pid = std::process::id();
+    for _ in 0..32 {
+        let parent: u32 = crate::supervision::ps_field(&pid.to_string(), "ppid")
+            .ok()?
+            .parse()
+            .ok()?;
+        if parent <= 1 {
+            return None;
+        }
+        let command = crate::supervision::ps_field(&parent.to_string(), "comm").ok()?;
+        if Path::new(&command)
+            .file_name()
+            .is_some_and(|name| name == "claude")
+        {
+            return Some(ClaudeOwnerProcess {
+                pane: pane.to_owned(),
+                pid: parent,
+                birth: crate::supervision::ps_field(&parent.to_string(), "lstart").ok()?,
+            });
+        }
+        pid = parent;
+    }
+    None
+}
+
+/// Fails when the Claude Code process that registered this owner session no
+/// longer runs, or registered another pane. A session registered before this
+/// record existed keeps the pane-and-kind check alone.
+fn claude_owner_present(paths: &Paths, session_id: &str, pane: &str) -> Result<()> {
+    let Some(bytes) = claude_owner_path(paths, session_id).and_then(|path| fs::read(path).ok())
+    else {
+        return Ok(());
+    };
+    let owner: ClaudeOwnerProcess = serde_json::from_slice(&bytes)?;
+    let alive = crate::supervision::ps_field(&owner.pid.to_string(), "lstart")
+        .is_ok_and(|birth| birth == owner.birth);
+    if owner.pane != pane || !alive {
+        bail!("the Claude Code session that owns this task no longer runs in pane {pane}");
+    }
+    Ok(())
 }
 
 /// The Herdr agent kind an owner runs as.
@@ -588,6 +682,9 @@ async fn prompt_owner(paths: &Paths, pane: &OwnerPane<'_>, body: &str) -> Result
     {
         bail!("recorded parent agent identity changed");
     }
+    if claude {
+        claude_owner_present(paths, pane.session_id, pane.pane_id)?;
+    }
     if !matches!(
         agent.get("agent_status").and_then(Value::as_str),
         Some("idle" | "done")
@@ -611,4 +708,40 @@ fn herdr_command(pane: &OwnerPane<'_>) -> tokio::process::Command {
         command.arg("--session").arg(session);
     }
     command
+}
+
+#[cfg(test)]
+mod claude_owner_tests {
+    use super::*;
+
+    #[test]
+    fn a_claude_owner_is_present_only_while_its_process_runs_in_its_pane() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = Paths::new(Some(temp.path().join("brgr"))).unwrap();
+        fs::create_dir_all(&paths.runs).unwrap();
+        let session = "6b0e2a7c-1f7e-4c55-9d8f-0a1b2c3d4e5f";
+        // Nothing recorded: the pane-and-kind check alone applies.
+        claude_owner_present(&paths, session, "w1:p1").unwrap();
+        let me = std::process::id();
+        let birth = crate::supervision::ps_field(&me.to_string(), "lstart").unwrap();
+        let owner = ClaudeOwnerProcess {
+            pane: "w1:p1".into(),
+            pid: me,
+            birth,
+        };
+        record_claude_owner(&paths, session, &owner).unwrap();
+        claude_owner_present(&paths, session, "w1:p1").unwrap();
+        assert!(claude_owner_present(&paths, session, "w1:p2").is_err());
+        record_claude_owner(
+            &paths,
+            session,
+            &ClaudeOwnerProcess {
+                birth: "Thu Jan  1 00:00:00 1970".into(),
+                ..owner
+            },
+        )
+        .unwrap();
+        assert!(claude_owner_present(&paths, session, "w1:p1").is_err());
+        assert!(claude_owner_path(&paths, "../escape").is_none());
+    }
 }

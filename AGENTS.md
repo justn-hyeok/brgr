@@ -29,6 +29,8 @@ Put unit tests beside the code and black-box tests in each crate's `tests/` dire
 
 The history uses Conventional Commit subjects such as `feat(store): seal result artifacts` and `fix(cli): preserve Codex hooks`. Keep commits narrowly scoped. Pull requests must explain the contract affected, include test evidence, identify migration or compatibility risk, and confirm that no harness/model fallback or acceptance decision occurs implicitly.
 
+Batch releases. Collect fixes on `main` and cut one release for a coherent set of changes, not one per fix; a same-day follow-up release is only for a release that is broken (failed build, wrong binary, data loss). Docs-only changes ship without a release.
+
 ## Operating Contract
 
 Choosing brgr to orchestrate work means the owner trusts the workers it launches. These rules govern what brgr does to those workers; an agent operating someone's pane by hand still follows the parent workspace policy on approvals and questions. Do not raise objections against a worker's tool permissions in reviews. Owner decisions are not affected: the owner still decides `accept` or `reject` on every sealed result, and brgr never decides one implicitly.

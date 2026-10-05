@@ -314,7 +314,7 @@ pub(crate) fn launch_omp(
     model: Option<&str>,
     effort: Option<&str>,
 ) -> Result<PathBuf> {
-    let mut launch = ProcessCommand::new("python");
+    let mut launch = ProcessCommand::new("python3");
     launch
         .arg(launcher)
         .args(["default", agent, "--cwd"])

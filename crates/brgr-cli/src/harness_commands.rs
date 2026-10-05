@@ -218,18 +218,28 @@ pub(crate) async fn doctor(paths: &Paths, json_output: bool) -> Result<()> {
         }
     }
     let integration = codex_integration::status(&paths.home)?;
+    let claude_integration = codex_integration::claude_status(&paths.home)?;
     let healthy_harnesses = !harnesses.is_empty()
         && harnesses
             .iter()
             .all(|harness| harness["health"] == "healthy");
-    let healthy =
-        store_ok && registry_ok && healthy_harnesses && integration["status"] == "installed";
+    // Either owner is enough; one that is installed must be current.
+    let integrations = [&integration, &claude_integration];
+    let integrated = integrations
+        .iter()
+        .any(|status| status["status"] == "installed")
+        && integrations
+            .iter()
+            .all(|status| status["status"] != "drifted");
+    let healthy = store_ok && registry_ok && healthy_harnesses && integrated;
     let value = json!({
         "status": if healthy { "ok" } else { "needs_attention" },
         "store": store_ok,
         "registry": registry_ok,
         "harnesses": harnesses,
         "codex_integration": integration,
+        "claude_integration": claude_integration,
+        "codex_trace": crate::caller_pane::codex_trace_status(),
     });
     print_value(&value, json_output);
     if healthy {

@@ -62,16 +62,29 @@ struct Paths {
     worktrees: PathBuf,
 }
 
+/// The control home when `--home` and `BRGR_HOME` are absent: the platform's
+/// application data directory.
+fn default_home() -> Result<PathBuf> {
+    let user_home = PathBuf::from(env::var_os("HOME").context("HOME is not set")?);
+    if cfg!(target_os = "macos") {
+        return Ok(user_home
+            .join("Library")
+            .join("Application Support")
+            .join("brgr"));
+    }
+    Ok(env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .unwrap_or_else(|| user_home.join(".local").join("share"))
+        .join("brgr"))
+}
+
 impl Paths {
     fn new(home: Option<PathBuf>) -> Result<Self> {
         let home = if let Some(path) = home {
             path
         } else {
-            let user_home = env::var_os("HOME").context("HOME is not set")?;
-            PathBuf::from(user_home)
-                .join("Library")
-                .join("Application Support")
-                .join("brgr")
+            default_home()?
         };
         fs::create_dir_all(&home)?;
         let home = home.canonicalize()?;
