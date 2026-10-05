@@ -685,8 +685,10 @@ fn regenerable(path: &str) -> bool {
         .is_some_and(|name| REGENERABLE.contains(&name))
 }
 
-/// Whether the worktree's changes are exactly the patch sealed with the
-/// revision's result, so removing the checkout loses nothing the store lacks.
+/// Whether the worktree's changes are exactly what the store sealed with the
+/// revision's result, so removing the checkout loses nothing the store lacks:
+/// the patch byte for byte, and each `--evidence-file`, which the patch leaves
+/// out, with the digest of an artifact sealed with it.
 fn patch_is_sealed(store: &Store, task: &TaskSpec) -> bool {
     if !task.evidence.capture_diff {
         return false;
@@ -705,8 +707,37 @@ fn patch_is_sealed(store: &Store, task: &TaskSpec) -> bool {
     let Ok(sealed) = store.read_artifact(sealed, limit) else {
         return false;
     };
-    brgr_core::task_patch(task, limit, std::time::Duration::from_secs(30))
+    if !brgr_core::task_patch(task, limit, std::time::Duration::from_secs(30))
         .is_ok_and(|now| now == sealed)
+    {
+        return false;
+    }
+    let workspace = Path::new(&task.workspace);
+    task.evidence.files.iter().all(|relative| {
+        let path = workspace.join(relative);
+        // A file no longer there holds nothing to lose.
+        if fs::symlink_metadata(&path).is_err() {
+            return true;
+        }
+        fs::read(&path).is_ok_and(|bytes| {
+            let digest = sha256_digest(&bytes);
+            result
+                .artifacts
+                .iter()
+                .any(|artifact| artifact.digest == digest)
+        })
+    })
+}
+
+/// The store's digest form: `sha256:` and lowercase hex.
+fn sha256_digest(bytes: &[u8]) -> String {
+    use sha2::{Digest as _, Sha256};
+    use std::fmt::Write as _;
+    let mut encoded = String::from("sha256:");
+    for byte in Sha256::digest(bytes) {
+        let _ = write!(encoded, "{byte:02x}");
+    }
+    encoded
 }
 
 /// Lists the repository directories under the worktrees root, and the ones that

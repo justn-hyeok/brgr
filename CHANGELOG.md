@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.12.4 — 2026-10-06
+
+Hotfix: worktree reclamation did not check `--evidence-file` paths. They are
+sealed on their own and left out of the patch, so a worktree whose patch still
+matched its sealed diff was removed even when an evidence file had been edited
+after sealing. Each evidence file must now still have the digest of an artifact
+sealed with the result.
+
 ## 2.12.3 — 2026-10-06
 
 Hotfix: the source documentation of `reclaim_task` began with `brgr prune`'s

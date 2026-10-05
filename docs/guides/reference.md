@@ -267,7 +267,8 @@ forced only when brgr has shown every change is disposable: each one is an
 untracked harness cache (`.gjc/` or `.commandcode/`, which hold only session
 state; `.claude/` or `.cursor/` also hold project configuration a task may
 write, so they are not caches), or the task sealed a diff with
-`--capture-diff` and the worktree's patch is byte-for-byte that diff. Its `brgr/task-*` branch goes only when every commit on it also lives
+`--capture-diff`, the worktree's patch is byte-for-byte that diff, and each
+`--evidence-file` still has the digest of its sealed copy. Its `brgr/task-*` branch goes only when every commit on it also lives
 elsewhere: in `HEAD`, or on another branch or remote-tracking branch. A task
 started from a feature branch carries that branch's commits, and those are
 safe while the feature branch exists. Other task branches do not count, since
