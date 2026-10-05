@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.10.1 — 2026-10-05
+
+The release workflow's smoke test now runs headless: since 2.10.0 the default
+is a native TUI in a Herdr pane, which a CI machine does not have, so the 2.10.0
+release stopped before publishing binaries. brgr itself is unchanged.
+
 ## 2.10.0 — 2026-10-05
 
 Workers run unattended. Each runs as its harness's native TUI in a Herdr pane
