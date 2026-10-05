@@ -734,6 +734,32 @@ fn a_reclaim_already_in_progress_is_left_to_its_owner_without_a_note() {
     assert!(!fixture.worktree(&task).exists());
 }
 
+/// Reject, then revise without `--workspace`: the rejection reclaims the
+/// worktree, and the revision starts from the repository it came from. Before,
+/// revise took the old worktree, which lies under the control home and was
+/// refused even while it still existed.
+#[test]
+fn revise_after_a_rejection_starts_from_the_repository() {
+    let fixture = Fixture::new();
+    let task = fixture.run_with("clean", &[]);
+    let decision = fixture.json(&["reject", &task, "--reason", "try again"]);
+    assert_eq!(decision["verdict"], "rejected");
+    assert!(!fixture.worktree(&task).exists());
+    let revised = fixture.json(&["revise", &task, "clean again", "--foreground"]);
+    assert_eq!(revised["outcome"], "candidate", "{revised}");
+}
+
+/// The same with the old worktree kept: it is still not a valid source.
+#[test]
+fn revise_ignores_a_kept_previous_worktree() {
+    let fixture = Fixture::new();
+    let task = fixture.run_with("clean", &["--keep-worktree"]);
+    fixture.json(&["reject", &task, "--reason", "try again"]);
+    assert!(fixture.worktree(&task).is_dir());
+    let revised = fixture.json(&["revise", &task, "clean again", "--foreground"]);
+    assert_eq!(revised["outcome"], "candidate", "{revised}");
+}
+
 #[test]
 fn keep_worktree_keeps_it_after_the_decision() {
     let fixture = Fixture::new();

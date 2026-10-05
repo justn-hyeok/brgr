@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.12.6 — 2026-10-06
+
+Hotfix: `brgr revise TASK` without `--workspace` failed for every Git task. It
+took the previous revision's worktree as its source, which lies under the
+control home that admission refuses as a source, and which v2.12.0 also
+removes once the result is decided. A revision of a Git task now starts from
+the repository its worktree was checked out from.
+
 ## 2.12.5 — 2026-10-06
 
 Hotfix: after a decision, the decision and the pane's session loop could
