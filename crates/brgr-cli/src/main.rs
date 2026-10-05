@@ -225,6 +225,7 @@ async fn main() -> Result<()> {
     let outcome = Box::pin(execute(&paths, cli.command, cli.json)).await;
     if !internal {
         failure_banner::print(&paths);
+        pane_adapter::balance_all(&paths);
     }
     outcome
 }

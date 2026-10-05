@@ -818,6 +818,38 @@ impl std::fmt::Display for HerdrFailure {
     }
 }
 
+/// Evens out every caller's open workers. Runs after each brgr command, so a
+/// column that a manual close or a terminal resize left uneven is fixed on the
+/// next call. Callers with no open workers cost nothing but reading receipts.
+pub(crate) fn balance_all(paths: &Paths) {
+    let Ok(entries) = fs::read_dir(&paths.runs) else {
+        return;
+    };
+    let mut callers: Vec<(String, Herdr)> = Vec::new();
+    for receipt in entries
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_name().to_string_lossy().ends_with(".pane.json"))
+        .filter_map(|entry| fs::read(entry.path()).ok())
+        .filter_map(|bytes| serde_json::from_slice::<PaneReceipt>(&bytes).ok())
+        .filter(|receipt| receipt.cleanup != "closed")
+    {
+        if let Some(caller) = receipt.caller
+            && !callers.iter().any(|(known, _)| *known == caller)
+        {
+            callers.push((
+                caller,
+                Herdr {
+                    binary: receipt.binary.into_os_string(),
+                    session: receipt.session,
+                },
+            ));
+        }
+    }
+    for (caller, herdr) in callers {
+        herdr.balance(&paths.runs, &caller);
+    }
+}
+
 pub(crate) struct Herdr {
     binary: OsString,
     session: Option<String>,

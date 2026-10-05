@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.10.6 — 2026-10-05
+
+Every brgr command evens out the worker column beside each caller after it
+finishes. Before, only opening or closing a worker did, so a pane closed by
+hand, a dragged border, or a resized terminal left the column uneven. Callers
+with no open workers cost only a read of the pane receipts.
+
 ## 2.10.5 — 2026-10-05
 
 Workers opened beside one caller share one evenly divided column. The first
