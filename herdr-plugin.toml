@@ -1,6 +1,6 @@
 id = "brgr"
 name = "brgr"
-version = "2.12.8"
+version = "2.12.9"
 min_herdr_version = "0.9.0"
 description = "Managed coding-agent runs with sealed results and explicit decisions"
 platforms = ["macos"]

@@ -355,6 +355,7 @@ pub(crate) fn cleanup_settled(paths: &Paths, task: TaskId, revision: u32) -> Res
     ) {
         mark_closed(&path)?;
         archive_report(paths, task, revision)?;
+        crate::worktree_prune::reclaim_and_report(paths, task, revision);
         return Ok(());
     }
     if let Some(interactive) = launch

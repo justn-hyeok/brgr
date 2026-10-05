@@ -14,11 +14,64 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
+        Self::build(|temp, _, _| {
+            let workspace = temp.join("work");
+            fs::create_dir_all(&workspace).unwrap();
+            workspace
+        })
+    }
+
+    /// The task runs in a real brgr task worktree of a fresh repository, as a
+    /// Git-backed task does.
+    fn in_worktree() -> Self {
+        Self::build(|temp, paths, task| {
+            let repository = temp.join("repo");
+            fs::create_dir_all(&repository).unwrap();
+            let git = |directory: &Path, args: &[&str]| {
+                let status = std::process::Command::new("git")
+                    .current_dir(directory)
+                    .args(args)
+                    .status()
+                    .unwrap();
+                assert!(status.success(), "git {args:?}");
+            };
+            git(&repository, &["init", "-q", "-b", "main"]);
+            fs::write(repository.join("README"), "seed\n").unwrap();
+            git(&repository, &["add", "README"]);
+            git(
+                &repository,
+                &[
+                    "-c",
+                    "user.name=t",
+                    "-c",
+                    "user.email=t@t",
+                    "commit",
+                    "-qm",
+                    "seed",
+                ],
+            );
+            let slug = &task.to_string()[..8];
+            let workspace = paths.worktrees.join("repo").join(slug);
+            git(
+                &repository,
+                &[
+                    "worktree",
+                    "add",
+                    "-q",
+                    "-b",
+                    &format!("brgr/task-{slug}"),
+                    workspace.to_str().unwrap(),
+                ],
+            );
+            workspace.canonicalize().unwrap()
+        })
+    }
+
+    fn build(workspace: impl FnOnce(&Path, &Paths, TaskId) -> PathBuf) -> Self {
         let temp = tempfile::tempdir().unwrap();
         let paths = Paths::new(Some(temp.path().join("home"))).unwrap();
-        let workspace = temp.path().join("work");
-        fs::create_dir_all(&workspace).unwrap();
         let task = TaskId::new();
+        let workspace = workspace(temp.path(), &paths, task);
         let spec: TaskSpec = serde_json::from_value(serde_json::json!({
             "schema":"brgr/v1","task_id":task,"revision":1,"create_request_id":format!("recover-{task}"),
             "owner_id":"codex:recovery","objective":"Return COMPLETE","workspace":workspace,
@@ -28,6 +81,11 @@ impl Fixture {
         })).unwrap();
         let mut store = Store::open(&paths.store).unwrap();
         store.record_task(&spec, "fixture").unwrap();
+        if let Some(primary) = crate::workspace::primary_checkout(&workspace) {
+            store
+                .record_task_checkout(task, 1, &primary.to_string_lossy())
+                .unwrap();
+        }
         store.bind_owner(&spec.owner_id, "recovery", 1).unwrap();
         let attempt = AttemptId::new();
         store.claim_attempt(task, 1, attempt).unwrap();
@@ -213,6 +271,48 @@ fn confirmed_absent_pane_settles_cleanup_and_archives_the_handled_report() {
         "COMPLETE"
     );
     cleanup_settled(&fixture.paths, fixture.task, 1).unwrap();
+}
+
+/// A decided task whose pane disappeared before brgr closed it takes the
+/// pane-already-gone path, which must reclaim the worktree like the others.
+#[test]
+fn a_pane_that_vanished_after_the_decision_still_reclaims_the_worktree() {
+    let mut fixture = Fixture::in_worktree();
+    let workspace = Store::open(&fixture.paths.store)
+        .unwrap()
+        .task(fixture.task)
+        .unwrap()
+        .workspace;
+    fixture.report =
+        PathBuf::from(&workspace).join(format!(".brgr/tasks/{}-r1/report.md", fixture.task));
+    fs::create_dir_all(fixture.report.parent().unwrap()).unwrap();
+    fs::write(&fixture.report, "COMPLETE").unwrap();
+    update_receipt(&fixture.receipt, |receipt| {
+        receipt.report = Some(fixture.report.clone());
+        receipt.report_digest = Some(report_digest(b"COMPLETE"));
+    })
+    .unwrap();
+    let mut supervisor = brgr_core::Supervisor::open(&fixture.paths.store).unwrap();
+    assert!(collect_recovered(&fixture.paths, &fixture.unfinished(), &mut supervisor).unwrap());
+    let result = supervisor.store().latest_result(fixture.task).unwrap();
+    let owner = supervisor.store().task(fixture.task).unwrap().owner_id;
+    let decision: brgr_protocol::Decision = serde_json::from_value(serde_json::json!({
+        "schema":"brgr/v1", "decision_id":brgr_protocol::DecisionId::new(),
+        "owner_id":owner, "task_id":fixture.task, "revision":1,
+        "result_id":result.result_id, "result_digest":Store::result_digest(&result).unwrap(),
+        "session_id":"recovery", "binding_epoch":1, "verdict":"accepted", "reason":"COMPLETE verified"
+    }))
+    .unwrap();
+    supervisor
+        .store()
+        .record_decision_and_ack(&decision)
+        .unwrap();
+    fs::write(fixture.temp.path().join("pane-gone"), "").unwrap();
+    cleanup_settled(&fixture.paths, fixture.task, 1).unwrap();
+    assert!(
+        !Path::new(&workspace).exists(),
+        "the worktree survived the pane-already-gone path"
+    );
 }
 
 #[test]
