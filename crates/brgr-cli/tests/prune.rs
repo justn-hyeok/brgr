@@ -833,6 +833,57 @@ fn a_kept_worktree_is_noted_once_with_advice_accept_can_follow() {
     assert!(!stderr.contains("pass --include-ignored"), "{stderr}");
 }
 
+/// A decision reads only its own task's repository, not every repository
+/// brgr has recorded.
+#[test]
+fn a_decision_reads_only_its_own_repository() {
+    let fixture = Fixture::new();
+    let other = fixture.temp.path().join("other");
+    fs::create_dir_all(&other).unwrap();
+    git(&other, &["init", "-b", "main"]);
+    git(&other, &["config", "user.name", "Fixture"]);
+    git(&other, &["config", "user.email", "fixture@example.invalid"]);
+    fs::write(other.join("README"), b"other\n").unwrap();
+    git(&other, &["add", "README"]);
+    git(&other, &["commit", "-m", "seed"]);
+    fixture.json(&[
+        "run",
+        "clean",
+        "--workspace",
+        other.to_str().unwrap(),
+        "--foreground",
+        "--keep-worktree",
+    ]);
+    let task = fixture.run_with("clean", &[]);
+    let shim = fixture.temp.path().join("shim");
+    fs::create_dir_all(&shim).unwrap();
+    let log = fixture.temp.path().join("git.log");
+    fs::write(
+        shim.join("git"),
+        format!(
+            "#!/bin/sh\necho \"$*\" >> '{}'\nexec /usr/bin/git \"$@\"\n",
+            log.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(shim.join("git"), fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!("{}:{}", shim.display(), std::env::var("PATH").unwrap());
+    let output = fixture
+        .command()
+        .env("PATH", path)
+        .args(["accept", &task, "--reason", "fixture result verified"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert!(!fixture.worktree(&task).exists());
+    let calls = fs::read_to_string(&log).unwrap_or_default();
+    assert_eq!(
+        calls.matches("worktree list").count(),
+        1,
+        "a decision listed more than its own repository: {calls}"
+    );
+}
+
 #[test]
 fn keep_worktree_keeps_it_after_the_decision() {
     let fixture = Fixture::new();
