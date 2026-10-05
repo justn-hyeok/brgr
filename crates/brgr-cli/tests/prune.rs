@@ -758,6 +758,35 @@ fn a_change_made_after_sealing_keeps_the_worktree() {
     assert!(fixture.worktree(&task).is_dir());
 }
 
+/// An `--evidence-file` is sealed on its own and left out of the patch, so
+/// the patch alone cannot show it is unchanged.
+#[test]
+fn an_evidence_file_changed_after_sealing_keeps_the_worktree() {
+    let fixture = Fixture::new();
+    let task = fixture.run_with(
+        "WRITE",
+        &["--capture-diff", "--evidence-file", "AGENT_OUTPUT.txt"],
+    );
+    let evidence = fixture.worktree(&task).join("AGENT_OUTPUT.txt");
+    fs::write(&evidence, b"edited after the result was sealed\n").unwrap();
+    fixture.accept(&task);
+    assert!(
+        evidence.is_file(),
+        "an evidence file edited after sealing was deleted"
+    );
+}
+
+#[test]
+fn an_unchanged_evidence_file_does_not_keep_the_worktree() {
+    let fixture = Fixture::new();
+    let task = fixture.run_with(
+        "WRITE",
+        &["--capture-diff", "--evidence-file", "AGENT_OUTPUT.txt"],
+    );
+    fixture.accept(&task);
+    assert!(!fixture.worktree(&task).exists());
+}
+
 #[test]
 fn a_harness_cache_alone_does_not_keep_the_worktree() {
     let fixture = Fixture::new();
