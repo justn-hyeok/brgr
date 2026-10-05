@@ -35,6 +35,10 @@ pub(crate) struct PaneReceipt {
     pub(crate) archived_report: Option<PathBuf>,
     #[serde(default)]
     pub(super) finished_at: Option<u64>,
+    /// The pane the worker was opened beside, so its siblings can be laid out
+    /// together.
+    #[serde(default)]
+    pub(crate) caller: Option<String>,
 }
 
 pub(super) fn update_receipt(path: &Path, update: impl FnOnce(&mut PaneReceipt)) -> Result<()> {
@@ -462,6 +466,9 @@ pub(crate) fn close_leftover_pane(paths: &Paths, task: TaskId, revision: u32, ke
     let _ = update_receipt(&path, |value| "closing".clone_into(&mut value.cleanup));
     if herdr.call(&["pane", "close", &receipt.pane]).is_ok() {
         let _ = mark_closed(&path);
+        if let Some(caller) = receipt.caller.as_deref() {
+            herdr.balance(&paths.runs, caller);
+        }
         eprintln!(
             "brgr pane mode · closed pane {} left by a stopped run",
             receipt.pane

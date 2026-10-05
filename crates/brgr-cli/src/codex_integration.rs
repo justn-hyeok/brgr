@@ -26,7 +26,7 @@ brgr hands bounded work to registered coding agents and seals what they return f
 
 ## Rules
 
-1. Every worker opens as a Herdr pane split beside your pane, running the harness's own TUI: to the right of a wide pane, below a narrow one, or in its own tab after `brgr config set worker-placement tab`. Do not use `--headless`.
+1. Every worker opens as a Herdr pane split beside your pane, running the harness's own TUI: the first to the right of a wide pane or below a narrow one, later ones stacked under it in equal sizes while you keep your half, and in a new tab once that column is full or after `brgr config set worker-placement tab`. Do not use `--headless`.
 2. When the work should be done by Claude, use `--harness local.claude-code`. Do not run Claude through another harness.
 3. Workers always run with full permissions (yolo). Nothing lowers it; `--permission` is ignored.
 4. Close what you open. Decide every result (`accept`, `reject`, or `result TASK --ack`) so brgr closes the worker's pane. Use `--keep-pane` only when the user asks to keep one.

@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.10.5 — 2026-10-05
+
+Workers opened beside one caller share one evenly divided column. The first
+worker splits the caller as before. Later ones split the last worker downward,
+so the caller keeps its half. After each open or close, brgr resizes the
+caller's workers to equal heights. A worker that would get fewer than 10 rows
+opens in a new tab. Only panes brgr opened for that caller are resized.
+
 ## 2.10.4 — 2026-10-05
 
 A native worker takes its harness's allowlisted variables, such as
