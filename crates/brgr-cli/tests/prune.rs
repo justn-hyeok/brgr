@@ -811,6 +811,28 @@ fn keep_pane_does_not_keep_a_headless_worktree() {
     assert!(!fixture.worktree(&task).exists());
 }
 
+/// A decision that keeps a worktree says so once, and its advice names a
+/// command that takes the flag, not one `accept` lacks.
+#[test]
+fn a_kept_worktree_is_noted_once_with_advice_accept_can_follow() {
+    let fixture = Fixture::new();
+    let task = fixture.run_with("clean", &[]);
+    fs::write(fixture.worktree(&task).join(".env"), b"TOKEN=secret\n").unwrap();
+    let output = fixture
+        .command()
+        .args(["accept", &task, "--reason", "fixture result verified"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(stderr.matches("kept worktree").count(), 1, "{stderr}");
+    assert!(
+        stderr.contains("brgr prune --apply --include-ignored"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("pass --include-ignored"), "{stderr}");
+}
+
 #[test]
 fn keep_worktree_keeps_it_after_the_decision() {
     let fixture = Fixture::new();

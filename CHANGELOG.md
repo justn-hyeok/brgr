@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.12.13 — 2026-10-06
+
+Hotfix: the note a decision prints when it keeps a worktree told the owner to
+"pass --include-ignored", a flag `accept`, `reject` and `--ack` do not take.
+It now names `brgr prune --apply --include-ignored`, ends with "`brgr prune`
+lists it", and is printed once per decision.
+
 ## 2.12.12 — 2026-10-06
 
 Hotfix: a revision forgot what its task was asked to keep. `brgr revise`
