@@ -579,6 +579,7 @@ fn prepare_native_config(run: &PaneRunArgs, paths: &Paths) -> Result<(PathBuf, P
             argv,
             workspace: run.workspace.clone(),
             environment,
+            pane_environment: manifest.launch.env_allow.clone(),
             state: state.clone(),
         },
     )?;
