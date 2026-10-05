@@ -240,7 +240,7 @@ impl Registry {
     /// Returns [`RegistryError`] when probing fails, required documented flags
     /// are absent, or activation data cannot be persisted.
     pub async fn add(&self, executable: &Path) -> Result<ActivationReceipt, RegistryError> {
-        let (manifest, probe) = draft_manifest(executable).await?;
+        let (manifest, probe) = self.draft_with_probe(executable).await?;
         if manifest.id != "local.omp-herdr" || manifest.adapter != OMP_ROLE_ADAPTER_V1 {
             return Err(RegistryError::ScratchRunRequired(manifest.id));
         }
@@ -256,9 +256,51 @@ impl Registry {
     /// Returns an error if probing fails or a bounded fresh run cannot be
     /// described without guessing flags.
     pub async fn draft(&self, executable: &Path) -> Result<HarnessManifest, RegistryError> {
-        draft_manifest(executable)
+        self.draft_with_probe(executable)
             .await
             .map(|(manifest, _)| manifest)
+    }
+
+    /// Drafts by file name, or, when that names no recipe, by the name of the
+    /// harness already registered for the same executable. `harness status`
+    /// names a wrapper's script, such as `command-code/dist/index.mjs`, in its
+    /// re-certify command, and that command has to work as printed.
+    async fn draft_with_probe(
+        &self,
+        executable: &Path,
+    ) -> Result<(HarnessManifest, ProbeEvidence), RegistryError> {
+        let file_name = executable.file_name().and_then(|value| value.to_str());
+        let known =
+            file_name.is_some_and(|name| RECIPES.iter().any(|recipe| recipe.names.contains(&name)));
+        if !known
+            && executable.is_absolute()
+            && let Some(name) = self.registered_name_for(executable)?
+        {
+            return draft_manifest_as(executable, &name).await;
+        }
+        draft_manifest(executable).await
+    }
+
+    fn registered_name_for(&self, executable: &Path) -> Result<Option<String>, RegistryError> {
+        let Ok(target) = executable.canonicalize() else {
+            return Ok(None);
+        };
+        for id in self.registered_harness_ids()? {
+            let Ok(bytes) = fs::read(self.manifest_path(&id)) else {
+                continue;
+            };
+            let Ok(manifest) = serde_json::from_slice::<HarnessManifest>(&bytes) else {
+                continue;
+            };
+            if manifest
+                .executable
+                .canonicalize()
+                .is_ok_and(|path| path == target)
+            {
+                return Ok(Some(name_from_id(&id, &manifest.adapter)?.to_owned()));
+            }
+        }
+        Ok(None)
     }
 
     /// Drafts the recipe again for an activated harness, looked up by its
@@ -1748,6 +1790,40 @@ mod tests {
     fn fixture_executable(path: &Path) {
         fs::write(path, "#!/bin/sh\ncase \"$1\" in\n  --version) echo 'fixture 1.0';;\n  --help) echo '  --prompt-file <path>  fresh run';;\n  --prompt-file) /bin/cat \"$2\";;\n  *) exit 2;;\nesac\n").unwrap();
         fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
+    /// `harness status` prints the canonical script path of a wrapper such as
+    /// Command Code's `dist/index.mjs`; re-adding that path keeps its recipe.
+    #[tokio::test]
+    async fn a_script_path_drafts_as_the_harness_registered_for_it() {
+        let root = tempfile::tempdir().unwrap();
+        let script = root.path().join("index.mjs");
+        fs::write(
+            &script,
+            "#!/bin/sh\ncase \"$1\" in\n  --version) echo '1.74.1';;\n  --list-models) echo 'model-a';;\n  *) echo '--print [query] --permission-mode <mode> --no-session --no-skills --skip-onboarding --no-auto-update --max-turns <number> --model <model>';;\nesac\n",
+        )
+        .unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o700)).unwrap();
+        let link = root.path().join("command-code");
+        std::os::unix::fs::symlink(&script, &link).unwrap();
+        let registry = Registry::open(root.path().join("registry")).unwrap();
+
+        // Before anything is registered the file name alone names no recipe.
+        assert!(matches!(
+            registry.draft(&script).await,
+            Err(RegistryError::RequiredFlagsMissing)
+        ));
+        let registered = registry.draft(&link).await.unwrap();
+        assert_eq!(registered.id, "local.command-code");
+        fs::write(
+            registry.manifest_path(&registered.id),
+            serde_json::to_vec(&registered).unwrap(),
+        )
+        .unwrap();
+
+        let redrafted = registry.draft(&script).await.unwrap();
+        assert_eq!(redrafted.id, "local.command-code");
+        assert_eq!(redrafted.launch.argv, registered.launch.argv);
     }
 
     #[tokio::test]
