@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.12.15 — 2026-10-06
+
+Hotfix: the evidence-file check from v2.12.4 read each file whole, however
+large, and used its own copy of the digest function. It now reads at most the
+artifact limit (a larger file cannot match anything sealed) and uses the
+shared digest.
+
 ## 2.12.14 — 2026-10-06
 
 Hotfix: every decision ran `git worktree list` in every repository brgr had

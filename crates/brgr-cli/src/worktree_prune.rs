@@ -752,8 +752,8 @@ fn patch_is_sealed(store: &Store, task: &TaskSpec) -> bool {
         if fs::symlink_metadata(&path).is_err() {
             return true;
         }
-        fs::read(&path).is_ok_and(|bytes| {
-            let digest = sha256_digest(&bytes);
+        read_bounded(&path, limit).is_some_and(|bytes| {
+            let digest = crate::pane_adapter::native_digest(&bytes);
             result
                 .artifacts
                 .iter()
@@ -762,15 +762,17 @@ fn patch_is_sealed(store: &Store, task: &TaskSpec) -> bool {
     })
 }
 
-/// The store's digest form: `sha256:` and lowercase hex.
-fn sha256_digest(bytes: &[u8]) -> String {
-    use sha2::{Digest as _, Sha256};
-    use std::fmt::Write as _;
-    let mut encoded = String::from("sha256:");
-    for byte in Sha256::digest(bytes) {
-        let _ = write!(encoded, "{byte:02x}");
-    }
-    encoded
+/// A file's bytes when it holds at most `limit` of them. Sealing refuses a
+/// larger file, so one cannot match a sealed artifact and is never read whole.
+fn read_bounded(path: &Path, limit: u64) -> Option<Vec<u8>> {
+    use std::io::Read as _;
+    let mut bytes = Vec::new();
+    fs::File::open(path)
+        .ok()?
+        .take(limit.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .ok()?;
+    (u64::try_from(bytes.len()).ok()? <= limit).then_some(bytes)
 }
 
 /// Lists the repository directories under the worktrees root, and the ones that
@@ -1349,6 +1351,16 @@ pub(crate) fn command(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_file_over_the_limit_is_never_read_whole() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("evidence.bin");
+        fs::write(&path, b"0123456789").unwrap();
+        assert_eq!(read_bounded(&path, 10).unwrap(), b"0123456789");
+        assert!(read_bounded(&path, 9).is_none());
+        assert!(read_bounded(&temp.path().join("absent"), 10).is_none());
+    }
 
     #[test]
     fn only_an_untracked_harness_directory_is_a_cache() {
