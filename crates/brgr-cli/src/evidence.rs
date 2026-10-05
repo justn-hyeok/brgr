@@ -87,11 +87,25 @@ pub fn apply_result(
     if target != repository_root {
         bail!("integration target must be the repository root, not a subdirectory");
     }
-    let task_workspace = Path::new(&spec.workspace).canonicalize()?;
-    let expected_head = spec.evidence.base_commit.as_ref().map_or_else(
-        || git_value(&task_workspace, &["rev-parse", "HEAD"]),
-        |commit| Ok(PathBuf::from(commit)),
-    )?;
+    // The worktree is removed once the result is decided and nothing in it
+    // would be lost, so the sealed patch, the recorded base commit, and the
+    // checkout recorded at admission are what integration relies on.
+    let worktree = Path::new(&spec.workspace).canonicalize().ok();
+    let task_workspace = match &worktree {
+        Some(worktree) => worktree.clone(),
+        None => store
+            .task_checkout(task, spec.revision)?
+            .map(PathBuf::from)
+            .and_then(|checkout| checkout.canonicalize().ok())
+            .context("the task's worktree was removed and its repository was not recorded")?,
+    };
+    let expected_head = match (&spec.evidence.base_commit, &worktree) {
+        (Some(commit), _) => PathBuf::from(commit),
+        (None, Some(worktree)) => git_value(worktree, &["rev-parse", "HEAD"])?,
+        (None, None) => {
+            bail!("the task's base commit was not recorded and its worktree was removed")
+        }
+    };
     let target_head = git_value(&target, &["rev-parse", "HEAD"])?;
     if git_value(
         &target,

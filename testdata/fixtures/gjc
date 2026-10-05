@@ -22,5 +22,13 @@ done
 if [ -n "$prompt_file" ] && /usr/bin/grep -q 'SLOW' "$prompt_file"; then
   /bin/sleep 30
 fi
+# A worker that leaves a file of its own, or only its harness cache.
+if [ -n "$prompt_file" ] && /usr/bin/grep -q 'WRITE' "$prompt_file"; then
+  printf 'worker output\n' > AGENT_OUTPUT.txt
+fi
+if [ -n "$prompt_file" ] && /usr/bin/grep -q 'CACHE' "$prompt_file"; then
+  /bin/mkdir -p .gjc
+  printf '{}\n' > .gjc/session.json
+fi
 printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"BRGR_FIXTURE_OK"}]}}'
 printf '%s\n' '{"type":"agent_end","stopReason":"completed"}'

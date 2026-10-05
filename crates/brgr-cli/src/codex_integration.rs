@@ -29,7 +29,7 @@ brgr hands bounded work to registered coding agents and seals what they return f
 1. Every worker opens as a Herdr pane split beside your pane, running the harness's own TUI: the first to the right of a wide pane or below a narrow one, later ones stacked under it in equal sizes while you keep your half, and in a new tab once that column is full or after `brgr config set worker-placement tab`. Do not use `--headless`.
 2. When the work should be done by Claude, use `--harness local.claude-code`. Do not run Claude through another harness.
 3. Workers always run with full permissions (yolo). Nothing lowers it; `--permission` is ignored.
-4. Close what you open. Decide every result (`accept`, `reject`, or `result TASK --ack`) so brgr closes the worker's pane. Use `--keep-pane` only when the user asks to keep one.
+4. Close what you open. Decide every result (`accept`, `reject`, or `result TASK --ack`) so brgr closes the worker's pane and removes its worktree once nothing in it would be lost. Use `--keep-pane` or `--keep-worktree` only when the user asks to keep one.
 5. From Codex, start every brgr command with `--as SESSION`, the session in your calling context, and never add `--source-pane`. brgr finds your pane from what the Codex panes show; if it cannot, the run fails instead of opening beside someone else.
 6. Leave a worker's screens to brgr. It accepts the workspace trust prompt, continue notices, Claude Code's bypass warning and new-MCP-server prompt, and skips update offers.
 
@@ -69,7 +69,7 @@ Siblings talk directly only when the user asks for a **debate**: `brgr debate st
 - Workspace: a clean Git repository gets a task worktree. `--snapshot-path <file>` carries chosen uncommitted files; `--evidence-file <file>` and `--capture-logs` add artifacts.
 - Status: `brgr status`, `brgr status TASK --tree`, `brgr cancel TASK --tree`.
 - Config: `brgr config init`, `brgr config show`, `brgr config set model <name> --harness <id>`, `brgr config set worker-placement tab`, `brgr config check`. User instructions live in `$BRGR_HOME/BRGR.md`.
-- Housekeeping: `brgr errors` lists recorded failures; `brgr prune` reports settled task worktrees and `brgr prune --apply` removes them.
+- Housekeeping: `brgr errors` lists recorded failures. A worktree a decision kept (it holds work found nowhere else) stays until `brgr prune --apply`; `brgr prune` first reports what would go and why the rest stays.
 - Registration: `brgr harness draft <executable>`, `brgr harness add <executable> --workspace <scratch> --prompt "<probe>"`, `brgr harness status <id>`, `brgr doctor`. Each harness keeps its own login and configuration.
 - Owners: Codex sessions and Claude Code sessions (`claude:<CLAUDE_CODE_SESSION_ID>`) both receive notices.
 "#;

@@ -353,14 +353,26 @@ pub(crate) struct RunArgs {
     pub(crate) snapshot_paths: Vec<PathBuf>,
     #[arg(long, hide = true)]
     pub(crate) foreground: bool,
-    #[arg(long)]
-    pub(crate) keep_pane: bool,
+    #[command(flatten)]
+    pub(crate) keep: RetentionArgs,
 }
 
 impl RunArgs {
     pub(crate) fn forwards_criteria(&self) -> bool {
         !self.criteria.is_empty() || !self.scopes.is_empty() || !self.role_instructions.is_empty()
     }
+}
+
+/// What a run leaves behind once its result is decided.
+#[derive(Args)]
+pub(crate) struct RetentionArgs {
+    /// Keep the worker's pane open after the result is decided.
+    #[arg(long)]
+    pub(crate) keep_pane: bool,
+    /// Keep the task worktree after the result is decided. By default brgr
+    /// removes it once nothing in it would be lost.
+    #[arg(long)]
+    pub(crate) keep_worktree: bool,
 }
 
 #[derive(Args)]
@@ -400,8 +412,8 @@ pub(crate) struct ReviseArgs {
     pub(crate) snapshot_paths: Vec<PathBuf>,
     #[arg(long, hide = true)]
     pub(crate) foreground: bool,
-    #[arg(long)]
-    pub(crate) keep_pane: bool,
+    #[command(flatten)]
+    pub(crate) keep: RetentionArgs,
 }
 
 impl ReviseArgs {

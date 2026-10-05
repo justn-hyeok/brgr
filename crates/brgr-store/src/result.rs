@@ -325,6 +325,28 @@ impl Store {
             .transpose()
     }
 
+    /// Returns the latest terminal result of one task revision, if any.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when stored data is invalid.
+    pub fn revision_result(
+        &self,
+        task_id: TaskId,
+        revision: u32,
+    ) -> Result<Option<ResultEnvelope>, StoreError> {
+        self.connection
+            .query_row(
+                "SELECT envelope_json FROM results WHERE task_id = ?1 AND revision = ?2
+                 ORDER BY rowid DESC LIMIT 1",
+                params![task_id.to_string(), revision],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .map(|json| serde_json::from_str(&json).map_err(StoreError::from))
+            .transpose()
+    }
+
     /// Returns the latest terminal result for a task.
     ///
     /// # Errors
