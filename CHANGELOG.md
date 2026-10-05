@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.12.10 — 2026-10-06
+
+Hotfix: a worktree a decision kept was reassessed, and its "kept worktree" note
+printed again, on every Codex hook and every few session ticks, since the
+pending-work pass calls pane cleanup for each closed pane. Each revision is now
+assessed once (`runs/<task>-r<n>.reclaimed`); what it kept is `brgr prune`'s.
+
 ## 2.12.9 — 2026-10-06
 
 Hotfix: a decided pane task whose pane was already gone when brgr came to

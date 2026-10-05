@@ -249,7 +249,9 @@ because of it. `--keep-worktree` on `run` or `revise` keeps it, as does
 commit and the checkout recorded at admission, so it still works after the
 worktree is gone.
 
-Whatever a decision kept, and worktrees from before v2.12.0, are swept by hand:
+Each revision is assessed once: a worktree a decision kept is not looked at
+again automatically. Whatever a decision kept, and worktrees from before
+v2.12.0, are swept by hand:
 
 ```bash
 brgr prune           # report what is removable and why the rest is kept
