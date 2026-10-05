@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.12.8 — 2026-10-06
+
+Hotfix: worktree reclamation could force-delete what a sealed patch cannot
+hold. A repository the worker made inside the task is one commit id in the
+patch, so its uncommitted work was lost, and an unarchived `.brgr/` report is
+left out of the patch. Either now keeps the worktree, and untracked files are
+read individually so a nested repository is seen.
+
 ## 2.12.7 — 2026-10-06
 
 Hotfix: worktree reclamation could still delete a secret. When `dist/` itself

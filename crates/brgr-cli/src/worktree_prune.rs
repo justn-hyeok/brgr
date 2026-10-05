@@ -611,7 +611,17 @@ fn changes_objection(
     // lists each ignored path at the level its pattern matched: the default
     // folds a directory whose files are all ignored into one entry, so a
     // `build/prod.env` caught by `*.env` would read as `build/`.
-    let status = match git(worktree, &["status", "--porcelain", "--ignored=matching"]) {
+    // `--untracked-files=all` stops at a nested repository's own directory
+    // instead of folding it into the untracked directory above it.
+    let status = match git(
+        worktree,
+        &[
+            "status",
+            "--porcelain",
+            "--ignored=matching",
+            "--untracked-files=all",
+        ],
+    ) {
         Ok(status) => status,
         Err(reason) => return Some(format!("worktree status is unreadable: {reason}")),
     };
@@ -620,6 +630,15 @@ fn changes_objection(
         .filter(|line| !line.is_empty() && !line.starts_with("!! "))
         .collect();
     if !changed.is_empty() {
+        // A patch records a repository nested in the worktree as one commit
+        // id, and leaves brgr's own report directory out: neither survives in
+        // the store, so neither may be forced away.
+        if let Some(line) = changed.iter().find(|line| unsealable(worktree, line)) {
+            return Some(format!(
+                "worktree holds {}, which no sealed patch can hold",
+                line.get(3..).unwrap_or(line)
+            ));
+        }
         // Only a harness's own cache, or exactly what the store sealed: either
         // way nothing in the worktree exists only there.
         if changed.iter().all(|line| harness_cache(line)) || patch_is_sealed(store, task) {
@@ -647,6 +666,18 @@ fn changes_objection(
         ));
     }
     None
+}
+
+/// A changed entry a patch cannot carry: a directory holding its own `.git`,
+/// recorded only as a commit id, or brgr's `.brgr/` report directory, which
+/// is archived out of the worktree once the result is handled and left out of
+/// the patch.
+fn unsealable(worktree: &Path, status_line: &str) -> bool {
+    let Some(path) = status_line.get(3..) else {
+        return false;
+    };
+    let path = path.trim_end_matches('/');
+    path == ".brgr" || path.starts_with(".brgr/") || worktree.join(path).join(".git").exists()
 }
 
 /// An untracked directory a worker harness keeps only its own session state
