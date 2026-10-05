@@ -455,6 +455,12 @@ fn native_worker_placement_uses_config_and_reaches_owner_decision() {
         &["accept", ran["task_id"].as_str().unwrap()],
         &[("BRGR_OWNER_ID", "codex:pane-test")],
     ));
+    // The decision closes the pane at once when the agent reads idle;
+    // otherwise the session loop closes it on its next poll.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while fixture.state("closed").trim() != "closed" && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(100));
+    }
     assert_eq!(fixture.state("closed").trim(), "closed");
 }
 /// A worker that asks its owner, or tries to delegate, as its prompt says.
