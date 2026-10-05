@@ -846,6 +846,32 @@ fn an_unchanged_evidence_file_does_not_keep_the_worktree() {
     assert!(!fixture.worktree(&task).exists());
 }
 
+/// A repository the worker made inside the task is one commit id in the
+/// sealed patch; its uncommitted work exists nowhere else.
+#[test]
+fn a_nested_repository_keeps_the_worktree_even_with_a_matching_patch() {
+    let fixture = Fixture::new();
+    let task = fixture.run_with("NESTED", &["--capture-diff"]);
+    let work = fixture.worktree(&task).join("vendor/lib/work.txt");
+    assert!(work.is_file());
+    fixture.accept(&task);
+    assert!(work.is_file(), "the nested repository's work was deleted");
+}
+
+/// A report left in `.brgr/` was not archived, and the patch leaves it out.
+#[test]
+fn an_unarchived_report_keeps_the_worktree() {
+    let fixture = Fixture::new();
+    let task = fixture.run_with("clean", &["--capture-diff"]);
+    let report = fixture
+        .worktree(&task)
+        .join(format!(".brgr/tasks/{task}-r1/report.md"));
+    fs::create_dir_all(report.parent().unwrap()).unwrap();
+    fs::write(&report, b"the worker's report\n").unwrap();
+    fixture.accept(&task);
+    assert!(report.is_file(), "an unarchived report was deleted");
+}
+
 #[test]
 fn a_harness_cache_alone_does_not_keep_the_worktree() {
     let fixture = Fixture::new();

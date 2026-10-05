@@ -268,7 +268,9 @@ untracked harness cache (`.gjc/` or `.commandcode/`, which hold only session
 state; `.claude/` or `.cursor/` also hold project configuration a task may
 write, so they are not caches), or the task sealed a diff with
 `--capture-diff`, the worktree's patch is byte-for-byte that diff, and each
-`--evidence-file` still has the digest of its sealed copy. Its `brgr/task-*` branch goes only when every commit on it also lives
+`--evidence-file` still has the digest of its sealed copy. A repository nested in
+the worktree, which a patch records as one commit id, and a `.brgr/` report
+directory that was not archived keep the worktree in every case. Its `brgr/task-*` branch goes only when every commit on it also lives
 elsewhere: in `HEAD`, or on another branch or remote-tracking branch. A task
 started from a feature branch carries that branch's commits, and those are
 safe while the feature branch exists. Other task branches do not count, since

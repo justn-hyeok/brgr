@@ -26,6 +26,18 @@ fi
 if [ -n "$prompt_file" ] && /usr/bin/grep -q 'WRITE' "$prompt_file"; then
   printf 'worker output\n' > AGENT_OUTPUT.txt
 fi
+# A worker that starts its own repository inside the task and leaves it dirty.
+if [ -n "$prompt_file" ] && /usr/bin/grep -q 'NESTED' "$prompt_file"; then
+  /bin/mkdir -p vendor/lib
+  (
+    cd vendor/lib
+    /usr/bin/git init -q
+    printf 'v1\n' > lib.txt
+    /usr/bin/git add lib.txt
+    /usr/bin/git -c user.name=Worker -c user.email=worker@example.invalid commit -qm lib
+    printf 'uncommitted work\n' > work.txt
+  )
+fi
 if [ -n "$prompt_file" ] && /usr/bin/grep -q 'CACHE' "$prompt_file"; then
   /bin/mkdir -p .gjc
   printf '{}\n' > .gjc/session.json
