@@ -320,10 +320,19 @@ pub(super) fn send_prompt(
                 Some("idle" | "done")
             )
         {
-            herdr
-                .call(&["agent", "prompt", pane, text])
-                .map_err(|e| anyhow::anyhow!("native TUI prompt delivery failed: {e}"))?;
-            return Ok(());
+            match herdr.call(&["agent", "prompt", pane, text]) {
+                Ok(_) => return Ok(()),
+                // Herdr recognizes the agent on screen but only prompts agents it
+                // started and named, which a native host is not. It refuses before
+                // sending anything, so typing the prompt in cannot duplicate it.
+                Err(HerdrFailure::Code(code, _))
+                    if code == "agent_not_ready" || code == "agent_not_found" => {}
+                Err(failure) => {
+                    return Err(anyhow::anyhow!(
+                        "native TUI prompt delivery failed: {failure}"
+                    ));
+                }
+            }
         }
         paste(herdr, pane, text)?;
     } else {

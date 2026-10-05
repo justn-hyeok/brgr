@@ -385,6 +385,14 @@ fn is_skip(option: &str) -> bool {
         .any(|word| option.contains(word))
 }
 
+/// Marks the quoted screen in an error; nothing after it leaves the machine.
+pub(crate) const LAST_SCREEN: &str = "last screen:";
+
+/// The last rows of the screen, for an error message.
+pub(super) fn tail(screen: &str) -> String {
+    head(screen)
+}
+
 /// The last rows of the screen. A dialog sits at the bottom, below whatever
 /// scrolled past (the shell line that launched the agent, for one).
 fn head(screen: &str) -> String {

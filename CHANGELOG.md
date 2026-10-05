@@ -1,5 +1,20 @@
 # Changelog
 
+## 2.10.1 — 2026-10-05
+
+The release workflow's smoke test now runs headless: since 2.10.0 the default
+is a native TUI in a Herdr pane, which a CI machine does not have, so the 2.10.0
+release stopped before publishing binaries.
+
+A native worker whose agent Herdr recognizes but did not start, seen with GJC,
+lost its task because Herdr refused to prompt it as "not an active named
+agent". brgr now types the prompt into the pane when Herdr refuses that way.
+A Command Code task no longer fails at admission because its executable is a
+script (`dist/index.mjs`) whose name matches no recipe; the registered name is
+used, and a failed re-draft falls back to the certified recipe. A run that ends
+without a report quotes the last rows of the agent's screen in its error, which
+the error memo and issue text cut off.
+
 ## 2.10.0 — 2026-10-05
 
 Workers run unattended. Each runs as its harness's native TUI in a Herdr pane

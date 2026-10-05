@@ -47,6 +47,7 @@ pub(crate) use native::{deliver_owner_notice, send_native_input, serve_session};
 use native::{
     deliver_worker_messages, report_digest, send_prompt, spawn_session_server, start_native,
 };
+pub(crate) use screens::LAST_SCREEN as LAST_SCREEN_MARK;
 use screens::{Screen, ScreenWatch};
 
 /// How often the agent's state is read.
@@ -608,9 +609,15 @@ impl IdleReport {
             return seal_native_report(notices.paths, run.task, run.revision);
         }
         if self.reminded {
+            // The screen usually says why (seen live: "Insufficient credits").
+            let last = herdr
+                .screen(pane)
+                .map(|screen| screens::tail(&screen))
+                .unwrap_or_default();
             bail!(
-                "the agent finished without writing its report to {}",
-                report.display()
+                "the agent finished without writing its report to {}; {} {last}",
+                report.display(),
+                screens::LAST_SCREEN
             );
         }
         let nudge = format!(

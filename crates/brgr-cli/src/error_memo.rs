@@ -31,6 +31,10 @@ const SCREEN_MARK: &str = "no brgr rule answers";
 /// Applies every cut that keeps free text out of an error class or sample.
 fn without_free_text(error: &str) -> &str {
     let error = error.split(PROGRESS_MARK).next().unwrap_or(error);
+    let error = error
+        .split(crate::pane_adapter::LAST_SCREEN_MARK)
+        .next()
+        .unwrap_or(error);
     match error.find(SCREEN_MARK) {
         Some(at) => {
             let rest = &error[at..];
@@ -747,6 +751,14 @@ mod tests {
                 "{leaked} leaked"
             );
         }
+    }
+
+    #[test]
+    fn a_quoted_last_screen_never_reaches_a_class_or_a_sample() {
+        let error = "the Herdr-backed worker did not provide a valid final result: the agent finished without writing its report to /x/report.md; last screen: Insufficient credits for alice@example.com | Buy extra usage";
+        let class = classify(error);
+        assert!(class.ends_with("report to <path>;"), "{class}");
+        assert!(!redact(error, 400).contains("Insufficient"));
     }
 
     #[test]
