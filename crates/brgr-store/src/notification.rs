@@ -29,10 +29,13 @@ pub struct NotificationTarget {
 pub struct QuestionTarget {
     pub message_id: String,
     pub task_id: TaskId,
+    pub owner_id: String,
     pub session_id: String,
     pub pane_id: String,
     pub herdr_session: Option<String>,
     pub herdr_bin: String,
+    pub kind: String,
+    pub body: String,
 }
 
 struct ClaimRow {
@@ -63,6 +66,26 @@ impl Store {
             )
             .optional()?
             .is_some())
+    }
+
+    /// The pane registered for this owner and session, if any.
+    ///
+    /// # Errors
+    ///
+    /// Returns a database error if the lookup fails.
+    pub fn owner_surface_pane(
+        &self,
+        owner_id: &OwnerId,
+        session_id: &str,
+    ) -> Result<Option<String>, StoreError> {
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT pane_id FROM owner_surfaces WHERE owner_id = ?1 AND session_id = ?2",
+                params![owner_id.as_str(), session_id],
+                |row| row.get(0),
+            )
+            .optional()?)
     }
 
     /// Records the exact Codex pane currently bound to an owner.
@@ -324,14 +347,14 @@ impl Store {
         task_id: TaskId,
     ) -> Result<Vec<QuestionTarget>, StoreError> {
         let mut statement = self.connection.prepare(
-            "SELECT q.message_id, b.session_id, s.pane_id, s.herdr_session, s.herdr_bin
+            "SELECT q.message_id, b.session_id, s.pane_id, s.herdr_session, s.herdr_bin, q.kind, q.body, t.owner_id
              FROM task_messages q
              JOIN attempts a ON a.attempt_id = q.attempt_id
              JOIN tasks t ON t.task_id = a.task_id AND t.revision = a.revision
              JOIN owner_bindings b ON b.owner_id = t.owner_id
              JOIN owner_surfaces s ON s.owner_id = b.owner_id
                AND s.session_id = b.session_id AND s.binding_epoch = b.binding_epoch
-             WHERE q.task_id = ?1 AND q.kind = 'question'
+             WHERE q.task_id = ?1 AND q.kind IN ('question','note')
                AND q.direction = 'worker_to_owner' AND q.acknowledged = 0
                AND NOT EXISTS (
                  SELECT 1 FROM task_messages r
@@ -354,6 +377,9 @@ impl Store {
                 pane_id: row.get(2)?,
                 herdr_session: row.get(3)?,
                 herdr_bin: row.get(4)?,
+                kind: row.get(5)?,
+                body: row.get(6)?,
+                owner_id: row.get(7)?,
             })
         })?;
         Ok(rows.collect::<Result<_, _>>()?)

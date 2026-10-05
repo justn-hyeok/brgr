@@ -34,6 +34,16 @@ fn a_lost_delegated_run_names_the_adapter_error() {
         delegated_lost_reason(None),
         "the Herdr-backed worker did not provide a valid final result"
     );
+    // At the deadline the last stderr line is progress noise, not the cause.
+    let timed_out = brgr_runner::ExecutionOutput {
+        stderr: b"brgr pane mode \xc2\xb7 prompted\n".to_vec(),
+        timed_out: true,
+        ..output
+    };
+    assert_eq!(
+        delegated_lost_reason(Some(&timed_out)),
+        "the Herdr-backed worker did not provide a valid final result: the attempt deadline elapsed"
+    );
     let noisy = format!("{}\u{1b}[31m", "x".repeat(400));
     let line = last_stderr_line(noisy.as_bytes()).unwrap();
     assert_eq!(line.chars().count(), 300);

@@ -80,12 +80,12 @@ decision state without revealing prompts or artifact contents.
 See [the v2 plugin contract](docs/guides/v2-herdr-plugin.md) for ownership, context,
 recovery, and verification boundaries.
 
-GJC, Cursor CLI, Command Code, Devin CLI, and OMP have bounded one-shot process recipes.
-Herdr is optional:
-the separate `local.omp-herdr` adapter uses `omp-role` when an interactive pane
-is explicitly wanted. After Codex accepts or rejects that adapter's result,
-brgr closes only its recorded pane; use `--keep-pane` to retain it. See the
-cleanup safety limit below.
+Default execution uses the registered harness's native TUI in an owned Herdr
+pane, with its full/YOLO recipe. Use `--headless` explicitly for a bounded
+one-shot process without Herdr. brgr preserves the requested harness, model,
+effort, and permission. Unsupported TUI options fail before admission instead
+of selecting headless. The separate `local.omp-herdr` route retains its legacy
+`omp-role` presentation adapter. `--keep-pane` retains an owned pane.
 
 | Route or operation | v1 status |
 |---|---|
@@ -124,24 +124,27 @@ native model observation, and none expose a verified effort observation.
 
 ### Pane mode
 
-Inside Herdr, Claude Code, Cursor, Devin, Cline, OMP, and OpenCode run in pane
-mode: the harness's own interactive session opens in a pane beside the caller,
-without taking focus, and closes when the task ends. brgr sends the prompt,
-seals the report the agent writes, and asks the owner to look at the pane when
-the agent stops at an approval or on a screen Herdr cannot classify; once the
-agent is ready again, brgr withdraws that question. `read-only` tasks, an
-OpenCode task with `--effort` (its TUI cannot take one), and every task after
-`brgr config set-pane-mode false` run headless. GJC and Command Code are not
-agents Herdr recognizes, so they always run headless.
+Generated recipes declare native TUI launches for Claude Code, Cursor, Devin,
+Cline, OMP, OpenCode, GJC, and Command Code. The registered executable runs in
+an owned pane without taking focus. brgr connects parent/worker messages to
+that session, seals its final report, and closes the pane after the owner
+handles the result. A momentarily idle TUI can continue the conversation.
+Owned-workspace trust, "press Enter to continue" notices, update offers (skipped) and an applied self-update are answered automatically; any other screen is reported and fails the run after three minutes. Other native
+input uses `brgr input TASK --key KEY` or `--text TEXT`; conversation messages
+stay queued while the TUI is busy or displaying a native dialog.
+
+`--headless` is a per-call choice. Read-only scope, an unsupported effort,
+and legacy `prefer_print_mode` settings never silently select it. Use
+`--owner-session SESSION --source-pane PANE` for a positively verified source
+when the caller is a shared daemon. See the [orchestration guide](docs/guides/orchestration.md)
+for config, instructions, debate, and the current verification limits.
 
 ### Recursive workers
 
-v2.2.1 can open the brgr-owned `worker` plugin pane for a detached run from
-any Herdr pane. Run `brgr config set-auto-worker-pane true` once to enable
-automatic panes for ordinary Herdr callers. The brgr plugin Codex pane opens
-worker panes without this setting. Set `brgr config set-worker-placement tab` to open future workers in
-new tabs; `adjacent` restores the default. The setting is stored at
-`BRGR_HOME/config.toml` and never moves panes already running.
+Default TUI tasks own their native pane; an additional supervisor pane is not
+created. Set `brgr config set worker-placement tab` for new tabs or `adjacent`
+for a split beside the exact caller. Settings live at `$BRGR_HOME/config.toml`
+and do not move existing panes. Legacy auto-worker settings remain readable.
 
 A worker receives `$BRGR_BIN`, its exact task/attempt identity, and a scoped
 owner session. It may call `brgr run` again to create a child; brgr records the

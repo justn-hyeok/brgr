@@ -97,6 +97,8 @@ pub enum ExecutionObservation {
     /// A live, task-bound detached supervisor whose identity has not yet been
     /// persisted to the attempt launch intent.
     SupervisorAlive(RunnerIdentity),
+    /// A task/attempt-bound external TUI session observed by its adapter.
+    ExternalAlive(RunnerIdentity),
     NotObserved,
     Unknown,
 }
@@ -162,12 +164,14 @@ impl Supervisor {
                         && launch.as_ref().is_none_or(|intent| {
                             intent.runner_identity.as_ref().is_none_or(|expected| expected == actual)
                         })
-            );
+            ) || matches!(&observation, ExecutionObservation::ExternalAlive(identity) if identity.validate().is_ok());
             if exactly_alive {
                 continue;
             }
             let reason = match observation {
-                ExecutionObservation::Alive(_) | ExecutionObservation::SupervisorAlive(_) => {
+                ExecutionObservation::Alive(_)
+                | ExecutionObservation::SupervisorAlive(_)
+                | ExecutionObservation::ExternalAlive(_) => {
                     "runner identity did not match the durable launch receipt"
                 }
                 ExecutionObservation::NotObserved => {
@@ -265,6 +269,89 @@ impl Supervisor {
     #[must_use]
     pub fn store_mut(&mut self) -> &mut Store {
         &mut self.store
+    }
+
+    /// Seal a completed external session on its original attempt after the
+    /// collector exited. The adapter verifies the session and report identity.
+    ///
+    /// # Errors
+    /// Returns an error for a stale attempt, invalid evidence, or store failure.
+    pub fn recover_external_report(
+        &mut self,
+        task: brgr_protocol::TaskId,
+        attempt: brgr_protocol::AttemptId,
+        report: &[u8],
+    ) -> Result<ResultEnvelope, SupervisorError> {
+        if let Ok(existing) = self.store.latest_result(task)
+            && existing.attempt_id == attempt
+        {
+            return Ok(existing);
+        }
+        let spec = self
+            .store
+            .unfinished_attempts()?
+            .into_iter()
+            .find(|value| value.task.task_id == task && value.attempt_id == attempt)
+            .ok_or(brgr_store::StoreError::AttemptNotFound(attempt))?
+            .task;
+        let state = self.store.attempt_state_by_id(attempt)?;
+        if !matches!(
+            state,
+            brgr_protocol::AttemptState::Running
+                | brgr_protocol::AttemptState::Collecting
+                | brgr_protocol::AttemptState::Blocked
+        ) {
+            return Err(brgr_store::StoreError::AttemptNotFound(attempt).into());
+        }
+        if state != brgr_protocol::AttemptState::Collecting {
+            self.store.compare_and_set_attempt_state(
+                attempt,
+                state,
+                brgr_protocol::AttemptState::Collecting,
+            )?;
+        }
+        let settlement = execution::unsettled_worker_reason(&self.store, task, attempt)?;
+        let (artifacts, error) = if report.is_empty() {
+            (
+                Vec::new(),
+                Some("external session returned an empty report".to_owned()),
+            )
+        } else if let Some(reason) = settlement {
+            (Vec::new(), Some(reason))
+        } else {
+            let reference = self.store.seal_artifact_reader(
+                std::io::Cursor::new(report),
+                &spec.artifact_contract.media_type,
+                spec.artifact_contract.max_bytes,
+            )?;
+            let output = brgr_runner::ExecutionOutput {
+                exit_code: None,
+                stdout: report.to_vec(),
+                stderr: vec![],
+                result: report.to_vec(),
+                observed_model: None,
+                timed_out: false,
+                cancelled: false,
+                output_truncated: false,
+                elapsed: std::time::Duration::ZERO,
+            };
+            match evidence::seal_requested_evidence(&self.store, &spec, &output) {
+                Ok(mut evidence) => {
+                    evidence.insert(0, reference);
+                    (evidence, None)
+                }
+                Err(error) => (vec![reference], Some(error)),
+            }
+        };
+        let outcome = if error.is_none() {
+            brgr_protocol::TerminalOutcome::Candidate
+        } else {
+            brgr_protocol::TerminalOutcome::Failed
+        };
+        let result = execution::result_for(&spec, attempt, outcome, artifacts, error);
+        self.store
+            .commit_terminal_result_final(&spec.owner_id, &result)?;
+        Ok(result)
     }
 }
 

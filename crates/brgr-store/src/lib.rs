@@ -4,6 +4,7 @@ mod artifact;
 mod attempt;
 mod board;
 mod contention;
+mod debate;
 mod delegation;
 mod error;
 #[cfg(test)]
@@ -28,6 +29,7 @@ use brgr_protocol::{
     ResultId, RouteObservation, SCHEMA_V1, TaskSpec,
 };
 use contention::BUSY_TIMEOUT;
+pub use debate::{DebateGroup, PeerDraft, PeerMessage};
 pub use error::StoreError;
 pub use message::{MessageDirection, MessageDraft, MessageKind, TaskMessage};
 pub use notification::{NotificationTarget, PendingNotification, QuestionTarget};

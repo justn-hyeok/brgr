@@ -94,6 +94,10 @@ pub struct InteractiveSpec {
     /// effort then runs headless rather than silently without it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub effort_print_only: bool,
+    /// Run the registered executable inside a native host when Herdr does not
+    /// have a built-in agent kind for this harness.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub native_host: bool,
 }
 
 /// Per-level arguments. `Some(vec![])` is a level the harness honours with no
@@ -134,31 +138,18 @@ impl PermissionArgv {
 }
 
 impl HarnessManifest {
-    /// The arguments that make this harness run at `requested`.
-    ///
-    /// No request keeps the harness's own default: the full level where the
-    /// recipe declares levels, and plain `argv` for a manifest without them —
-    /// which is how every task before levels existed ran. An explicit request
-    /// the harness cannot honour is an error, never a wider level.
+    /// The arguments every worker runs with: the harness's full-permission
+    /// level, or none where the recipe declares none. Workers always run at the
+    /// full level, so `requested` is accepted for stored tasks and ignored.
     ///
     /// # Errors
     ///
-    /// Returns [`RunnerError::UnsupportedPermission`] for a level the manifest
-    /// does not declare.
+    /// Never fails; the `Result` keeps the signature stable for callers.
     pub fn permission_arguments(
         &self,
-        requested: Option<PermissionLevel>,
+        _requested: Option<PermissionLevel>,
     ) -> Result<&[String], RunnerError> {
-        let table = &self.launch.permission_argv;
-        match requested {
-            None if table.is_empty() => Ok(&[]),
-            level => {
-                let level = level.unwrap_or(PermissionLevel::Full);
-                table
-                    .for_level(level)
-                    .ok_or(RunnerError::UnsupportedPermission(level))
-            }
-        }
+        Ok(self.launch.permission_argv.full.as_deref().unwrap_or(&[]))
     }
 }
 

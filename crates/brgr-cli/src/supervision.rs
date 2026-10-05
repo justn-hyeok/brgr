@@ -29,11 +29,16 @@ pub(crate) async fn supervise(paths: &Paths, launch_path: &Path, json_output: bo
     if launch.protocol_generation != "brgr-v1" {
         bail!("unsupported task protocol generation");
     }
-    let manifest = pinned_manifest_for_launch(
+    let mut manifest = pinned_manifest_for_launch(
         launch.manifest.as_ref(),
         launch.executable_digest.as_deref(),
         &launch.harness_id,
     )?;
+    if !launch.pane_mode
+        && let Some(options) = &launch.calling_options
+    {
+        manifest.launch.argv.extend(options.argv.clone());
+    }
     manifest.validate_task_route(&launch.spec)?;
     #[cfg(debug_assertions)]
     if env::var_os("BRGR_TEST_EXIT_BEFORE_TASK_CLAIM").is_some() {
@@ -64,9 +69,13 @@ pub(crate) async fn supervise(paths: &Paths, launch_path: &Path, json_output: bo
     // Reconcile before publishing our own task receipt. Otherwise a previous
     // crashed attempt without a launch identity could mistake this new process
     // for its original live supervisor and remain unfinished forever.
-    supervisor.reconcile_after_restart(|attempt| observe_attempt(paths, attempt))?;
+    record_recovered(
+        paths,
+        &supervisor.reconcile_after_restart(|attempt| observe_attempt(paths, attempt))?,
+    );
     write_json_atomic(&paths.supervisor(launch.spec.task_id), &receipt)?;
     let (task_id, revision) = (launch.spec.task_id, launch.spec.revision);
+    let harness = launch.spec.route.harness_id.clone();
     let result = supervisor
         .run_fresh_controlled(
             launch.spec,
@@ -76,10 +85,15 @@ pub(crate) async fn supervise(paths: &Paths, launch_path: &Path, json_output: bo
             Some(&receipt.identity),
         )
         .await;
-    if launch.pane_mode {
+    if launch.pane_mode
+        && !result
+            .as_ref()
+            .is_ok_and(|value| value.outcome == TerminalOutcome::Candidate)
+    {
         crate::pane_adapter::close_leftover_pane(paths, task_id, revision, launch.keep_pane);
     }
     let result = result?;
+    crate::error_memo::record_result(paths, &harness, &result);
     let _ = fs::remove_file(cancel_path);
     let _ = fs::remove_file(paths.supervisor(result.task_id));
     print_value(&serde_json::to_value(result)?, json_output);
@@ -127,15 +141,68 @@ pub(crate) fn spawn_supervisor(paths: &Paths, launch_path: &Path) -> Result<()> 
     Ok(())
 }
 
+/// Failures settled by recovery after a crashed supervisor go to the memo too.
+fn record_recovered(paths: &Paths, results: &[ResultEnvelope]) {
+    let Ok(store) = Store::open(&paths.store) else {
+        return;
+    };
+    for result in results {
+        let harness = store
+            .task(result.task_id)
+            .map_or_else(|_| "unknown".to_owned(), |spec| spec.route.harness_id);
+        crate::error_memo::record_result(paths, &harness, result);
+    }
+}
+
+fn recover_one(
+    paths: &Paths,
+    supervisor: &mut Supervisor,
+    attempt: &UnfinishedAttempt,
+) -> Result<()> {
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(
+            paths
+                .runs
+                .join(format!("{}.recover.lock", attempt.task.task_id)),
+        )?;
+    if lock.try_lock().is_ok() && !crate::pane_adapter::stop_external(paths, attempt)? {
+        crate::pane_adapter::collect_recovered(paths, attempt, supervisor)?;
+    }
+    Ok(())
+}
+
 pub(crate) fn reconcile_pending(paths: &Paths) -> Result<()> {
     let mut supervisor = Supervisor::open(&paths.store)?;
-    supervisor.reconcile_after_restart(|attempt| observe_attempt(paths, attempt))?;
+    for attempt in supervisor.store().unfinished_attempts()? {
+        if !matches!(
+            observe_attempt(paths, &attempt),
+            ExecutionObservation::SupervisorAlive(_)
+        ) {
+            // One attempt with a bad receipt or a changed report must not stop
+            // the others, or every hook would report an unreadable inbox.
+            if let Err(error) = recover_one(paths, &mut supervisor, &attempt) {
+                eprintln!(
+                    "brgr recovery of {} is pending: {error}",
+                    attempt.task.task_id
+                );
+            }
+        }
+    }
+    record_recovered(
+        paths,
+        &supervisor.reconcile_after_restart(|attempt| observe_attempt(paths, attempt))?,
+    );
     let mut store = Store::open(&paths.store)?;
     for task in store.unstarted_tasks()? {
         if unstarted_admission_is_stale(paths, &task)? {
             let cancelled = paths.cancel(task.task_id).exists()
                 || store.cancellation_requested(task.task_id)?;
             record_unstarted_terminal(
+                paths,
                 &mut store,
                 &task,
                 if cancelled {
@@ -152,6 +219,29 @@ pub(crate) fn reconcile_pending(paths: &Paths) -> Result<()> {
                     "supervisor did not claim the admitted task".to_owned()
                 },
             )?;
+        }
+    }
+    for entry in fs::read_dir(&paths.runs)?.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !name.ends_with(".pane.json") {
+            continue;
+        }
+        if let Some(id) = name.strip_suffix(".pane.json")
+            && let Ok(task) = id.parse::<TaskId>()
+        {
+            if let Err(error) = crate::pane_cleanup::close_if_eligible(&store, &paths.runs, task) {
+                eprintln!("brgr legacy pane cleanup pending: {error}");
+            }
+            continue;
+        }
+        if let Some((id, suffix)) = name.split_once("-r")
+            && let (Ok(task), Ok(revision)) = (
+                id.parse::<TaskId>(),
+                suffix.trim_end_matches(".pane.json").parse::<u32>(),
+            )
+            && let Err(error) = crate::pane_adapter::cleanup_settled(paths, task, revision)
+        {
+            eprintln!("brgr cleanup pending: {error}");
         }
     }
     Ok(())
@@ -215,6 +305,7 @@ pub(crate) fn unstarted_admission_is_stale(paths: &Paths, task: &TaskSpec) -> Re
 }
 
 pub(crate) fn record_unstarted_terminal(
+    paths: &Paths,
     store: &mut Store,
     task: &TaskSpec,
     outcome: TerminalOutcome,
@@ -255,6 +346,7 @@ pub(crate) fn record_unstarted_terminal(
         },
     };
     store.commit_terminal_result_final(&task.owner_id, &result)?;
+    crate::error_memo::record_result(paths, &task.route.harness_id, &result);
     Ok(true)
 }
 
@@ -264,7 +356,7 @@ pub(crate) fn observe_attempt(paths: &Paths, attempt: &UnfinishedAttempt) -> Exe
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
     {
         Some(receipt) => receipt,
-        None => return ExecutionObservation::Unknown,
+        None => return external_observation(paths, attempt),
     };
     if receipt.task_id != attempt.task.task_id
         || receipt.launch_path != paths.launch(attempt.task.task_id, attempt.task.revision)
@@ -277,7 +369,19 @@ pub(crate) fn observe_attempt(paths: &Paths, attempt: &UnfinishedAttempt) -> Exe
     match process_identity(pid) {
         Ok(actual) if actual == receipt.identity => ExecutionObservation::SupervisorAlive(actual),
         Ok(_) => ExecutionObservation::NotObserved,
-        Err(_) => ExecutionObservation::Unknown,
+        Err(_) => external_observation(paths, attempt),
+    }
+}
+
+fn external_observation(paths: &Paths, attempt: &UnfinishedAttempt) -> ExecutionObservation {
+    if crate::pane_adapter::external_alive(paths, attempt) {
+        ExecutionObservation::ExternalAlive(RunnerIdentity {
+            namespace: "brgr.native-pane".to_owned(),
+            handle: attempt.task.task_id.to_string(),
+            birth_marker: attempt.attempt_id.to_string(),
+        })
+    } else {
+        ExecutionObservation::Unknown
     }
 }
 

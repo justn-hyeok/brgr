@@ -212,6 +212,9 @@ struct FileStat {
 /// Per-file line counts, read by `git apply --numstat` outside any repository
 /// so no repository configuration takes part.
 fn numstat(patch: &[u8]) -> Result<Vec<FileStat>> {
+    if patch.is_empty() {
+        return Ok(Vec::new());
+    }
     let scratch = tempfile::tempdir()?;
     let mut child = Command::new("git")
         .args(["apply", "--numstat", "-z", "-"])
@@ -301,6 +304,9 @@ fn git_value(workspace: &Path, argv: &[&str]) -> Result<PathBuf> {
 }
 
 fn git_apply(workspace: &Path, patch: &[u8], check_only: bool) -> Result<()> {
+    if patch.is_empty() {
+        return Ok(());
+    }
     let mut command = Command::new("git");
     command.arg("-C").arg(workspace).args(["apply", "--binary"]);
     if check_only {
