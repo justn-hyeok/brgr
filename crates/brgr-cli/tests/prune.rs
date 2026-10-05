@@ -783,6 +783,22 @@ fn a_dotenv_alone_in_a_build_directory_keeps_the_worktree() {
     );
 }
 
+/// `.claude/` holds project configuration as well as session state, and git
+/// reports a new `.claude/commands/deploy.md` as the bare `.claude/`.
+#[test]
+fn a_new_claude_command_written_by_the_worker_keeps_the_worktree() {
+    let fixture = Fixture::new();
+    let task = fixture.run_with("clean", &[]);
+    let commands = fixture.worktree(&task).join(".claude/commands");
+    fs::create_dir_all(&commands).unwrap();
+    fs::write(commands.join("deploy.md"), b"# deploy\n").unwrap();
+    fixture.accept(&task);
+    assert!(
+        commands.join("deploy.md").is_file(),
+        "the worker's .claude/commands/deploy.md was deleted as a cache"
+    );
+}
+
 #[test]
 fn installed_dependencies_do_not_keep_the_worktree_but_a_dotenv_does() {
     let fixture = Fixture::new();

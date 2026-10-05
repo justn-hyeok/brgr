@@ -1,5 +1,14 @@
 # Changelog
 
+## 2.12.2 — 2026-10-06
+
+Hotfix: worktree reclamation could delete a worker's deliverable. v2.12.0
+treated untracked `.claude/`, `.cursor/`, `.opencode/`, `.cline/`, `.devin/`
+and `.omp/` as harness caches, but those directories also hold project
+configuration a task may write, and git reports a new
+`.claude/commands/deploy.md` as the bare `.claude/`. Only `.gjc/` and
+`.commandcode/`, which hold nothing but session state, are caches now.
+
 ## 2.12.1 — 2026-10-06
 
 Hotfix: worktree reclamation could delete a secret. git folds a directory

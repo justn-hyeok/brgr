@@ -649,20 +649,14 @@ fn changes_objection(
     None
 }
 
-/// An untracked directory a worker harness keeps its own state in. Only an
-/// untracked entry counts: a change to a tracked file under one of these names
-/// is the repository's own content.
+/// An untracked directory a worker harness keeps only its own session state
+/// in. Only an untracked entry counts: a change to a tracked file under one of
+/// these names is the repository's own content. Directories such as `.claude/`
+/// or `.cursor/` are not here: they also hold project configuration a task may
+/// be asked to write (`.claude/commands/`, `.cursor/rules/`), and git reports
+/// either as the bare directory.
 fn harness_cache(status_line: &str) -> bool {
-    const CACHES: [&str; 8] = [
-        ".gjc/",
-        ".commandcode/",
-        ".claude/",
-        ".opencode/",
-        ".cursor/",
-        ".cline/",
-        ".devin/",
-        ".omp/",
-    ];
+    const CACHES: [&str; 2] = [".gjc/", ".commandcode/"];
     status_line
         .strip_prefix("?? ")
         .is_some_and(|path| CACHES.iter().any(|cache| path.starts_with(cache)))
@@ -1238,8 +1232,10 @@ mod tests {
     #[test]
     fn only_an_untracked_harness_directory_is_a_cache() {
         assert!(harness_cache("?? .gjc/"));
-        assert!(harness_cache("?? .claude/settings.local.json"));
-        assert!(!harness_cache(" M .claude/settings.json"));
+        assert!(harness_cache("?? .commandcode/"));
+        assert!(!harness_cache("?? .claude/"));
+        assert!(!harness_cache("?? .cursor/"));
+        assert!(!harness_cache(" M .gjc/config.json"));
         assert!(!harness_cache("?? src/main.rs"));
         assert!(!harness_cache("?? .gjcx/"));
     }
