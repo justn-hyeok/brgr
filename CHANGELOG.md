@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.12.12 — 2026-10-06
+
+Hotfix: a revision forgot what its task was asked to keep. `brgr revise`
+took `--keep-worktree` and `--keep-pane` from its own flags only, so a task
+started with `--keep-worktree` had its next revision's worktree reclaimed. A
+revision now inherits both. Also, `--keep-pane` no longer stops worktree
+reclamation for a headless run, which has no pane.
+
 ## 2.12.11 — 2026-10-06
 
 Hotfix: a headless decision that arrived while the supervisor was still

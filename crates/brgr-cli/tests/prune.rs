@@ -786,6 +786,31 @@ fn a_decision_waits_for_a_worker_that_is_still_exiting() {
     );
 }
 
+/// `--keep-worktree` on the task carries over to its revisions.
+#[test]
+fn a_revision_keeps_its_worktree_when_the_task_asked_to() {
+    let fixture = Fixture::new();
+    let task = fixture.run_with("clean", &["--keep-worktree"]);
+    fixture.json(&["reject", &task, "--reason", "try again"]);
+    let revised = fixture.json(&["revise", &task, "clean again", "--foreground"]);
+    assert_eq!(revised["outcome"], "candidate", "{revised}");
+    fixture.accept(&task);
+    let second = fixture
+        .worktrees_root()
+        .join("repo")
+        .join(format!("{}-r2", Fixture::slug(&task)));
+    assert!(second.is_dir(), "the revision's worktree was reclaimed");
+}
+
+/// A headless run has no pane, so `--keep-pane` does not keep its worktree.
+#[test]
+fn keep_pane_does_not_keep_a_headless_worktree() {
+    let fixture = Fixture::new();
+    let task = fixture.run_with("clean", &["--keep-pane"]);
+    fixture.accept(&task);
+    assert!(!fixture.worktree(&task).exists());
+}
+
 #[test]
 fn keep_worktree_keeps_it_after_the_decision() {
     let fixture = Fixture::new();

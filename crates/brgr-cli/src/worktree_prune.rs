@@ -1136,7 +1136,9 @@ pub(crate) fn reclaim_task(paths: &Paths, task: TaskId, revision: u32) -> Option
     let store = Store::open(&paths.store).ok()?;
     let launch: crate::LaunchEnvelope =
         serde_json::from_slice(&fs::read(paths.launch(task, revision)).ok()?).ok()?;
-    if launch.keep_worktree || launch.keep_pane {
+    // A kept pane still runs its worker in the worktree; a headless run has
+    // no pane, so `--keep-pane` says nothing about its worktree.
+    if launch.keep_worktree || (launch.keep_pane && launch.pane_mode) {
         return None;
     }
     let worktree = resolve(Path::new(&launch.spec.workspace));
