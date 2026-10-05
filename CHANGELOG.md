@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.12.9 — 2026-10-06
+
+Hotfix: a decided pane task whose pane was already gone when brgr came to
+close it never had its worktree reclaimed. That path marked the pane closed and
+archived the report, but unlike the other two closed paths it did not reclaim.
+It does now.
+
 ## 2.12.8 — 2026-10-06
 
 Hotfix: worktree reclamation could force-delete what a sealed patch cannot
