@@ -363,7 +363,7 @@ fn issue_text(entry: &Entry) -> (String, String) {
             .cloned()
             .collect::<Vec<_>>()
             .join(", "),
-        entry.class,
+        redact(&entry.class, 300),
         join(&entry.outcomes),
         join(&entry.harnesses),
         entry.count,
@@ -487,38 +487,73 @@ fn is_pane_id(text: &str) -> bool {
 }
 
 /// Masks what must not leave the machine: home directories, ids, addresses,
-/// tokens, then cuts the text to `limit` characters.
+/// tokens, then cuts the text to `limit` characters. Each word is also split at
+/// `=`, `,`, `;`, quotes and brackets, so `key=ghp_...` or `(bob@example.com)`
+/// is caught inside a longer token.
 pub(crate) fn redact(text: &str, limit: usize) -> String {
     let text = without_free_text(text);
     let home = std::env::var("HOME").unwrap_or_default();
     let mut words = Vec::new();
     for word in text.split_whitespace() {
-        let mut word = if home.len() > 1 {
+        let word = if home.len() > 1 {
             word.replace(&home, "~")
         } else {
             word.to_owned()
         };
-        let core = word
-            .trim_matches(|c: char| ",.;:'\"()[]{}<>".contains(c))
-            .to_owned();
-        let replacement = if is_secret(&core) {
-            Some("<secret>")
-        } else if core.contains('@') && core.contains('.') {
-            Some("<email>")
-        } else if is_uuid(&core) {
-            Some("<id>")
-        } else {
-            None
-        };
-        if let Some(new) = replacement {
-            word = word.replace(&core, new);
-        } else if let Some(rest) = core.strip_prefix("/Users/") {
-            let after = rest.split_once('/').map_or("", |(_, tail)| tail);
-            word = word.replace(&core, &format!("/Users/<user>/{after}"));
-        }
-        words.push(word);
+        words.push(mask_pieces(&word));
     }
     words.join(" ").chars().take(limit).collect()
+}
+
+fn mask_pieces(word: &str) -> String {
+    const DELIMITERS: &str = "=,;:'\"()[]{}<>|";
+    let mut out = String::new();
+    let mut piece = String::new();
+    for character in word.chars() {
+        if DELIMITERS.contains(character) {
+            out.push_str(&mask_piece(&piece));
+            piece.clear();
+            out.push(character);
+        } else {
+            piece.push(character);
+        }
+    }
+    out.push_str(&mask_piece(&piece));
+    out
+}
+
+fn mask_piece(piece: &str) -> String {
+    let core = piece.trim_matches(|c: char| ".:".contains(c));
+    if core.is_empty() {
+        return piece.to_owned();
+    }
+    let replacement = if is_secret(core) {
+        "<secret>".to_owned()
+    } else if core.contains('@') && core.contains('.') {
+        "<email>".to_owned()
+    } else if is_uuid(core) {
+        "<id>".to_owned()
+    } else if let Some(masked) = mask_home(core) {
+        masked
+    } else {
+        return piece.to_owned();
+    };
+    piece.replace(core, &replacement)
+}
+
+/// `/Users/<name>/...` and `/home/<name>/...` with the name masked.
+fn mask_home(path: &str) -> Option<String> {
+    for root in ["/Users/", "/home/"] {
+        if let Some(rest) = path.strip_prefix(root) {
+            let after = rest.split_once('/').map_or("", |(_, tail)| tail);
+            return Some(if after.is_empty() {
+                format!("{root}<user>")
+            } else {
+                format!("{root}<user>/{after}")
+            });
+        }
+    }
+    None
 }
 
 fn is_secret(token: &str) -> bool {
@@ -689,6 +724,29 @@ mod tests {
         assert!(class.starts_with(title.trim_end_matches('…')), "{title}");
         assert!(!title.contains("longe"), "{title}");
         assert_eq!(title_of("short class"), "short class");
+    }
+
+    #[test]
+    fn secrets_addresses_and_homes_inside_a_longer_token_are_masked() {
+        let error = "Herdr could not open a pane: BRGR_HOME=/Users/alice/Library/brgr contact=bob@example.com key=ghp_abcdefghijklmnopqrstuvwxyz0123456789 (path:/home/carol/x)";
+        let out = redact(error, 400);
+        for leaked in ["alice", "bob@", "ghp_", "carol"] {
+            assert!(!out.contains(leaked), "{leaked} leaked: {out}");
+        }
+        let entry = Entry {
+            fingerprint: "abc".to_owned(),
+            class: error.to_owned(),
+            sample: out,
+            count: 1,
+            ..Entry::default()
+        };
+        let (title, body) = issue_text(&entry);
+        for leaked in ["alice", "bob@", "ghp_", "carol"] {
+            assert!(
+                !title.contains(leaked) && !body.contains(leaked),
+                "{leaked} leaked"
+            );
+        }
     }
 
     #[test]

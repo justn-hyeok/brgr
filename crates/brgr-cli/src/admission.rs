@@ -73,15 +73,14 @@ pub(crate) async fn run_task(paths: &Paths, mut args: RunArgs, json_output: bool
         .or(config.defaults.harness.clone())
         .unwrap_or_else(|| "local.gjc".to_owned());
     let mut calling = config.calling(&harness);
+    warn_stored_permissions(&config);
     calling.model = args.model.take().or(calling.model);
     calling.effort = args.effort.take().or(calling.effort);
     calling.permission = ignored_permission(args.permission.is_some());
     calling.deadline_seconds = args.deadline_seconds.or(calling.deadline_seconds);
     config::validate_argv(&calling.argv)?;
     let (user_instructions, instructions_digest) = read_user_instructions(paths)?;
-    if let Some(instructions) = user_instructions {
-        args.role_instructions.push(instructions);
-    }
+    add_user_instructions(&mut args.role_instructions, user_instructions)?;
     let registry = Registry::open_with_control_home(&paths.registry, &paths.home)?;
     let (activated, activation) = load_harness(&registry, &harness).await?;
     config::validate_manifest_argv(&calling.argv, &activated)?;
@@ -203,9 +202,7 @@ pub(crate) async fn revise_task(paths: &Paths, args: ReviseArgs, json_output: bo
             .retain(|value| !value.starts_with("BRGR USER INSTRUCTIONS\n"));
     }
     let (user_instructions, instructions_digest) = read_user_instructions(paths)?;
-    if let Some(instructions) = user_instructions {
-        replacement.instructions.role.push(instructions);
-    }
+    add_user_instructions(&mut replacement.instructions.role, user_instructions)?;
     replacement.instructions.forward_criteria |= forward_criteria;
     args.evidence.extend_task(&mut replacement);
     if args.max_children.is_some() {
@@ -472,11 +469,18 @@ fn print_launch_receipt(launch: &LaunchEnvelope, workspace: &Path, json_output: 
     print_value(&receipt, json_output);
 }
 
-fn read_user_instructions(paths: &Paths) -> Result<(Option<String>, Option<String>)> {
+/// One role entry may hold at most 2,048 bytes and a task at most 16 entries, so
+/// a longer BRGR.md is carried as several entries, cut at line breaks.
+const ROLE_ENTRY_BYTES: usize = 1_900;
+const ROLE_ENTRIES: usize = 16;
+
+fn read_user_instructions(paths: &Paths) -> Result<(Vec<String>, Option<String>)> {
     let path = paths.home.join("BRGR.md");
     let metadata = match fs::symlink_metadata(&path) {
         Ok(value) => value,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok((None, None)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok((Vec::new(), None));
+        }
         Err(error) => return Err(error.into()),
     };
     if !metadata.is_file() || metadata.len() > 16_384 {
@@ -490,10 +494,48 @@ fn read_user_instructions(paths: &Paths) -> Result<(Option<String>, Option<Strin
     for byte in Sha256::digest(text.as_bytes()) {
         write!(&mut digest, "{byte:02x}")?;
     }
-    Ok((
-        Some(format!("BRGR USER INSTRUCTIONS\n{text}")),
-        Some(digest),
-    ))
+    Ok((chunk_instructions(&text), Some(digest)))
+}
+
+fn chunk_instructions(text: &str) -> Vec<String> {
+    let mut chunks = Vec::new();
+    let mut current = String::from("BRGR USER INSTRUCTIONS\n");
+    for line in text.split_inclusive('\n') {
+        let mut rest = line;
+        while current.len() + rest.len() > ROLE_ENTRY_BYTES {
+            let room = ROLE_ENTRY_BYTES.saturating_sub(current.len());
+            let mut cut = room.min(rest.len());
+            while cut > 0 && !rest.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            if cut == 0 {
+                chunks.push(std::mem::take(&mut current));
+                current = String::from("BRGR USER INSTRUCTIONS (continued)\n");
+                continue;
+            }
+            current.push_str(&rest[..cut]);
+            rest = &rest[cut..];
+            chunks.push(std::mem::take(&mut current));
+            current = String::from("BRGR USER INSTRUCTIONS (continued)\n");
+        }
+        current.push_str(rest);
+    }
+    if current.trim().len() > "BRGR USER INSTRUCTIONS".len() {
+        chunks.push(current);
+    }
+    chunks
+}
+
+fn add_user_instructions(role: &mut Vec<String>, chunks: Vec<String>) -> Result<()> {
+    if role.len() + chunks.len() > ROLE_ENTRIES {
+        bail!(
+            "BRGR.md takes {} role instruction entries and the task already has {}; at most {ROLE_ENTRIES} fit, so shorten BRGR.md or pass fewer --role-instruction values",
+            chunks.len(),
+            role.len()
+        );
+    }
+    role.extend(chunks);
+    Ok(())
 }
 
 pub(crate) fn prepare_task_workspace(
@@ -599,6 +641,20 @@ pub(crate) fn require_parent_may_delegate(
 
 /// Workers always run with full permissions, so a requested level (from an
 /// old script, a stored task or a config value) is accepted and ignored.
+fn warn_stored_permissions(config: &Config) {
+    if config.worker.max_permission.is_some()
+        || config.defaults.permission.is_some()
+        || config
+            .harnesses
+            .values()
+            .any(|options| options.permission.is_some())
+    {
+        eprintln!(
+            "brgr: stored permission settings are ignored; workers always run with full permissions"
+        );
+    }
+}
+
 fn ignored_permission(requested: bool) -> Option<PermissionLevel> {
     if requested {
         eprintln!("brgr: --permission is ignored; workers always run with full permissions");
@@ -615,4 +671,41 @@ fn delegation_parent(args: &DelegationArgs) -> Result<Option<(TaskId, AttemptId)
         bail!("explicit delegation parent differs from the current worker attempt");
     }
     Ok(explicit.or(inherited))
+}
+
+#[cfg(test)]
+mod instruction_tests {
+    use super::*;
+
+    #[test]
+    fn a_long_brgr_md_is_carried_as_entries_within_the_task_limits() {
+        // 12 KiB of lines, longer than one 2,048-byte role entry allows.
+        let text = "an instruction line that is about sixty characters long....\n".repeat(200);
+        let chunks = chunk_instructions(&text);
+        assert!(
+            chunks.len() > 1 && chunks.len() <= ROLE_ENTRIES,
+            "{}",
+            chunks.len()
+        );
+        assert!(chunks.iter().all(|chunk| chunk.len() <= 2_048));
+        let body: String = chunks
+            .iter()
+            .map(|chunk| chunk.split_once('\n').map_or("", |(_, rest)| rest))
+            .collect();
+        assert_eq!(body, text, "nothing is lost or reordered");
+        let mut role = Vec::new();
+        add_user_instructions(&mut role, chunks).unwrap();
+        assert!(role.iter().all(|entry| !entry.trim().is_empty()));
+    }
+
+    #[test]
+    fn a_short_brgr_md_stays_one_entry_and_too_many_entries_say_why() {
+        assert_eq!(chunk_instructions("be brief\n").len(), 1);
+        assert!(chunk_instructions("").is_empty());
+        let mut role = vec!["x".to_owned(); 15];
+        let error = add_user_instructions(&mut role, chunk_instructions(&"y".repeat(5_000)))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("BRGR.md"), "{error}");
+    }
 }

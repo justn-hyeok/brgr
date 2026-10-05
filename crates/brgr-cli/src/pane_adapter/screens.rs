@@ -43,14 +43,27 @@ pub(super) enum Screen {
 /// Classifies a pane's visible text. Pure: it never reads or presses anything.
 pub(super) fn classify(screen: &str, workspace: &Path) -> Screen {
     if trust_workspace_matches(screen, workspace) {
-        let flat = squash(screen);
-        let selected_yes = ["❯", "›", ">"]
+        let options = menu_options(screen);
+        let yes = options
             .iter()
-            .any(|cursor| flat.contains(&format!("{cursor}Yes,Itrustthisfolder")));
-        let keys = if selected_yes {
-            vec!["enter"]
+            .position(|option| option.text.starts_with("Yes, I trust this folder"));
+        let keys = if let (Some(selected), Some(yes)) =
+            (options.iter().position(|option| option.selected), yes)
+        {
+            // A numbered menu: move to "Yes" from wherever the cursor is.
+            let mut keys = keys_between(selected, yes);
+            keys.push("enter");
+            keys
         } else {
-            vec!["down", "enter"]
+            let flat = squash(screen);
+            let selected_yes = ["❯", "›", ">"]
+                .iter()
+                .any(|cursor| flat.contains(&format!("{cursor}Yes,Itrustthisfolder")));
+            if selected_yes {
+                vec!["enter"]
+            } else {
+                vec!["down", "enter"]
+            }
         };
         return Screen::Resolve {
             rule: "workspace-trust",
@@ -67,7 +80,12 @@ pub(super) fn classify(screen: &str, workspace: &Path) -> Screen {
     }
     // The harness updated itself and wants a restart. The dialog carries an
     // `esc` affordance; Enter ("ok") is what quit OpenCode.
-    if lower.contains("update complete") && lower.contains("restart") {
+    if lower.contains("update complete")
+        && lower.contains("restart")
+        && screen
+            .lines()
+            .any(|line| matches!(line.trim().to_lowercase().as_str(), "ok" | "esc"))
+    {
         return Screen::Resolve {
             rule: "update-applied",
             keys: vec!["esc"],
@@ -124,7 +142,11 @@ fn accepting_option(lower: &str, options: &[MenuOption]) -> Option<(&'static str
         return position("yes, i accept").map(|at| ("bypass-warning", at));
     }
     if lower.contains("mcp server") {
-        return position("use this").map(|at| ("mcp-trust", at));
+        // The single-server choice first; "use this and all future" only if it
+        // is all there is.
+        return position("use this mcp server")
+            .or_else(|| position("use this"))
+            .map(|at| ("mcp-trust", at));
     }
     None
 }
@@ -154,9 +176,13 @@ fn codex_trust(screen: &str, workspace: &Path) -> Option<Screen> {
         return None;
     }
     let workspace = squash(&workspace.to_string_lossy());
-    let shown = flat
-        .split_once("Folderaccess")
-        .is_some_and(|(_, after)| after.starts_with(workspace.trim_end_matches('/')));
+    // The path must end where the prompt's own sentence begins, so a longer
+    // path ("/repo/task-evil", "/repo/task/sub") is not the task's workspace.
+    let shown = flat.split_once("Folderaccess").is_some_and(|(_, after)| {
+        after
+            .strip_prefix(workspace.trim_end_matches('/'))
+            .is_some_and(|rest| rest.trim_start_matches('/').starts_with("Trustthisfolder"))
+    });
     let options = menu_options(screen);
     let target = options
         .iter()
@@ -238,7 +264,12 @@ pub(super) struct ScreenWatch {
     kind: String,
     limit: Duration,
     since: Option<Instant>,
+    presses: Vec<(&'static str, u32)>,
 }
+
+/// How many times one rule may answer the same standing screen before the run
+/// fails: a screen a key does not clear would otherwise be pressed forever.
+const PRESS_BUDGET: u32 = 5;
 
 impl ScreenWatch {
     pub(super) fn new(kind: &str) -> Self {
@@ -250,14 +281,39 @@ impl ScreenWatch {
             kind: kind.to_owned(),
             limit,
             since: None,
+            presses: Vec::new(),
         }
+    }
+
+    /// Records a key press for `rule`. Fails when it keeps being needed.
+    pub(super) fn pressed(&mut self, rule: &'static str) -> Result<()> {
+        let count =
+            if let Some((_, count)) = self.presses.iter_mut().find(|(name, _)| *name == rule) {
+                *count += 1;
+                *count
+            } else {
+                self.presses.push((rule, 1));
+                1
+            };
+        if count > PRESS_BUDGET {
+            bail!(
+                "the {} agent kept showing a screen brgr answers ({rule}); {PRESS_BUDGET} presses did not clear it",
+                self.kind
+            );
+        }
+        Ok(())
     }
 
     /// Records a poll. Fails once an unknown screen has stood past the limit.
     pub(super) fn observe(&mut self, screen: &Screen) -> Result<()> {
         match screen {
             Screen::Unknown(text) => self.stuck(text),
-            Screen::Clear | Screen::Resolve { .. } => {
+            Screen::Clear => {
+                self.since = None;
+                self.presses.clear();
+                Ok(())
+            }
+            Screen::Resolve { .. } => {
                 self.since = None;
                 Ok(())
             }
@@ -271,6 +327,7 @@ impl ScreenWatch {
 
     pub(super) fn reset(&mut self) {
         self.since = None;
+        self.presses.clear();
     }
 
     fn stuck(&mut self, text: &str) -> Result<()> {
@@ -532,7 +589,84 @@ mod tests {
             classify(screen, work()),
             Screen::Resolve {
                 rule: "mcp-trust",
+                keys: vec!["down", "enter"],
+            }
+        );
+    }
+
+    #[test]
+    fn a_numbered_claude_trust_menu_is_answered_by_moving_to_yes() {
+        let screen = "Accessing workspace:\n\n/repo/task\n\nQuick safety check\n\n❯ 1. Yes, I trust this folder\n  2. No, exit\n";
+        assert_eq!(
+            classify(screen, work()),
+            Screen::Resolve {
+                rule: "workspace-trust",
                 keys: vec!["enter"],
+            }
+        );
+        let other = screen
+            .replace("❯ 1. Yes", "  1. Yes")
+            .replace("  2. No, exit", "❯ 2. No, exit");
+        assert_eq!(
+            classify(&other, work()),
+            Screen::Resolve {
+                rule: "workspace-trust",
+                keys: vec!["up", "enter"],
+            }
+        );
+    }
+
+    #[test]
+    fn the_codex_trust_prompt_for_a_longer_path_is_not_accepted() {
+        for longer in [
+            "/private/tmp/scratchpad/codex owner repo-evil",
+            "/private/tmp/scratchpad/codex owner repo/sub",
+        ] {
+            let screen =
+                CODEX_TRUST.replace("/private/tmp/scratchpad/cod\n  ex owner repo", longer);
+            assert!(
+                matches!(
+                    classify(
+                        &screen,
+                        Path::new("/private/tmp/scratchpad/codex owner repo")
+                    ),
+                    Screen::Unknown(_)
+                ),
+                "{longer}"
+            );
+        }
+    }
+
+    #[test]
+    fn agent_prose_about_an_update_is_not_the_applied_update_dialog() {
+        let prose = "The build finished. Update complete, please restart the dev server.\n";
+        assert_eq!(classify(prose, work()), Screen::Clear);
+    }
+
+    #[test]
+    fn a_screen_that_a_key_does_not_clear_fails_the_run_after_the_budget() {
+        let mut watch = ScreenWatch::new("claude");
+        for _ in 0..PRESS_BUDGET {
+            watch.pressed("continue-notice").unwrap();
+        }
+        let error = watch.pressed("continue-notice").unwrap_err().to_string();
+        assert!(
+            error.contains("continue-notice") && error.contains("did not clear"),
+            "{error}"
+        );
+        // A clear screen is progress: the count starts over.
+        watch.observe(&Screen::Clear).unwrap();
+        watch.pressed("continue-notice").unwrap();
+    }
+
+    #[test]
+    fn a_new_mcp_server_prompt_prefers_the_single_server_choice() {
+        let screen = "New MCP server found in .mcp.json: docs\n\n❯ 1. Use this and all future MCP servers in this project\n  2. Use this MCP server\n  3. Continue without using this MCP server\n";
+        assert_eq!(
+            classify(screen, work()),
+            Screen::Resolve {
+                rule: "mcp-trust",
+                keys: vec!["down", "enter"],
             }
         );
     }

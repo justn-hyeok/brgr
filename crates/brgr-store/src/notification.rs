@@ -68,6 +68,26 @@ impl Store {
             .is_some())
     }
 
+    /// The pane registered for this owner and session, if any.
+    ///
+    /// # Errors
+    ///
+    /// Returns a database error if the lookup fails.
+    pub fn owner_surface_pane(
+        &self,
+        owner_id: &OwnerId,
+        session_id: &str,
+    ) -> Result<Option<String>, StoreError> {
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT pane_id FROM owner_surfaces WHERE owner_id = ?1 AND session_id = ?2",
+                params![owner_id.as_str(), session_id],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
     /// Records the exact Codex pane currently bound to an owner.
     ///
     /// # Errors

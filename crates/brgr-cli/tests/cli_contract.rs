@@ -742,7 +742,7 @@ PY
     elif [ -s "$d/paste" ] && [ ! -e "$d/no-report" ]; then
       report=$(/usr/bin/grep -E '^/.*\.md$' "$d/paste" | /usr/bin/tail -1)
       test -z "$report" || printf '%s' PANE_REPORT_OK > "$report"
-      test -z "$report" || seal_report
+      test -z "$report" || [ -e "$d/no-seal" ] || seal_report
     fi
     echo idle > "$d/state"
     echo '{"result":{"type":"ok"}}';;
@@ -971,6 +971,22 @@ fn native_tui_bootstrap_starts_once_even_with_a_slow_shell() {
     let ran = fixture.run(&[]);
     assert_eq!(ran["outcome"], "candidate");
     assert_eq!(fixture.state("start-attempts").lines().count(), 1);
+}
+
+/// Herdr never classifies GJC or Command Code, so their status is `unknown` for
+/// the whole run. A report they wrote but never sealed is sealed once it has
+/// stopped changing, instead of the run waiting for its deadline.
+#[test]
+fn an_unclassified_agent_that_wrote_but_did_not_seal_its_report_is_sealed() {
+    let fixture = pane_fixture();
+    fs::create_dir_all(&fixture.state).unwrap();
+    for flag in ["unclassified", "no-seal"] {
+        fs::write(fixture.state.join(flag), "").unwrap();
+    }
+    let started = Instant::now();
+    let ran = fixture.run_with_env(&[], &[("BRGR_TEST_REPORT_GRACE_MS", "400")]);
+    assert_eq!(ran["outcome"], "candidate", "{ran}");
+    assert!(started.elapsed() < Duration::from_mins(1));
 }
 
 /// Herdr does not classify every harness (GJC, Command Code), so a native run

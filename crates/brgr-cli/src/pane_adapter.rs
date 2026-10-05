@@ -391,7 +391,7 @@ fn settle(
     loop {
         let status = herdr.status(name)?;
         match screens::resolve(herdr, pane, run, notices.paths, Some(&status))? {
-            Screen::Resolve { .. } => watch.reset(),
+            Screen::Resolve { rule, .. } => watch.pressed(rule)?,
             Screen::Unknown(text) => {
                 if !announced {
                     notices.tell(
@@ -480,11 +480,11 @@ fn drive(
             // `unknown` for their whole life, and their own output can look
             // like a menu.
             "blocked" => match screens::resolve(herdr, pane, run, notices.paths, Some(&status))? {
-                Screen::Resolve { .. } => {
+                Screen::Resolve { rule, .. } => {
                     notices.withdraw();
                     blocked = false;
                     set_phase(notices.paths, run, "working");
-                    watch.reset();
+                    watch.pressed(rule)?;
                     thread::sleep(POLL);
                     continue;
                 }
@@ -518,7 +518,12 @@ fn drive(
                 idle.settle(herdr, name, pane, run, report, notices)?;
                 watch.reset();
             }
-            _ => watch.reset(),
+            _ => {
+                if run.native_executable.is_some() {
+                    idle.seal_stable_report(report, notices.paths, run)?;
+                }
+                watch.reset();
+            }
         }
         thread::sleep(POLL);
     }
@@ -534,6 +539,8 @@ struct IdleReport {
     worked: bool,
     reminded: bool,
     idle_since: Option<Instant>,
+    /// The report's size and time, and since when it has not changed.
+    stable: Option<((u64, Option<std::time::SystemTime>), Instant)>,
 }
 
 impl IdleReport {
@@ -546,7 +553,34 @@ impl IdleReport {
             worked: false,
             reminded: false,
             idle_since: None,
+            stable: None,
         }
+    }
+
+    /// Herdr never classifies some harnesses (GJC, Command Code), so their
+    /// status is `unknown` and idleness cannot be read. A report file that has
+    /// not changed for the grace period is sealed for them; nothing is sent to
+    /// the agent, since it may still be working.
+    fn seal_stable_report(
+        &mut self,
+        report: &Path,
+        paths: &Paths,
+        run: &PaneRunArgs,
+    ) -> Result<()> {
+        let Ok(metadata) = fs::metadata(report) else {
+            self.stable = None;
+            return Ok(());
+        };
+        let mark = (metadata.len(), metadata.modified().ok());
+        match &self.stable {
+            Some((seen, since)) if *seen == mark => {
+                if since.elapsed() >= self.report_grace {
+                    return seal_native_report(paths, run.task, run.revision);
+                }
+            }
+            _ => self.stable = Some((mark, Instant::now())),
+        }
+        Ok(())
     }
 
     fn worked(&mut self) {
@@ -643,8 +677,9 @@ fn menu_on_screen(herdr: &Herdr, pane: &str) -> bool {
 }
 
 fn numbered_option(rest: &str) -> bool {
-    let rest = rest.trim_start_matches(|c: char| c.is_ascii_digit());
-    rest.starts_with('.') || rest.starts_with(')')
+    let digits = rest.chars().take_while(char::is_ascii_digit).count();
+    // `> ./run.sh` and `❯ ...` are prompts, not menu rows: a digit is required.
+    digits > 0 && (rest[digits..].starts_with('.') || rest[digits..].starts_with(')'))
 }
 
 /// Native input notices this run sent its owner about the pane. Each is withdrawn
@@ -937,6 +972,16 @@ impl Herdr {
 mod lifecycle_tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt as _;
+
+    #[test]
+    fn a_shell_prompt_is_not_a_numbered_menu_row() {
+        for prompt in ["./run.sh", "...", ".gitignore", ") closing"] {
+            assert!(!numbered_option(prompt), "{prompt}");
+        }
+        for row in ["1. Yes", "2) No", "10. Skip"] {
+            assert!(numbered_option(row), "{row}");
+        }
+    }
 
     #[test]
     fn an_empty_successful_herdr_acknowledgement_is_a_valid_transport_reply() {

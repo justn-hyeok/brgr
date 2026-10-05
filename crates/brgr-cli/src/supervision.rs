@@ -154,6 +154,27 @@ fn record_recovered(paths: &Paths, results: &[ResultEnvelope]) {
     }
 }
 
+fn recover_one(
+    paths: &Paths,
+    supervisor: &mut Supervisor,
+    attempt: &UnfinishedAttempt,
+) -> Result<()> {
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(
+            paths
+                .runs
+                .join(format!("{}.recover.lock", attempt.task.task_id)),
+        )?;
+    if lock.try_lock().is_ok() && !crate::pane_adapter::stop_external(paths, attempt)? {
+        crate::pane_adapter::collect_recovered(paths, attempt, supervisor)?;
+    }
+    Ok(())
+}
+
 pub(crate) fn reconcile_pending(paths: &Paths) -> Result<()> {
     let mut supervisor = Supervisor::open(&paths.store)?;
     for attempt in supervisor.store().unfinished_attempts()? {
@@ -161,18 +182,13 @@ pub(crate) fn reconcile_pending(paths: &Paths) -> Result<()> {
             observe_attempt(paths, &attempt),
             ExecutionObservation::SupervisorAlive(_)
         ) {
-            let lock = OpenOptions::new()
-                .read(true)
-                .write(true)
-                .create(true)
-                .truncate(false)
-                .open(
-                    paths
-                        .runs
-                        .join(format!("{}.recover.lock", attempt.task.task_id)),
-                )?;
-            if lock.try_lock().is_ok() && !crate::pane_adapter::stop_external(paths, &attempt)? {
-                crate::pane_adapter::collect_recovered(paths, &attempt, &mut supervisor)?;
+            // One attempt with a bad receipt or a changed report must not stop
+            // the others, or every hook would report an unreadable inbox.
+            if let Err(error) = recover_one(paths, &mut supervisor, &attempt) {
+                eprintln!(
+                    "brgr recovery of {} is pending: {error}",
+                    attempt.task.task_id
+                );
             }
         }
     }

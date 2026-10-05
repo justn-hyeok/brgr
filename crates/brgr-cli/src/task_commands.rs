@@ -105,7 +105,11 @@ pub(crate) fn result(paths: &Paths, task: TaskId, ack: bool, json_output: bool) 
         } else if let Err(error) = pane_cleanup::close_if_eligible(&store, &paths.runs, task) {
             eprintln!("brgr pane cleanup remains pending: {error}");
         }
-        crate::pane_adapter::cleanup_settled(paths, task, spec.revision)?;
+        // The acknowledgement is already durable: a cleanup problem is reported,
+        // not returned, or the caller would retry a decision that was recorded.
+        if let Err(error) = crate::pane_adapter::cleanup_settled(paths, task, spec.revision) {
+            eprintln!("brgr cleanup pending: {error}");
+        }
     }
     print_value(
         &json!({"result": result, "artifacts": artifacts, "route_observation": route_observation}),
@@ -310,7 +314,9 @@ pub(crate) fn decide(
         reason,
     };
     store.record_decision_and_ack(&decision)?;
-    crate::pane_adapter::cleanup_settled(paths, task, spec.revision)?;
+    if let Err(error) = crate::pane_adapter::cleanup_settled(paths, task, spec.revision) {
+        eprintln!("brgr cleanup pending: {error}");
+    }
     let persisted = store
         .decision_for_result(result.result_id)?
         .context("decision was not readable after commit")?;

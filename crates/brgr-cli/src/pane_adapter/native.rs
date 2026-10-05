@@ -100,6 +100,7 @@ pub(crate) fn serve_session(paths: &Paths, task: TaskId) -> Result<()> {
         return Ok(());
     }
     let started = Instant::now();
+    let mut ticks = 0_u64;
     loop {
         if !paths.store.join("brgr.sqlite3").is_file() {
             return Ok(());
@@ -117,7 +118,11 @@ pub(crate) fn serve_session(paths: &Paths, task: TaskId) -> Result<()> {
         if receipt.cleanup == "closed" {
             return Ok(());
         }
-        if let Err(error) = crate::supervision::reconcile_pending(paths) {
+        // Recovery scans every retained receipt, so it is not run every second.
+        ticks += 1;
+        if ticks % 5 == 1
+            && let Err(error) = crate::supervision::reconcile_pending(paths)
+        {
             eprintln!("brgr session recovery pending: {error}");
         }
         if !matches!(
@@ -605,8 +610,8 @@ pub(super) fn start_native(
         }
         let status = herdr.status(pane).ok();
         match screens::resolve(herdr, pane, run, paths, status.as_deref())? {
-            Screen::Resolve { .. } => {
-                watch.reset();
+            Screen::Resolve { rule, .. } => {
+                watch.pressed(rule)?;
                 thread::sleep(POLL);
                 continue;
             }

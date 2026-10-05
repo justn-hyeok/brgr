@@ -113,6 +113,11 @@ pub(crate) fn wait_for_session(session: &str, limit: std::time::Duration) -> Opt
 const TRACE_PREFIX: usize = 13;
 
 fn traced(session: &str) -> Option<String> {
+    // A hook runs on every prompt under a tight time budget, and the call that
+    // would show the session cannot be on a screen yet at session start.
+    if crate::invocation::is_hook() {
+        return None;
+    }
     let prefix: String = session.chars().take(TRACE_PREFIX).collect();
     if prefix.chars().count() < TRACE_PREFIX {
         return None;

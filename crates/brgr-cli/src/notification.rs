@@ -419,6 +419,16 @@ async fn register_for_task(paths: &Paths, store: &Store, task: TaskId) -> bool {
     let Ok(Some((session, _))) = store.owner_binding(&spec.owner_id) else {
         return false;
     };
+    // Already proven and recorded (a Claude Code owner's shell does it at
+    // admission): rescanning every Codex pane would only repeat it.
+    if store
+        .owner_surface_pane(&spec.owner_id, &session)
+        .ok()
+        .flatten()
+        .is_some()
+    {
+        return true;
+    }
     register_current_surface(paths, store, &spec.owner_id, &session)
         .await
         .unwrap_or(false)

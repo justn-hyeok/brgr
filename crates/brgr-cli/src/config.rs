@@ -26,8 +26,13 @@ pub enum WorkerPlacement {
 pub struct Config {
     pub herdr: HerdrConfig,
     pub worker: WorkerConfig,
+    // The tables below did not exist in earlier releases, which refuse unknown
+    // keys and share this file. They are written only once they hold something.
+    #[serde(skip_serializing_if = "IssuesConfig::is_default")]
     pub issues: IssuesConfig,
+    #[serde(skip_serializing_if = "CallingOptions::is_unset")]
     pub defaults: CallingOptions,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub harnesses: BTreeMap<String, CallingOptions>,
 }
 
@@ -65,6 +70,12 @@ pub struct IssuesConfig {
     pub min_count: u64,
 }
 
+impl IssuesConfig {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
 impl Default for IssuesConfig {
     fn default() -> Self {
         Self {
@@ -95,6 +106,12 @@ pub fn validate_codex_executable(path: &Path) -> Result<()> {
         bail!("configured Codex executable is not an executable file");
     }
     Ok(())
+}
+
+impl CallingOptions {
+    fn is_unset(&self) -> bool {
+        *self == Self::default()
+    }
 }
 
 impl Config {
@@ -392,5 +409,24 @@ mod tests {
         let linked = root.path().join("linked.toml");
         std::os::unix::fs::symlink(&path, &linked).unwrap();
         assert!(Config::load(&linked).is_err());
+    }
+}
+
+#[cfg(test)]
+mod serialize_tests {
+    use super::*;
+
+    /// Earlier releases refuse unknown tables and share this file, so saving an
+    /// unrelated setting must not add the tables they do not know.
+    #[test]
+    fn a_default_config_writes_no_table_an_older_release_would_refuse() {
+        let text = toml::to_string_pretty(&Config::default()).unwrap();
+        for table in ["[issues]", "[defaults]", "[harnesses"] {
+            assert!(!text.contains(table), "{table} written:\n{text}");
+        }
+        let mut config = Config::default();
+        config.issues.auto_file = true;
+        let text = toml::to_string_pretty(&config).unwrap();
+        assert!(text.contains("[issues]"), "{text}");
     }
 }
