@@ -315,6 +315,58 @@ fn a_pane_that_vanished_after_the_decision_still_reclaims_the_worktree() {
     );
 }
 
+/// A worktree kept for its contents is assessed once. Every hook runs the
+/// pending-work pass, which calls cleanup again for each closed pane; it must
+/// not reassess, so removing the blocking file afterwards changes nothing.
+#[test]
+fn a_kept_worktree_is_not_reassessed_by_later_cleanups() {
+    let mut fixture = Fixture::in_worktree();
+    let workspace = PathBuf::from(
+        Store::open(&fixture.paths.store)
+            .unwrap()
+            .task(fixture.task)
+            .unwrap()
+            .workspace,
+    );
+    fixture.report = workspace.join(format!(".brgr/tasks/{}-r1/report.md", fixture.task));
+    fs::create_dir_all(fixture.report.parent().unwrap()).unwrap();
+    fs::write(&fixture.report, "COMPLETE").unwrap();
+    update_receipt(&fixture.receipt, |receipt| {
+        receipt.report = Some(fixture.report.clone());
+        receipt.report_digest = Some(report_digest(b"COMPLETE"));
+    })
+    .unwrap();
+    let mut supervisor = brgr_core::Supervisor::open(&fixture.paths.store).unwrap();
+    assert!(collect_recovered(&fixture.paths, &fixture.unfinished(), &mut supervisor).unwrap());
+    let result = supervisor.store().latest_result(fixture.task).unwrap();
+    let owner = supervisor.store().task(fixture.task).unwrap().owner_id;
+    let decision: brgr_protocol::Decision = serde_json::from_value(serde_json::json!({
+        "schema":"brgr/v1", "decision_id":brgr_protocol::DecisionId::new(),
+        "owner_id":owner, "task_id":fixture.task, "revision":1,
+        "result_id":result.result_id, "result_digest":Store::result_digest(&result).unwrap(),
+        "session_id":"recovery", "binding_epoch":1, "verdict":"accepted", "reason":"COMPLETE verified"
+    }))
+    .unwrap();
+    supervisor
+        .store()
+        .record_decision_and_ack(&decision)
+        .unwrap();
+    let output = workspace.join("NOTES.md");
+    fs::write(&output, "written by the worker\n").unwrap();
+    fs::write(fixture.temp.path().join("pane-gone"), "").unwrap();
+    cleanup_settled(&fixture.paths, fixture.task, 1).unwrap();
+    assert!(
+        workspace.is_dir(),
+        "a worktree with the worker's file was removed"
+    );
+    fs::remove_file(&output).unwrap();
+    cleanup_settled(&fixture.paths, fixture.task, 1).unwrap();
+    assert!(
+        workspace.is_dir(),
+        "a later cleanup reassessed a worktree already kept"
+    );
+}
+
 #[test]
 fn recovered_session_keeps_its_original_deadline() {
     let fixture = Fixture::new();

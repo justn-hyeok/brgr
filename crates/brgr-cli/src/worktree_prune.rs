@@ -1170,6 +1170,13 @@ pub(crate) fn reclaim_task(paths: &Paths, task: TaskId, revision: u32) -> Option
     if !worktree.is_dir() {
         return None;
     }
+    // Decided once: a worktree kept for its contents is `brgr prune`'s from
+    // here on. Without this, every hook's pending-work pass reassessed it and
+    // printed the same note again.
+    let assessed = paths.runs.join(format!("{task}-r{revision}.reclaimed"));
+    if assessed.exists() {
+        return None;
+    }
     let current_dir = std::env::current_dir()
         .ok()
         .and_then(|path| canonical(&path));
@@ -1189,6 +1196,7 @@ pub(crate) fn reclaim_task(paths: &Paths, task: TaskId, revision: u32) -> Option
             .exists()
             .then(|| format!("kept worktree {shown}: {reason}"))
     };
+    let _ = fs::write(&assessed, b"");
     match (assessment.blocked, assessment.primary) {
         (Some(reason), _) => kept(reason),
         (None, Some(primary)) => match remove(&worktree, &slug, &primary, assessment.force) {
