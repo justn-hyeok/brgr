@@ -1,7 +1,12 @@
 # Readiness status
 
-Moved from the top of the README on 2026-10-05, unchanged. The
-[v1 readiness checklist](v1-readiness-checklist-2026-09-14.md) holds the full record.
+**v2 is experimental. The first stable release will be v3**, once the two open
+gates below close: multi-process concurrency (2-4) and a full non-author
+review (2-5). Until then the public verdict stays NO-GO.
+
+The rest of this page moved from the top of the README on 2026-10-05,
+unchanged. The [v1 readiness checklist](v1-readiness-checklist-2026-09-14.md)
+holds the full record.
 
 v2 packages brgr as a Herdr 0.9+ plugin for Apple Silicon macOS 15 or newer.
 Herdr hosts a read-only task board and a Codex pane; brgr still owns task

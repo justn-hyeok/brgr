@@ -108,10 +108,10 @@ brgr accept TASK --reason "criteria verified"
 
 ## Status
 
-**Beta: one author, macOS only.** It is used daily by its author; see the
-[changelog](CHANGELOG.md). Two checks the author requires before calling it
-ready for others are still open: concurrency across several processes at once,
-and a full review of the code by someone else. See
+**Experimental.** v2 is used daily by its author, on macOS only, and changes
+quickly; see the [changelog](CHANGELOG.md). The first stable release will be
+**v3**. It waits on two checks: concurrency across several processes at once,
+and a full review of the code by someone other than the author. See
 [the readiness status](docs/readiness/status.md).
 
 The detailed contract, covering plugin internals, routes, pane mode, recursive
