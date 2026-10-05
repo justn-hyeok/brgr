@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.12.14 — 2026-10-06
+
+Hotfix: every decision ran `git worktree list` in every repository brgr had
+ever recorded, to reclaim one worktree. It now reads only that worktree's own
+repository.
+
 ## 2.12.13 — 2026-10-06
 
 Hotfix: the note a decision prints when it keeps a worktree told the owner to

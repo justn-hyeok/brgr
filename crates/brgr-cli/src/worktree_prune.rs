@@ -1200,7 +1200,12 @@ pub(crate) fn reclaim_task(paths: &Paths, task: TaskId, revision: u32) -> Option
         worker_alive: &|task| crate::supervision::worker_may_be_running(paths, task),
     };
     let slug = file_name(&worktree);
-    let mut known = Repositories::load(&store);
+    // Only this worktree's repository is needed, and `locate` reads it from
+    // the worktree itself; loading every repository brgr has ever recorded
+    // cost one `git worktree list` each on every decision.
+    let mut known = Repositories {
+        inventories: Vec::new(),
+    };
     let assessment = assess(&worktree, &slug, &sweep, &mut known);
     let shown = worktree.display();
     // A worktree that is gone was removed by someone else: nothing was kept.
