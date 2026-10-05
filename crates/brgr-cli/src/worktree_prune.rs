@@ -1204,10 +1204,16 @@ pub(crate) fn reclaim_task(paths: &Paths, task: TaskId, revision: u32) -> Option
     let assessment = assess(&worktree, &slug, &sweep, &mut known);
     let shown = worktree.display();
     // A worktree that is gone was removed by someone else: nothing was kept.
+    // The reason is written for `brgr prune`; a decision takes none of its
+    // flags, so its advice names the command that does.
     let kept = |reason: String| {
-        worktree
-            .exists()
-            .then(|| format!("kept worktree {shown}: {reason}"))
+        worktree.exists().then(|| {
+            let reason = reason.replace(
+                "pass --include-ignored to remove them",
+                "`brgr prune --apply --include-ignored` removes them",
+            );
+            format!("kept worktree {shown}: {reason}; `brgr prune` lists it")
+        })
     };
     let _ = fs::write(&assessed, b"");
     match (assessment.blocked, assessment.primary) {
