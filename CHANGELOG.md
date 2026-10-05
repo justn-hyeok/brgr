@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.10.3 — 2026-10-05
+
+The re-certify command that `brgr harness status` prints works as printed for a
+harness whose executable is a script, such as Command Code's `dist/index.mjs`:
+when the file name names no recipe, `harness add` and `harness draft` use the
+name of the harness already registered for the same executable.
+
 ## 2.10.2 — 2026-10-05
 
 The brgr skill is rewritten around the rules brgr runs by: workers open as
