@@ -887,6 +887,24 @@ fn a_new_claude_command_written_by_the_worker_keeps_the_worktree() {
     );
 }
 
+/// With `dist/` itself ignored, git reports only `dist/` and never the `.env`
+/// inside it, so `dist/` must not count as regenerable.
+#[test]
+fn a_dotenv_in_an_ignored_dist_directory_keeps_the_worktree() {
+    let fixture = Fixture::new();
+    let exclude = fixture.repository.join(".git/info/exclude");
+    fs::write(&exclude, b"dist/\n").unwrap();
+    let task = fixture.run_with("clean", &[]);
+    let dist = fixture.worktree(&task).join("dist");
+    fs::create_dir_all(&dist).unwrap();
+    fs::write(dist.join(".env"), b"TOKEN=secret\n").unwrap();
+    fixture.accept(&task);
+    assert!(
+        dist.join(".env").is_file(),
+        "a secret inside an ignored dist/ was deleted with the worktree"
+    );
+}
+
 #[test]
 fn installed_dependencies_do_not_keep_the_worktree_but_a_dotenv_does() {
     let fixture = Fixture::new();

@@ -662,23 +662,25 @@ fn harness_cache(status_line: &str) -> bool {
         .is_some_and(|path| CACHES.iter().any(|cache| path.starts_with(cache)))
 }
 
-/// An ignored directory a build or a package manager recreates: an entry git
-/// reported as a directory whose own name is a well-known output or dependency
-/// directory. A file is never regenerable, wherever it sits.
+/// An ignored directory a tool owns and recreates in full: an entry git
+/// reported as a directory whose own name is a package manager's, compiler's or
+/// test runner's. A file is never regenerable, wherever it sits.
+///
+/// When the directory itself matches an ignore pattern, git reports only the
+/// directory and never what is inside, so a file put there by hand would go
+/// with it. Generic names such as `dist`, `build` or `out` are therefore not
+/// here: people keep their own files under those.
 fn regenerable(path: &str) -> bool {
-    const REGENERABLE: [&str; 12] = [
+    const REGENERABLE: [&str; 9] = [
         "node_modules",
         "target",
         ".next",
         ".turbo",
-        "dist",
-        "build",
         "__pycache__",
         ".pytest_cache",
         ".mypy_cache",
         ".venv",
         ".gradle",
-        "coverage",
     ];
     path.strip_suffix('/')
         .map(|directory| directory.rsplit('/').next().unwrap_or(directory))
@@ -1297,6 +1299,10 @@ mod tests {
         assert!(regenerable("node_modules/"));
         assert!(regenerable("packages/web/.next/"));
         assert!(regenerable("target/"));
+        // Generic output names may hold files someone put there.
+        assert!(!regenerable("dist/"));
+        assert!(!regenerable("build/"));
+        assert!(!regenerable("coverage/"));
         assert!(!regenerable(".env"));
         assert!(!regenerable("secrets/credentials.json"));
         assert!(!regenerable("node_modules_backup.tar"));

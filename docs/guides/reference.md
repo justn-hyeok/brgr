@@ -279,12 +279,13 @@ git is not the only check. Its clean test does not look at ignored files, so
 `git worktree remove` would silently delete an ignored `.env`, a downloaded
 credential, or a build cache — the things a task worktree is most likely to
 hold. Those worktrees are kept and their ignored paths listed; pass
-`--include-ignored` to remove them anyway. An ignored directory a build or
-package manager recreates (`node_modules`, `target`, `.next`, `.turbo`, `dist`,
-`build`, `__pycache__`, `.pytest_cache`, `.mypy_cache`, `.venv`, `.gradle`,
-`coverage`) does not keep a worktree when git reports the directory itself as
-ignored. An ignored file inside one, such as `dist/.env` caught by a `.env`
-pattern, still does. A symlink, a directory git has not
+`--include-ignored` to remove them anyway. An ignored directory a tool owns
+and recreates in full (`node_modules`, `target`, `.next`, `.turbo`,
+`__pycache__`, `.pytest_cache`, `.mypy_cache`, `.venv`, `.gradle`) does not keep
+a worktree when git reports the directory itself as ignored. Generic output
+directories such as `dist` or `build` do: when the directory matches an ignore
+pattern git never lists what is inside, and a file put there by hand would go
+with it. A symlink, a directory git has not
 registered as a worktree, one git has locked, a name the layout could not have
 produced, and the directory prune is running in are all refused.
 

@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.12.7 — 2026-10-06
+
+Hotfix: worktree reclamation could still delete a secret. When `dist/` itself
+matches an ignore pattern, git reports only `dist/` and never the `dist/.env`
+inside it, so v2.12.1's fix did not apply. Generic output directories (`dist`,
+`build`, `coverage`) no longer count as regenerable; only directories a tool
+owns in full (`node_modules`, `target`, `.next`, `.venv` and the like) do.
+
 ## 2.12.6 — 2026-10-06
 
 Hotfix: `brgr revise TASK` without `--workspace` failed for every Git task. It
