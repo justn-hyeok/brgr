@@ -1152,8 +1152,19 @@ pub(crate) fn reclaim_task(paths: &Paths, task: TaskId, revision: u32) -> Option
     if paths.pane_receipt(task, revision).exists() && !pane_closed(paths, task, revision) {
         return None;
     }
-    if crate::supervision::worker_may_be_running(paths, task) {
+    // Only a settled revision is assessed, so the once-only marker below can
+    // never record an assessment made before the decision.
+    if unsettled(&store, task, revision, None).is_some() {
         return None;
+    }
+    // A decision can land while a headless supervisor is still exiting after
+    // sealing the result; nothing would retry once it has gone, so wait a moment.
+    let exited_by = std::time::Instant::now() + WORKER_EXIT_WAIT;
+    while crate::supervision::worker_may_be_running(paths, task) {
+        if std::time::Instant::now() >= exited_by {
+            return None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
     }
     // The decision and the pane's session loop both reclaim once the pane
     // closes. One attempt at a time: the other process is already on it.
@@ -1212,6 +1223,10 @@ pub(crate) fn reclaim_task(paths: &Paths, task: TaskId, revision: u32) -> Option
         (None, None) => None,
     }
 }
+
+/// How long a decision waits for a worker that is exiting after sealing its
+/// result.
+const WORKER_EXIT_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Runs [`reclaim_task`] and notes the outcome on stderr.
 pub(crate) fn reclaim_and_report(paths: &Paths, task: TaskId, revision: u32) {

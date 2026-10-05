@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.12.11 — 2026-10-06
+
+Hotfix: a headless decision that arrived while the supervisor was still
+exiting after sealing its result skipped reclaiming the worktree, and nothing
+retried it. The decision now waits up to five seconds for the worker to exit.
+Reclamation also checks that the revision is settled before assessing, so the
+once-only marker can never record an assessment made before the decision.
+
 ## 2.12.10 — 2026-10-06
 
 Hotfix: a worktree a decision kept was reassessed, and its "kept worktree" note
