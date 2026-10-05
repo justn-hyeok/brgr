@@ -1482,6 +1482,64 @@ fn pane_mode_failure_closes_the_pane_and_names_the_cause() {
 
 /// A wide caller gets its worker beside it; a narrow one gets it below, so
 /// repeated workers do not squeeze the caller down to nothing.
+/// Any brgr command evens out a caller's workers that a manual close or a
+/// terminal resize left uneven, and leaves panes brgr did not open alone.
+#[test]
+fn any_command_evens_out_an_uneven_worker_column() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("brgr");
+    let runs = home.join("runs");
+    fs::create_dir_all(&runs).unwrap();
+    let calls = temp.path().join("calls.log");
+    let herdr = temp.path().join("herdr");
+    fs::write(
+        &herdr,
+        format!(
+            r#"#!/bin/sh
+echo "$*" >> '{calls}'
+case "$1 $2" in
+  'pane layout') echo '{{"result":{{"layout":{{"panes":[
+    {{"pane_id":"w9:p1","rect":{{"x":0,"y":0,"width":104,"height":66}}}},
+    {{"pane_id":"w9:p2","rect":{{"x":104,"y":0,"width":104,"height":50}}}},
+    {{"pane_id":"w9:p3","rect":{{"x":104,"y":50,"width":104,"height":16}}}},
+    {{"pane_id":"w9:p9","rect":{{"x":0,"y":66,"width":208,"height":7}}}}],
+   "splits":[
+    {{"direction":"right","ratio":0.5,"rect":{{"x":0,"y":0,"width":208,"height":66}}}},
+    {{"direction":"down","ratio":0.76,"rect":{{"x":104,"y":0,"width":104,"height":66}}}}]}}}}}}';;
+  *) echo '{{}}';;
+esac
+"#,
+            calls = calls.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&herdr, fs::Permissions::from_mode(0o700)).unwrap();
+    for (index, pane) in ["w9:p2", "w9:p3"].into_iter().enumerate() {
+        fs::write(
+            runs.join(format!(
+                "00000000-0000-4000-8000-00000000000{index}-r1.pane.json"
+            )),
+            serde_json::to_vec(&json!({
+                "pane": pane,
+                "binary": herdr,
+                "session": null,
+                "cleanup": "pending",
+                "caller": "w9:p1",
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    }
+
+    json_output(&run(&home, &["status"], &[]));
+    let log = fs::read_to_string(&calls).unwrap();
+    assert!(
+        log.contains("pane resize --pane w9:p3 --direction up --amount 0.2600"),
+        "{log}"
+    );
+    assert!(!log.contains("w9:p9 --direction"), "{log}");
+}
+
 #[test]
 fn a_narrow_caller_gets_its_worker_below_and_a_wide_one_beside() {
     for (width, direction) in [("200", "--direction right"), ("60", "--direction down")] {
