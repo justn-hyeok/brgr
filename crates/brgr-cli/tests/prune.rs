@@ -760,6 +760,32 @@ fn revise_ignores_a_kept_previous_worktree() {
     assert_eq!(revised["outcome"], "candidate", "{revised}");
 }
 
+/// A headless decision can arrive while the supervisor is still exiting after
+/// sealing. Nothing retries a headless reclaim later, so the decision waits a
+/// moment for it rather than skipping.
+#[test]
+fn a_decision_waits_for_a_worker_that_is_still_exiting() {
+    let fixture = Fixture::new();
+    let task = fixture.run_with("clean", &[]);
+    // Started through a shell that exits at once, so the system reaps it and
+    // it does not linger as this test's zombie.
+    let launched = Command::new("/bin/sh")
+        .args(["-c", "/bin/sleep 2 >/dev/null 2>&1 & echo $!"])
+        .output()
+        .unwrap();
+    let pid = String::from_utf8(launched.stdout).unwrap();
+    fs::write(
+        fixture.home.join("runs").join(format!("{task}.pid")),
+        pid.trim(),
+    )
+    .unwrap();
+    fixture.accept(&task);
+    assert!(
+        !fixture.worktree(&task).exists(),
+        "the decision skipped reclaiming while the worker exited"
+    );
+}
+
 #[test]
 fn keep_worktree_keeps_it_after_the_decision() {
     let fixture = Fixture::new();
