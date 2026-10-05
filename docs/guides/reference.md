@@ -264,8 +264,9 @@ lost result warns that its worker may outlive its supervisor, and while that
 process runs the worktree is kept. The checkout is removed with `git worktree
 remove`, so uncommitted work is kept and reported with git's own reason. It is
 forced only when brgr has shown every change is disposable: each one is an
-untracked harness cache (`.gjc/`, `.commandcode/`, `.claude/`, `.opencode/`,
-`.cursor/`, `.cline/`, `.devin/`, `.omp/`), or the task sealed a diff with
+untracked harness cache (`.gjc/` or `.commandcode/`, which hold only session
+state; `.claude/` or `.cursor/` also hold project configuration a task may
+write, so they are not caches), or the task sealed a diff with
 `--capture-diff` and the worktree's patch is byte-for-byte that diff. Its `brgr/task-*` branch goes only when every commit on it also lives
 elsewhere: in `HEAD`, or on another branch or remote-tracking branch. A task
 started from a feature branch carries that branch's commits, and those are
