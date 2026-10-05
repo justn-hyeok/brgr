@@ -261,6 +261,24 @@ impl Registry {
             .map(|(manifest, _)| manifest)
     }
 
+    /// Drafts the recipe again for an activated harness, looked up by its
+    /// registered name. Its executable path can name a wrapper's script, such
+    /// as `command-code/dist/index.mjs`, whose file name matches no recipe.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if probing fails or the help no longer documents the
+    /// recipe's flags.
+    pub async fn redraft(
+        &self,
+        manifest: &HarnessManifest,
+    ) -> Result<HarnessManifest, RegistryError> {
+        let name = name_from_id(&manifest.id, &manifest.adapter)?;
+        draft_manifest_as(&manifest.executable, name)
+            .await
+            .map(|(manifest, _)| manifest)
+    }
+
     /// Performs the deterministic process/v1 contract check without invoking
     /// the target model. Activation still requires a caller-authorized scratch
     /// run through [`Self::activate_with_scratch`].

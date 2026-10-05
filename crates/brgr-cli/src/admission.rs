@@ -294,10 +294,19 @@ pub(crate) async fn load_harness(
             .unwrap_or_else(|_| recertify_action_fallback()),
     )?;
     let (mut activated, activation) = registry.load_healthy_with_receipt(harness)?;
+    // A generated recipe picks up the current interactive launch. If the
+    // installed CLI's help has drifted so that no recipe can be drafted now, the
+    // certified activation still runs instead of the task failing at admission.
     if !crate::invocation::current().headless && activation.registration_mode == "generated" {
-        let current = registry.draft(&activated.executable).await?;
-        if current.id == activated.id {
-            activated.launch.interactive = current.launch.interactive;
+        match registry.redraft(&activated).await {
+            Ok(current) if current.id == activated.id => {
+                activated.launch.interactive = current.launch.interactive;
+            }
+            Ok(_) => {}
+            Err(error) => eprintln!(
+                "brgr: {} could not be re-drafted ({error}); running its certified recipe",
+                activated.id
+            ),
         }
     }
     Ok((activated, activation))
