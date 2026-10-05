@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.10.4 — 2026-10-05
+
+A native worker takes its harness's allowlisted variables, such as
+`COMMAND_CODE_API_KEY`, from its own pane shell, and drops any the pane does not
+set. Before, it got the calling session's copy, so a session started before a
+key was replaced handed the worker the stale key, and Command Code failed with
+"Insufficient credits" despite a fresh login. Headless runs are unchanged.
+
 ## 2.10.3 — 2026-10-05
 
 The re-certify command that `brgr harness status` prints works as printed for a
