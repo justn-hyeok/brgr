@@ -42,7 +42,7 @@ so moving a file breaks a test rather than a reader.
 
 ## Releases
 
-Newest first. [v2.9.3](releases/v2.9.3.md) · [v2.9.2](releases/v2.9.2.md) · [v2.9.1](releases/v2.9.1.md) · [v2.9.0](releases/v2.9.0.md) · [v2.8.0](releases/v2.8.0.md) · [v2.7.1](releases/v2.7.1.md) · [v2.7.0](releases/v2.7.0.md) · [v2.6.1](releases/v2.6.1.md) · [v2.6.0](releases/v2.6.0.md) · [v2.5.0](releases/v2.5.0.md) · [v2.4.0](releases/v2.4.0.md) · [v2.3.1](releases/v2.3.1.md) ·
+Newest first. [v2.10.0](releases/v2.10.0.md) · [v2.9.3](releases/v2.9.3.md) · [v2.9.2](releases/v2.9.2.md) · [v2.9.1](releases/v2.9.1.md) · [v2.9.0](releases/v2.9.0.md) · [v2.8.0](releases/v2.8.0.md) · [v2.7.1](releases/v2.7.1.md) · [v2.7.0](releases/v2.7.0.md) · [v2.6.1](releases/v2.6.1.md) · [v2.6.0](releases/v2.6.0.md) · [v2.5.0](releases/v2.5.0.md) · [v2.4.0](releases/v2.4.0.md) · [v2.3.1](releases/v2.3.1.md) ·
 [v2.3.0](releases/v2.3.0.md) · [v2.2.2](releases/v2.2.2.md) ·
 [v2.2.1](releases/v2.2.1.md) · [v2.2.0](releases/v2.2.0.md) ·
 [v2.1.0](releases/v2.1.0.md) · [v2.0.2](releases/v2.0.2.md) ·

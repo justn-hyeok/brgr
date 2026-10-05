@@ -1,5 +1,23 @@
 # Changelog
 
+## 2.10.0 — 2026-10-05
+
+Workers run unattended. Each runs as its harness's native TUI in a Herdr pane
+with the full-permission option, and nothing lowers it: `--permission` and the
+`permission` config key are ignored with a note, and the permission cap
+commands are removed. A rule table answers the screens that would stop a
+worker — workspace trust for Claude Code and Codex, continue notices, Claude
+Code's bypass warning and MCP prompt — skips update offers, and fails a run
+whose screen no rule covers after three minutes, with its text. Owner and worker
+messages are delivered in both directions, Claude Code sessions are owners too,
+and a failed or lost run reaches its owner as a `brgr_failure` notice and as a
+stderr note on every brgr command until acknowledged. Failures are folded into
+`brgr_error_issue_memo.md`, with optional, redacted GitHub issue filing. With
+several Codex panes, a call is placed by the one Codex pane whose screen shows
+`Ran brgr --as <session>`, instead of Herdr's per-pane session record, which a
+shared Codex daemon makes wrong. `brgr wait` returns early with
+`state: awaiting_input` while a worker question is unanswered.
+
 ## 2.9.3 — 2026-09-30
 
 brgr now trusts `HERDR_PANE_ID` only when it provably runs inside that pane: its
