@@ -4,7 +4,11 @@
 
 The release workflow's smoke test now runs headless: since 2.10.0 the default
 is a native TUI in a Herdr pane, which a CI machine does not have, so the 2.10.0
-release stopped before publishing binaries. brgr itself is unchanged.
+release stopped before publishing binaries.
+
+A native worker whose agent Herdr recognizes but did not start, seen with GJC,
+lost its task because Herdr refused to prompt it as "not an active named
+agent". brgr now types the prompt into the pane when Herdr refuses that way.
 
 ## 2.10.0 — 2026-10-05
 

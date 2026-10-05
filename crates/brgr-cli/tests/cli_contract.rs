@@ -775,6 +775,10 @@ PY
     echo idle > "$d/state"
     echo '{"result":{"agent":{"agent":"claude","agent_status":"idle","pane_id":"w9:p2"}}}';;
   'agent prompt')
+    if [ -e "$d/prompt-refused" ]; then
+      echo '{"error":{"code":"agent_not_ready","message":"agent w9:p2 is not an active named agent"}}' >&2
+      exit 1
+    fi
     if printf '%s' "$4" | /usr/bin/grep -q 'BRGR RESULT CHANNEL'; then
       /usr/bin/python3 - "$d/native-config.json" <<'PY'
 import json,pathlib,sys,subprocess,shlex,os
@@ -971,6 +975,20 @@ fn native_tui_bootstrap_starts_once_even_with_a_slow_shell() {
     let ran = fixture.run(&[]);
     assert_eq!(ran["outcome"], "candidate");
     assert_eq!(fixture.state("start-attempts").lines().count(), 1);
+}
+
+/// Herdr can recognize a native host's agent on screen yet refuse to prompt it,
+/// because it only prompts agents it started and named (seen live with GJC).
+/// The prompt is then typed into the pane instead of the run being lost.
+#[test]
+fn a_prompt_herdr_refuses_for_a_native_host_is_typed_in_instead() {
+    let fixture = pane_fixture();
+    fs::create_dir_all(&fixture.state).unwrap();
+    fs::write(fixture.state.join("prompt-refused"), "").unwrap();
+    let ran = fixture.run(&[]);
+    assert_eq!(ran["outcome"], "candidate", "{ran}");
+    let calls = fixture.state("calls.log");
+    assert!(calls.contains("pane send-text w9:p2"), "{calls}");
 }
 
 /// Herdr never classifies GJC or Command Code, so their status is `unknown` for
