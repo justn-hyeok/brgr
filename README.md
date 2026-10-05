@@ -60,7 +60,7 @@ starts workers, the *owner*, can be a Codex or Claude Code session.
 
 ```bash
 # 1. The brgr CLI
-cargo install --git https://github.com/justn-hyeok/brgr --tag v2.12.0 --locked brgr-cli
+cargo install --git https://github.com/justn-hyeok/brgr --tag v2.12.1 --locked brgr-cli
 
 # 2. Teach your agent how to use brgr
 brgr integrate claude install    # Claude Code: installs the brgr skill
@@ -78,7 +78,7 @@ you added shows `"health": "healthy"`.
 The Herdr plugin adds a task board and workspace actions on top:
 
 ```bash
-herdr plugin install justn-hyeok/brgr --ref v2.12.0
+herdr plugin install justn-hyeok/brgr --ref v2.12.1
 ```
 
 ## Use it
