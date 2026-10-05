@@ -33,6 +33,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{LaunchEnvelope, Paths, cli::PaneRunArgs, write_json_atomic};
+mod layout;
 pub(crate) mod lifecycle;
 mod native;
 mod screens;
@@ -58,9 +59,6 @@ const REPORT_GRACE: Duration = Duration::from_secs(15);
 /// How long an agent Herdr never showed working may sit idle without a report
 /// before it counts as finished.
 const UNSEEN_WORK_GRACE: Duration = Duration::from_mins(1);
-
-/// A caller pane narrower than this many columns gets its worker below it.
-const NARROW_CALLER: u64 = 100;
 
 /// How long a pane run waits for its calling Codex pane to show the call. The
 /// call that started the task ends within seconds, so this is generous.
@@ -268,12 +266,26 @@ pub(crate) fn run_pane_adapter(paths: &Paths, run: &PaneRunArgs) -> Result<()> {
     fs::create_dir_all(&report_dir)?;
     let _ = fs::remove_file(&report);
 
-    let pane = herdr.open_pane(&caller, &run.workspace)?;
+    // One opener at a time per caller, so two workers started together do not
+    // both split the caller before either is recorded.
+    let layout_lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(
+            paths
+                .runs
+                .join(format!("layout-{}.lock", caller.replace(':', "_"))),
+        )?;
+    layout_lock.lock()?;
+    let pane = herdr.open_pane(paths, &caller, &run.workspace)?;
     let receipt = paths.pane_receipt(run.task, run.revision);
     write_json_atomic(
         &receipt,
         &PaneReceipt {
             pane: pane.clone(),
+            caller: Some(caller.clone()),
             binary: PathBuf::from(&herdr.binary),
             session: herdr.session.clone(),
             task: Some(run.task),
@@ -296,6 +308,8 @@ pub(crate) fn run_pane_adapter(paths: &Paths, run: &PaneRunArgs) -> Result<()> {
             ..PaneReceipt::default()
         },
     )?;
+    herdr.balance(&paths.runs, &caller);
+    drop(layout_lock);
     eprintln!("brgr pane mode · {} agent {name} in pane {pane}", run.kind);
     let mut notices = Notices {
         paths,
@@ -879,17 +893,31 @@ impl Herdr {
         }
     }
 
-    /// A new shell pane to the right of the caller, in the task workspace,
-    /// without taking focus. The worker identity goes with it, so the agent
-    /// can message its owner like any other worker.
-    fn open_pane(&self, caller: &str, workspace: &Path) -> Result<String> {
-        let placement = crate::config::Config::load(
-            &crate::Paths::new(env::var_os("BRGR_HOME").map(PathBuf::from))?.config,
-        )?
-        .herdr
-        .worker_placement;
-        let mut args: Vec<String> = if placement == crate::config::WorkerPlacement::Tab {
-            vec![
+    /// A new shell pane beside the caller, in the task workspace, without
+    /// taking focus. The worker identity goes with it, so the agent can message
+    /// its owner like any other worker.
+    fn open_pane(&self, paths: &Paths, caller: &str, workspace: &Path) -> Result<String> {
+        let placement = crate::config::Config::load(&paths.config)?
+            .herdr
+            .worker_placement;
+        let target = if placement == crate::config::WorkerPlacement::Tab {
+            layout::Placement::Tab
+        } else {
+            let workers = layout::workers(&paths.runs, caller);
+            self.call(&["pane", "layout", "--pane", caller])
+                .ok()
+                .as_ref()
+                .and_then(layout::Layout::parse)
+                .map_or_else(
+                    || layout::Placement::Split {
+                        pane: caller.to_owned(),
+                        direction: "right",
+                    },
+                    |current| layout::place(&current, caller, &workers),
+                )
+        };
+        let mut args: Vec<String> = match target {
+            layout::Placement::Tab => vec![
                 "tab".into(),
                 "create".into(),
                 "--workspace".into(),
@@ -903,19 +931,18 @@ impl Herdr {
                 "--cwd".into(),
                 workspace.to_string_lossy().into_owned(),
                 "--no-focus".into(),
-            ]
-        } else {
-            vec![
+            ],
+            layout::Placement::Split { pane, direction } => vec![
                 "pane".into(),
                 "split".into(),
                 "--pane".into(),
-                caller.into(),
+                pane,
                 "--direction".into(),
-                self.split_direction(caller).into(),
+                direction.into(),
                 "--cwd".into(),
                 workspace.to_string_lossy().into_owned(),
                 "--no-focus".into(),
-            ]
+            ],
         };
         for name in [
             "BRGR_HOME",
@@ -941,25 +968,29 @@ impl Herdr {
             .context("Herdr did not report the new pane")
     }
 
-    /// A wide caller splits to the right, so the worker sits beside it. Once the
-    /// caller is narrow, splitting right again would squeeze both below what a
-    /// TUI can show, so the worker goes below it instead.
-    fn split_direction(&self, caller: &str) -> &'static str {
-        let width = self
+    /// Makes the caller's workers equal in size. Best effort: a layout Herdr
+    /// cannot report or resize stays as it is.
+    pub(crate) fn balance(&self, runs: &Path, caller: &str) {
+        let workers = layout::workers(runs, caller);
+        let Some(current) = self
             .call(&["pane", "layout", "--pane", caller])
             .ok()
-            .and_then(|layout| {
-                layout
-                    .pointer("/result/layout/panes")?
-                    .as_array()?
-                    .iter()
-                    .find(|pane| pane.get("pane_id").and_then(Value::as_str) == Some(caller))?
-                    .pointer("/rect/width")?
-                    .as_u64()
-            });
-        match width {
-            Some(columns) if columns < NARROW_CALLER => "down",
-            _ => "right",
+            .as_ref()
+            .and_then(layout::Layout::parse)
+        else {
+            return;
+        };
+        for (pane, direction, amount) in layout::equalize(&current, caller, &workers) {
+            let _ = self.call(&[
+                "pane",
+                "resize",
+                "--pane",
+                &pane,
+                "--direction",
+                direction,
+                "--amount",
+                &format!("{amount:.4}"),
+            ]);
         }
     }
 
