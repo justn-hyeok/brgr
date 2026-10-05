@@ -1,42 +1,115 @@
 # brgr
 
-`brgr` is a harness-neutral local supervisor for bounded agent runs. It turns a
-fresh process attempt into a sealed artifact, a durable owner inbox item, and
-an explicit accept or reject decision. Herdr can present an OMP session, but it
-does not own task identity or completion.
+**Let Codex or Claude Code hand work to other coding agents, each running in
+its own [Herdr](https://github.com/herdrdev/herdr) pane beside you, without
+anyone clicking through their prompts.** Herdr is a terminal workspace built for
+running coding agents side by side; brgr is a plugin and CLI for it.
+
+![Claude Code asks brgr for three Claude Code workers. They open stacked beside it, report back, are accepted, and their panes close.](docs/assets/demo.gif)
+
+*Above: one request to Claude Code. brgr opens three Claude Code workers beside
+it, each worker's report comes back as a `FROM BRGR` notice, Claude accepts it,
+and brgr closes that worker's pane. Shown at 2x speed.*
+
+brgr brings the orchestration part of [Orca](https://github.com/stablyai/orca),
+a desktop app for running many coding agents, to Herdr. Your agent stays the one
+that decides. brgr starts the workers, clicks through the trust and continue
+prompts that would stop them, and hands every result back for an explicit
+accept or reject.
+
+## What it does
+
+- **Workers in panes, not in the background.** Each worker is the harness's own
+  TUI in a Herdr pane. The first one splits your pane. Later ones stack under it
+  at equal heights while you keep your half, and every brgr command evens the
+  column out again. A pane closes when its result is accepted or rejected.
+- **Unattended.** brgr accepts workspace trust, "press Enter to continue"
+  notices, and Claude Code's bypass warning and new-MCP-server prompt. It skips
+  update offers. A screen it does not recognise is reported with its text and
+  fails the run after three minutes, instead of waiting forever.
+- **Results you decide on.** Each worker writes a report that brgr seals. brgr
+  types a `FROM BRGR` notice into your agent's pane, and the agent reads the
+  result and accepts or rejects it.
+  A diff is applied only after an explicit accept.
+- **Failures reach you.** A failed or lost run sends a failure notice with the
+  reason. Every brgr command repeats it until you acknowledge it.
+- **Talk both ways.** Owner and worker exchange questions and replies, workers
+  can start their own child workers, and sibling workers can debate when you ask
+  for it.
+
+Workers can be Claude Code, OpenCode, Cursor CLI, Devin CLI, Cline, GJC, OMP or
+Command Code; brgr calls each registered worker CLI a *harness*. The agent that
+starts workers, the *owner*, can be a Codex or Claude Code session.
+
+> **Workers always run with full permissions** (`--yolo`,
+> `--dangerously-skip-permissions` and equivalents). That is the point of
+> unattended orchestration, so only point brgr at code you trust. A clean Git
+> repository gets a separate worktree for each task.
+
+## Requirements
+
+- Apple Silicon Mac with macOS 15 or newer
+- [Herdr](https://github.com/herdrdev/herdr) 0.9 or newer, installed and
+  running. Start your agent in a Herdr pane, so workers can open beside it.
+- A Rust toolchain (`cargo`) to install. Release archives exist but are unsigned
+  and not notarized; see [the unsigned distribution guide](docs/guides/unsigned-distribution.md).
+- At least one worker CLI, installed and logged in, for example Claude Code
+
+## Install
+
+```bash
+# 1. The brgr CLI
+cargo install --git https://github.com/justn-hyeok/brgr --tag v2.10.6 --locked brgr-cli
+
+# 2. Teach your agent how to use brgr
+brgr integrate claude install    # Claude Code: installs the brgr skill
+brgr integrate codex install     # Codex: installs the skill and session hooks
+
+# 3. Register a worker. This runs one small prompt through it.
+mkdir -p ~/brgr-scratch
+brgr harness add "$(command -v claude)" --workspace ~/brgr-scratch --prompt "Reply with OK"
+brgr doctor
+```
+
+`brgr doctor` prints JSON. It is ready when `"status"` is `"ok"` and the worker
+you added shows `"health": "healthy"`.
+
+The Herdr plugin adds a task board and workspace actions on top:
+
+```bash
+herdr plugin install justn-hyeok/brgr --ref v2.10.6
+```
+
+## Use it
+
+Inside Herdr, ask your agent in plain words, for example:
+
+> Use brgr to have two Claude Code workers review this diff, one for bugs and
+> one for missing tests. Accept the results that hold up.
+
+The agent runs commands like these, which you can also run yourself:
+
+```bash
+brgr run "Review this change" --harness local.claude-code --criterion "findings cite changed lines"
+brgr result TASK
+brgr accept TASK --reason "criteria verified"
+```
 
 ## Status
 
-v2 packages brgr as a Herdr 0.9+ plugin for Apple Silicon macOS 15 or newer.
-Herdr hosts a read-only task board and a Codex pane; brgr still owns task
-identity, sealed results, and the durable inbox, while Codex alone decides
-accept or reject. The v1 CLI and stored results remain usable without Herdr.
-Release archives are
-unsigned and not notarized. Read [the unsigned distribution guide](docs/guides/unsigned-distribution.md)
-before sharing or running a downloaded binary.
+brgr works, is used daily by its author, and is released often; see the
+[changelog](CHANGELOG.md). The version number counts releases. Separately, the
+author keeps a stricter bar for calling it ready for others, and that review is
+still open (**NO-GO**). Two checks are not done yet: concurrency across several
+processes at once, and a full review of the code by someone other than the
+author. Read [the readiness status](docs/readiness/status.md) before relying on
+it for anything important.
 
-The v1 managed-run contract is retained. The v2.1.0 release closed the
-[v1 readiness checklist](docs/readiness/v1-readiness-checklist-2026-09-14.md) under its
-recorded personal-use scope and evidence limits, and v2.2.0 adds recursive worker
-delegation and an attempt-scoped message mailbox; its verified scope and open
-limits are described below.
+## Reference
 
-That gate closure did not hold. Re-measuring the same code on 2026-09-28 found a
-concurrency defect that failed one in four concurrent admissions with a raw store
-error, a board projection that cost 3.26s at 6,400 stored tasks against a
-two-second refresh, and task worktrees that were never reclaimed. Those are fixed
-and pinned by regression gates, but gates 2-4, 2-5 and the final GO verdict are
-reopened and the public v1 verdict is NO-GO until they close. The personal-use GO
-stands, because it was scoped to observed single-session paths.
+The rest of this README is the detailed contract.
 
-One limitation is accepted rather than pending: brgr has no human reviewer other
-than its author. The review gate is therefore defined as a procedure — a
-non-author review of the whole crate, every finding disposed of in writing, each
-load-bearing claim reproduced independently, and every performance claim backed
-by a bench in this repository — and the absence of a second person is recorded
-here instead of being waived.
-
-## Herdr plugin
+## Herdr plugin details
 
 Install the current public v2 plugin from GitHub:
 
@@ -83,8 +156,9 @@ recovery, and verification boundaries.
 Default execution uses the registered harness's native TUI in an owned Herdr
 pane, with its full/YOLO recipe. Use `--headless` explicitly for a bounded
 one-shot process without Herdr. brgr preserves the requested harness, model,
-effort, and permission. Unsupported TUI options fail before admission instead
-of selecting headless. The separate `local.omp-herdr` route retains its legacy
+and effort; workers always run with full permissions, and `--permission` is
+ignored. Unsupported TUI options fail before admission instead of selecting
+headless. The separate `local.omp-herdr` route retains its legacy
 `omp-role` presentation adapter. `--keep-pane` retains an owned pane.
 
 | Route or operation | v1 status |
@@ -98,7 +172,7 @@ of selecting headless. The separate `local.omp-herdr` route retains its legacy
 permissions and the non-interactive workspace-trust override. It uses the model
 already selected in Devin CLI. Run `/model` once in an interactive Devin session
 if that configured default is stale. Devin's current JSON catalog exceeds
-brgr's bounded probe limit, so `brgr run --model` and `--effort` intentionally
+brgr's bounded probe limit, so `brgr run OBJECTIVE --model MODEL` and `--effort` intentionally
 fail for this route instead of guessing a family variant. See the
 [v2.0.2 live receipt](docs/evidence/live-devin-cli-v2.0.2-2026-09-15.md).
 
@@ -147,12 +221,12 @@ for a split beside the exact caller. Settings live at `$BRGR_HOME/config.toml`
 and do not move existing panes. Legacy auto-worker settings remain readable.
 
 A worker receives `$BRGR_BIN`, its exact task/attempt identity, and a scoped
-owner session. It may call `brgr run` again to create a child; brgr records the
+owner session. It may call `brgr run OBJECTIVE` again to create a child; brgr records the
 parent edge and delivers the child result to that worker's inbox. The parent
 must read and accept/reject a candidate (or acknowledge another outcome)
 before its own successful result can become a candidate. `brgr wait TASK`
-waits for a child result without approving it. `brgr message send|list|wait|ack`
-lets each side ask and answer questions on the active attempt; unanswered
+waits for a child result without approving it. The `message` subcommands (`send`, `list`, `wait`, `ack`)
+let each side ask and answer questions on the active attempt; unanswered
 questions block a successful candidate. Standalone runs opt in with
 `--enable-delegation`; plugin workers enable it automatically. See
 [recursive worker contract](docs/guides/recursive-workers.md) for the verified scope
@@ -174,8 +248,8 @@ the source index and files are unchanged. Use `--requires-write`, `--requires-br
 routes before worker admission.
 
 `--capture-diff`, `--capture-logs`, and `--evidence-file RELATIVE_FILE` seal
-bounded review artifacts. `brgr artifact export TASK INDEX --output PATH`
-exports binary evidence. `brgr diff TASK` prints a sealed diff and
+bounded review artifacts. `brgr artifact export TASK 0 --output PATH`
+exports a result's artifact by index, starting at 0, for binary evidence. `brgr diff TASK` prints a sealed diff and
 `brgr diff TASK --stat` lists the files it changes. `brgr apply TASK --workspace PATH` checks a sealed
 diff; `--execute` applies it only after an explicit accepted result. The diff
 includes files the worker created without staging them, except ignored files
@@ -226,8 +300,8 @@ fixture, set both `BRGR_OWNER_ID=codex:example` and
 
 `brgr integrate codex|claude status|uninstall` checks or removes only brgr-owned
 entries; the Claude Code skill goes to `$CLAUDE_CONFIG_DIR` or `~/.claude`. For OMP, Cursor CLI, Command Code, Devin CLI, or an approved unfamiliar CLI, use
-`brgr harness draft`, `brgr harness test`, then an authorized scratch run with
-`brgr harness activate` and `brgr harness status`. Pass `--model MODEL` when
+`brgr harness draft EXECUTABLE`, `brgr harness test`, then an authorized scratch run with
+`brgr harness activate --workspace DIR --prompt PROMPT` and `brgr harness status`. Pass `--model MODEL` when
 that exact manifest supports model selection. Do not infer support for flags
 absent from the installed executable's help.
 See [agent-authored manifests](docs/guides/custom-harness-registration.md) for a

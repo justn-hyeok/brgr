@@ -551,6 +551,57 @@ mod tests {
         }
     }
 
+    /// The README's commands are what a new reader copies first.
+    #[test]
+    fn every_brgr_command_in_the_readme_parses() {
+        use clap::Parser as _;
+        let readme = include_str!("../../../README.md");
+        let mut commands: Vec<String> = Vec::new();
+        let mut prose = String::new();
+        let mut fenced = false;
+        for line in readme.lines() {
+            if line.trim_start().starts_with("```") {
+                fenced = !fenced;
+                continue;
+            }
+            if fenced {
+                let command = line.split(" # ").next().unwrap_or_default().trim();
+                if command.starts_with("brgr ") {
+                    commands.push(command.to_owned());
+                }
+            } else {
+                prose.push_str(line);
+                prose.push('\n');
+            }
+        }
+        commands.extend(
+            prose
+                .split('`')
+                .skip(1)
+                .step_by(2)
+                .filter(|span| span.starts_with("brgr ") && !span.contains('\n'))
+                .map(str::to_owned),
+        );
+        assert!(
+            commands.len() > 20,
+            "found only {} commands",
+            commands.len()
+        );
+        let failures: Vec<String> = commands
+            .iter()
+            .filter_map(|command| {
+                crate::cli::Cli::try_parse_from(sample_argv(command))
+                    .err()
+                    .map(|error| format!("`{command}`: {}", error.kind()))
+            })
+            .collect();
+        assert!(
+            failures.is_empty(),
+            "README commands that do not parse:\n{}",
+            failures.join("\n")
+        );
+    }
+
     #[test]
     fn skill_states_the_operating_rules() {
         for rule in ["--headless", "local.claude-code", "--keep-pane", "yolo"] {
