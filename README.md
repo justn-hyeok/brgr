@@ -21,7 +21,9 @@ accept or reject.
 - **Workers in panes, not in the background.** Each worker is the harness's own
   TUI in a Herdr pane. The first one splits your pane. Later ones stack under it
   at equal heights while you keep your half, and every brgr command evens the
-  column out again. A pane closes when its result is accepted or rejected.
+  column out again. When a result is accepted or rejected its pane closes, and
+  its worktree is removed once nothing in it would be lost (`--keep-worktree`
+  keeps it).
 - **Unattended.** brgr accepts workspace trust, "press Enter to continue"
   notices, and Claude Code's bypass warning and new-MCP-server prompt. It skips
   update offers. A screen it does not recognise is reported with its text and
@@ -58,7 +60,7 @@ starts workers, the *owner*, can be a Codex or Claude Code session.
 
 ```bash
 # 1. The brgr CLI
-cargo install --git https://github.com/justn-hyeok/brgr --tag v2.11.0 --locked brgr-cli
+cargo install --git https://github.com/justn-hyeok/brgr --tag v2.12.0 --locked brgr-cli
 
 # 2. Teach your agent how to use brgr
 brgr integrate claude install    # Claude Code: installs the brgr skill
@@ -76,7 +78,7 @@ you added shows `"health": "healthy"`.
 The Herdr plugin adds a task board and workspace actions on top:
 
 ```bash
-herdr plugin install justn-hyeok/brgr --ref v2.11.0
+herdr plugin install justn-hyeok/brgr --ref v2.12.0
 ```
 
 ## Use it

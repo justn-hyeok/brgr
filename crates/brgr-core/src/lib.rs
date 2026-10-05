@@ -65,6 +65,7 @@ mod execution;
 mod git_diff;
 mod state;
 
+pub use evidence::task_patch;
 pub use state::{Attempt, CoreError, TaskRevision};
 
 use execution::{AttemptControl, result_for, run_single_attempt, sha256};

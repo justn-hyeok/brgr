@@ -43,6 +43,7 @@ pub(crate) struct StartOptions<'a> {
     pub(crate) enable_delegation: bool,
     pub(crate) snapshot: WorkspaceSnapshot,
     pub(crate) pane: PaneDisposition,
+    pub(crate) worktree: WorktreeDisposition,
     pub(crate) execution: ExecutionDisposition,
     pub(crate) json_output: bool,
     pub(crate) headless: bool,
@@ -58,6 +59,29 @@ pub(crate) enum WorkspaceSnapshot {
 pub(crate) enum PaneDisposition {
     CleanupAfterDecision,
     Keep,
+}
+
+pub(crate) enum WorktreeDisposition {
+    ReclaimAfterDecision,
+    Keep,
+}
+
+impl crate::cli::RetentionArgs {
+    fn pane(&self) -> PaneDisposition {
+        if self.keep_pane {
+            PaneDisposition::Keep
+        } else {
+            PaneDisposition::CleanupAfterDecision
+        }
+    }
+
+    fn worktree(&self) -> WorktreeDisposition {
+        if self.keep_worktree {
+            WorktreeDisposition::Keep
+        } else {
+            WorktreeDisposition::ReclaimAfterDecision
+        }
+    }
 }
 
 pub(crate) enum ExecutionDisposition {
@@ -146,11 +170,8 @@ pub(crate) async fn run_task(paths: &Paths, mut args: RunArgs, json_output: bool
             } else {
                 WorkspaceSnapshot::RequireClean
             },
-            pane: if args.keep_pane {
-                PaneDisposition::Keep
-            } else {
-                PaneDisposition::CleanupAfterDecision
-            },
+            worktree: args.keep.worktree(),
+            pane: args.keep.pane(),
             execution: if args.foreground {
                 ExecutionDisposition::Foreground
             } else {
@@ -243,11 +264,8 @@ pub(crate) async fn revise_task(paths: &Paths, args: ReviseArgs, json_output: bo
             } else {
                 WorkspaceSnapshot::RequireClean
             },
-            pane: if args.keep_pane {
-                PaneDisposition::Keep
-            } else {
-                PaneDisposition::CleanupAfterDecision
-            },
+            worktree: args.keep.worktree(),
+            pane: args.keep.pane(),
             execution: if args.foreground {
                 ExecutionDisposition::Foreground
             } else {
@@ -346,6 +364,37 @@ fn check_admissible(activated: &HarnessManifest, spec: &TaskSpec, source: &Path)
     Ok(())
 }
 
+/// The pane a TUI worker opens beside: the verified Herdr caller, or for a
+/// Codex call a marker resolved once the call shows on its screen. `None` for a
+/// headless run.
+fn source_pane(
+    activated: &HarnessManifest,
+    spec: &TaskSpec,
+    headless: bool,
+) -> Result<Option<String>> {
+    if headless {
+        return Ok(None);
+    }
+    if activated.adapter != brgr_runner::OMP_ROLE_ADAPTER_V1 {
+        crate::pane_adapter::require_tui(activated, spec)?;
+    }
+    // A Codex call cannot be placed while it runs, so its pane is looked up
+    // once the call has finished; the worker pane opens then, beside it.
+    crate::caller_pane::verified()
+        .or_else(|| {
+            (spec.owner_id.as_str().starts_with("codex:")
+                && std::env::var("HERDR_ENV").as_deref() == Ok("1")
+                && crate::caller_pane::binary().is_some())
+            .then(|| crate::current_session().ok().flatten())
+            .flatten()
+            .map(|session| crate::caller_pane::pending_marker(&session))
+        })
+        .context(
+            "default TUI execution needs an exact Herdr source; run it from a Herdr pane, or from a Codex session start the command with `--as SESSION` (the session in your calling context) so brgr can find your pane",
+        )
+        .map(Some)
+}
+
 pub(crate) async fn start_task(
     paths: &Paths,
     mut spec: TaskSpec,
@@ -360,28 +409,7 @@ pub(crate) async fn start_task(
     let home = paths.home.canonicalize()?;
     validate_source_home(paths, &source, &home, options.parent, &spec.owner_id)?;
     check_admissible(activated, &spec, &source)?;
-    let source_pane = if options.headless {
-        None
-    } else {
-        if activated.adapter != brgr_runner::OMP_ROLE_ADAPTER_V1 {
-            crate::pane_adapter::require_tui(activated, &spec)?;
-        }
-        // A Codex call cannot be placed while it runs, so its pane is looked up
-        // once the call has finished; the worker pane opens then, beside it.
-        let source_pane = crate::caller_pane::verified()
-            .or_else(|| {
-                (spec.owner_id.as_str().starts_with("codex:")
-                    && std::env::var("HERDR_ENV").as_deref() == Ok("1")
-                    && crate::caller_pane::binary().is_some())
-                .then(|| crate::current_session().ok().flatten())
-                    .flatten()
-                    .map(|session| crate::caller_pane::pending_marker(&session))
-            })
-            .context(
-                "default TUI execution needs an exact Herdr source; run it from a Herdr pane, or from a Codex session start the command with `--as SESSION` (the session in your calling context) so brgr can find your pane",
-            )?;
-        Some(source_pane)
-    };
+    let source_pane = source_pane(activated, &spec, options.headless)?;
     let pane_mode = source_pane.is_some() && activated.adapter != brgr_runner::OMP_ROLE_ADAPTER_V1;
     let admission = workspace::acquire_admission_lock(&paths.worktrees, options.source_workspace)?;
     let store = Store::open(&paths.store)?;
@@ -401,6 +429,7 @@ pub(crate) async fn start_task(
         harness_id,
         protocol_generation: "brgr-v1".to_owned(),
         keep_pane: matches!(options.pane, PaneDisposition::Keep),
+        keep_worktree: matches!(options.worktree, WorktreeDisposition::Keep),
         delegation_enabled: pane_mode || options.enable_delegation || options.parent.is_some(),
         manifest: Some(activated.clone()),
         executable_digest: Some(activation.executable_digest.clone()),

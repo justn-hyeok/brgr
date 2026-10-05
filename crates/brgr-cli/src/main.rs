@@ -130,12 +130,18 @@ impl Paths {
     }
 }
 
+// A record written to disk for every task: its field types are a compatibility
+// contract with existing launch files, so its flags stay plain booleans.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Serialize, Deserialize)]
 struct LaunchEnvelope {
     spec: TaskSpec,
     harness_id: String,
     protocol_generation: String,
     keep_pane: bool,
+    /// Keep the task worktree after the result is decided.
+    #[serde(default)]
+    keep_worktree: bool,
     #[serde(default)]
     delegation_enabled: bool,
     #[serde(default)]

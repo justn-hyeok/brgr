@@ -682,6 +682,106 @@ fn row<'a>(receipt: &'a Value, slug: &str) -> &'a Value {
         .unwrap_or_else(|| panic!("no row for {slug} in {receipt}"))
 }
 
+#[test]
+fn accepting_a_clean_task_reclaims_its_worktree_and_branch_at_once() {
+    let fixture = Fixture::new();
+    let task = fixture.run_with("clean", &[]);
+    assert!(fixture.worktree(&task).is_dir());
+    fixture.accept(&task);
+    assert!(
+        !fixture.worktree(&task).exists(),
+        "worktree survived its decision"
+    );
+    assert!(
+        !fixture
+            .branches()
+            .contains(&format!("brgr/task-{}", Fixture::slug(&task)))
+    );
+    let detail = fixture.json(&["result", &task]);
+    assert_eq!(detail["result"]["outcome"], "candidate");
+}
+
+#[test]
+fn keep_worktree_keeps_it_after_the_decision() {
+    let fixture = Fixture::new();
+    let task = fixture.run_with("clean", &["--keep-worktree"]);
+    fixture.accept(&task);
+    assert!(fixture.worktree(&task).is_dir());
+}
+
+#[test]
+fn a_worker_file_that_exists_nowhere_else_keeps_the_worktree() {
+    let fixture = Fixture::new();
+    let task = fixture.run_with("WRITE", &[]);
+    fixture.accept(&task);
+    assert!(fixture.worktree(&task).join("AGENT_OUTPUT.txt").is_file());
+}
+
+#[test]
+fn a_worker_file_sealed_in_the_diff_does_not_keep_the_worktree() {
+    let fixture = Fixture::new();
+    let task = fixture.run_with("WRITE", &["--capture-diff"]);
+    fixture.accept(&task);
+    assert!(!fixture.worktree(&task).exists(), "sealed changes kept it");
+    let mut diff = fixture.command();
+    diff.args(["diff", &task]);
+    let output = diff.output().unwrap();
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("AGENT_OUTPUT.txt"),
+        "the sealed diff lost the file"
+    );
+    // Integration works from the sealed patch alone, after the worktree is gone.
+    let applied = fixture.json(&[
+        "apply",
+        &task,
+        "--workspace",
+        fixture.repo_arg(),
+        "--execute",
+    ]);
+    assert_eq!(applied["status"], "applied", "{applied}");
+    assert_eq!(
+        fs::read_to_string(fixture.repository.join("AGENT_OUTPUT.txt")).unwrap(),
+        "worker output\n"
+    );
+}
+
+#[test]
+fn a_change_made_after_sealing_keeps_the_worktree() {
+    let fixture = Fixture::new();
+    let task = fixture.run_with("WRITE", &["--capture-diff"]);
+    fs::write(
+        fixture.worktree(&task).join("AGENT_OUTPUT.txt"),
+        b"edited after the result was sealed\n",
+    )
+    .unwrap();
+    fixture.accept(&task);
+    assert!(fixture.worktree(&task).is_dir());
+}
+
+#[test]
+fn a_harness_cache_alone_does_not_keep_the_worktree() {
+    let fixture = Fixture::new();
+    let task = fixture.run_with("CACHE", &[]);
+    assert!(fixture.worktree(&task).join(".gjc").is_dir());
+    fixture.accept(&task);
+    assert!(!fixture.worktree(&task).exists());
+}
+
+#[test]
+fn installed_dependencies_do_not_keep_the_worktree_but_a_dotenv_does() {
+    let fixture = Fixture::new();
+    let dependencies = fixture.run_with("clean", &[]);
+    let secret = fixture.run_with("clean", &[]);
+    let package = fixture.worktree(&dependencies).join("node_modules/pkg");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(package.join("index.js"), b"module.exports = 1;\n").unwrap();
+    fs::write(fixture.worktree(&secret).join(".env"), b"TOKEN=secret\n").unwrap();
+    fixture.accept(&dependencies);
+    fixture.accept(&secret);
+    assert!(!fixture.worktree(&dependencies).exists());
+    assert!(fixture.worktree(&secret).join(".env").is_file());
+}
+
 struct Fixture {
     /// Held so the tree outlives the fixture, and used for scratch files.
     temp: TempDir,
@@ -719,14 +819,22 @@ impl Fixture {
         task[..8].to_owned()
     }
 
+    /// A run whose worktree survives its decision, so `brgr prune` is what
+    /// removes it.
     fn run_task(&self, objective: &str) -> String {
-        let receipt = self.json(&[
+        self.run_with(objective, &["--keep-worktree"])
+    }
+
+    fn run_with(&self, objective: &str, extra: &[&str]) -> String {
+        let mut args = vec![
             "run",
             objective,
             "--workspace",
             self.repo_arg(),
             "--foreground",
-        ]);
+        ];
+        args.extend_from_slice(extra);
+        let receipt = self.json(&args);
         assert_eq!(receipt["outcome"], "candidate");
         receipt["task_id"].as_str().unwrap().to_owned()
     }
@@ -742,6 +850,7 @@ impl Fixture {
             "--deadline-seconds",
             "1",
             "--foreground",
+            "--keep-worktree",
         ]);
         assert_ne!(receipt["outcome"], "candidate", "{receipt}");
         receipt["task_id"].as_str().unwrap().to_owned()
@@ -911,7 +1020,7 @@ impl Fixture {
         git(repo, &["config", "user.email", "fixture@example.invalid"]);
         fs::write(repo.join("README"), b"seed\n").unwrap();
         // Committed so every task worktree inherits it and `.env` is ignored.
-        fs::write(repo.join(".gitignore"), b".env\n").unwrap();
+        fs::write(repo.join(".gitignore"), b".env\nnode_modules/\n").unwrap();
         git(repo, &["add", "README", ".gitignore"]);
         git(repo, &["commit", "-m", "seed"]);
         // A branch brgr does not own, to prove pruning leaves it alone.

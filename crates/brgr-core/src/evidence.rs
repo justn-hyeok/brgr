@@ -8,6 +8,30 @@ use brgr_store::Store;
 
 use crate::git_diff;
 
+/// The patch `--capture-diff` seals for a task revision, computed from its
+/// workspace now. Sealing and worktree removal both use it, so a worktree whose
+/// patch still equals the sealed one holds nothing the store lacks.
+///
+/// # Errors
+///
+/// Returns an error when git fails, the patch exceeds `limit` bytes, or the
+/// diff outlasts `remaining`.
+pub fn task_patch(spec: &TaskSpec, limit: u64, remaining: Duration) -> Result<Vec<u8>, String> {
+    let mut excluded = spec.evidence.files.clone();
+    excluded.push(format!(".brgr/tasks/{}-r{}", spec.task_id, spec.revision));
+    git_diff::bounded_git_diff(
+        Path::new(&spec.workspace),
+        spec.evidence
+            .base_tree
+            .as_deref()
+            .or(spec.evidence.base_commit.as_deref())
+            .unwrap_or("HEAD"),
+        &excluded,
+        limit,
+        remaining,
+    )
+}
+
 pub(crate) fn seal_requested_evidence(
     store: &Store,
     spec: &TaskSpec,
@@ -25,19 +49,7 @@ pub(crate) fn seal_requested_evidence(
     let mut artifacts = Vec::new();
     let mut total = 0_u64;
     if spec.evidence.capture_diff {
-        let mut excluded = spec.evidence.files.clone();
-        excluded.push(format!(".brgr/tasks/{}-r{}", spec.task_id, spec.revision));
-        let patch = git_diff::bounded_git_diff(
-            Path::new(&spec.workspace),
-            spec.evidence
-                .base_tree
-                .as_deref()
-                .or(spec.evidence.base_commit.as_deref())
-                .unwrap_or("HEAD"),
-            &excluded,
-            limit,
-            remaining,
-        )?;
+        let patch = task_patch(spec, limit, remaining)?;
         let reference = store
             .seal_artifact_reader(Cursor::new(patch), "text/x-diff", limit)
             .map_err(|error| error.to_string())?;

@@ -342,6 +342,7 @@ pub(crate) fn cleanup_settled(paths: &Paths, task: TaskId, revision: u32) -> Res
     let receipt: PaneReceipt = serde_json::from_slice(&bytes)?;
     if receipt.cleanup == "closed" {
         archive_report(paths, task, revision)?;
+        crate::worktree_prune::reclaim_and_report(paths, task, revision);
         return Ok(());
     }
     let herdr = Herdr {
@@ -383,6 +384,7 @@ pub(crate) fn cleanup_settled(paths: &Paths, task: TaskId, revision: u32) -> Res
     let latest: PaneReceipt = serde_json::from_slice(&fs::read(&path)?)?;
     if latest.cleanup == "closed" {
         archive_report(paths, task, revision)?;
+        crate::worktree_prune::reclaim_and_report(paths, task, revision);
     }
     Ok(())
 }

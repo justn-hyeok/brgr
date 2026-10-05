@@ -237,7 +237,19 @@ an atomic compare-and-close guarantee; use `--keep-pane` for shared sessions.
 
 Every Git-backed task gets its own worktree, which costs a full copy of the
 source working tree and leaves a `brgr/task-*` branch in a repository brgr does
-not own. Nothing is reclaimed automatically.
+not own.
+
+Since v2.12.0 a decision reclaims its own revision's worktree: `accept`,
+`reject` and `result TASK --ack` run the checks below for that one worktree,
+and a pane-mode task runs them again once its pane has closed, since its worker
+works in the worktree until then. The note "brgr · removed worktree …" or
+"brgr · kept worktree …: reason" goes to stderr, and the decision never fails
+because of it. `--keep-worktree` on `run` or `revise` keeps it, as does
+`--keep-pane`. `brgr apply TASK --workspace PATH` works from the sealed patch, the recorded base
+commit and the checkout recorded at admission, so it still works after the
+worktree is gone.
+
+Whatever a decision kept, and worktrees from before v2.12.0, are swept by hand:
 
 ```bash
 brgr prune           # report what is removable and why the rest is kept
@@ -250,8 +262,11 @@ lost result with `brgr result TASK --ack`. A failed revision also needs no
 attempt still running, no retry granted, and no worker process left alive; a
 lost result warns that its worker may outlive its supervisor, and while that
 process runs the worktree is kept. The checkout is removed with `git worktree
-remove`, never forced, so uncommitted work is kept and reported with git's own
-reason. Its `brgr/task-*` branch goes only when every commit on it also lives
+remove`, so uncommitted work is kept and reported with git's own reason. It is
+forced only when brgr has shown every change is disposable: each one is an
+untracked harness cache (`.gjc/`, `.commandcode/`, `.claude/`, `.opencode/`,
+`.cursor/`, `.cline/`, `.devin/`, `.omp/`), or the task sealed a diff with
+`--capture-diff` and the worktree's patch is byte-for-byte that diff. Its `brgr/task-*` branch goes only when every commit on it also lives
 elsewhere: in `HEAD`, or on another branch or remote-tracking branch. A task
 started from a feature branch carries that branch's commits, and those are
 safe while the feature branch exists. Other task branches do not count, since
@@ -262,7 +277,10 @@ git is not the only check. Its clean test does not look at ignored files, so
 `git worktree remove` would silently delete an ignored `.env`, a downloaded
 credential, or a build cache — the things a task worktree is most likely to
 hold. Those worktrees are kept and their ignored paths listed; pass
-`--include-ignored` to remove them anyway. A symlink, a directory git has not
+`--include-ignored` to remove them anyway. Ignored paths inside directories a
+build or package manager recreates (`node_modules`, `target`, `.next`, `.turbo`,
+`dist`, `build`, `__pycache__`, `.pytest_cache`, `.mypy_cache`, `.venv`,
+`.gradle`, `coverage`) do not keep a worktree. A symlink, a directory git has not
 registered as a worktree, one git has locked, a name the layout could not have
 produced, and the directory prune is running in are all refused.
 

@@ -1,11 +1,15 @@
 //! Removal of brgr-owned task worktrees and the branches they created.
 //!
 //! [`crate::workspace`] creates task worktrees and never deletes, so removal
-//! lives here behind an explicit command that defaults to reporting.
+//! lives here: behind `brgr prune`, which defaults to reporting, and
+//! [`reclaim_task`], which a decision runs for its own revision.
 //!
 //! git is used for the two removals, but it is deliberately **not** trusted as
 //! the only safety authority. `git worktree remove` refuses a worktree with
-//! modified or untracked files, and is never forced. A task branch goes only
+//! modified or untracked files, and is forced only when brgr has shown every
+//! such change is disposable: an untracked harness cache (`.gjc/`, `.claude/`
+//! and the like), or a worktree whose patch is byte-for-byte the diff the store
+//! sealed with the result. A task branch goes only
 //! when every commit on it survives elsewhere: in `HEAD`, or on another branch
 //! or remote-tracking branch — a task started from a feature branch carries that
 //! branch's commits, which `git branch -d` would count as unmerged forever. A
@@ -15,7 +19,8 @@
 //! silently. A task worktree is exactly where an agent has been working, which
 //! makes it the most likely place in a repository to hold such a file. This
 //! module therefore checks the ignored set itself and keeps the worktree unless
-//! the caller opts in.
+//! the caller opts in, or every ignored path lies in a directory a build or a
+//! package manager recreates (`node_modules`, `target`, `.next` and the like).
 //!
 //! Every candidate must also be a real directory (not a symlink), a worktree git
 //! itself has registered for its repository and has not locked, a name
@@ -159,17 +164,19 @@ pub(crate) fn prune(
             let assessment = assess(&worktree, &slug, &sweep, &mut known);
             let outcome = match (assessment.blocked, &assessment.primary) {
                 (Some(reason), _) => Outcome::Kept(reason),
-                (None, Some(primary)) if apply => match remove(&worktree, &slug, primary) {
-                    Ok(None) => {
-                        removed_any = true;
-                        Outcome::Removed
+                (None, Some(primary)) if apply => {
+                    match remove(&worktree, &slug, primary, assessment.force) {
+                        Ok(None) => {
+                            removed_any = true;
+                            Outcome::Removed
+                        }
+                        Ok(Some(reason)) => {
+                            removed_any = true;
+                            Outcome::RemovedKeepingBranch(reason)
+                        }
+                        Err(reason) => Outcome::Kept(reason),
                     }
-                    Ok(Some(reason)) => {
-                        removed_any = true;
-                        Outcome::RemovedKeepingBranch(reason)
-                    }
-                    Err(reason) => Outcome::Kept(reason),
-                },
+                }
                 (None, Some(_)) => Outcome::Removable,
                 (None, None) => Outcome::Kept("no repository was resolved for it".to_owned()),
             };
@@ -456,6 +463,10 @@ struct Assessment {
     blocked: Option<String>,
     owner: Option<String>,
     ignored: Vec<String>,
+    /// The worktree holds changes that git's own remove refuses, all of which
+    /// brgr has shown are disposable: a harness's cache, or exactly the patch
+    /// the store sealed. Only then is `git worktree remove --force` used.
+    force: bool,
     /// The primary checkout of the repository this worktree's task belongs to.
     primary: Option<PathBuf>,
 }
@@ -476,6 +487,7 @@ fn assess(worktree: &Path, slug: &str, sweep: &Sweep<'_>, known: &mut Repositori
         blocked: None,
         owner: None,
         ignored: Vec::new(),
+        force: false,
         primary: None,
     };
     found.blocked = objection(worktree, slug, sweep, known, &mut found);
@@ -578,33 +590,124 @@ fn objection(
         return Some("worktree is locked; unlock it first with `git worktree unlock`".to_owned());
     }
 
+    if let Some(reason) = changes_objection(worktree, store, &task, include_ignored, found) {
+        return Some(reason);
+    }
+    found.primary = Some(inventory.primary.clone());
+    None
+}
+
+/// The reason a worktree's own contents keep it, or `None`. Sets
+/// `found.force` and `found.ignored` for the removal.
+fn changes_objection(
+    worktree: &Path,
+    store: &Store,
+    task: &TaskSpec,
+    include_ignored: bool,
+    found: &mut Assessment,
+) -> Option<String> {
     // One status call answers both questions: tracked or untracked changes, and
     // the ignored set that git's own clean check does not look at.
     let status = match git(worktree, &["status", "--porcelain", "--ignored"]) {
         Ok(status) => status,
         Err(reason) => return Some(format!("worktree status is unreadable: {reason}")),
     };
-    if status
+    let changed: Vec<&str> = status
         .lines()
-        .any(|line| !line.is_empty() && !line.starts_with("!! "))
-    {
-        return Some("worktree holds modified or untracked files".to_owned());
+        .filter(|line| !line.is_empty() && !line.starts_with("!! "))
+        .collect();
+    if !changed.is_empty() {
+        // Only a harness's own cache, or exactly what the store sealed: either
+        // way nothing in the worktree exists only there.
+        if changed.iter().all(|line| harness_cache(line)) || patch_is_sealed(store, task) {
+            found.force = true;
+        } else {
+            return Some("worktree holds modified or untracked files".to_owned());
+        }
     }
     found.ignored = status
         .lines()
         .filter_map(|line| line.strip_prefix("!! "))
         .map(str::to_owned)
         .collect();
-    if !found.ignored.is_empty() && !include_ignored {
+    let kept_ignored: Vec<&String> = found
+        .ignored
+        .iter()
+        .filter(|path| !regenerable(path))
+        .collect();
+    if !kept_ignored.is_empty() && !include_ignored {
         return Some(format!(
             "worktree holds {} ignored path(s) git's clean check cannot see, such as {}; \
              pass --include-ignored to remove them",
-            found.ignored.len(),
-            found.ignored.first().map_or("", String::as_str)
+            kept_ignored.len(),
+            kept_ignored.first().map_or("", |path| path.as_str())
         ));
     }
-    found.primary = Some(inventory.primary.clone());
     None
+}
+
+/// An untracked directory a worker harness keeps its own state in. Only an
+/// untracked entry counts: a change to a tracked file under one of these names
+/// is the repository's own content.
+fn harness_cache(status_line: &str) -> bool {
+    const CACHES: [&str; 8] = [
+        ".gjc/",
+        ".commandcode/",
+        ".claude/",
+        ".opencode/",
+        ".cursor/",
+        ".cline/",
+        ".devin/",
+        ".omp/",
+    ];
+    status_line
+        .strip_prefix("?? ")
+        .is_some_and(|path| CACHES.iter().any(|cache| path.starts_with(cache)))
+}
+
+/// An ignored path that a build or a package manager recreates, never a
+/// secret: every component up to it is an ordinary name, and one of them is a
+/// well-known output or dependency directory.
+fn regenerable(path: &str) -> bool {
+    const REGENERABLE: [&str; 12] = [
+        "node_modules",
+        "target",
+        ".next",
+        ".turbo",
+        "dist",
+        "build",
+        "__pycache__",
+        ".pytest_cache",
+        ".mypy_cache",
+        ".venv",
+        ".gradle",
+        "coverage",
+    ];
+    path.split('/').any(|part| REGENERABLE.contains(&part))
+}
+
+/// Whether the worktree's changes are exactly the patch sealed with the
+/// revision's result, so removing the checkout loses nothing the store lacks.
+fn patch_is_sealed(store: &Store, task: &TaskSpec) -> bool {
+    if !task.evidence.capture_diff {
+        return false;
+    }
+    let Ok(Some(result)) = store.revision_result(task.task_id, task.revision) else {
+        return false;
+    };
+    let Some(sealed) = result
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.media_type == "text/x-diff")
+    else {
+        return false;
+    };
+    let limit = task.artifact_contract.max_bytes.min(8 * 1024 * 1024);
+    let Ok(sealed) = store.read_artifact(sealed, limit) else {
+        return false;
+    };
+    brgr_core::task_patch(task, limit, std::time::Duration::from_secs(30))
+        .is_ok_and(|now| now == sealed)
 }
 
 /// Lists the repository directories under the worktrees root, and the ones that
@@ -702,8 +805,19 @@ fn parse_slug(slug: &str) -> Option<(&str, u32)> {
 ///
 /// `Ok(None)` removed both. `Ok(Some(reason))` removed the checkout while git
 /// kept the branch, which preserves committed work.
-fn remove(worktree: &Path, slug: &str, primary: &Path) -> Result<Option<String>, String> {
-    git(primary, &["worktree", "remove", &lossy(worktree)])
+fn remove(
+    worktree: &Path,
+    slug: &str,
+    primary: &Path,
+    force: bool,
+) -> Result<Option<String>, String> {
+    let path = lossy(worktree);
+    let mut arguments = vec!["worktree", "remove"];
+    if force {
+        arguments.push("--force");
+    }
+    arguments.push(&path);
+    git(primary, &arguments)
         .map_err(|error| format!("git declined to remove the worktree: {error}"))?;
     let branch = format!("brgr/task-{slug}");
     if let Err(reason) = delete_task_branch(primary, &branch) {
@@ -956,6 +1070,77 @@ fn lossy(path: &Path) -> String {
 ///
 /// Nothing in the store is removed: a worktree is a rebuildable checkout, while
 /// a sealed result and its decision are the durable record brgr exists to keep.
+/// Removes one decided revision's worktree when nothing in it would be lost,
+/// with the same checks as `brgr prune --apply` and never `--include-ignored`.
+/// Returns what happened, for a note on stderr; `None` when there was nothing
+/// to do. Never fails the decision that triggered it.
+pub(crate) fn reclaim_task(paths: &Paths, task: TaskId, revision: u32) -> Option<String> {
+    let store = Store::open(&paths.store).ok()?;
+    let launch: crate::LaunchEnvelope =
+        serde_json::from_slice(&fs::read(paths.launch(task, revision)).ok()?).ok()?;
+    if launch.keep_worktree || launch.keep_pane {
+        return None;
+    }
+    let worktree = resolve(Path::new(&launch.spec.workspace));
+    // Only a checkout brgr made under its own root; a non-Git task ran in
+    // place, in the user's own directory.
+    let root = canonical(&paths.worktrees)?;
+    let parent = worktree.parent()?;
+    if parent.parent() != Some(root.as_path()) || !worktree.is_dir() {
+        return None;
+    }
+    // A pane-mode worker still runs in the worktree until its pane closes;
+    // the pane cleanup calls this again once it has.
+    if paths.pane_receipt(task, revision).exists() && !pane_closed(paths, task, revision) {
+        return None;
+    }
+    if crate::supervision::worker_may_be_running(paths, task) {
+        return None;
+    }
+    let current_dir = std::env::current_dir()
+        .ok()
+        .and_then(|path| canonical(&path));
+    let sweep = Sweep {
+        store: &store,
+        current_dir: current_dir.as_deref(),
+        include_ignored: false,
+        worker_alive: &|task| crate::supervision::worker_may_be_running(paths, task),
+    };
+    let slug = file_name(&worktree);
+    let mut known = Repositories::load(&store);
+    let assessment = assess(&worktree, &slug, &sweep, &mut known);
+    let shown = worktree.display();
+    match (assessment.blocked, assessment.primary) {
+        (Some(reason), _) => Some(format!("kept worktree {shown}: {reason}")),
+        (None, Some(primary)) => match remove(&worktree, &slug, &primary, assessment.force) {
+            Ok(kept_branch) => {
+                remove_if_emptied(parent, current_dir.as_deref());
+                Some(match kept_branch {
+                    None => format!("removed worktree {shown}"),
+                    Some(reason) => format!("removed worktree {shown}; {reason}"),
+                })
+            }
+            Err(reason) => Some(format!("kept worktree {shown}: {reason}")),
+        },
+        (None, None) => None,
+    }
+}
+
+/// Runs [`reclaim_task`] and notes the outcome on stderr.
+pub(crate) fn reclaim_and_report(paths: &Paths, task: TaskId, revision: u32) {
+    if let Some(note) = reclaim_task(paths, task, revision) {
+        eprintln!("brgr · {note}");
+    }
+}
+
+/// Whether the revision's pane receipt says its pane has been closed.
+fn pane_closed(paths: &Paths, task: TaskId, revision: u32) -> bool {
+    fs::read(paths.pane_receipt(task, revision))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .is_some_and(|receipt| receipt["cleanup"] == "closed")
+}
+
 pub(crate) fn command(
     paths: &Paths,
     apply: bool,
@@ -1044,6 +1229,25 @@ pub(crate) fn command(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_an_untracked_harness_directory_is_a_cache() {
+        assert!(harness_cache("?? .gjc/"));
+        assert!(harness_cache("?? .claude/settings.local.json"));
+        assert!(!harness_cache(" M .claude/settings.json"));
+        assert!(!harness_cache("?? src/main.rs"));
+        assert!(!harness_cache("?? .gjcx/"));
+    }
+
+    #[test]
+    fn only_dependency_and_build_directories_are_regenerable() {
+        assert!(regenerable("node_modules/"));
+        assert!(regenerable("packages/web/.next/"));
+        assert!(regenerable("target/"));
+        assert!(!regenerable(".env"));
+        assert!(!regenerable("secrets/credentials.json"));
+        assert!(!regenerable("node_modules_backup.tar"));
+    }
     use crate::adversary::Adversary;
 
     /// Every slug the parser accepts must be one `task_slug` would have written.

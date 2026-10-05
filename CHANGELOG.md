@@ -1,5 +1,14 @@
 # Changelog
 
+## 2.12.0 — 2026-10-06
+
+Deciding a result reclaims its task worktree and branch when nothing in it
+would be lost, the way its pane closes. A pane task is reclaimed after its pane
+closes. An untracked harness cache, a change already sealed byte-for-byte in
+the task's `--capture-diff` patch, and ignored dependency or build directories
+no longer keep a worktree; `brgr prune` uses the same rules. `--keep-worktree`
+keeps one. `brgr apply` works without the worktree.
+
 ## 2.11.0 — 2026-10-05
 
 Fixes from an outside review.
