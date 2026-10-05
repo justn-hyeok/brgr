@@ -701,6 +701,39 @@ fn accepting_a_clean_task_reclaims_its_worktree_and_branch_at_once() {
     assert_eq!(detail["result"]["outcome"], "candidate");
 }
 
+/// The decision and a pane's session loop both reclaim after a decision; while
+/// one holds the revision's reclaim lock the other steps aside without a note.
+#[test]
+fn a_reclaim_already_in_progress_is_left_to_its_owner_without_a_note() {
+    let fixture = Fixture::new();
+    let task = fixture.run_with("clean", &[]);
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(
+            fixture
+                .home
+                .join("runs")
+                .join(format!("{task}-r1.reclaim.lock")),
+        )
+        .unwrap();
+    lock.try_lock().unwrap();
+    let output = fixture
+        .command()
+        .args(["accept", &task, "--reason", "fixture result verified"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.contains("worktree"), "{stderr}");
+    assert!(fixture.worktree(&task).is_dir());
+    drop(lock);
+    fixture.json(&["prune", "--apply"]);
+    assert!(!fixture.worktree(&task).exists());
+}
+
 #[test]
 fn keep_worktree_keeps_it_after_the_decision() {
     let fixture = Fixture::new();

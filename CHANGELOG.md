@@ -1,5 +1,14 @@
 # Changelog
 
+## 2.12.5 — 2026-10-06
+
+Hotfix: after a decision, the decision and the pane's session loop could
+reclaim the same worktree at once, and the slower one printed "kept worktree …:
+git declined to remove the worktree" for a worktree that was in fact removed.
+Reclamation now holds a per-revision lock and steps aside while another
+process holds it, and a worktree that has gone by the time a failure would be
+reported is not reported as kept.
+
 ## 2.12.4 — 2026-10-06
 
 Hotfix: worktree reclamation did not check `--evidence-file` paths. They are

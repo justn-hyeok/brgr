@@ -1122,6 +1122,21 @@ pub(crate) fn reclaim_task(paths: &Paths, task: TaskId, revision: u32) -> Option
     if crate::supervision::worker_may_be_running(paths, task) {
         return None;
     }
+    // The decision and the pane's session loop both reclaim once the pane
+    // closes. One attempt at a time: the other process is already on it.
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(paths.runs.join(format!("{task}-r{revision}.reclaim.lock")))
+        .ok()?;
+    if lock.try_lock().is_err() {
+        return None;
+    }
+    if !worktree.is_dir() {
+        return None;
+    }
     let current_dir = std::env::current_dir()
         .ok()
         .and_then(|path| canonical(&path));
@@ -1135,8 +1150,14 @@ pub(crate) fn reclaim_task(paths: &Paths, task: TaskId, revision: u32) -> Option
     let mut known = Repositories::load(&store);
     let assessment = assess(&worktree, &slug, &sweep, &mut known);
     let shown = worktree.display();
+    // A worktree that is gone was removed by someone else: nothing was kept.
+    let kept = |reason: String| {
+        worktree
+            .exists()
+            .then(|| format!("kept worktree {shown}: {reason}"))
+    };
     match (assessment.blocked, assessment.primary) {
-        (Some(reason), _) => Some(format!("kept worktree {shown}: {reason}")),
+        (Some(reason), _) => kept(reason),
         (None, Some(primary)) => match remove(&worktree, &slug, &primary, assessment.force) {
             Ok(kept_branch) => {
                 remove_if_emptied(parent, current_dir.as_deref());
@@ -1145,7 +1166,7 @@ pub(crate) fn reclaim_task(paths: &Paths, task: TaskId, revision: u32) -> Option
                     Some(reason) => format!("removed worktree {shown}; {reason}"),
                 })
             }
-            Err(reason) => Some(format!("kept worktree {shown}: {reason}")),
+            Err(reason) => kept(reason),
         },
         (None, None) => None,
     }
