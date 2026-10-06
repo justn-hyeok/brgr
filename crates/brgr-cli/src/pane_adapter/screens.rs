@@ -82,11 +82,9 @@ pub(super) fn classify(screen: &str, workspace: &Path) -> Screen {
             keys,
         };
     }
-    if let Some(resolution) = codex_trust(
-        screen,
-        workspace,
-        crate::workspace::primary_checkout(workspace).as_deref(),
-    ) {
+    if let Some(resolution) = codex_trust(screen, workspace, || {
+        crate::workspace::primary_checkout(workspace)
+    }) {
         return resolution;
     }
     if let Some(resolution) = copilot_trust(screen, workspace) {
@@ -208,13 +206,23 @@ fn has_continue_notice(screen: &str) -> bool {
 
 /// Codex's own folder prompt ("Trust this folder? ... 1. Trust and continue").
 /// Accepted only for the task's workspace, like Claude's.
-fn codex_trust(screen: &str, workspace: &Path, primary: Option<&Path>) -> Option<Screen> {
+/// `primary` runs `git` and is asked only for a worktree prompt: every poll of
+/// every pane classifies its screen.
+fn codex_trust(
+    screen: &str,
+    workspace: &Path,
+    primary: impl FnOnce() -> Option<PathBuf>,
+) -> Option<Screen> {
     let flat = squash(screen);
     if !flat.contains("Trustthisfolder?") || !flat.contains("Trustandcontinue") {
         return None;
     }
     let workspace = squash(&workspace.to_string_lossy());
-    let primary = primary.map(|primary| squash(&primary.to_string_lossy()));
+    let primary = flat
+        .contains("repositoryroot:")
+        .then(primary)
+        .flatten()
+        .map(|primary| squash(&primary.to_string_lossy()));
     // The path must end where the prompt's own sentence begins, so a longer
     // path ("/repo/task-evil", "/repo/task/sub") is not the task's workspace.
     // In a task worktree Codex adds that trust applies to the repository
@@ -236,27 +244,9 @@ fn codex_trust(screen: &str, workspace: &Path, primary: Option<&Path>) -> Option
                             })
             })
     });
-    let options = menu_options(screen);
-    let target = options
-        .iter()
-        .position(|option| option.text.starts_with("Trust and continue"));
-    let (true, Some(target)) = (shown, target) else {
-        return Some(Screen::Unknown(head(screen)));
-    };
-    let selected = options
-        .iter()
-        .position(|option| option.selected)
-        .unwrap_or(target);
-    let mut keys = Vec::new();
-    keys.extend(std::iter::repeat_n(
-        if target > selected { "down" } else { "up" },
-        target.abs_diff(selected),
-    ));
-    keys.push("enter");
-    Some(Screen::Resolve {
-        rule: "codex-trust",
-        keys,
-    })
+    Some(trust_choice(screen, shown, "codex-trust", |text| {
+        text.starts_with("Trust and continue")
+    }))
 }
 
 /// GitHub Copilot CLI's folder prompt ("Confirm folder trust … Do you trust the
@@ -279,10 +269,24 @@ fn copilot_trust(screen: &str, workspace: &Path) -> Option<Screen> {
         .split_once("Confirmfoldertrust")
         .and_then(|(_, after)| after.split_once("Copilotcanread"))
         .is_some_and(|(path, _)| path.trim_end_matches('/') == workspace.trim_end_matches('/'));
+    Some(trust_choice(screen, shown, "copilot-trust", |text| {
+        text == "Yes"
+    }))
+}
+
+/// Answers a harness's folder-trust menu: the option `accept` names when the
+/// prompt is for the task's own folder (`shown`), otherwise the screen is one
+/// no rule answers.
+fn trust_choice(
+    screen: &str,
+    shown: bool,
+    rule: &'static str,
+    accept: impl Fn(&str) -> bool,
+) -> Screen {
     let options = menu_options(screen);
-    let target = options.iter().position(|option| option.text == "Yes");
+    let target = options.iter().position(|option| accept(&option.text));
     let (true, Some(target)) = (shown, target) else {
-        return Some(Screen::Unknown(head(screen)));
+        return Screen::Unknown(head(screen));
     };
     let selected = options
         .iter()
@@ -290,10 +294,7 @@ fn copilot_trust(screen: &str, workspace: &Path) -> Option<Screen> {
         .unwrap_or(target);
     let mut keys = keys_between(selected, target);
     keys.push("enter");
-    Some(Screen::Resolve {
-        rule: "copilot-trust",
-        keys,
-    })
+    Screen::Resolve { rule, keys }
 }
 
 /// Presses what the rule table says for this pane, unless the agent is working.
@@ -664,7 +665,6 @@ mod tests {
         );
     }
 
-    /// Synthetic.
     /// Captured from GitHub Copilot CLI 1.0.86 in a Herdr pane.
     const COPILOT_TRUST: &str =
         include_str!("../../../../testdata/fixtures/screens/copilot-1.0.86-trust.txt");
@@ -679,11 +679,9 @@ mod tests {
     #[test]
     fn codex_trust_in_a_task_worktree_names_and_accepts_its_repository() {
         assert_eq!(
-            codex_trust(
-                CODEX_WORKTREE_TRUST,
-                Path::new(CODEX_WORKTREE),
-                Some(Path::new(CODEX_REPOSITORY))
-            ),
+            codex_trust(CODEX_WORKTREE_TRUST, Path::new(CODEX_WORKTREE), || {
+                Some(PathBuf::from(CODEX_REPOSITORY))
+            }),
             Some(Screen::Resolve {
                 rule: "codex-trust",
                 keys: vec!["enter"],
@@ -696,11 +694,9 @@ mod tests {
         for primary in [None, Some("/private/tmp/other-repo"), Some(CODEX_WORKTREE)] {
             assert!(
                 matches!(
-                    codex_trust(
-                        CODEX_WORKTREE_TRUST,
-                        Path::new(CODEX_WORKTREE),
-                        primary.map(Path::new)
-                    ),
+                    codex_trust(CODEX_WORKTREE_TRUST, Path::new(CODEX_WORKTREE), || {
+                        primary.map(PathBuf::from)
+                    }),
                     Some(Screen::Unknown(_))
                 ),
                 "{primary:?}"
@@ -742,6 +738,7 @@ mod tests {
         assert_eq!(classify(idle, Path::new(COPILOT_WORKSPACE)), Screen::Clear);
     }
 
+    /// Synthetic.
     #[test]
     fn an_agent_question_about_updating_something_is_not_an_update_offer() {
         for screen in [

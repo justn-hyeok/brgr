@@ -16,7 +16,21 @@ pub(crate) async fn hook(paths: &Paths, event: HookEvent) -> Result<()> {
     crate::invocation::mark_hook();
     let mut input = String::new();
     io::stdin().read_to_string(&mut input)?;
-    let input: HookInput = serde_json::from_str(&input).unwrap_or(HookInput { session_id: None });
+    let input: HookInput = serde_json::from_str(&input).unwrap_or(HookInput {
+        session_id: None,
+        cwd: None,
+    });
+    // A Codex worker runs in a brgr task worktree, and Codex runs every
+    // installed hook for it too. This hook is for owners: binding the worker's
+    // session, or telling it to call brgr as an owner, would mix the two up.
+    if input
+        .cwd
+        .as_deref()
+        .is_some_and(|cwd| in_task_worktree(paths, cwd))
+    {
+        println!("{{}}");
+        return Ok(());
+    }
     let Some(session_id) = input.session_id else {
         println!("{{}}");
         return Ok(());
@@ -104,4 +118,15 @@ pub(crate) async fn hook(paths: &Paths, event: HookEvent) -> Result<()> {
         ),
     }
     Ok(())
+}
+
+/// Whether a working directory lies in one of this control home's task
+/// worktrees.
+fn in_task_worktree(paths: &Paths, cwd: &std::path::Path) -> bool {
+    let Ok(root) = paths.worktrees.canonicalize() else {
+        return false;
+    };
+    cwd.canonicalize()
+        .unwrap_or_else(|_| cwd.to_path_buf())
+        .starts_with(root)
 }

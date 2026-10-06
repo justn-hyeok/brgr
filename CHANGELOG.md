@@ -1,5 +1,19 @@
 # Changelog
 
+## 2.13.1 — 2026-10-06
+
+Fixes from a review of v2.13.0.
+- A Codex worker no longer runs with every hook disabled. brgr's own hook
+  recognises a task worktree and stays out, so the user's other hooks still
+  run.
+- A headless prompt that starts with `-` or `@` stays text.
+- Copilot workers run with `--no-ask-user`.
+- Screen checks no longer run `git` on every poll.
+- More auth variables reach Gemini, Codex and Pi workers.
+- A failed headless run quotes the harness's own stderr reason, such as a
+  spent Gemini quota, and the error memo keeps that quote local.
+- Docs say that a Codex worker leaves its repository trusted in Codex.
+
 ## 2.13.0 — 2026-10-06
 
 Four new workers: Codex CLI (`local.codex`), GitHub Copilot CLI

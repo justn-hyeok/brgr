@@ -184,6 +184,9 @@ struct ProcessReceipt {
 #[derive(Debug, Deserialize)]
 struct HookInput {
     session_id: Option<String>,
+    /// The session's working directory, which Codex sends with every hook.
+    #[serde(default)]
+    cwd: Option<PathBuf>,
 }
 
 fn calling_cli() -> Cli {
