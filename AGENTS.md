@@ -33,11 +33,11 @@ Batch releases. Collect fixes on `main` and cut one release for a coherent set o
 
 ## Releasing
 
-1. On a branch, bump the version in `Cargo.toml` (`[workspace.package]` and the five internal crates in `[workspace.dependencies]`) and `herdr-plugin.toml`, and the `--ref`/`--tag` in `README.md`. Add a `CHANGELOG.md` entry, write `docs/releases/vX.Y.Z.md`, and link it first in the `docs/README.md` index. Run `cargo update --workspace --offline`.
+1. On a branch, bump the version in `Cargo.toml` (`[workspace.package]` and the five internal crates in `[workspace.dependencies]`) and `herdr-plugin.toml`, and the `--ref`/`--tag` in `README.md`. Add a `CHANGELOG.md` entry, write the release notes in `docs/releases/`, named after the tag, and link them first in the `docs/README.md` index. Run `cargo update --workspace --offline`.
 2. Open a `release: vX.Y.Z` pull request, wait for CI, and squash-merge it.
 3. On the merged `main`, run `git tag -a vX.Y.Z -m "brgr vX.Y.Z"` and push the tag.
 
-The tag runs `.github/workflows/release.yml`. It tests and builds the binary, publishes the GitHub release as Latest with `docs/releases/vX.Y.Z.md` as its notes, then publishes all six crates to crates.io with the `CARGO_REGISTRY_TOKEN` secret, dependencies first. If a run fails part way, for example on a crates.io 429, rerun it: crates already at that version are skipped and an existing release is updated. A release is done when the GitHub release is Latest and `cargo install --locked brgr-cli` installs the new version.
+The tag runs `.github/workflows/release.yml`. It tests and builds the binary, publishes the GitHub release as Latest with those notes, then publishes all six crates to crates.io with the `CARGO_REGISTRY_TOKEN` secret, dependencies first. If a run fails part way, for example on a crates.io 429, rerun it: crates already at that version are skipped and an existing release is updated. A release is done when the GitHub release is Latest and `cargo install --locked brgr-cli` installs the new version.
 
 ## Operating Contract
 
