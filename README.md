@@ -111,9 +111,9 @@ brgr accept TASK --reason "criteria verified"
 
 ## Status
 
-**Experimental.** v2 is used daily by its author, on macOS only, and changes
-quickly; see the [changelog](CHANGELOG.md). The first stable release will be
-**v3**. It waits on two checks: concurrency across several processes at once,
+v2 is the current release line. Its author uses it daily, on macOS only, and
+it changes quickly; see the [changelog](CHANGELOG.md). Two checks from its
+readiness record are still open: concurrency across several processes at once,
 and a full review of the code by someone other than the author. See
 [the readiness status](docs/readiness/status.md).
 
