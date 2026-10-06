@@ -1503,6 +1503,30 @@ mod tests {
             .unwrap();
     }
 
+    /// `opencode models` is no catalog on `OpenCode` 2: the same call printed
+    /// 0, 206, 242 or 251 models, and none with `--standalone`. `OpenCode`
+    /// refuses an unknown model itself, so the name, variant included, goes
+    /// to it unchecked.
+    #[tokio::test]
+    async fn opencode_validates_its_own_model_names() {
+        let root = tempfile::tempdir().unwrap();
+        let manifest = generate_manifest(
+            "opencode",
+            PathBuf::from("/bin/false"),
+            &help_fixture("opencode-run-2.0.20.txt"),
+        )
+        .unwrap();
+        assert_eq!(
+            manifest.probe.model_catalog.as_ref().unwrap().format,
+            ModelCatalogFormat::CliValidated
+        );
+        let registry = Registry::open(root.path().join("registry")).unwrap();
+        registry
+            .preflight_model(&manifest, Some("opencode/big-pickle#high"))
+            .await
+            .unwrap();
+    }
+
     #[test]
     fn registry_directories_are_private() {
         let root = tempfile::tempdir().unwrap();
@@ -1560,43 +1584,74 @@ mod tests {
         );
     }
 
-    /// `OpenCode` 2 moved the variant into the model name and dropped
-    /// `--variant`; it still drafts, without effort selection.
-    #[test]
-    fn opencode_2_drafts_without_the_variant_flag() {
-        let help = std::fs::read_to_string(
+    fn help_fixture(name: &str) -> String {
+        std::fs::read_to_string(
             Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../../testdata/fixtures/help/opencode-run-2.0.20.txt"),
+                .join("../../testdata/fixtures/help")
+                .join(name),
+        )
+        .unwrap()
+    }
+
+    /// `OpenCode` 2 moved the variant into the model name and dropped
+    /// `--variant`; it still drafts, without effort selection, and runs with
+    /// `--standalone` so the task does not live on in its shared service after
+    /// brgr stops the client. `OpenCode` 1 has no such service or flag.
+    #[test]
+    fn opencode_drafts_from_the_help_of_each_major_version() {
+        let two = generate_manifest(
+            "opencode",
+            PathBuf::from("/bin/echo"),
+            &help_fixture("opencode-run-2.0.20.txt"),
         )
         .unwrap();
-        let manifest = generate_manifest("opencode", PathBuf::from("/bin/echo"), &help).unwrap();
-        manifest.validate().unwrap();
-        assert_eq!(manifest.id, "local.opencode");
-        assert!(manifest.launch.effort_argv.is_empty());
+        two.validate().unwrap();
+        assert_eq!(two.id, "local.opencode");
+        assert_eq!(two.launch.argv, ["run", "${input.prompt}", "--standalone"]);
+        let tui = two.launch.interactive.as_ref().unwrap();
+        assert_eq!(tui.argv, ["--standalone"]);
+        assert!(tui.model_print_only && tui.effort_print_only);
+        assert!(two.launch.effort_argv.is_empty());
         assert_eq!(
-            manifest.capabilities["effort_select"].status,
+            two.capabilities["effort_select"].status,
             CapabilityStatus::Unsupported
         );
+
         let one = generate_manifest(
             "opencode",
             PathBuf::from("/bin/echo"),
-            "--model <model> --variant <variant> --agent <agent> --auto",
+            &help_fixture("opencode-run-1.18.34.txt"),
         )
         .unwrap();
+        assert_eq!(one.launch.argv, ["run", "${input.prompt}"]);
+        let tui = one.launch.interactive.as_ref().unwrap();
+        assert!(tui.argv.is_empty());
+        assert!(!tui.model_print_only && tui.effort_print_only);
         assert_eq!(one.launch.effort_argv, ["--variant", "${route.effort}"]);
+    }
+
+    /// A required flag counts only as a whole flag in the help, not as the
+    /// start of a longer one.
+    #[test]
+    fn a_flag_inside_a_longer_flag_does_not_satisfy_a_recipe() {
+        let longer = "--model-list --agents --autoupdate --variants --standalone-ish";
+        assert!(matches!(
+            generate_manifest("opencode", PathBuf::from("/bin/echo"), longer),
+            Err(RegistryError::RequiredFlagsMissing)
+        ));
+        let manifest = generate_manifest(
+            "opencode",
+            PathBuf::from("/bin/echo"),
+            "-m, --model <m>\n--agent=<a>\n[--auto]\n--variants --standalone-ish",
+        )
+        .unwrap();
+        assert!(manifest.launch.effort_argv.is_empty());
+        assert_eq!(manifest.launch.argv, ["run", "${input.prompt}"]);
     }
 
     /// Recipes drafted from the help each CLI printed when it was added.
     #[test]
     fn the_v2_13_workers_draft_from_their_own_help() {
-        let fixture = |name: &str| {
-            std::fs::read_to_string(
-                Path::new(env!("CARGO_MANIFEST_DIR"))
-                    .join("../../testdata/fixtures/help")
-                    .join(name),
-            )
-            .unwrap()
-        };
         for (name, help, id, argv, full, kind) in [
             (
                 "copilot",
@@ -1645,7 +1700,7 @@ mod tests {
             ),
         ] {
             let manifest =
-                generate_manifest(name, PathBuf::from("/bin/echo"), &fixture(help)).unwrap();
+                generate_manifest(name, PathBuf::from("/bin/echo"), &help_fixture(help)).unwrap();
             manifest.validate().unwrap();
             assert_eq!(manifest.id, id);
             assert_eq!(manifest.launch.argv, argv, "{name}");
@@ -1809,9 +1864,14 @@ mod tests {
         assert_eq!(opencode.id, "local.opencode");
         // `run`'s flags are documented only by `opencode run --help`.
         assert_eq!(opencode.probe.help_argv, ["run", "--help"]);
-        assert_eq!(
-            opencode.probe.model_catalog.as_ref().unwrap().argv,
-            ["models"]
+        assert!(
+            opencode
+                .probe
+                .model_catalog
+                .as_ref()
+                .unwrap()
+                .argv
+                .is_empty()
         );
         assert_eq!(opencode.launch.argv, ["run", "${input.prompt}"]);
         assert_eq!(opencode.permission_arguments(None).unwrap(), ["--auto"]);

@@ -355,6 +355,9 @@ pub(crate) async fn check(paths: &crate::Paths, config: &Config, json_output: bo
         if interactive.effort_print_only && options.effort.is_some() {
             bail!("{id} cannot apply effort in its TUI");
         }
+        if interactive.model_print_only && options.model.is_some() {
+            bail!("{id} cannot apply a model in its TUI");
+        }
         if options
             .deadline_seconds
             .is_some_and(|seconds| seconds == 0 || seconds > 604_800)

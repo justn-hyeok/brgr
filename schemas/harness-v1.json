@@ -50,6 +50,7 @@
             "herdr_kind": { "type": "string", "pattern": "^[a-z0-9-]+$" },
             "argv": { "$ref": "#/$defs/argv" },
             "effort_print_only": { "type": "boolean" },
+            "model_print_only": { "type": "boolean" },
             "native_host": { "type": "boolean" }
           }
         },
