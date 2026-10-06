@@ -73,7 +73,9 @@ brgr doctor
 ```
 
 `brgr doctor` prints JSON. It is ready when `"status"` is `"ok"` and the worker
-you added shows `"health": "healthy"`.
+you added shows `"health": "healthy"`. Then start a new Claude Code or Codex
+session inside Herdr: an agent reads its skills when a session starts, so one
+that was already running does not know brgr yet.
 
 The Herdr plugin adds a task board and workspace actions on top:
 
