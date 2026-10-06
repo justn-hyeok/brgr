@@ -884,6 +884,32 @@ fn a_decision_reads_only_its_own_repository() {
     );
 }
 
+/// A pane's session process, which closes the pane and reclaims after a
+/// decision, used to run inside the task worktree, and the working-directory
+/// check then kept the worktree for good. A decision made from inside the
+/// worktree reproduces that.
+#[test]
+fn a_decision_made_from_inside_the_worktree_still_reclaims_it() {
+    let fixture = Fixture::new();
+    let task = fixture.run_with("clean", &[]);
+    let output = fixture
+        .command()
+        .current_dir(fixture.worktree(&task))
+        .args(["accept", &task, "--reason", "fixture result verified"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !fixture.worktree(&task).exists(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 #[test]
 fn keep_worktree_keeps_it_after_the_decision() {
     let fixture = Fixture::new();

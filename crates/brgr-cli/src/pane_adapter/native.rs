@@ -81,6 +81,9 @@ pub(super) fn spawn_session_server(paths: &Paths, task: TaskId) -> Result<()> {
         .arg(&paths.home)
         .arg("__session")
         .arg(task.to_string())
+        // The pane runner sits in the task worktree; the session outlives the
+        // worker and reclaims that worktree, so it must not sit in it too.
+        .current_dir(&paths.home)
         .stdin(std::process::Stdio::null())
         .stdout(log.try_clone()?)
         .stderr(log)
