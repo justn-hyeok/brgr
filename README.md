@@ -1,3 +1,5 @@
+<p align="center"><img src="docs/assets/brgr-icon.svg" width="120" alt="brgr burger icon"></p>
+
 # brgr
 
 **Let Codex or Claude Code hand work to other coding agents, each running in
