@@ -1,5 +1,7 @@
 <p align="center"><img src="docs/assets/brgr-icon.svg" width="120" alt="brgr burger icon"></p>
 
+<p align="center"><a href="https://crates.io/crates/brgr-cli"><img src="https://img.shields.io/crates/v/brgr-cli.svg" alt="crates.io"></a> <a href="https://github.com/justn-hyeok/brgr/releases/latest"><img src="https://img.shields.io/github/v/release/justn-hyeok/brgr" alt="release"></a> <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT license"></a></p>
+
 # brgr
 
 **Let Codex or Claude Code hand work to other coding agents, each running in
@@ -63,7 +65,7 @@ each registered worker CLI a *harness*. The agent that starts workers, the
 
 ```bash
 # 1. The brgr CLI
-cargo install --git https://github.com/justn-hyeok/brgr --tag v2.13.4 --locked brgr-cli
+cargo install --locked brgr-cli
 
 # 2. Teach your agent how to use brgr
 brgr integrate claude install    # Claude Code: installs the brgr skill
