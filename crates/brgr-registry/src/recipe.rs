@@ -444,6 +444,56 @@ pub(crate) const RECIPES: &[Recipe] = &[
         }),
         ..GENERIC
     },
+    Recipe {
+        names: &["copilot"],
+        id: "local.copilot",
+        required_flags: &[
+            "-p, --prompt <text>",
+            "-s, --silent",
+            "--model <model>",
+            "--yolo",
+            "--no-auto-update",
+        ],
+        argv: &[
+            "--no-auto-update",
+            "--silent",
+            "--prompt",
+            "${input.prompt}",
+        ],
+        // No model list; Copilot refuses a name it does not offer within
+        // seconds, before any request ("Model … is not available").
+        catalog: Some((&[], Catalog::CliValidated)),
+        model_argv: MODEL,
+        effort_argv: &["--reasoning-effort", "${route.effort}"],
+        effort_requires: Some("--reasoning-effort <level>"),
+        // `USER` names the keychain entry that holds the GitHub login.
+        env_allow: &[
+            "HOME",
+            "PATH",
+            "LANG",
+            "TMPDIR",
+            "USER",
+            "GH_TOKEN",
+            "GITHUB_TOKEN",
+            "COPILOT_GITHUB_TOKEN",
+        ],
+        capabilities: &[
+            PROCESS_CAPS[0],
+            PROCESS_CAPS[1],
+            ("model_select", Cap::Supported("--model")),
+            ("effort_select", Cap::Supported("--reasoning-effort")),
+        ],
+        // `--yolo` is `--allow-all-tools --allow-all-paths --allow-all-urls`.
+        full: Some(&["--yolo"]),
+        edits: None,
+        read_only: None,
+        interactive: Some(Interactive {
+            kind: "copilot",
+            argv: &["--no-auto-update"],
+            effort_print_only: false,
+        }),
+        ..GENERIC
+    },
 ];
 
 pub(crate) fn generate_manifest(
