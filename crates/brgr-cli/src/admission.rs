@@ -307,12 +307,18 @@ pub(crate) async fn revise_task(paths: &Paths, args: ReviseArgs, json_output: bo
                 ExecutionDisposition::Detached
             },
             json_output,
-            headless: crate::invocation::current().headless,
+            headless: crate::invocation::current().headless || ran_headless(&previous_launch),
             calling_options: calling,
             instructions_digest,
         },
     )
     .await
+}
+
+/// A revision of a headless run stays headless, as its retention flags carry
+/// over: its model or effort may be one the harness's TUI cannot honour.
+fn ran_headless(previous: &LaunchEnvelope) -> bool {
+    !previous.pane_mode && previous.source_pane.is_none()
 }
 
 fn rejected_revision(store: &Store, previous: &TaskSpec) -> Result<u32> {
@@ -350,10 +356,24 @@ pub(crate) async fn load_harness(
     // A generated recipe picks up the current interactive launch. If the
     // installed CLI's help has drifted so that no recipe can be drafted now, the
     // certified activation still runs instead of the task failing at admission.
-    if !crate::invocation::current().headless && activation.registration_mode == "generated" {
+    // The rest of the launch was certified by a scratch run and is never
+    // swapped in; when it differs from today's recipe the owner is told to
+    // register the harness again.
+    if activation.registration_mode == "generated" {
         match registry.redraft(&activated).await {
             Ok(current) if current.id == activated.id => {
-                activated.launch.interactive = current.launch.interactive;
+                if certified_launch_drifted(&activated, &current) {
+                    eprintln!(
+                        "brgr: {} was registered with an older recipe and runs without its current fixes; {}",
+                        activated.id,
+                        registry
+                            .recertify_action_for(harness)
+                            .unwrap_or_else(|_| recertify_action_fallback())
+                    );
+                }
+                if !crate::invocation::current().headless {
+                    activated.launch.interactive = current.launch.interactive;
+                }
             }
             Ok(_) => {}
             Err(error) => eprintln!(
@@ -363,6 +383,18 @@ pub(crate) async fn load_harness(
         }
     }
     Ok((activated, activation))
+}
+
+/// Whether the parts of a launch that only a scratch run certifies differ from
+/// what the current recipe drafts. The interactive launch is excluded: it is
+/// taken from the current recipe.
+fn certified_launch_drifted(activated: &HarnessManifest, current: &HarnessManifest) -> bool {
+    let certified = |manifest: &HarnessManifest| {
+        let mut launch = manifest.launch.clone();
+        launch.interactive = None;
+        (launch, manifest.probe.model_catalog.clone())
+    };
+    certified(activated) != certified(current)
 }
 
 fn bind_owner_session(store: &Store, owner: &OwnerId, session: Option<&str>) -> Result<()> {
@@ -780,5 +812,59 @@ mod instruction_tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("BRGR.md"), "{error}");
+    }
+}
+
+#[cfg(test)]
+mod drift_tests {
+    use super::*;
+
+    fn manifest() -> HarnessManifest {
+        serde_json::from_value(json!({
+            "schema": "brgr.harness/v1",
+            "id": "local.opencode",
+            "adapter": "process/v1",
+            "executable": "/bin/echo",
+            "probe": {
+                "version_argv": ["--version"],
+                "help_argv": ["run", "--help"],
+                "model_catalog": { "argv": ["models"], "format": { "kind": "lines" } }
+            },
+            "launch": {
+                "argv": ["run", "${input.prompt}"],
+                "model_argv": ["--model", "${route.model}"],
+                "effort_argv": [],
+                "env_allow": ["HOME"],
+                "mode": "one_shot",
+                "permission_argv": { "full": ["--auto"] },
+                "interactive": { "herdr_kind": "opencode" }
+            },
+            "result": {
+                "source": { "kind": "stdout" },
+                "media_type": "text/plain",
+                "max_bytes": 1024,
+                "success_exit_codes": [0]
+            },
+            "capabilities": {}
+        }))
+        .unwrap()
+    }
+
+    /// v2.13.3 added `--standalone` to `OpenCode` 2's headless launch and made
+    /// its catalog CLI-validated; a v2.13.2 registration has neither.
+    #[test]
+    fn an_older_certified_launch_is_reported_as_drifted() {
+        let registered = manifest();
+        let mut tui_only = registered.clone();
+        tui_only.launch.interactive.as_mut().unwrap().argv = vec!["--standalone".to_owned()];
+        assert!(!certified_launch_drifted(&registered, &tui_only));
+
+        let mut argv = registered.clone();
+        argv.launch.argv.push("--standalone".to_owned());
+        assert!(certified_launch_drifted(&registered, &argv));
+
+        let mut catalog = registered.clone();
+        catalog.probe.model_catalog.as_mut().unwrap().argv.clear();
+        assert!(certified_launch_drifted(&registered, &catalog));
     }
 }

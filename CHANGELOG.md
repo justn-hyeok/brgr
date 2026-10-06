@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- A run on a harness registered with an older recipe warns that it runs
+  without the current recipe's fixes and names the command that re-registers
+  it. Only its pane launch is taken from the current recipe; the rest is what
+  its scratch run certified.
+- A revision of a headless run stays headless, so a model or effort the
+  harness's TUI cannot honour no longer stops it.
+
 ## 2.13.3 — 2026-10-06
 
 OpenCode 2 fixes from a review of v2.13.2.
