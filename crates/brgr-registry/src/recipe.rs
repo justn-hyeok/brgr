@@ -494,6 +494,60 @@ pub(crate) const RECIPES: &[Recipe] = &[
         }),
         ..GENERIC
     },
+    Recipe {
+        names: &["codex"],
+        id: "local.codex",
+        required_flags: &[
+            "--dangerously-bypass-approvals-and-sandbox",
+            "--skip-git-repo-check",
+            "--ephemeral",
+            "--disable <FEATURE>",
+            "-m, --model <MODEL>",
+            "-c, --config <key=value>",
+        ],
+        help_argv: &["exec", "--help"],
+        // `--disable hooks`: a worker Codex must not run the hooks installed
+        // for Codex owners, brgr's among them, which would bind the worker's
+        // session as an owner and tell it to call brgr as one.
+        argv: &[
+            "exec",
+            "--skip-git-repo-check",
+            "--ephemeral",
+            "--disable",
+            "hooks",
+            "--color",
+            "never",
+            "${input.prompt}",
+        ],
+        catalog: Some((&[], Catalog::CliValidated)),
+        model_argv: MODEL,
+        effort_argv: &["-c", "model_reasoning_effort=${route.effort}"],
+        effort_requires: Some("-c, --config <key=value>"),
+        env_allow: &[
+            "HOME",
+            "PATH",
+            "LANG",
+            "TMPDIR",
+            "USER",
+            "OPENAI_API_KEY",
+            "CODEX_HOME",
+        ],
+        capabilities: &[
+            PROCESS_CAPS[0],
+            PROCESS_CAPS[1],
+            ("model_select", Cap::Supported("--model")),
+            ("effort_select", Cap::Supported("model_reasoning_effort")),
+        ],
+        full: Some(&["--dangerously-bypass-approvals-and-sandbox"]),
+        edits: None,
+        read_only: None,
+        interactive: Some(Interactive {
+            kind: "codex",
+            argv: &["--disable", "hooks"],
+            effort_print_only: false,
+        }),
+        ..GENERIC
+    },
 ];
 
 pub(crate) fn generate_manifest(
