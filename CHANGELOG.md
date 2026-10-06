@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.13.2 — 2026-10-06
+
+OpenCode 2 registers again. It dropped `run --variant` (a variant is now part
+of the model, `provider/model#variant`), which the OpenCode recipe required.
+`--variant` is now needed only for effort selection, which OpenCode 2 harnesses
+report as unsupported.
+
 ## 2.13.1 — 2026-10-06
 
 Fixes from a review of v2.13.0.
