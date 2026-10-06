@@ -421,12 +421,15 @@ pub(crate) const RECIPES: &[Recipe] = &[
     Recipe {
         names: &["opencode"],
         id: "local.opencode",
-        required_flags: &["--model", "--variant", "--agent", "--auto"],
+        required_flags: &["--model", "--agent", "--auto"],
         help_argv: &["run", "--help"],
         catalog: Some((&["models"], Catalog::Lines)),
         argv: &["run", "${input.prompt}"],
         model_argv: &["--model", "${route.model}"],
         effort_argv: &["--variant", "${route.effort}"],
+        // OpenCode 2 dropped `--variant` (a variant is now part of the model,
+        // `provider/model#variant`), so effort is offered only where it exists.
+        effort_requires: Some("--variant"),
         env_allow: &BASE_ENV,
         capabilities: &[
             PROCESS_CAPS[0],

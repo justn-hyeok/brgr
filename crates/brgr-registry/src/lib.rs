@@ -1560,6 +1560,32 @@ mod tests {
         );
     }
 
+    /// `OpenCode` 2 moved the variant into the model name and dropped
+    /// `--variant`; it still drafts, without effort selection.
+    #[test]
+    fn opencode_2_drafts_without_the_variant_flag() {
+        let help = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../testdata/fixtures/help/opencode-run-2.0.20.txt"),
+        )
+        .unwrap();
+        let manifest = generate_manifest("opencode", PathBuf::from("/bin/echo"), &help).unwrap();
+        manifest.validate().unwrap();
+        assert_eq!(manifest.id, "local.opencode");
+        assert!(manifest.launch.effort_argv.is_empty());
+        assert_eq!(
+            manifest.capabilities["effort_select"].status,
+            CapabilityStatus::Unsupported
+        );
+        let one = generate_manifest(
+            "opencode",
+            PathBuf::from("/bin/echo"),
+            "--model <model> --variant <variant> --agent <agent> --auto",
+        )
+        .unwrap();
+        assert_eq!(one.launch.effort_argv, ["--variant", "${route.effort}"]);
+    }
+
     /// Recipes drafted from the help each CLI printed when it was added.
     #[test]
     fn the_v2_13_workers_draft_from_their_own_help() {
