@@ -1,0 +1,36 @@
+name: Bug report
+description: Something brgr did, or failed to do
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        A failed run's error quotes the last lines of the worker's screen, which can contain your code or prompt. Read anything you paste first.
+        Security problems: open an issue titled "Security report" without details instead (see CONTRIBUTING.md).
+  - type: input
+    id: versions
+    attributes:
+      label: Versions
+      description: Output of `brgr --version` and `herdr --version`
+      placeholder: brgr 2.13.3, herdr 0.9.x
+    validations:
+      required: true
+  - type: input
+    id: harness
+    attributes:
+      label: Harness
+      description: The worker involved, for example `local.claude-code`
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What you ran and what you expected
+    validations:
+      required: true
+  - type: textarea
+    id: errors
+    attributes:
+      label: brgr errors
+      description: Output of `brgr errors`; paths and ids are already redacted
+      render: text
