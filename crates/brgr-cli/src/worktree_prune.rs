@@ -1192,6 +1192,16 @@ pub(crate) fn reclaim_task(paths: &Paths, task: TaskId, revision: u32) -> Option
     if assessed.exists() {
         return None;
     }
+    // The process deciding, or closing the pane, may itself be sitting in the
+    // worktree; the check that refuses to remove a working directory would
+    // then keep it for good. Step out first: this process is finishing.
+    if let Some(cwd) = std::env::current_dir()
+        .ok()
+        .and_then(|path| canonical(&path))
+        && is_self_or_ancestor(&worktree, &cwd)
+    {
+        std::env::set_current_dir(&paths.home).ok()?;
+    }
     let current_dir = std::env::current_dir()
         .ok()
         .and_then(|path| canonical(&path));

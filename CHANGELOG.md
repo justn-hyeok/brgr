@@ -1,5 +1,14 @@
 # Changelog
 
+## 2.12.16 — 2026-10-06
+
+Hotfix: a pane task whose pane was closed by its session process, rather than
+by the decision itself, kept its worktree for good. The session process ran
+inside the task worktree, so the check that refuses to remove a process's own
+working directory kept it, and the once-only marker stopped any retry. The
+session process now starts in the control home, and reclamation steps out of
+the worktree before assessing it.
+
 ## 2.12.15 — 2026-10-06
 
 Hotfix: the evidence-file check from v2.12.4 read each file whole, however
