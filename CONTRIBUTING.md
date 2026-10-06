@@ -20,8 +20,6 @@ What that means, plainly:
 - **Reviews are model reviews.** They catch real bugs: v2.12.1 to v2.12.15
   came out of two of them. They are not a human review, and the
   [readiness checklist](docs/readiness/status.md) does not count them as one.
-- **No human has reviewed the code yet.** A review by someone other than its
-  author is one of the two open readiness checks.
 
 ## Reporting a bug
 
@@ -58,8 +56,7 @@ gate; it tells the reviewer what kind of mistakes to look for.
 
 What brgr lacks most is a person reading its code. A review of one crate, or
 one module such as `crates/brgr-cli/src/worktree_prune.rs`, filed as issues,
-closes part of that open check (gate 2-5 in the
-[readiness checklist](docs/readiness/v1-readiness-checklist-2026-09-14.md)).
+helps the most.
 
 ## Security
 
