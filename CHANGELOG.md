@@ -1,5 +1,18 @@
 # Changelog
 
+## 2.13.3 — 2026-10-06
+
+OpenCode 2 fixes from a review of v2.13.2.
+- OpenCode 2 runs get `--standalone`, so a run brgr stops no longer carries on
+  in OpenCode's shared background service.
+- `--model` works on OpenCode 2 again, `#variant` included. OpenCode checks
+  model names itself, because `opencode models` returns a different list on
+  each call.
+- A pane task that names a model on OpenCode 2 says to use `--headless`
+  instead of starting a TUI that exits at once.
+- Recipe flags must appear in the help as whole flags.
+- Register OpenCode again after upgrading.
+
 ## 2.13.2 — 2026-10-06
 
 OpenCode 2 registers again. It dropped `run --variant` (a variant is now part

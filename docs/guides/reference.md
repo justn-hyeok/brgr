@@ -71,6 +71,13 @@ brgr's bounded probe limit, so `brgr run OBJECTIVE --model MODEL` and `--effort`
 fail for this route instead of guessing a family variant. See the
 [v2.0.2 live receipt](../evidence/live-devin-cli-v2.0.2-2026-09-15.md).
 
+`local.opencode` passes `--standalone` when `opencode run --help` documents it
+(OpenCode 2), in its pane as well. Without it the task runs in OpenCode's shared
+background service, which carries on after brgr stops the run. OpenCode checks
+model names itself, so `--model provider/model#variant` selects a variant.
+Its TUI takes no effort option, and on OpenCode 2 no model option either, so a
+task that names one runs only with `--headless`.
+
 For JSONL OMP process results, brgr checks every assistant event's native
 `provider/model` against an explicitly requested selector before publishing a
 candidate. `brgr result TASK` exposes that model in a separately committed

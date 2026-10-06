@@ -94,6 +94,10 @@ pub struct InteractiveSpec {
     /// effort then runs headless rather than silently without it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub effort_print_only: bool,
+    /// Likewise for the model arguments: `OpenCode` 2's TUI has no `--model`,
+    /// while `OpenCode` 1's has.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub model_print_only: bool,
     /// Run the registered executable inside a native host when Herdr does not
     /// have a built-in agent kind for this harness.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]

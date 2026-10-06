@@ -690,6 +690,20 @@ esac
 echo OPENCODE_PRINT_MODE_OK
 "#;
 
+/// An `OpenCode` 2 stand-in: `--variant` is gone, and a run outside a private
+/// server (`--standalone`) would keep going in the shared service after brgr
+/// stops the client, so this one refuses it.
+const OPENCODE_2_FIXTURE: &str = r#"#!/bin/sh
+case "$1 $2" in
+  '--version '*) echo 'opencode v2.0.20'; exit 0;;
+  'run --help') printf '%s\n' '  --standalone            Run with a private server instead of the background service' '  --model, -m string      Model to use in the format provider/model#variant' '  --agent string          Agent to use' '  --auto                  Auto-approve permissions that are not explicitly denied'; exit 0;;
+  'models '*) echo 'opencode/big-pickle'; exit 0;;
+esac
+for arg in "$@"; do test "$arg" = --standalone && { echo OPENCODE_2_STANDALONE_OK; exit 0; }; done
+echo 'ran in the shared background service' >&2
+exit 7
+"#;
+
 /// A Herdr stand-in. It opens a pane, starts an agent, and — standing in for
 /// the agent too — writes the report named in the prompt, then goes from
 /// working to idle. Every call and the pane's environment are recorded beside
@@ -1370,6 +1384,52 @@ fn extra_argv_cannot_bypass_a_harness_effort_selector() {
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("--variant"));
     assert!(!fixture.state("calls.log").contains("pane split"));
+}
+
+/// `OpenCode` 2 runs in a private server in both modes. It checks its own model
+/// names, variant included; its TUI takes none, so a model needs `--headless`.
+#[test]
+fn opencode_2_runs_standalone_and_takes_a_model_only_headless() {
+    let fixture = pane_fixture();
+    let opencode = fixture.herdr.with_file_name("opencode");
+    fs::write(&opencode, OPENCODE_2_FIXTURE).unwrap();
+    add_fixture(
+        &fixture.home,
+        &opencode,
+        &fixture.home.with_file_name("scratch-2"),
+    );
+    let headless = fixture.run_on(
+        "local.opencode",
+        &["--headless", "--model", "opencode/big-pickle#high"],
+    );
+    assert_eq!(headless["outcome"], "candidate", "{headless}");
+    let modelled = run(
+        &fixture.home,
+        &[
+            "run",
+            "Explain",
+            "--harness",
+            "local.opencode",
+            "--model",
+            "opencode/big-pickle",
+            "--workspace",
+            fixture.workspace.to_str().unwrap(),
+            "--foreground",
+        ],
+        &[
+            ("HERDR_ENV", "1"),
+            ("HERDR_PANE_ID", "w9:p1"),
+            ("HERDR_BIN_PATH", fixture.herdr.to_str().unwrap()),
+            ("BRGR_OWNER_ID", "codex:pane-test"),
+        ],
+    );
+    assert!(!modelled.status.success());
+    assert!(String::from_utf8_lossy(&modelled.stderr).contains("--headless"));
+    assert!(!fixture.state("calls.log").contains("pane split"));
+    let paned = fixture.run_on("local.opencode", &[]);
+    assert_eq!(paned["outcome"], "candidate", "{paned}");
+    let start = fixture.state("start-args");
+    assert!(start.contains("--kind\nopencode\n--standalone"), "{start}");
 }
 
 /// Herdr may never show an agent working: Cursor went from unknown straight to

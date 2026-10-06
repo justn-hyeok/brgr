@@ -18,6 +18,8 @@ pub(crate) struct Interactive {
     /// Arguments before the permission, model, and effort ones.
     pub(crate) argv: &'static [&'static str],
     pub(crate) effort_print_only: bool,
+    /// The TUI takes no model option when the help documents this flag.
+    pub(crate) model_print_only_with: Option<&'static str>,
 }
 
 /// A harness brgr recognizes by name, and the process manifest it drafts.
@@ -38,6 +40,10 @@ pub(crate) struct Recipe {
     pub(crate) effort_argv: &'static [&'static str],
     /// When set, effort is offered only if the help text documents this flag.
     pub(crate) effort_requires: Option<&'static str>,
+    /// A flag that keeps the run in a process of its own, appended to both the
+    /// one-shot and the interactive arguments when the help documents it, so
+    /// that stopping the process stops the work.
+    pub(crate) own_process: Option<&'static str>,
     pub(crate) env_allow: &'static [&'static str],
     pub(crate) source: Source,
     pub(crate) media_type: &'static str,
@@ -61,7 +67,6 @@ pub(crate) enum Catalog {
     OmpSelectors,
     DashSeparated,
     FirstColumn,
-    Lines,
     CliValidated,
 }
 
@@ -109,6 +114,7 @@ pub(crate) const GENERIC: Recipe = Recipe {
     model_argv: &[],
     effort_argv: &[],
     effort_requires: None,
+    own_process: None,
     env_allow: &["HOME", "PATH", "LANG"],
     source: Source::Stdout,
     media_type: "text/plain",
@@ -152,6 +158,7 @@ pub(crate) const RECIPES: &[Recipe] = &[
             kind: "gjc",
             argv: &[],
             effort_print_only: false,
+            model_print_only_with: None,
         }),
         ..GENERIC
     },
@@ -190,6 +197,7 @@ pub(crate) const RECIPES: &[Recipe] = &[
             kind: "omp",
             argv: &[],
             effort_print_only: false,
+            model_print_only_with: None,
         }),
         ..GENERIC
     },
@@ -227,6 +235,7 @@ pub(crate) const RECIPES: &[Recipe] = &[
             kind: "cursor",
             argv: &["--trust"],
             effort_print_only: false,
+            model_print_only_with: None,
         }),
         ..GENERIC
     },
@@ -269,6 +278,7 @@ pub(crate) const RECIPES: &[Recipe] = &[
             kind: "command-code",
             argv: &["--trust", "--no-auto-update", "--skip-onboarding"],
             effort_print_only: false,
+            model_print_only_with: None,
         }),
         ..GENERIC
     },
@@ -305,6 +315,7 @@ pub(crate) const RECIPES: &[Recipe] = &[
             kind: "devin",
             argv: &["--respect-workspace-trust", "false"],
             effort_print_only: false,
+            model_print_only_with: None,
         }),
         ..GENERIC
     },
@@ -382,6 +393,7 @@ pub(crate) const RECIPES: &[Recipe] = &[
             kind: "claude",
             argv: &[],
             effort_print_only: false,
+            model_print_only_with: None,
         }),
         ..GENERIC
     },
@@ -415,6 +427,7 @@ pub(crate) const RECIPES: &[Recipe] = &[
             kind: "cline",
             argv: &[],
             effort_print_only: false,
+            model_print_only_with: None,
         }),
         ..GENERIC
     },
@@ -423,13 +436,18 @@ pub(crate) const RECIPES: &[Recipe] = &[
         id: "local.opencode",
         required_flags: &["--model", "--agent", "--auto"],
         help_argv: &["run", "--help"],
-        catalog: Some((&["models"], Catalog::Lines)),
+        // `opencode models` prints a different, sometimes empty, list from
+        // one call to the next on OpenCode 2; `run` refuses an unknown model.
+        catalog: Some((&[], Catalog::CliValidated)),
         argv: &["run", "${input.prompt}"],
         model_argv: &["--model", "${route.model}"],
         effort_argv: &["--variant", "${route.effort}"],
         // OpenCode 2 dropped `--variant` (a variant is now part of the model,
         // `provider/model#variant`), so effort is offered only where it exists.
         effort_requires: Some("--variant"),
+        // OpenCode 2 otherwise runs the task in a shared background service,
+        // which carries on after brgr stops the client.
+        own_process: Some("--standalone"),
         env_allow: &BASE_ENV,
         capabilities: &[
             PROCESS_CAPS[0],
@@ -444,6 +462,9 @@ pub(crate) const RECIPES: &[Recipe] = &[
             kind: "opencode",
             argv: &[],
             effort_print_only: true,
+            // OpenCode 2, which documents `--standalone`, dropped the TUI's
+            // `--model`; OpenCode 1's TUI still takes one.
+            model_print_only_with: Some("--standalone"),
         }),
         ..GENERIC
     },
@@ -498,6 +519,7 @@ pub(crate) const RECIPES: &[Recipe] = &[
             kind: "copilot",
             argv: &["--no-auto-update", "--no-ask-user"],
             effort_print_only: false,
+            model_print_only_with: None,
         }),
         ..GENERIC
     },
@@ -549,6 +571,7 @@ pub(crate) const RECIPES: &[Recipe] = &[
             kind: "codex",
             argv: &[],
             effort_print_only: false,
+            model_print_only_with: None,
         }),
         ..GENERIC
     },
@@ -593,6 +616,7 @@ pub(crate) const RECIPES: &[Recipe] = &[
             kind: "gemini",
             argv: &["--skip-trust"],
             effort_print_only: false,
+            model_print_only_with: None,
         }),
         ..GENERIC
     },
@@ -642,6 +666,7 @@ pub(crate) const RECIPES: &[Recipe] = &[
             kind: "pi",
             argv: &[],
             effort_print_only: false,
+            model_print_only_with: None,
         }),
         ..GENERIC
     },
@@ -656,7 +681,11 @@ pub(crate) fn generate_manifest(
         .iter()
         .find(|recipe| recipe.names.contains(&requested_name))
     {
-        if !recipe.required_flags.iter().all(|flag| help.contains(flag)) {
+        if !recipe
+            .required_flags
+            .iter()
+            .all(|flag| documents(help, flag))
+        {
             return Err(RegistryError::RequiredFlagsMissing);
         }
         return Ok(draft(recipe, recipe.id.to_owned(), executable, help));
@@ -689,7 +718,18 @@ pub(crate) fn draft(
     let strings = |values: &[&str]| values.iter().map(|value| (*value).to_owned()).collect();
     let effort = recipe
         .effort_requires
-        .is_none_or(|flag| help.contains(flag));
+        .is_none_or(|flag| documents(help, flag));
+    let own_process: &[&str] = match recipe.own_process {
+        Some(flag) if documents(help, flag) => &[flag],
+        _ => &[],
+    };
+    let with_own_process = |values: &[&str]| -> Vec<String> {
+        values
+            .iter()
+            .chain(own_process)
+            .map(|value| (*value).to_owned())
+            .collect()
+    };
     HarnessManifest {
         schema: MANIFEST_SCHEMA_V1.to_owned(),
         id,
@@ -708,13 +748,12 @@ pub(crate) fn draft(
                     },
                     Catalog::DashSeparated => ModelCatalogFormat::DashSeparated,
                     Catalog::FirstColumn => ModelCatalogFormat::FirstColumn,
-                    Catalog::Lines => ModelCatalogFormat::Lines,
                     Catalog::CliValidated => ModelCatalogFormat::CliValidated,
                 },
             }),
         },
         launch: LaunchSpec {
-            argv: strings(recipe.argv),
+            argv: with_own_process(recipe.argv),
             model_argv: strings(recipe.model_argv),
             effort_argv: if effort {
                 strings(recipe.effort_argv)
@@ -733,8 +772,11 @@ pub(crate) fn draft(
                 .as_ref()
                 .map(|interactive| InteractiveSpec {
                     herdr_kind: interactive.kind.to_owned(),
-                    argv: strings(interactive.argv),
+                    argv: with_own_process(interactive.argv),
                     effort_print_only: interactive.effort_print_only,
+                    model_print_only: interactive
+                        .model_print_only_with
+                        .is_some_and(|flag| documents(help, flag)),
                     native_host: true,
                 }),
         },
@@ -768,6 +810,17 @@ pub(crate) fn draft(
             })
             .collect(),
     }
+}
+
+/// Whether the help documents `flag` as a whole flag: `--auto` is not
+/// documented by `--autoupdate`, nor `--model` by `--model-list`.
+fn documents(help: &str, flag: &str) -> bool {
+    help.match_indices(flag).any(|(start, _)| {
+        let before = help[..start].chars().next_back();
+        let after = help[start + flag.len()..].chars().next();
+        before.is_none_or(|c| c.is_whitespace() || matches!(c, ',' | '[' | '(' | '|'))
+            && after.is_none_or(|c| !(c.is_alphanumeric() || matches!(c, '-' | '_')))
+    })
 }
 
 pub(crate) fn supported(semantics: &str) -> Capability {

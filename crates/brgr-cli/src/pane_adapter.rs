@@ -128,6 +128,11 @@ pub(crate) fn require_tui(manifest: &HarnessManifest, spec: &TaskSpec) -> Result
             "this native TUI cannot honour --effort; change the requested option or explicitly request --headless"
         );
     }
+    if interactive.model_print_only && spec.route.requested_model.is_some() {
+        bail!(
+            "this native TUI cannot honour --model; change the requested option or explicitly request --headless"
+        );
+    }
     Ok(())
 }
 
