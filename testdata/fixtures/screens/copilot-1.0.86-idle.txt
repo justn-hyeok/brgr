@@ -1,0 +1,57 @@
+  Current   Sessions   Issues   Pull requests   Gists
+
+╭───────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│                                                                                                               │
+│  ╭─╮╭─╮                            │  Getting started                                                         │
+│  ╰─╯╰─╯  Copilot v1.0.86 uses AI.  │  Use the tabs above to explore your sessions and pull requests           │
+│  █ ▘▝ █  Check for mistakes.       │  /init — Initialize Copilot instructions for this repository             │
+│   ▔▔▔▔                             │  /model — Switch models across providers, or use Auto                    │
+│                                                                                                               │
+╰───────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+ ! Failed to load 1 skill. Run /skills for more details.
+
+ ● No copilot-instructions.md found. Run /init to generate.
+
+ ● Tip: /app
+   └ Prefer a visual workspace? Try out the GitHub Copilot desktop app
+      https://github.com/features/ai/github-app
+
+ ● MCP Servers reloaded: 2 servers connected
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ /private/tmp/claude-501/-Users-justn-dev-brgr/.../cap-copilot-1791247661 [⎇ main]             Session: 0 AIC used
+╻▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
+┃
+╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+ ← open sidebar · / commands · ? help · tab next tab                                                          Auto

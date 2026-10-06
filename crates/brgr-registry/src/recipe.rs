@@ -444,6 +444,195 @@ pub(crate) const RECIPES: &[Recipe] = &[
         }),
         ..GENERIC
     },
+    Recipe {
+        names: &["copilot"],
+        id: "local.copilot",
+        required_flags: &[
+            "-p, --prompt <text>",
+            "-s, --silent",
+            "--model <model>",
+            "--yolo",
+            "--no-auto-update",
+        ],
+        argv: &[
+            "--no-auto-update",
+            "--silent",
+            "--prompt",
+            "${input.prompt}",
+        ],
+        // No model list; Copilot refuses a name it does not offer within
+        // seconds, before any request ("Model … is not available").
+        catalog: Some((&[], Catalog::CliValidated)),
+        model_argv: MODEL,
+        effort_argv: &["--reasoning-effort", "${route.effort}"],
+        effort_requires: Some("--reasoning-effort <level>"),
+        // `USER` names the keychain entry that holds the GitHub login.
+        env_allow: &[
+            "HOME",
+            "PATH",
+            "LANG",
+            "TMPDIR",
+            "USER",
+            "GH_TOKEN",
+            "GITHUB_TOKEN",
+            "COPILOT_GITHUB_TOKEN",
+        ],
+        capabilities: &[
+            PROCESS_CAPS[0],
+            PROCESS_CAPS[1],
+            ("model_select", Cap::Supported("--model")),
+            ("effort_select", Cap::Supported("--reasoning-effort")),
+        ],
+        // `--yolo` is `--allow-all-tools --allow-all-paths --allow-all-urls`.
+        full: Some(&["--yolo"]),
+        edits: None,
+        read_only: None,
+        interactive: Some(Interactive {
+            kind: "copilot",
+            argv: &["--no-auto-update"],
+            effort_print_only: false,
+        }),
+        ..GENERIC
+    },
+    Recipe {
+        names: &["codex"],
+        id: "local.codex",
+        required_flags: &[
+            "--dangerously-bypass-approvals-and-sandbox",
+            "--skip-git-repo-check",
+            "--ephemeral",
+            "--disable <FEATURE>",
+            "-m, --model <MODEL>",
+            "-c, --config <key=value>",
+        ],
+        help_argv: &["exec", "--help"],
+        // `--disable hooks`: a worker Codex must not run the hooks installed
+        // for Codex owners, brgr's among them, which would bind the worker's
+        // session as an owner and tell it to call brgr as one.
+        argv: &[
+            "exec",
+            "--skip-git-repo-check",
+            "--ephemeral",
+            "--disable",
+            "hooks",
+            "--color",
+            "never",
+            "${input.prompt}",
+        ],
+        catalog: Some((&[], Catalog::CliValidated)),
+        model_argv: MODEL,
+        effort_argv: &["-c", "model_reasoning_effort=${route.effort}"],
+        effort_requires: Some("-c, --config <key=value>"),
+        env_allow: &[
+            "HOME",
+            "PATH",
+            "LANG",
+            "TMPDIR",
+            "USER",
+            "OPENAI_API_KEY",
+            "CODEX_HOME",
+        ],
+        capabilities: &[
+            PROCESS_CAPS[0],
+            PROCESS_CAPS[1],
+            ("model_select", Cap::Supported("--model")),
+            ("effort_select", Cap::Supported("model_reasoning_effort")),
+        ],
+        full: Some(&["--dangerously-bypass-approvals-and-sandbox"]),
+        edits: None,
+        read_only: None,
+        interactive: Some(Interactive {
+            kind: "codex",
+            argv: &["--disable", "hooks"],
+            effort_print_only: false,
+        }),
+        ..GENERIC
+    },
+    Recipe {
+        names: &["gemini"],
+        id: "local.gemini",
+        required_flags: &[
+            "-p, --prompt",
+            "-m, --model",
+            "--approval-mode",
+            "--skip-trust",
+        ],
+        // `--skip-trust`: in a folder it does not trust, Gemini CLI silently
+        // drops the approval mode back to "default" and stops for approval.
+        argv: &["--skip-trust", "--prompt", "${input.prompt}"],
+        catalog: Some((&[], Catalog::CliValidated)),
+        model_argv: MODEL,
+        env_allow: &[
+            "HOME",
+            "PATH",
+            "LANG",
+            "TMPDIR",
+            "USER",
+            "GEMINI_API_KEY",
+            "GOOGLE_API_KEY",
+            "GOOGLE_CLOUD_PROJECT",
+            "GOOGLE_GENAI_USE_VERTEXAI",
+            "GOOGLE_GENAI_USE_GCA",
+        ],
+        capabilities: &[
+            PROCESS_CAPS[0],
+            PROCESS_CAPS[1],
+            ("model_select", Cap::Supported("--model")),
+            ("effort_select", Cap::Unsupported("not_documented")),
+        ],
+        full: Some(&["--approval-mode", "yolo"]),
+        edits: None,
+        read_only: None,
+        interactive: Some(Interactive {
+            kind: "gemini",
+            argv: &["--skip-trust"],
+            effort_print_only: false,
+        }),
+        ..GENERIC
+    },
+    Recipe {
+        names: &["pi"],
+        id: "local.pi",
+        required_flags: &[
+            "--print, -p",
+            "--no-session",
+            "--model <pattern>",
+            "--thinking <level>",
+        ],
+        argv: &["--print", "--no-session", "${input.prompt}"],
+        catalog: Some((&[], Catalog::CliValidated)),
+        model_argv: MODEL,
+        effort_argv: &["--thinking", "${route.effort}"],
+        effort_requires: Some("--thinking <level>"),
+        env_allow: &[
+            "HOME",
+            "PATH",
+            "LANG",
+            "TMPDIR",
+            "USER",
+            "PI_CODING_AGENT_DIR",
+            "ANTHROPIC_API_KEY",
+            "OPENAI_API_KEY",
+            "GEMINI_API_KEY",
+        ],
+        capabilities: &[
+            PROCESS_CAPS[0],
+            PROCESS_CAPS[1],
+            ("model_select", Cap::Supported("--model")),
+            ("effort_select", Cap::Supported("--thinking")),
+        ],
+        // Pi asks no approvals: its tools always run, so the full level takes
+        // no flag.
+        full: Some(&[]),
+        edits: None,
+        read_only: None,
+        interactive: Some(Interactive {
+            kind: "pi",
+            argv: &[],
+            effort_print_only: false,
+        }),
+        ..GENERIC
+    },
 ];
 
 pub(crate) fn generate_manifest(

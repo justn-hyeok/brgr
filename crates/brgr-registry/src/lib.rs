@@ -1560,6 +1560,95 @@ mod tests {
         );
     }
 
+    /// Recipes drafted from the help each CLI printed when it was added.
+    #[test]
+    fn the_v2_13_workers_draft_from_their_own_help() {
+        let fixture = |name: &str| {
+            std::fs::read_to_string(
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../testdata/fixtures/help")
+                    .join(name),
+            )
+            .unwrap()
+        };
+        for (name, help, id, argv, full, kind) in [
+            (
+                "copilot",
+                "copilot-1.0.86.txt",
+                "local.copilot",
+                &[
+                    "--no-auto-update",
+                    "--silent",
+                    "--prompt",
+                    "${input.prompt}",
+                ][..],
+                &["--yolo"][..],
+                "copilot",
+            ),
+            (
+                "codex",
+                "codex-exec-0.160.0.txt",
+                "local.codex",
+                &[
+                    "exec",
+                    "--skip-git-repo-check",
+                    "--ephemeral",
+                    "--disable",
+                    "hooks",
+                    "--color",
+                    "never",
+                    "${input.prompt}",
+                ][..],
+                &["--dangerously-bypass-approvals-and-sandbox"][..],
+                "codex",
+            ),
+            (
+                "gemini",
+                "gemini-0.62.0.txt",
+                "local.gemini",
+                &["--skip-trust", "--prompt", "${input.prompt}"][..],
+                &["--approval-mode", "yolo"][..],
+                "gemini",
+            ),
+            (
+                "pi",
+                "pi-0.73.1.txt",
+                "local.pi",
+                &["--print", "--no-session", "${input.prompt}"][..],
+                &[][..],
+                "pi",
+            ),
+        ] {
+            let manifest =
+                generate_manifest(name, PathBuf::from("/bin/echo"), &fixture(help)).unwrap();
+            manifest.validate().unwrap();
+            assert_eq!(manifest.id, id);
+            assert_eq!(manifest.launch.argv, argv, "{name}");
+            assert_eq!(manifest.permission_arguments(None).unwrap(), full, "{name}");
+            assert_eq!(
+                manifest.launch.interactive.as_ref().unwrap().herdr_kind,
+                kind,
+                "{name}"
+            );
+        }
+        // A worker Codex never runs the hooks installed for Codex owners.
+        let codex = generate_manifest(
+            "codex",
+            PathBuf::from("/bin/echo"),
+            &fixture("codex-exec-0.160.0.txt"),
+        )
+        .unwrap();
+        assert!(
+            codex
+                .launch
+                .interactive
+                .unwrap()
+                .argv
+                .windows(2)
+                .any(|pair| pair == ["--disable", "hooks"])
+        );
+    }
+
     #[test]
     fn named_cursor_and_command_code_recipes_always_run_at_the_full_level() {
         let cursor_help = "--print --mode <mode> --output-format <format> --model <model>";

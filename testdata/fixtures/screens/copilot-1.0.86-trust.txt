@@ -1,0 +1,57 @@
+  Current   Sessions   Issues   Pull requests   Gists
+
+╭───────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│                                                                                                               │
+│  ╭─╮╭─╮                            │  Getting started                                                         │
+│  ╰─╯╰─╯  Copilot v1.0.86 uses AI.  │  Use the tabs above to explore your sessions and pull requests           │
+│  █ ▘▝ █  Check for mistakes.       │  /init — Initialize Copilot instructions for this repository             │
+│   ▔▔▔▔                             │  /model — Switch models across providers, or use Auto                    │
+│                                                                                                               │
+╰───────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+ ! Failed to load 1 skill. Run /skills for more details.
+
+ ● No copilot-instructions.md found. Run /init to generate.
+
+ ● Tip: /app
+   └ Prefer a visual workspace? Try out the GitHub Copilot desktop app
+      https://github.com/features/ai/github-app
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+╭─────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ Confirm folder trust                                                                                            │
+│ ─────────────────────────────────────────────────────────────────────────────────────────────────────────────── │
+│ ╭─────────────────────────────────────────────────────────────────────────────────────────────────────────────╮ │
+│ │ /private/tmp/claude-501/-Users-justn-dev-brgr/b54b7525-6101-4186-a2b9-0e32355d043a/scratchpad/cap-copilot-1 │ │
+│ │ 791247661                                                                                                   │ │
+│ ╰─────────────────────────────────────────────────────────────────────────────────────────────────────────────╯ │
+│                                                                                                                 │
+│ Copilot can read files in this folder and, with your permission, edit them or run code and shell commands. It   │
+│ will remember your permissions for the rest of this session.                                                    │
+│                                                                                                                 │
+│ Do you trust the files in this folder?                                                                          │
+│                                                                                                                 │
+│ ❯ 1. Yes                                                                                                        │
+│   2. Yes, and remember this folder for future sessions                                                          │
+│   3. No (Esc)                                                                                                   │
+│                                                                                                                 │
+│ ↑/↓ to navigate · enter to select · esc to cancel                                                               │
+╰─────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯

@@ -1,5 +1,15 @@
 # Changelog
 
+## 2.13.0 — 2026-10-06
+
+Four new workers: Codex CLI (`local.codex`), GitHub Copilot CLI
+(`local.copilot`), Gemini CLI (`local.gemini`) and Pi (`local.pi`), each run
+as its own TUI in a Herdr pane with full permissions, or headless. A Codex
+worker runs with `--disable hooks`, so the hooks installed for Codex owners
+never treat its session as an owner. New screen rules accept Copilot's folder
+prompt and the prompt Codex shows in a task worktree, only for the task's own
+workspace and repository.
+
 ## 2.12.16 — 2026-10-06
 
 Hotfix: a pane task whose pane was closed by its session process, rather than

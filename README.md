@@ -38,9 +38,10 @@ accept or reject.
   can start their own child workers, and sibling workers can debate when you ask
   for it.
 
-Workers can be Claude Code, OpenCode, Cursor CLI, Devin CLI, Cline, GJC, OMP or
-Command Code; brgr calls each registered worker CLI a *harness*. The agent that
-starts workers, the *owner*, can be a Codex or Claude Code session.
+Workers can be Claude Code, Codex CLI, Gemini CLI, GitHub Copilot CLI, Pi,
+OpenCode, Cursor CLI, Devin CLI, Cline, GJC, OMP or Command Code; brgr calls
+each registered worker CLI a *harness*. The agent that starts workers, the
+*owner*, can be a Codex or Claude Code session.
 
 > **Workers always run with full permissions** (`--yolo`,
 > `--dangerously-skip-permissions` and equivalents). That is the point of
@@ -60,7 +61,7 @@ starts workers, the *owner*, can be a Codex or Claude Code session.
 
 ```bash
 # 1. The brgr CLI
-cargo install --git https://github.com/justn-hyeok/brgr --tag v2.12.16 --locked brgr-cli
+cargo install --git https://github.com/justn-hyeok/brgr --tag v2.13.0 --locked brgr-cli
 
 # 2. Teach your agent how to use brgr
 brgr integrate claude install    # Claude Code: installs the brgr skill
@@ -80,7 +81,7 @@ that was already running does not know brgr yet.
 The Herdr plugin adds a task board and workspace actions on top:
 
 ```bash
-herdr plugin install justn-hyeok/brgr --ref v2.12.16
+herdr plugin install justn-hyeok/brgr --ref v2.13.0
 ```
 
 ## Use it

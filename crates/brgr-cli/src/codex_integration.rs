@@ -17,7 +17,7 @@ use tempfile::NamedTempFile;
 
 const SKILL_TEXT: &str = r#"---
 name: brgr
-description: Delegate bounded coding work through brgr. Workers open as Herdr panes beside you, run with full permissions, and report back as sealed results you accept or reject. Use for Claude Code, OpenCode, Cursor, Devin, Cline, GJC and OMP workers.
+description: Delegate bounded coding work through brgr. Workers open as Herdr panes beside you, run with full permissions, and report back as sealed results you accept or reject. Use for Claude Code, Codex, Gemini CLI, GitHub Copilot CLI, Pi, OpenCode, Cursor, Devin, Cline, GJC and OMP workers.
 ---
 
 # brgr

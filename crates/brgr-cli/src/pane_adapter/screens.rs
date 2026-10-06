@@ -82,7 +82,14 @@ pub(super) fn classify(screen: &str, workspace: &Path) -> Screen {
             keys,
         };
     }
-    if let Some(resolution) = codex_trust(screen, workspace) {
+    if let Some(resolution) = codex_trust(
+        screen,
+        workspace,
+        crate::workspace::primary_checkout(workspace).as_deref(),
+    ) {
+        return resolution;
+    }
+    if let Some(resolution) = copilot_trust(screen, workspace) {
         return resolution;
     }
     let lower = screen.to_lowercase();
@@ -201,18 +208,33 @@ fn has_continue_notice(screen: &str) -> bool {
 
 /// Codex's own folder prompt ("Trust this folder? ... 1. Trust and continue").
 /// Accepted only for the task's workspace, like Claude's.
-fn codex_trust(screen: &str, workspace: &Path) -> Option<Screen> {
+fn codex_trust(screen: &str, workspace: &Path, primary: Option<&Path>) -> Option<Screen> {
     let flat = squash(screen);
     if !flat.contains("Trustthisfolder?") || !flat.contains("Trustandcontinue") {
         return None;
     }
     let workspace = squash(&workspace.to_string_lossy());
+    let primary = primary.map(|primary| squash(&primary.to_string_lossy()));
     // The path must end where the prompt's own sentence begins, so a longer
     // path ("/repo/task-evil", "/repo/task/sub") is not the task's workspace.
+    // In a task worktree Codex adds that trust applies to the repository
+    // root, which must then be exactly the repository the worktree came from.
     let shown = flat.split_once("Folderaccess").is_some_and(|(_, after)| {
         after
             .strip_prefix(workspace.trim_end_matches('/'))
-            .is_some_and(|rest| rest.trim_start_matches('/').starts_with("Trustthisfolder"))
+            .map(|rest| rest.trim_start_matches('/'))
+            .is_some_and(|rest| {
+                rest.starts_with("Trustthisfolder")
+                    || rest.starts_with("Note:")
+                        && rest
+                            .split_once("repositoryroot:")
+                            .and_then(|(_, root)| root.split_once("Trustthisfolder"))
+                            .is_some_and(|(root, _)| {
+                                primary.as_deref().is_some_and(|primary| {
+                                    root.trim_end_matches('/') == primary.trim_end_matches('/')
+                                })
+                            })
+            })
     });
     let options = menu_options(screen);
     let target = options
@@ -233,6 +255,43 @@ fn codex_trust(screen: &str, workspace: &Path) -> Option<Screen> {
     keys.push("enter");
     Some(Screen::Resolve {
         rule: "codex-trust",
+        keys,
+    })
+}
+
+/// GitHub Copilot CLI's folder prompt ("Confirm folder trust … Do you trust the
+/// files in this folder? 1. Yes"). Accepted only for the task's workspace: the
+/// path is drawn wrapped inside a box, so it is compared with the borders
+/// removed, and it must be exactly the workspace. "Yes, and remember this
+/// folder" is never chosen; a task worktree does not outlive its task.
+fn copilot_trust(screen: &str, workspace: &Path) -> Option<Screen> {
+    let flat: String = screen
+        .chars()
+        .filter(|character| {
+            !character.is_whitespace() && !matches!(character, '│' | '╭' | '╮' | '╰' | '╯' | '─')
+        })
+        .collect();
+    if !flat.contains("Confirmfoldertrust") || !flat.contains("Doyoutrustthefilesinthisfolder?") {
+        return None;
+    }
+    let workspace = squash(&workspace.to_string_lossy());
+    let shown = flat
+        .split_once("Confirmfoldertrust")
+        .and_then(|(_, after)| after.split_once("Copilotcanread"))
+        .is_some_and(|(path, _)| path.trim_end_matches('/') == workspace.trim_end_matches('/'));
+    let options = menu_options(screen);
+    let target = options.iter().position(|option| option.text == "Yes");
+    let (true, Some(target)) = (shown, target) else {
+        return Some(Screen::Unknown(head(screen)));
+    };
+    let selected = options
+        .iter()
+        .position(|option| option.selected)
+        .unwrap_or(target);
+    let mut keys = keys_between(selected, target);
+    keys.push("enter");
+    Some(Screen::Resolve {
+        rule: "copilot-trust",
         keys,
     })
 }
@@ -606,6 +665,83 @@ mod tests {
     }
 
     /// Synthetic.
+    /// Captured from GitHub Copilot CLI 1.0.86 in a Herdr pane.
+    const COPILOT_TRUST: &str =
+        include_str!("../../../../testdata/fixtures/screens/copilot-1.0.86-trust.txt");
+    const COPILOT_WORKSPACE: &str = "/private/tmp/claude-501/-Users-justn-dev-brgr/b54b7525-6101-4186-a2b9-0e32355d043a/scratchpad/cap-copilot-1791247661";
+
+    /// Captured from Codex CLI 0.160 started in a git worktree.
+    const CODEX_WORKTREE_TRUST: &str =
+        include_str!("../../../../testdata/fixtures/screens/codex-0.160-worktree-trust.txt");
+    const CODEX_WORKTREE: &str = "/private/tmp/claude-501/-Users-justn-dev-brgr/b54b7525-6101-4186-a2b9-0e32355d043a/scratchpad/cap-codex-wt";
+    const CODEX_REPOSITORY: &str = "/private/tmp/claude-501/-Users-justn-dev-brgr/b54b7525-6101-4186-a2b9-0e32355d043a/scratchpad/cap-codex-repo";
+
+    #[test]
+    fn codex_trust_in_a_task_worktree_names_and_accepts_its_repository() {
+        assert_eq!(
+            codex_trust(
+                CODEX_WORKTREE_TRUST,
+                Path::new(CODEX_WORKTREE),
+                Some(Path::new(CODEX_REPOSITORY))
+            ),
+            Some(Screen::Resolve {
+                rule: "codex-trust",
+                keys: vec!["enter"],
+            })
+        );
+    }
+
+    #[test]
+    fn codex_trust_for_a_root_that_is_not_the_worktrees_repository_is_refused() {
+        for primary in [None, Some("/private/tmp/other-repo"), Some(CODEX_WORKTREE)] {
+            assert!(
+                matches!(
+                    codex_trust(
+                        CODEX_WORKTREE_TRUST,
+                        Path::new(CODEX_WORKTREE),
+                        primary.map(Path::new)
+                    ),
+                    Some(Screen::Unknown(_))
+                ),
+                "{primary:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn copilots_trust_prompt_for_the_task_workspace_is_accepted_once() {
+        assert_eq!(
+            classify(COPILOT_TRUST, Path::new(COPILOT_WORKSPACE)),
+            Screen::Resolve {
+                rule: "copilot-trust",
+                keys: vec!["enter"],
+            }
+        );
+    }
+
+    #[test]
+    fn copilots_trust_prompt_for_another_folder_is_not_accepted() {
+        for other in [
+            "/private/tmp/claude-501/-Users-justn-dev-brgr/b54b7525-6101-4186-a2b9-0e32355d043a/scratchpad/cap-copilot-179124766",
+            "/private/tmp/claude-501",
+            "/somewhere/else",
+        ] {
+            assert!(
+                matches!(
+                    classify(COPILOT_TRUST, Path::new(other)),
+                    Screen::Unknown(_)
+                ),
+                "{other}"
+            );
+        }
+    }
+
+    #[test]
+    fn copilots_idle_screen_needs_no_answer() {
+        let idle = include_str!("../../../../testdata/fixtures/screens/copilot-1.0.86-idle.txt");
+        assert_eq!(classify(idle, Path::new(COPILOT_WORKSPACE)), Screen::Clear);
+    }
+
     #[test]
     fn an_agent_question_about_updating_something_is_not_an_update_offer() {
         for screen in [

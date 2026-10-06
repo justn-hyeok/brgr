@@ -58,7 +58,7 @@ headless. The separate `local.omp-herdr` route retains its legacy
 
 | Route or operation | v1 status |
 |---|---|
-| OMP process, GJC, Cursor CLI, Command Code, Devin CLI | Certified bounded fresh-run contract; exact model/effort only where the activated recipe supports it |
+| OMP process, GJC, Cursor CLI, Command Code, Devin CLI, Codex CLI, GitHub Copilot CLI, Gemini CLI, Pi | Certified bounded fresh-run contract; exact model/effort only where the activated recipe supports it |
 | Approved unfamiliar one-shot CLI | Supported after manifest contract test and authorized scratch activation |
 | `local.omp-herdr` presentation | Optional best effort; external worker stop is not certified and uncertain failure is `lost` |
 | Resume, in-flight steering, provider-side undo | Deferred; unsupported requests must fail rather than silently fall back |
@@ -93,8 +93,10 @@ native model observation, and none expose a verified effort observation.
 
 ### Pane mode
 
-Generated recipes declare native TUI launches for Claude Code, Cursor, Devin,
-Cline, OMP, OpenCode, GJC, and Command Code. The registered executable runs in
+Generated recipes declare native TUI launches for Claude Code, Codex, Gemini
+CLI, GitHub Copilot CLI, Pi, Cursor, Devin, Cline, OMP, OpenCode, GJC, and
+Command Code. A Codex worker runs with `--disable hooks`, so the hooks
+installed for Codex owners never treat its session as one. The registered executable runs in
 an owned pane without taking focus. brgr connects parent/worker messages to
 that session, seals its final report, and closes the pane after the owner
 handles the result. A momentarily idle TUI can continue the conversation.
