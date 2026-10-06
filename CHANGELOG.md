@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.13.4 — 2026-10-06
 
 - A run on a harness registered with an older recipe warns that it runs
   without the current recipe's fixes and names the command that re-registers
@@ -8,6 +8,7 @@
   its scratch run certified.
 - A revision of a headless run stays headless, so a model or effort the
   harness's TUI cannot honour no longer stops it.
+- brgr is published on crates.io as `brgr-cli` and its five internal crates.
 
 ## 2.13.3 — 2026-10-06
 
