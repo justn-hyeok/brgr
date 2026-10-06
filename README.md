@@ -114,6 +114,10 @@ quickly; see the [changelog](CHANGELOG.md). The first stable release will be
 and a full review of the code by someone other than the author. See
 [the readiness status](docs/readiness/status.md).
 
+brgr is written by AI coding agents under one maintainer's direction, so its
+code quality is not guaranteed; its behaviour is what the tests check.
+[CONTRIBUTING.md](CONTRIBUTING.md) says what that means and how to help.
+
 The detailed contract, covering plugin internals, routes, pane mode, recursive
 workers, the completion loop and worktree cleanup, is in
 [docs/guides/reference.md](docs/guides/reference.md).
