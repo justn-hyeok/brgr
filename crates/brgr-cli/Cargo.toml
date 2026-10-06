@@ -4,6 +4,12 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
+description = "Let Codex or Claude Code hand work to other coding agents, each in its own Herdr pane: the brgr CLI and Herdr plugin."
+repository.workspace = true
+homepage.workspace = true
+readme = "../../README.md"
+keywords = ["ai-agents", "claude-code", "codex", "herdr", "orchestration"]
+categories = ["command-line-utilities", "development-tools"]
 
 [[bin]]
 name = "brgr"
@@ -11,11 +17,11 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
-brgr-core = { path = "../brgr-core" }
-brgr-protocol = { path = "../brgr-protocol" }
-brgr-registry = { path = "../brgr-registry" }
-brgr-runner = { path = "../brgr-runner" }
-brgr-store = { path = "../brgr-store" }
+brgr-core.workspace = true
+brgr-protocol.workspace = true
+brgr-registry.workspace = true
+brgr-runner.workspace = true
+brgr-store.workspace = true
 clap.workspace = true
 libc.workspace = true
 serde.workspace = true

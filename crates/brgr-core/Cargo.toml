@@ -4,11 +4,14 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
+description = "Task state and supervision for brgr. Internal to the brgr CLI."
+repository.workspace = true
+homepage.workspace = true
 
 [dependencies]
-brgr-protocol = { path = "../brgr-protocol" }
-brgr-runner = { path = "../brgr-runner" }
-brgr-store = { path = "../brgr-store" }
+brgr-protocol.workspace = true
+brgr-runner.workspace = true
+brgr-store.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 tempfile.workspace = true
