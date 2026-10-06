@@ -339,7 +339,7 @@ pub(crate) fn finish_execution(
 }
 
 pub(crate) fn execution_failure_reason(output: &ExecutionOutput) -> String {
-    if output.timed_out {
+    let reason = if output.timed_out {
         "attempt deadline elapsed".to_owned()
     } else if output.output_truncated {
         "process output exceeded the configured limit".to_owned()
@@ -347,7 +347,48 @@ pub(crate) fn execution_failure_reason(output: &ExecutionOutput) -> String {
         "process produced no result artifact".to_owned()
     } else {
         format!("process exited with status {:?}", output.exit_code)
+    };
+    // The harness usually says why on stderr: a spent quota, a login, a model
+    // it does not offer. Without it the owner sees only that it failed.
+    match stderr_reason(&output.stderr) {
+        Some(line) => format!("{reason}; {LAST_STDERR} {line}"),
+        None => reason,
     }
+}
+
+/// Marks the quoted stderr line in a failure reason. Everything after it is
+/// the harness's own text; the error memo never copies it.
+pub const LAST_STDERR: &str = "last stderr:";
+
+/// The stderr line most likely to say why a run failed: the first that reads
+/// like an error and is not a stack frame, else the last non-empty one.
+fn stderr_reason(stderr: &[u8]) -> Option<String> {
+    const LIMIT: usize = 300;
+    const SIGNS: [&str; 9] = [
+        "error",
+        "quota",
+        "insufficient",
+        "denied",
+        "unauthorized",
+        "forbidden",
+        "not logged in",
+        "rate limit",
+        "not available",
+    ];
+    let text = String::from_utf8_lossy(stderr);
+    let lines: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+    let line = lines
+        .iter()
+        .find(|line| {
+            let lower = line.to_lowercase();
+            !line.starts_with("at ") && SIGNS.iter().any(|sign| lower.contains(sign))
+        })
+        .or_else(|| lines.last())?;
+    Some(line.chars().take(LIMIT).collect())
 }
 
 pub(crate) fn terminal_with_requested_logs(
@@ -452,4 +493,44 @@ pub(crate) fn sha256(bytes: &[u8]) -> String {
         write!(&mut encoded, "{byte:02x}").expect("writing to a String cannot fail");
     }
     encoded
+}
+
+#[cfg(test)]
+mod failure_reason_tests {
+    use super::*;
+
+    fn failed(stderr: &str) -> ExecutionOutput {
+        ExecutionOutput {
+            exit_code: Some(1),
+            stdout: Vec::new(),
+            stderr: stderr.as_bytes().to_vec(),
+            result: Vec::new(),
+            observed_model: None,
+            timed_out: false,
+            cancelled: false,
+            output_truncated: false,
+            elapsed: std::time::Duration::ZERO,
+        }
+    }
+
+    #[test]
+    fn a_failure_quotes_the_stderr_line_that_says_why() {
+        // Gemini CLI 0.62 on a spent free-tier quota.
+        let gemini = "Warning: 256-color support not detected.\n\
+            YOLO mode is enabled. All tool calls will be automatically approved.\n\
+            Error when talking to Gemini API TerminalQuotaError: You have exhausted your daily quota\n\
+                at classifyGoogleError (file:///x.js:1:1)\n\
+            }";
+        let reason = execution_failure_reason(&failed(gemini));
+        assert!(reason.starts_with("process produced no result artifact; last stderr: "));
+        assert!(reason.contains("exhausted your daily quota"), "{reason}");
+        assert!(
+            execution_failure_reason(&failed("Error: Insufficient credits for Command Code."))
+                .ends_with("last stderr: Error: Insufficient credits for Command Code.")
+        );
+        assert_eq!(
+            execution_failure_reason(&failed("")),
+            "process produced no result artifact"
+        );
+    }
 }

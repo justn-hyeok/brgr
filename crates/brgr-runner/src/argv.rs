@@ -36,8 +36,15 @@ pub(crate) fn substitute(
     values: &Substitutions<'_>,
 ) -> Result<String, RunnerError> {
     // A prompt is one opaque argv value, never a template or shell fragment.
+    // Most CLIs take it as a bare positional or an option value, so one that
+    // starts with `-` (a markdown list) would parse as flags and one that
+    // starts with `@` is a file include to Pi; a leading space keeps it text.
     if argument == "${input.prompt}" {
-        return Ok(values.prompt.to_owned());
+        return Ok(if values.prompt.starts_with(['-', '@']) {
+            format!(" {}", values.prompt)
+        } else {
+            values.prompt.to_owned()
+        });
     }
     let mut output = argument
         .replace(
@@ -60,4 +67,34 @@ pub(crate) fn substitute(
         return Err(RunnerError::UnknownSubstitution(output));
     }
     Ok(output)
+}
+
+#[cfg(test)]
+mod prompt_tests {
+    use super::*;
+
+    fn rendered(prompt: &str) -> String {
+        substitute(
+            "${input.prompt}",
+            &Substitutions {
+                prompt_file: Path::new("/tmp/prompt"),
+                prompt,
+                workspace: Path::new("/tmp"),
+                model: None,
+                effort: None,
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_prompt_that_looks_like_an_option_or_include_stays_text() {
+        assert_eq!(
+            rendered("- add tests\n- fix lint"),
+            " - add tests\n- fix lint"
+        );
+        assert_eq!(rendered("--help me"), " --help me");
+        assert_eq!(rendered("@src/main.rs fix it"), " @src/main.rs fix it");
+        assert_eq!(rendered("Fix the bug"), "Fix the bug");
+    }
 }

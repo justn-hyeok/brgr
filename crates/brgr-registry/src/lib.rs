@@ -1578,6 +1578,7 @@ mod tests {
                 "local.copilot",
                 &[
                     "--no-auto-update",
+                    "--no-ask-user",
                     "--silent",
                     "--prompt",
                     "${input.prompt}",
@@ -1593,8 +1594,6 @@ mod tests {
                     "exec",
                     "--skip-git-repo-check",
                     "--ephemeral",
-                    "--disable",
-                    "hooks",
                     "--color",
                     "never",
                     "${input.prompt}",
@@ -1631,22 +1630,6 @@ mod tests {
                 "{name}"
             );
         }
-        // A worker Codex never runs the hooks installed for Codex owners.
-        let codex = generate_manifest(
-            "codex",
-            PathBuf::from("/bin/echo"),
-            &fixture("codex-exec-0.160.0.txt"),
-        )
-        .unwrap();
-        assert!(
-            codex
-                .launch
-                .interactive
-                .unwrap()
-                .argv
-                .windows(2)
-                .any(|pair| pair == ["--disable", "hooks"])
-        );
     }
 
     #[test]

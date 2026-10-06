@@ -3130,6 +3130,46 @@ esac
     thread::sleep(Duration::from_millis(800));
 }
 
+/// Codex runs every installed hook for a worker as well. brgr's hook is for
+/// owners: in a task worktree it neither binds the session nor hands it the
+/// owner's calling context.
+#[test]
+fn the_codex_hook_stays_out_of_a_worker_in_a_task_worktree() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("brgr");
+    let hook = |cwd: &Path| {
+        let mut child = brgr_command()
+            .arg("--home")
+            .arg(&home)
+            .args(["__hook", "session-start"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let input = json!({"session_id": "019b0000-0000-7000-8000-000000000001", "cwd": cwd});
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(input.to_string().as_bytes())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap()
+    };
+    let owner = temp.path().join("project");
+    fs::create_dir_all(&owner).unwrap();
+    assert!(hook(&owner).contains("brgr calling context"));
+    let worker = home.join("worktrees/project/0123abcd");
+    fs::create_dir_all(&worker).unwrap();
+    assert_eq!(hook(&worker).trim(), "{}");
+}
+
 fn invoke_hook_with_herdr(
     home: &Path,
     herdr: &Path,

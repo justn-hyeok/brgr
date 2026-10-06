@@ -95,8 +95,12 @@ native model observation, and none expose a verified effort observation.
 
 Generated recipes declare native TUI launches for Claude Code, Codex, Gemini
 CLI, GitHub Copilot CLI, Pi, Cursor, Devin, Cline, OMP, OpenCode, GJC, and
-Command Code. A Codex worker runs with `--disable hooks`, so the hooks
-installed for Codex owners never treat its session as one. The registered executable runs in
+Command Code. Codex runs every installed hook for a worker as well; brgr's
+own hook recognises a task worktree by the session's working directory and
+does nothing there, while the user's other hooks still run. Codex has no
+"this session only" trust: when a Codex worker starts in a task worktree,
+brgr accepts the prompt for the repository that worktree came from, and Codex
+saves that repository as trusted in `~/.codex/config.toml`. The registered executable runs in
 an owned pane without taking focus. brgr connects parent/worker messages to
 that session, seals its final report, and closes the pane after the owner
 handles the result. A momentarily idle TUI can continue the conversation.

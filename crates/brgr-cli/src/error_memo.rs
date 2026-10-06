@@ -35,6 +35,12 @@ fn without_free_text(error: &str) -> &str {
         .split(crate::pane_adapter::LAST_SCREEN_MARK)
         .next()
         .unwrap_or(error);
+    // Only a stderr quote is trimmed of its separator, so classes recorded
+    // before it existed keep their fingerprints.
+    let error = match error.split_once(brgr_core::LAST_STDERR) {
+        Some((before, _)) => before.trim_end_matches([';', ' ']),
+        None => error,
+    };
     match error.find(SCREEN_MARK) {
         Some(at) => {
             let rest = &error[at..];
@@ -640,6 +646,15 @@ fn lock(paths: &Paths) -> Result<fs::File> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_quoted_stderr_line_never_reaches_a_class_or_a_sample() {
+        let error = "process produced no result artifact; last stderr: Error: quota for acme-prod-key exhausted";
+        assert_eq!(
+            without_free_text(error),
+            "process produced no result artifact"
+        );
+    }
 
     #[test]
     fn the_same_failure_on_another_task_has_one_fingerprint() {

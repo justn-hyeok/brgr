@@ -453,9 +453,13 @@ pub(crate) const RECIPES: &[Recipe] = &[
             "--model <model>",
             "--yolo",
             "--no-auto-update",
+            "--no-ask-user",
         ],
+        // `--no-ask-user`: Copilot's own question dialog is a screen no rule
+        // answers; a worker asks its owner through brgr instead.
         argv: &[
             "--no-auto-update",
+            "--no-ask-user",
             "--silent",
             "--prompt",
             "${input.prompt}",
@@ -489,7 +493,7 @@ pub(crate) const RECIPES: &[Recipe] = &[
         read_only: None,
         interactive: Some(Interactive {
             kind: "copilot",
-            argv: &["--no-auto-update"],
+            argv: &["--no-auto-update", "--no-ask-user"],
             effort_print_only: false,
         }),
         ..GENERIC
@@ -501,20 +505,16 @@ pub(crate) const RECIPES: &[Recipe] = &[
             "--dangerously-bypass-approvals-and-sandbox",
             "--skip-git-repo-check",
             "--ephemeral",
-            "--disable <FEATURE>",
             "-m, --model <MODEL>",
             "-c, --config <key=value>",
         ],
         help_argv: &["exec", "--help"],
-        // `--disable hooks`: a worker Codex must not run the hooks installed
-        // for Codex owners, brgr's among them, which would bind the worker's
-        // session as an owner and tell it to call brgr as one.
+        // Codex runs every installed hook for a worker too. brgr's own hook
+        // recognises a task worktree and stays out; the user's hooks still run.
         argv: &[
             "exec",
             "--skip-git-repo-check",
             "--ephemeral",
-            "--disable",
-            "hooks",
             "--color",
             "never",
             "${input.prompt}",
@@ -530,6 +530,7 @@ pub(crate) const RECIPES: &[Recipe] = &[
             "TMPDIR",
             "USER",
             "OPENAI_API_KEY",
+            "CODEX_API_KEY",
             "CODEX_HOME",
         ],
         capabilities: &[
@@ -543,7 +544,7 @@ pub(crate) const RECIPES: &[Recipe] = &[
         read_only: None,
         interactive: Some(Interactive {
             kind: "codex",
-            argv: &["--disable", "hooks"],
+            argv: &[],
             effort_print_only: false,
         }),
         ..GENERIC
@@ -571,6 +572,8 @@ pub(crate) const RECIPES: &[Recipe] = &[
             "GEMINI_API_KEY",
             "GOOGLE_API_KEY",
             "GOOGLE_CLOUD_PROJECT",
+            "GOOGLE_CLOUD_LOCATION",
+            "GOOGLE_APPLICATION_CREDENTIALS",
             "GOOGLE_GENAI_USE_VERTEXAI",
             "GOOGLE_GENAI_USE_GCA",
         ],
@@ -614,6 +617,12 @@ pub(crate) const RECIPES: &[Recipe] = &[
             "ANTHROPIC_API_KEY",
             "OPENAI_API_KEY",
             "GEMINI_API_KEY",
+            "OPENROUTER_API_KEY",
+            "GROQ_API_KEY",
+            "XAI_API_KEY",
+            "MISTRAL_API_KEY",
+            "DEEPSEEK_API_KEY",
+            "CEREBRAS_API_KEY",
         ],
         capabilities: &[
             PROCESS_CAPS[0],
