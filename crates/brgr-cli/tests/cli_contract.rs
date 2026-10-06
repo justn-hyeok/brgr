@@ -697,11 +697,15 @@ const OPENCODE_2_FIXTURE: &str = r#"#!/bin/sh
 case "$1 $2" in
   '--version '*) echo 'opencode v2.0.20'; exit 0;;
   'run --help') printf '%s\n' '  --standalone            Run with a private server instead of the background service' '  --model, -m string      Model to use in the format provider/model#variant' '  --agent string          Agent to use' '  --auto                  Auto-approve permissions that are not explicitly denied'; exit 0;;
-  'models '*) echo 'opencode/big-pickle'; exit 0;;
 esac
-for arg in "$@"; do test "$arg" = --standalone && { echo OPENCODE_2_STANDALONE_OK; exit 0; }; done
-echo 'ran in the shared background service' >&2
-exit 7
+model=none standalone=no previous=
+for arg in "$@"; do
+  test "$previous" = --model && model=$arg
+  test "$arg" = --standalone && standalone=yes
+  previous=$arg
+done
+test "$standalone" = yes || { echo 'ran in the shared background service' >&2; exit 7; }
+echo "OPENCODE_2_MODEL=$model"
 "#;
 
 /// A Herdr stand-in. It opens a pane, starts an agent, and — standing in for
@@ -1398,11 +1402,48 @@ fn opencode_2_runs_standalone_and_takes_a_model_only_headless() {
         &opencode,
         &fixture.home.with_file_name("scratch-2"),
     );
+    let herdr = [
+        ("HERDR_ENV", "1"),
+        ("HERDR_PANE_ID", "w9:p1"),
+        ("HERDR_BIN_PATH", fixture.herdr.to_str().unwrap()),
+        ("BRGR_OWNER_ID", "codex:pane-test"),
+    ];
+    let model_reached = |task: &str| {
+        let result = json_output(&run(&fixture.home, &["result", task], &herdr));
+        assert_eq!(
+            result["artifacts"][0]["text"].as_str().map(str::trim),
+            Some("OPENCODE_2_MODEL=opencode/big-pickle#high"),
+            "{result}"
+        );
+    };
     let headless = fixture.run_on(
         "local.opencode",
         &["--headless", "--model", "opencode/big-pickle#high"],
     );
     assert_eq!(headless["outcome"], "candidate", "{headless}");
+    let task = headless["task_id"].as_str().unwrap();
+    model_reached(task);
+
+    // A revision of it stays headless rather than asking the TUI for a model.
+    json_output(&run(
+        &fixture.home,
+        &["reject", task, "--reason", "revise"],
+        &herdr,
+    ));
+    // Not through `run`, which adds `--headless` to every revise.
+    let revised = json_output(
+        &brgr_command()
+            .arg("--home")
+            .arg(&fixture.home)
+            .args(["--json", "revise", task, "Explain again", "--foreground"])
+            .env("BRGR_SESSION_ID", "fixture-session")
+            .envs(herdr)
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(revised["outcome"], "candidate", "{revised}");
+    assert_eq!(revised["revision"], 2);
+    model_reached(task);
     let modelled = run(
         &fixture.home,
         &[
