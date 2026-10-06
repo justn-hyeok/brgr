@@ -61,7 +61,7 @@ each registered worker CLI a *harness*. The agent that starts workers, the
 
 ```bash
 # 1. The brgr CLI
-cargo install --git https://github.com/justn-hyeok/brgr --tag v2.12.16 --locked brgr-cli
+cargo install --git https://github.com/justn-hyeok/brgr --tag v2.13.0 --locked brgr-cli
 
 # 2. Teach your agent how to use brgr
 brgr integrate claude install    # Claude Code: installs the brgr skill
@@ -81,7 +81,7 @@ that was already running does not know brgr yet.
 The Herdr plugin adds a task board and workspace actions on top:
 
 ```bash
-herdr plugin install justn-hyeok/brgr --ref v2.12.16
+herdr plugin install justn-hyeok/brgr --ref v2.13.0
 ```
 
 ## Use it
