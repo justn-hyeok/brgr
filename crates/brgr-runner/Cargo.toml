@@ -4,9 +4,12 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
+description = "Shell-free process execution for brgr. Internal to the brgr CLI."
+repository.workspace = true
+homepage.workspace = true
 
 [dependencies]
-brgr-protocol = { path = "../brgr-protocol" }
+brgr-protocol.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

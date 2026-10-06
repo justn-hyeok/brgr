@@ -4,9 +4,12 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
+description = "Harness registration and recipes for brgr. Internal to the brgr CLI."
+repository.workspace = true
+homepage.workspace = true
 
 [dependencies]
-brgr-runner = { path = "../brgr-runner" }
+brgr-runner.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
