@@ -48,8 +48,7 @@
 //! # }"#;
 //! let manifest: HarnessManifest = serde_json::from_str(wire)?;
 //! let action = recertify_action(&manifest);
-//! assert!(action.contains("'/opt/my harness/bin/run'"), "{action}");
-//! assert!(action.contains("brgr harness add"));
+//! assert_eq!(action, format!("re-certify with `brgr harness recertify {}`", manifest.id));
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
@@ -142,31 +141,10 @@ impl Health {
 }
 
 /// Concrete re-certification command. Never updates, copies, or activates.
-/// The executable path is POSIX-quoted so spaces are copy-safe; probe bytes are never included.
+/// Names the harness id, so the command needs no path or probe bytes.
 #[must_use]
 pub fn recertify_action(manifest: &HarnessManifest) -> String {
-    let executable = quote_executable(&manifest.executable);
-    if manifest.adapter == OMP_ROLE_ADAPTER_V1 {
-        format!("re-certify with `brgr harness add {executable} --presentation-only`")
-    } else {
-        format!(
-            "re-certify with `brgr harness add {executable} --workspace <dir> --prompt <prompt>`"
-        )
-    }
-}
-
-fn quote_executable(path: &Path) -> String {
-    let raw = path.to_string_lossy();
-    let mut quoted = String::from("'");
-    for ch in raw.chars() {
-        if ch == '\'' {
-            quoted.push_str("'\\''");
-        } else {
-            quoted.push(ch);
-        }
-    }
-    quoted.push('\'');
-    quoted
+    format!("re-certify with `brgr harness recertify {}`", manifest.id)
 }
 
 impl Registry {
@@ -639,6 +617,20 @@ impl Registry {
         let manifest: HarnessManifest =
             serde_json::from_slice(&fs::read(self.manifest_path(harness_id))?)?;
         Ok(recertify_action(&manifest))
+    }
+
+    /// The executable and registration kind a stored harness was certified
+    /// with, so a re-certification names the same path. Does not re-run it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RegistryError`] when the manifest cannot be read.
+    pub fn certified_executable(&self, harness_id: &str) -> Result<(PathBuf, bool), RegistryError> {
+        validate_harness_id(harness_id)?;
+        let manifest: HarnessManifest =
+            serde_json::from_slice(&fs::read(self.manifest_path(harness_id))?)?;
+        let presentation_only = manifest.adapter == OMP_ROLE_ADAPTER_V1;
+        Ok((manifest.executable, presentation_only))
     }
 
     /// Resolves an exact requested model through a bounded native catalog
@@ -2392,31 +2384,32 @@ mod tests {
         fs::write(&manifest_path, original_manifest).unwrap();
         let action = registry.recertify_action_for(&draft.id).unwrap();
         assert!(action.contains("re-certify"));
-        assert!(action.contains("--prompt"));
+        assert!(action.contains("brgr harness recertify"));
         assert!(!action.contains("--help"));
     }
 
     #[test]
-    fn recertify_action_quotes_executable_paths_with_spaces() {
+    fn recertify_action_names_the_harness_and_runs_as_printed() {
         let help =
             "--expected-report --reuse-worktree-objective --reuse-worktree-owner --model --effort";
         let presentation =
             generate_manifest("omp-role", PathBuf::from("/tmp/my harness/omp-role"), help).unwrap();
-        let action = recertify_action(&presentation);
-        assert!(action.contains("'/tmp/my harness/omp-role'"));
-        assert!(action.contains("--presentation-only"));
-        assert!(!action.contains("unused-help"));
-        assert!(!action.contains("--expected-report"));
-
         let process = generate_manifest(
             "mystery-agent",
             PathBuf::from("/opt/my tools/agent"),
             "  --prompt-file <path>\n",
         )
         .unwrap();
-        let action = recertify_action(&process);
-        assert!(action.contains("'/opt/my tools/agent'"));
-        assert!(action.contains("--prompt"));
-        assert!(!action.contains("--prompt-file <path>"));
+        for manifest in [&presentation, &process] {
+            let action = recertify_action(manifest);
+            assert_eq!(
+                action,
+                format!("re-certify with `brgr harness recertify {}`", manifest.id)
+            );
+            assert!(
+                !action.contains('<'),
+                "action must run as printed: {action}"
+            );
+        }
     }
 }

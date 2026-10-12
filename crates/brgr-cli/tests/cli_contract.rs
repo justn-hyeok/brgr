@@ -3944,8 +3944,23 @@ fn doctor_reports_changed_harness_instead_of_ok() {
     assert_eq!(report["harnesses"][0]["health"], "executable_changed");
     let action = report["harnesses"][0]["action"].as_str().unwrap();
     assert!(action.contains("re-certify"));
-    assert!(action.contains("harness add"));
-    assert!(action.contains("--prompt"));
+    assert!(action.contains("brgr harness recertify local.gjc"));
+
+    let scratch = temp.path().join("scratch");
+    let recertified = run(
+        &home,
+        &[
+            "harness",
+            "recertify",
+            "local.gjc",
+            "--workspace",
+            scratch.to_str().unwrap(),
+        ],
+        &envs,
+    );
+    assert!(recertified.status.success(), "{recertified:?}");
+    let healed = json_output(&run(&home, &["doctor"], &envs));
+    assert_eq!(healed["harnesses"][0]["health"], "healthy");
     let dumped = String::from_utf8_lossy(&changed.stdout);
     assert!(!dumped.contains("--mode=<value>"));
     assert!(!dumped.contains("BRGR_FIXTURE_OK"));

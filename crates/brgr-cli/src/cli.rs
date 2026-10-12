@@ -541,6 +541,17 @@ pub(crate) enum HarnessCommand {
         #[arg(long)]
         effort: Option<String>,
     },
+    /// Re-certify a registered harness at its recorded path after the CLI
+    /// updated. Runs one paid scratch run, like `harness add`.
+    Recertify {
+        harness: String,
+        /// Directory for the scratch run (default: the current directory).
+        #[arg(long)]
+        workspace: Option<PathBuf>,
+        /// Scratch prompt (default: `say ok`).
+        #[arg(long)]
+        prompt: Option<String>,
+    },
     /// Report whether one registered harness is still healthy.
     Status {
         #[arg(default_value = "local.gjc")]
