@@ -74,11 +74,13 @@
 
 mod argv;
 mod capture;
+mod cause;
 mod collect;
 mod error;
 mod manifest;
 mod prompt;
 
+pub use cause::{CauseSource, FailureCause};
 pub use error::RunnerError;
 
 use argv::{Substitutions, render_argv};

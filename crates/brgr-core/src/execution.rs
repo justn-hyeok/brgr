@@ -7,8 +7,8 @@ use brgr_protocol::{
     ResultId, RouteObservation, TaskId, TaskSpec, TerminalOutcome,
 };
 use brgr_runner::{
-    DelegationContext, ExecutionMode, ExecutionOutput, HarnessManifest, ProcessRunner, RunRequest,
-    RunnerError,
+    CauseSource, DelegationContext, ExecutionMode, ExecutionOutput, HarnessManifest, ProcessRunner,
+    RunRequest, RunnerError,
 };
 use brgr_store::{RunnerIdentity, Store, StoreError};
 use sha2::{Digest, Sha256};
@@ -348,10 +348,17 @@ pub(crate) fn execution_failure_reason(output: &ExecutionOutput) -> String {
     } else {
         format!("process exited with status {:?}", output.exit_code)
     };
-    // The harness usually says why on stderr: a spent quota, a login, a model
-    // it does not offer. Without it the owner sees only that it failed.
-    match stderr_reason(&output.stderr) {
-        Some(line) => format!("{reason}; {LAST_STDERR} {line}"),
+    // The harness usually says why: a spent quota, a login, a model it does
+    // not offer. It says it on stderr, or in an error event on stdout when it
+    // streams JSON. Without it the owner sees only that it failed.
+    match output.failure_cause() {
+        Some(cause) => {
+            let mark = match cause.source {
+                CauseSource::Stderr => LAST_STDERR,
+                CauseSource::ErrorEvent => LAST_ERROR_EVENT,
+            };
+            format!("{reason}; {mark} {}", cause.text)
+        }
         None => reason,
     }
 }
@@ -360,36 +367,8 @@ pub(crate) fn execution_failure_reason(output: &ExecutionOutput) -> String {
 /// the harness's own text; the error memo never copies it.
 pub const LAST_STDERR: &str = "last stderr:";
 
-/// The stderr line most likely to say why a run failed: the first that reads
-/// like an error and is not a stack frame, else the last non-empty one.
-fn stderr_reason(stderr: &[u8]) -> Option<String> {
-    const LIMIT: usize = 300;
-    const SIGNS: [&str; 9] = [
-        "error",
-        "quota",
-        "insufficient",
-        "denied",
-        "unauthorized",
-        "forbidden",
-        "not logged in",
-        "rate limit",
-        "not available",
-    ];
-    let text = String::from_utf8_lossy(stderr);
-    let lines: Vec<&str> = text
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .collect();
-    let line = lines
-        .iter()
-        .find(|line| {
-            let lower = line.to_lowercase();
-            !line.starts_with("at ") && SIGNS.iter().any(|sign| lower.contains(sign))
-        })
-        .or_else(|| lines.last())?;
-    Some(line.chars().take(LIMIT).collect())
-}
+/// Marks a quoted stdout error event, with the same rule as [`LAST_STDERR`].
+pub const LAST_ERROR_EVENT: &str = "last error event:";
 
 pub(crate) fn terminal_with_requested_logs(
     store: &Store,
@@ -531,6 +510,18 @@ mod failure_reason_tests {
         assert_eq!(
             execution_failure_reason(&failed("")),
             "process produced no result artifact"
+        );
+    }
+
+    #[test]
+    fn a_silent_stderr_falls_back_to_the_stdout_error_event() {
+        let mut output = failed("");
+        output.stdout = br#"{"type":"turn_end","message":{"stopReason":"error","errorMessage":"Connect error resource_exhausted: Error"}}
+"#
+        .to_vec();
+        assert_eq!(
+            execution_failure_reason(&output),
+            "process produced no result artifact; last error event: Connect error resource_exhausted: Error"
         );
     }
 }

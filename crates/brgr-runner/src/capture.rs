@@ -124,6 +124,9 @@ where
     Ok((retained, false))
 }
 
+/// Characters of a failed turn's `errorMessage` kept in the reduced stream.
+const ERROR_MESSAGE_LIMIT: usize = 600;
+
 pub(crate) fn retain_jsonl_event(line: &[u8], retained: &mut Vec<u8>, limit: u64) -> bool {
     if line.is_empty() {
         return true;
@@ -133,16 +136,24 @@ pub(crate) fn retain_jsonl_event(line: &[u8], retained: &mut Vec<u8>, limit: u64
             Some("message_end")
                 if event.pointer("/message/role").and_then(Value::as_str) == Some("assistant") =>
             {
-                serde_json::to_vec(&json!({
-                    "type": "message_end",
-                    "message": {
-                        "role": "assistant",
-                        "provider": event.pointer("/message/provider"),
-                        "model": event.pointer("/message/model"),
-                        "content": event.pointer("/message/content"),
-                    },
-                }))
-                .expect("JSON values serialize")
+                let mut message = json!({
+                    "role": "assistant",
+                    "provider": event.pointer("/message/provider"),
+                    "model": event.pointer("/message/model"),
+                    "content": event.pointer("/message/content"),
+                });
+                // A failed turn says why here and nowhere else. Keep a bounded
+                // prefix so the failure cause survives the reduction; the full
+                // string is never retained.
+                if let Some(reason) = event
+                    .pointer("/message/errorMessage")
+                    .and_then(Value::as_str)
+                {
+                    message["errorMessage"] =
+                        Value::from(reason.chars().take(ERROR_MESSAGE_LIMIT).collect::<String>());
+                }
+                serde_json::to_vec(&json!({"type": "message_end", "message": message}))
+                    .expect("JSON values serialize")
             }
             Some("agent_end") => serde_json::to_vec(&json!({
                 "type": "agent_end",
@@ -196,4 +207,35 @@ where
         bytes.truncate(usize::try_from(limit).expect("validated output limit fits usize"));
     }
     Ok((bytes, truncated))
+}
+
+#[cfg(test)]
+mod error_message_tests {
+    use super::*;
+
+    fn retained(line: &str) -> String {
+        let mut out = Vec::new();
+        assert!(retain_jsonl_event(line.as_bytes(), &mut out, 1 << 20));
+        String::from_utf8(out).unwrap()
+    }
+
+    #[test]
+    fn a_failed_turns_error_message_survives_the_reduction_bounded() {
+        let long = "x".repeat(5_000);
+        let line = format!(
+            "{{\"type\":\"message_end\",\"message\":{{\"role\":\"assistant\",\"content\":[],\"errorMessage\":\"{long}\",\"secret\":\"drop\"}}}}"
+        );
+        let kept: Value = serde_json::from_str(retained(&line).trim()).unwrap();
+        let message = kept["message"]["errorMessage"].as_str().unwrap();
+        assert_eq!(message.chars().count(), ERROR_MESSAGE_LIMIT);
+        assert!(kept["message"].get("secret").is_none());
+    }
+
+    #[test]
+    fn a_turn_without_an_error_keeps_its_old_shape() {
+        let kept = retained(
+            "{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[]}}",
+        );
+        assert!(!kept.contains("errorMessage"));
+    }
 }

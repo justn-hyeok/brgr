@@ -441,9 +441,8 @@ impl Registry {
         .await?;
         if !output.succeeded(manifest) || output.result.is_empty() {
             // Say which condition failed. The bare "did not succeed" left a
-            // working CLI looking broken with nothing to go on. The harness's own
-            // output is never echoed, as everywhere else in this crate.
-            return Err(RegistryError::ScratchRunFailed(format!(
+            // working CLI looking broken with nothing to go on.
+            let mut reason = format!(
                 "exit code {}, timed out {}, output truncated {}, {} result bytes, {} stderr bytes",
                 output
                     .exit_code
@@ -452,7 +451,17 @@ impl Registry {
                 output.output_truncated,
                 output.result.len(),
                 output.stderr.len()
-            )));
+            );
+            // The CLI usually says why: a spent quota, a login. It is quoted
+            // as one bounded line of untrusted text, never as the full output.
+            if let Some(cause) = output.failure_cause() {
+                let mark = match cause.source {
+                    brgr_runner::CauseSource::Stderr => "last stderr:",
+                    brgr_runner::CauseSource::ErrorEvent => "last error event:",
+                };
+                reason = format!("{reason}; {mark} {}", cause.text);
+            }
+            return Err(RegistryError::ScratchRunFailed(reason));
         }
         let after = match authority {
             RecipeAuthority::Generated => {
