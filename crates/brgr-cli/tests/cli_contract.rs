@@ -4417,6 +4417,62 @@ fn a_revision_starts_from_the_current_head_not_the_old_base() {
     assert_eq!(status["base_commit"], head.as_str(), "{status}");
 }
 
+/// Another session can read a task with `--observe`, and only read it: the
+/// owner's session is still needed to decide, acknowledge, or apply.
+#[test]
+fn observe_reads_another_sessions_task_and_changes_nothing() {
+    let (_temp, home, repository, task) = append_then_main_edit("A\nb\nc\n", false);
+    let repo = repository.to_str().unwrap();
+    // The helper's runs are owned by the runner's default session.
+    let owner = [("BRGR_OWNER_ID", "codex:three-way")];
+    let other = [
+        ("BRGR_OWNER_ID", "codex:three-way"),
+        ("BRGR_SESSION_ID", "session-b"),
+    ];
+    json_output(&run(&home, &["status", &task], &owner));
+
+    for args in [
+        vec!["diff", &task],
+        vec!["result", &task],
+        vec!["status", &task],
+    ] {
+        let denied = run(&home, &args, &other);
+        assert!(!denied.status.success(), "{args:?}");
+        assert!(
+            String::from_utf8_lossy(&denied.stderr).contains("bound to another session"),
+            "{args:?}"
+        );
+        let mut observed_args = args.clone();
+        observed_args.push("--observe");
+        let seen = run(&home, &observed_args, &other);
+        assert!(
+            seen.status.success(),
+            "{observed_args:?}: {}",
+            String::from_utf8_lossy(&seen.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&seen.stderr).contains("observing a task owned by"),
+            "{observed_args:?}"
+        );
+    }
+    let diff = String::from_utf8(run(&home, &["diff", &task, "--observe"], &other).stdout).unwrap();
+    assert!(diff.contains("+TASK"), "{diff}");
+
+    // Reading never decides, and observing cannot acknowledge.
+    let combined = run(&home, &["result", &task, "--observe", "--ack"], &other);
+    assert!(!combined.status.success());
+    for args in [
+        vec!["accept", &task, "--reason", "x"],
+        vec!["land", &task, "--workspace", repo, "--reason", "x"],
+        vec!["apply", &task, "--workspace", repo],
+    ] {
+        let refused = run(&home, &args, &other);
+        assert!(!refused.status.success(), "{args:?}");
+    }
+    // The owner still decides.
+    json_output(&run(&home, &["accept", &task, "--reason", "owner"], &owner));
+}
+
 #[test]
 fn apply_three_way_merges_cleanly_when_the_edits_do_not_overlap() {
     let (_temp, home, repository, task) = accepted_append_then_main_edit("A\nb\nc\n");

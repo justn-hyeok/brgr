@@ -23,6 +23,7 @@ pub(crate) fn status(
     paths: &Paths,
     task: Option<TaskId>,
     tree: bool,
+    observe: bool,
     json_output: bool,
 ) -> Result<()> {
     reconcile_pending(paths)?;
@@ -30,12 +31,12 @@ pub(crate) fn status(
     if tree {
         let root = task.context("--tree requires a task ID")?;
         let spec = store.task(root)?;
-        require_owner(&store, &spec.owner_id)?;
+        check_reader(&store, &spec.owner_id, observe)?;
         return tree_status::show(&store, root, json_output);
     }
     if let Some(task_id) = task {
         let spec = store.task(task_id)?;
-        require_owner(&store, &spec.owner_id)?;
+        check_reader(&store, &spec.owner_id, observe)?;
         let state = match store.attempt_state(task_id) {
             Ok(state) => state,
             Err(StoreError::TaskNotFound(_)) => AttemptState::Queued,
@@ -78,10 +79,31 @@ pub(crate) fn status(
     Ok(())
 }
 
-pub(crate) fn result(paths: &Paths, task: TaskId, ack: bool, json_output: bool) -> Result<()> {
+/// The owner's session for a read, or, with `--observe`, no check at all.
+pub(crate) fn check_reader(store: &Store, owner: &OwnerId, observe: bool) -> Result<()> {
+    if observe {
+        crate::observe_owner(owner);
+        Ok(())
+    } else {
+        require_owner(store, owner).map(|_| ())
+    }
+}
+
+pub(crate) fn result(
+    paths: &Paths,
+    task: TaskId,
+    ack: bool,
+    observe: bool,
+    json_output: bool,
+) -> Result<()> {
     let store = Store::open(&paths.store)?;
     let spec = store.task(task)?;
-    let (session_id, binding_epoch) = require_owner(&store, &spec.owner_id)?;
+    let (session_id, binding_epoch) = if observe {
+        crate::observe_owner(&spec.owner_id);
+        (String::new(), 0)
+    } else {
+        require_owner(&store, &spec.owner_id)?
+    };
     let result = store.latest_result(task)?;
     let route_observation = store
         .route_observation(result.result_id)?

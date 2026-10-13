@@ -44,12 +44,20 @@ pub(crate) enum Command {
         /// Include the delegation tree beneath the task.
         #[arg(long)]
         tree: bool,
+        /// Read without owning the task: skips the owner-session check and
+        /// changes nothing. It never decides, acknowledges, or applies.
+        #[arg(long)]
+        observe: bool,
     },
     /// Show a task's sealed result, optionally acknowledging a failed one.
     Result {
         task: TaskId,
         #[arg(long)]
         ack: bool,
+        /// Read without owning the task: skips the owner-session check and
+        /// changes nothing. It cannot be combined with `--ack`.
+        #[arg(long, conflicts_with = "ack")]
+        observe: bool,
     },
     /// Export a sealed result artifact to a file.
     Artifact {
@@ -111,6 +119,10 @@ pub(crate) enum Command {
         /// Print changed files with added and deleted line counts instead.
         #[arg(long)]
         stat: bool,
+        /// Read without owning the task: skips the owner-session check and
+        /// changes nothing. It never decides, acknowledges, or applies.
+        #[arg(long)]
+        observe: bool,
     },
     /// Integrate a candidate's sealed Git diff into a matching workspace.
     Apply {

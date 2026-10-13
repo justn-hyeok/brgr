@@ -281,10 +281,16 @@ fn check_target(
 }
 
 /// Prints a result's sealed Git diff, or with `stat` the files it changes.
-pub fn show_diff(paths: &Paths, task: TaskId, stat: bool, json_output: bool) -> Result<()> {
+pub fn show_diff(
+    paths: &Paths,
+    task: TaskId,
+    stat: bool,
+    observe: bool,
+    json_output: bool,
+) -> Result<()> {
     let store = Store::open(&paths.store)?;
     let spec = store.task(task)?;
-    require_owner(&store, &spec.owner_id)?;
+    crate::task_commands::check_reader(&store, &spec.owner_id, observe)?;
     let result = store.latest_result(task)?;
     let (reference, patch) = sealed_patch(&store, &spec, &result)?;
     if !stat && !json_output {

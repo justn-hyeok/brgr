@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- `--observe` on `status`, `result` and `diff` reads a task owned by another
+  session without the owner-session check, with a note on stderr. It cannot
+  decide, acknowledge, apply or transfer the task, and `result --observe --ack`
+  is refused.
+- `brgr revise --help` says what `--workspace` does: the revision starts from
+  that repository's current HEAD. A test now holds it.
+
 ## 2.13.7 — 2026-10-13
 
 - `brgr land TASK --workspace REPO --reason WHY` checks a candidate's sealed

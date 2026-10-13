@@ -160,7 +160,11 @@ routes before worker admission.
 bounded review artifacts. `brgr artifact export TASK 0 --output PATH`
 exports a result's artifact by index, starting at 0, for binary evidence. `brgr diff TASK` prints a sealed diff and
 `brgr diff TASK --stat` lists the files it changes.
-`brgr status TASK --json` prints one object on stdout; every note brgr adds goes to
+`--observe` on `status`, `result` and `diff` reads a task owned by another session
+(for example an orchestrator's task, reviewed by a person or another agent) without
+the owner-session check, and prints a note on stderr that it did. It only reads:
+it cannot be combined with `result --ack`, and `accept`, `reject`, `land`, `apply`
+and `bind` still need the owner's session. `brgr status TASK --json` prints one object on stdout; every note brgr adds goes to
 stderr. Its fields are `task` (the stored task: `task.workspace` is the worktree,
 `task.evidence.base_commit` the commit it started from), `state`, `workspace`
 and `base_commit` (copies of those two), `workspace_present` (the worktree still
