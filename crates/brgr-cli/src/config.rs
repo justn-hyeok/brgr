@@ -342,16 +342,15 @@ pub(crate) async fn check(paths: &crate::Paths, config: &Config, json_output: bo
     let registry = brgr_registry::Registry::open_with_control_home(&paths.registry, &paths.home)?;
     validate_argv(&config.defaults.argv)?;
     let mut checked = Vec::new();
-    let default = config
-        .defaults
-        .harness
-        .as_deref()
-        .unwrap_or("local.gjc")
-        .to_owned();
+    // With no default configured and several harnesses registered, only the
+    // per-harness entries are checked: a run would ask for one by name.
+    let default =
+        crate::harness_commands::default_harness(&registry, config.defaults.harness.as_deref())
+            .ok();
     for id in config
         .harnesses
         .keys()
-        .chain(std::iter::once(&default))
+        .chain(default.iter())
         .collect::<std::collections::BTreeSet<_>>()
     {
         let (manifest, _) = crate::admission::load_harness(&registry, id, false).await?;

@@ -4059,6 +4059,36 @@ fn a_failed_automatic_recertification_still_stops_the_run() {
 }
 
 #[test]
+fn a_run_without_a_harness_uses_the_only_registered_one_and_refuses_to_pick() {
+    let (temp, home, workspace) = gjc_home();
+    let envs = [("BRGR_OWNER_ID", "codex:default-harness")];
+    let args = [
+        "run",
+        "BRGR_FIXTURE_OK",
+        "--workspace",
+        workspace.to_str().unwrap(),
+        "--foreground",
+    ];
+    assert_eq!(
+        json_output(&run(&home, &args, &envs))["outcome"],
+        "candidate"
+    );
+
+    add_slow_prompt_file_harness(&home, &temp.path().join("slow"));
+    let refused = run(&home, &args, &envs);
+    assert!(!refused.status.success());
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        stderr.contains("no harness named and no default configured"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("local.gjc") && stderr.contains("local.slow-agent"),
+        "{stderr}"
+    );
+}
+
+#[test]
 fn named_process_harness_cannot_activate_without_authorized_scratch() {
     let temp = TempDir::new().unwrap();
     let home = temp.path().join("brgr");
@@ -6237,6 +6267,8 @@ fn foreground_admission_lock_is_released_before_slow_harness_execution() {
             &[
                 "run",
                 "BRGR_FIXTURE_OK",
+                "--harness",
+                "local.gjc",
                 "--workspace",
                 &repo,
                 "--foreground",

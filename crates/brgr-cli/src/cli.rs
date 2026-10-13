@@ -562,8 +562,8 @@ pub(crate) enum HarnessCommand {
     },
     /// Report whether one registered harness is still healthy.
     Status {
-        #[arg(default_value = "local.gjc")]
-        harness: String,
+        /// Defaults to the configured default harness, else the only one registered.
+        harness: Option<String>,
     },
 }
 

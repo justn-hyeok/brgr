@@ -8,7 +8,9 @@ use std::{
 };
 
 use crate::cli::{DelegationArgs, ReviseArgs, RunArgs};
-use crate::harness_commands::{recertify_action_fallback, require_healthy_harness};
+use crate::harness_commands::{
+    default_harness, recertify_action_fallback, require_healthy_harness,
+};
 use crate::supervision::{record_unstarted_terminal, spawn_supervisor, supervise};
 use crate::{
     Claimant, LaunchEnvelope, Paths, config, current_session, delegation_parent_from_environment,
@@ -91,11 +93,14 @@ pub(crate) enum ExecutionDisposition {
 
 pub(crate) async fn run_task(paths: &Paths, mut args: RunArgs, json_output: bool) -> Result<()> {
     let config = Config::load(&paths.config)?;
-    let harness = args
-        .harness
-        .take()
-        .or(config.defaults.harness.clone())
-        .unwrap_or_else(|| "local.gjc".to_owned());
+    let registry = Registry::open_with_control_home(&paths.registry, &paths.home)?;
+    let harness = default_harness(
+        &registry,
+        args.harness
+            .take()
+            .or(config.defaults.harness.clone())
+            .as_deref(),
+    )?;
     let mut calling = config.calling(&harness);
     warn_stored_permissions(&config);
     calling.model = args.model.take().or(calling.model);
@@ -105,7 +110,6 @@ pub(crate) async fn run_task(paths: &Paths, mut args: RunArgs, json_output: bool
     config::validate_argv(&calling.argv)?;
     let (user_instructions, instructions_digest) = read_user_instructions(paths)?;
     add_user_instructions(&mut args.role_instructions, user_instructions)?;
-    let registry = Registry::open_with_control_home(&paths.registry, &paths.home)?;
     let (activated, activation) = load_harness(&registry, &harness, config.recertify.auto).await?;
     config::validate_manifest_argv(&calling.argv, &activated)?;
     let task_id = TaskId::new();

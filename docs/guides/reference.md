@@ -232,8 +232,8 @@ When a harness CLI updates, its executable or probe evidence changes and a run
 stops with `executable_changed` or `probe_evidence_changed`. `brgr harness
 recertify HARNESS` registers it again at the path it was certified with, using
 one scratch run (prompt `say ok`, the current directory unless `--workspace`
-is given). `brgr config set-auto-recertify true` lets `brgr run` and `brgr
-revise` do that themselves, in an empty temporary directory, and print a
+is given). `brgr config set-auto-recertify true` lets a new run or a revision do
+that themselves, in an empty temporary directory, and print a
 warning each time. It is off by default because each re-certification is a paid
 run that trusts the changed binary; any other health, and a re-certification
 that fails, still stop the run. A harness that takes no model per run (Cline,
