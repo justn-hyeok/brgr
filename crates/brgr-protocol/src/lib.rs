@@ -365,7 +365,14 @@ pub struct ArtifactRef {
     pub store_relative_path: String,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+/// Where a recorded model or effort came from.
+///
+/// A value this build does not know reads as `Unavailable`:
+/// a store written by a newer brgr stays readable, and says only that the source
+/// cannot be vouched for. (A release before this one rejected a source it did
+/// not know, so a store with `harness_config` rows cannot be read by v2.13.4
+/// or earlier.)
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ObservationSource {
     HarnessJsonl,
@@ -373,6 +380,16 @@ pub enum ObservationSource {
     /// configured-default-only harness was set to use.
     HarnessConfig,
     Unavailable,
+}
+
+impl<'de> Deserialize<'de> for ObservationSource {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(match String::deserialize(deserializer)?.as_str() {
+            "harness_jsonl" => Self::HarnessJsonl,
+            "harness_config" => Self::HarnessConfig,
+            _ => Self::Unavailable,
+        })
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -573,6 +590,24 @@ mod tests {
         assert_eq!(
             task.validate(),
             Err(ProtocolError::InvalidAcceptanceCriteria)
+        );
+    }
+
+    #[test]
+    fn an_observation_source_this_build_does_not_know_reads_as_unavailable() {
+        for (wire, expected) in [
+            ("\"harness_jsonl\"", ObservationSource::HarnessJsonl),
+            ("\"harness_config\"", ObservationSource::HarnessConfig),
+            ("\"unavailable\"", ObservationSource::Unavailable),
+            ("\"a_source_added_later\"", ObservationSource::Unavailable),
+        ] {
+            let read: ObservationSource = serde_json::from_str(wire).unwrap();
+            assert_eq!(read, expected, "{wire}");
+        }
+        // What is written is unchanged.
+        assert_eq!(
+            serde_json::to_string(&ObservationSource::HarnessConfig).unwrap(),
+            "\"harness_config\""
         );
     }
 

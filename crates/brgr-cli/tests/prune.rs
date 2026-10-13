@@ -723,6 +723,33 @@ fn a_decision_removes_a_worktree_with_ignored_files_only_when_told_to() {
     );
 }
 
+/// The `--include-ignored` choice is written down before the decision it
+/// belongs to, so a process that dies between the two leaves it behind. A later
+/// decision, made without the flag, must not inherit it and delete ignored files.
+#[test]
+fn a_leftover_include_ignored_marker_does_not_apply_to_a_later_decision() {
+    let fixture = Fixture::new();
+    let task = fixture.run_with("stale", &[]);
+    fs::write(fixture.worktree(&task).join(".env"), b"CACHE=1\n").unwrap();
+    // What a crashed `accept --include-ignored` leaves: a marker for a decision
+    // that was never recorded.
+    fs::write(
+        fixture
+            .home
+            .join("runs")
+            .join(format!("{task}-r1.include-ignored")),
+        b"decision-that-was-never-recorded",
+    )
+    .unwrap();
+
+    fixture.json(&["reject", &task, "--reason", "keep my ignored files"]);
+
+    assert!(
+        fixture.worktree(&task).join(".env").is_file(),
+        "a decision made without --include-ignored deleted an ignored file"
+    );
+}
+
 #[test]
 fn accepting_a_clean_task_reclaims_its_worktree_and_branch_at_once() {
     let fixture = Fixture::new();

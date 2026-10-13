@@ -25,6 +25,24 @@ pub(crate) struct NativeLaunch {
     pub(crate) state: PathBuf,
 }
 
+/// What a terminal program reads to decide whether it may use colour. They
+/// describe the pane the worker runs in, not the process that started the task:
+/// that process may be a tool shell with `TERM=dumb`, or have no terminal at all.
+const TERMINAL_ENVIRONMENT: [&str; 3] = ["TERM", "COLORTERM", "NO_COLOR"];
+
+/// The variables the pane's own shell supplies: the harness's allowlist plus the
+/// terminal's. Without `TERM` and `COLORTERM` a worker's TUI falls back to a few
+/// colours, or none.
+pub(crate) fn pane_variables(allowlist: &[String]) -> Vec<String> {
+    let mut names = allowlist.to_vec();
+    for name in TERMINAL_ENVIRONMENT {
+        if !names.iter().any(|existing| existing == name) {
+            names.push(name.to_owned());
+        }
+    }
+    names
+}
+
 /// Takes each named variable from the pane's shell, and drops the caller's copy
 /// when the pane does not set it. A caller started before the user replaced a
 /// key would otherwise hand the worker the stale one.
@@ -165,6 +183,41 @@ mod tests {
         assert_eq!(environment["PATH"], "/bin");
         assert!(!environment.contains_key("OLD_TOKEN"));
         assert_eq!(environment["BRGR_HOME"], "/brgr");
+    }
+
+    #[test]
+    fn a_workers_terminal_comes_from_its_pane_not_from_the_process_that_started_it() {
+        let allowlist = ["HOME".to_owned(), "PATH".to_owned()];
+        let names = pane_variables(&allowlist);
+        assert_eq!(names[..2], allowlist);
+        for terminal in ["TERM", "COLORTERM", "NO_COLOR"] {
+            assert!(names.iter().any(|name| name == terminal), "{terminal}");
+        }
+        assert_eq!(
+            pane_variables(&names),
+            names,
+            "adding twice changes nothing"
+        );
+
+        // The starting process was a tool shell: TERM=dumb and a NO_COLOR it
+        // set for its own output. The pane has a real terminal.
+        let mut environment = BTreeMap::from([
+            ("TERM".to_owned(), "dumb".to_owned()),
+            ("NO_COLOR".to_owned(), "1".to_owned()),
+            ("HOME".to_owned(), "/home/u".to_owned()),
+        ]);
+        take_from_pane(&mut environment, &names, |name| match name {
+            "TERM" => Some("xterm-256color".to_owned()),
+            "COLORTERM" => Some("truecolor".to_owned()),
+            "HOME" => Some("/home/u".to_owned()),
+            _ => None,
+        });
+        assert_eq!(environment["TERM"], "xterm-256color");
+        assert_eq!(environment["COLORTERM"], "truecolor");
+        assert!(
+            !environment.contains_key("NO_COLOR"),
+            "the caller's NO_COLOR is not the pane's"
+        );
     }
 
     #[test]

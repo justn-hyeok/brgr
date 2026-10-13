@@ -1,4 +1,5 @@
 use std::{
+    fs,
     io::{self, Write as _},
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -145,6 +146,13 @@ fn land_result(
     report.fail_on_conflicts(true)
 }
 
+/// The `state` an integration receipt recorded, if it can be read.
+fn receipt_state(receipt: &Path) -> Option<String> {
+    let bytes = fs::read(receipt).ok()?;
+    let value: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    value.get("state")?.as_str().map(str::to_owned)
+}
+
 /// What an apply or a dry run found.
 pub(crate) struct ApplyReport {
     pub(crate) json: serde_json::Value,
@@ -215,10 +223,27 @@ pub(crate) fn apply_core(
             .join(format!("{}-{}.apply.json", task, result.result_id));
         let intent = json!({"task_id": task, "result_id": result.result_id,
             "target": target, "patch_digest": reference.digest, "state": "started"});
+        // An apply that failed before touching anything left a `failed` receipt;
+        // it must not block the retry its own error asks for. A `started`
+        // receipt (the process died mid-apply) may mean a partial apply, so it
+        // still does.
+        if receipt_state(&receipt).as_deref() == Some("failed") {
+            fs::remove_file(&receipt)?;
+        }
         write_json_new(&receipt, &intent)
             .context("an integration receipt already exists or could not be written")?;
-        if let Applied::Conflicts(files) = git_apply(&target, &patch, false, three_way)? {
-            conflicts = files;
+        match git_apply(&target, &patch, false, three_way) {
+            Ok(Applied::Conflicts(files)) => conflicts = files,
+            Ok(Applied::Clean) => {}
+            Err(error) => {
+                let _ = write_json_atomic(
+                    &receipt,
+                    &json!({"task_id": task, "result_id": result.result_id, "target": target,
+                        "patch_digest": reference.digest, "state": "failed",
+                        "error": error.to_string().chars().take(512).collect::<String>()}),
+                );
+                return Err(error);
+            }
         }
         let state = if conflicts.is_empty() {
             "applied"
@@ -472,6 +497,12 @@ fn git_apply(workspace: &Path, patch: &[u8], check_only: bool, three_way: bool) 
     if patch.is_empty() {
         return Ok(Applied::Clean);
     }
+    // Files already unmerged are not this apply's conflicts.
+    let unmerged_before = if three_way && !check_only {
+        unmerged_files(workspace)?
+    } else {
+        Vec::new()
+    };
     let mut command = Command::new("git");
     command.arg("-C").arg(workspace).args(["apply", "--binary"]);
     if three_way {
@@ -495,16 +526,28 @@ fn git_apply(workspace: &Path, patch: &[u8], check_only: bool, three_way: bool) 
     write?;
     let diagnostic = String::from_utf8_lossy(&output.stderr);
     if three_way {
-        // A check reports conflicts and exits 0; an apply leaves the markers
-        // and exits 1. Either way the files are named on stderr or unmerged.
-        let mut files = conflicted_files(&diagnostic);
-        if !check_only && !output.status.success() {
-            files.extend(unmerged_files(workspace)?);
+        // A check that finds conflicts still exits 0 and names the files; one
+        // that exits non-zero found something git refuses (a file that differs
+        // from the index, a missing blob), whatever else it printed. An apply
+        // that conflicts exits 1 and leaves the files unmerged, so what counts
+        // is what became unmerged, not what was printed.
+        if check_only {
+            if output.status.success() {
+                let files = conflicted_files(&diagnostic);
+                if !files.is_empty() {
+                    return Ok(Applied::Conflicts(files));
+                }
+            }
+        } else if !output.status.success() {
+            let mut files: Vec<String> = unmerged_files(workspace)?
+                .into_iter()
+                .filter(|file| !unmerged_before.contains(file))
+                .collect();
             files.sort();
             files.dedup();
-        }
-        if !files.is_empty() {
-            return Ok(Applied::Conflicts(files));
+            if !files.is_empty() {
+                return Ok(Applied::Conflicts(files));
+            }
         }
     }
     if !output.status.success() {

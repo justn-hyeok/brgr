@@ -160,6 +160,30 @@ pub(crate) async fn recertify_harness(
     workspace: Option<PathBuf>,
     prompt: Option<String>,
 ) -> Result<ActivationReceipt> {
+    // A manifest an agent authored is what the owner approved; it is certified
+    // again as it is, not redrafted from help text that may not describe it.
+    if let Some(manifest) = registry
+        .authored_manifest(harness)
+        .with_context(|| format!("harness {harness} is not registered; use `brgr harness add`"))?
+    {
+        let workspace = match workspace {
+            Some(path) => path,
+            None => std::env::current_dir().context("cannot read the current directory")?,
+        };
+        let prompt = prompt.unwrap_or_else(|| RECERTIFY_PROMPT.to_owned());
+        let receipt = registry
+            .activate_custom_with_scratch(&manifest, &workspace, &prompt, None, None)
+            .await?;
+        let probed = registry.health_probed(&receipt.harness_id).await?;
+        require_healthy_harness(
+            &receipt.harness_id,
+            probed,
+            &registry
+                .recertify_action_for(&receipt.harness_id)
+                .unwrap_or_else(|_| recertify_action_fallback()),
+        )?;
+        return Ok(receipt);
+    }
     let (executable, presentation_only) = registry
         .certified_executable(harness)
         .with_context(|| format!("harness {harness} is not registered; use `brgr harness add`"))?;

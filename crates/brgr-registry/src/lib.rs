@@ -634,6 +634,27 @@ impl Registry {
         Ok(recertify_action(&manifest))
     }
 
+    /// The manifest an agent authored for a harness, when that is how it was
+    /// registered, whatever its health is now. `None` for a generated recipe,
+    /// which is redrafted from the CLI's help instead. Does not re-run it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RegistryError`] when the stored files cannot be read.
+    pub fn authored_manifest(
+        &self,
+        harness_id: &str,
+    ) -> Result<Option<HarnessManifest>, RegistryError> {
+        validate_harness_id(harness_id)?;
+        let receipt: ActivationReceipt =
+            serde_json::from_slice(&fs::read(self.activation_path(harness_id))?)?;
+        if receipt.registration_mode != RecipeAuthority::Custom.as_str() {
+            return Ok(None);
+        }
+        let manifest = serde_json::from_slice(&fs::read(self.manifest_path(harness_id))?)?;
+        Ok(Some(manifest))
+    }
+
     /// The executable and registration kind a stored harness was certified
     /// with, so a re-certification names the same path. Does not re-run it.
     ///

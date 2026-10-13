@@ -26,7 +26,11 @@ pub(crate) fn status(
     observe: bool,
     json_output: bool,
 ) -> Result<()> {
-    reconcile_pending(paths)?;
+    // Recovery records dead supervisors' tasks as lost and runs cleanups, which
+    // are writes; an observer only reads what is already recorded.
+    if !observe {
+        reconcile_pending(paths)?;
+    }
     let store = Store::open(&paths.store)?;
     if tree {
         let root = task.context("--tree requires a task ID")?;
@@ -351,9 +355,15 @@ pub(crate) fn record_verdict(
     };
     // Written before the decision, not after: recording it lets the pane's own
     // cleanup reclaim the worktree at once, and a reclaim that ran first would
-    // assess it without the flag and mark it assessed for good.
+    // assess it without the flag and mark it assessed for good. It names this
+    // decision, so one that never gets recorded cannot leak into a later one.
     if include_ignored {
-        crate::worktree_prune::allow_ignored(paths, task, spec.revision);
+        crate::worktree_prune::allow_ignored(
+            paths,
+            task,
+            spec.revision,
+            &decision.decision_id.to_string(),
+        );
     }
     if let Err(error) = store.record_decision_and_ack(&decision) {
         if include_ignored {
@@ -367,6 +377,15 @@ pub(crate) fn record_verdict(
     let persisted = store
         .decision_for_result(result.result_id)?
         .context("decision was not readable after commit")?;
+    // A replay of an earlier, identical decision keeps that decision's id.
+    if include_ignored && persisted.decision_id != decision.decision_id {
+        crate::worktree_prune::allow_ignored(
+            paths,
+            task,
+            spec.revision,
+            &persisted.decision_id.to_string(),
+        );
+    }
     if let Err(error) = pane_cleanup::mark_pending(&paths.runs, task, &result) {
         eprintln!("brgr pane cleanup queue could not be updated: {error}");
     } else if let Err(error) = pane_cleanup::close_if_eligible(&store, &paths.runs, task) {

@@ -4332,6 +4332,166 @@ fn apply_three_way_marks_a_conflict_instead_of_refusing_everything() {
     assert_eq!(String::from_utf8_lossy(&unmerged.stdout).trim(), "docs.md");
 }
 
+/// A candidate that rewrote `a` and `z`, in a repository whose `a` has since
+/// changed on the target (a conflict) and whose `z` is edited but not staged
+/// (git refuses to touch it). Returns the home, repository and task.
+fn candidate_with_conflict_and_dirty_file() -> (TempDir, PathBuf, PathBuf, String) {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("brgr");
+    let repository = temp.path().join("repo");
+    let executable = temp.path().join("gjc");
+    fs::create_dir_all(&repository).unwrap();
+    seed_git_repo(&repository);
+    for name in ["a", "z"] {
+        fs::write(repository.join(name), "base\n").unwrap();
+    }
+    for argv in [&["add", "a", "z"][..], &["commit", "-m", "files"][..]] {
+        assert!(
+            Command::new("git")
+                .arg("-C")
+                .arg(&repository)
+                .args(argv)
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+    fs::write(&executable, "#!/bin/sh\ncase \"$1\" in\n --version) echo 'gjc v-mixed-fixture'; exit 0;;\n --help) printf '%s\\n' '-p, --print' '--mode=<value>' '--no-session' '--no-mcp' '--model' '--thinking'; exit 0;;\nesac\nprintf 'task\\n' > a\nprintf 'task\\n' > z\nprintf '%s\\n' '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"OK\"}]}}'\nprintf '%s\\n' '{\"type\":\"agent_end\",\"stopReason\":\"completed\"}'\n").unwrap();
+    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+    add_fixture(&home, &executable, &temp.path().join("scratch"));
+    let owner = [("BRGR_OWNER_ID", "codex:three-way")];
+    let result = json_output(&run(
+        &home,
+        &[
+            "run",
+            "rewrite a and z",
+            "--workspace",
+            repository.to_str().unwrap(),
+            "--capture-diff",
+            "--foreground",
+        ],
+        &owner,
+    ));
+    assert_eq!(result["outcome"], "candidate");
+    let task = result["task_id"].as_str().unwrap().to_owned();
+    for name in ["a", "z"] {
+        fs::write(repository.join(name), "main\n").unwrap();
+    }
+    for argv in [&["add", "a", "z"][..], &["commit", "-m", "main"][..]] {
+        assert!(
+            Command::new("git")
+                .arg("-C")
+                .arg(&repository)
+                .args(argv)
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+    fs::write(repository.join("z"), "dirty\n").unwrap();
+    (temp, home, repository, task)
+}
+
+/// `git apply --3way` reports a conflict in one file and a hard refusal in
+/// another in the same run, and applies nothing. That is a failure, not a
+/// merge to resolve: no decision, no receipt claiming conflicts, no advice to
+/// resolve markers that were never written.
+#[test]
+fn land_three_way_is_a_failure_not_a_conflict_when_git_refuses_another_file() {
+    let (_temp, home, repository, task) = candidate_with_conflict_and_dirty_file();
+    let owner = [("BRGR_OWNER_ID", "codex:three-way")];
+    let repo = repository.to_str().unwrap();
+    let landed = run(
+        &home,
+        &[
+            "land",
+            &task,
+            "--workspace",
+            repo,
+            "--3way",
+            "--reason",
+            "reviewed",
+        ],
+        &owner,
+    );
+    assert!(!landed.status.success());
+    let stderr = String::from_utf8_lossy(&landed.stderr);
+    assert!(!stderr.contains("resolve them"), "{stderr}");
+    assert!(stderr.contains("does not match index"), "{stderr}");
+    assert_eq!(fs::read_to_string(repository.join("a")).unwrap(), "main\n");
+    assert_eq!(fs::read_to_string(repository.join("z")).unwrap(), "dirty\n");
+    // Nothing was decided: the owner can still reject it.
+    json_output(&run(
+        &home,
+        &["reject", &task, "--reason", "rework"],
+        &owner,
+    ));
+}
+
+/// A `git` that passes everything through except the real `git apply` (not
+/// `--check`), which it fails once: the diff checks out, then the write fails.
+fn git_that_fails_the_real_apply_once(dir: &Path) -> String {
+    let bin = dir.join("flaky-bin");
+    fs::create_dir_all(&bin).unwrap();
+    let marker = dir.join("failed-once");
+    fs::write(
+        bin.join("git"),
+        format!(
+            "#!/bin/sh\napply=0; check=0\nfor a in \"$@\"; do\n  [ \"$a\" = apply ] && apply=1\n  [ \"$a\" = --check ] && check=1\ndone\nif [ $apply = 1 ] && [ $check = 0 ] && [ ! -e '{marker}' ]; then\n  : > '{marker}'\n  echo 'error: injected transient write failure' >&2\n  exit 1\nfi\nexec /usr/bin/git \"$@\"\n",
+            marker = marker.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(bin.join("git"), fs::Permissions::from_mode(0o700)).unwrap();
+    format!("{}:{}", bin.display(), std::env::var("PATH").unwrap())
+}
+
+/// `land` accepts, then applies. If that apply fails for a reason that leaves
+/// the repository untouched, the error names `brgr apply` to retry, and the
+/// retry has to work: a failed apply must not leave a receipt that blocks it.
+#[test]
+fn a_failed_apply_after_land_can_be_retried_as_the_error_says() {
+    let (temp, home, repository, task) = append_then_main_edit("A\nb\nc\n", false);
+    let owner = [("BRGR_OWNER_ID", "codex:three-way")];
+    let repo = repository.to_str().unwrap();
+    let flaky_path = git_that_fails_the_real_apply_once(temp.path());
+    let landed = run(
+        &home,
+        &[
+            "land",
+            &task,
+            "--workspace",
+            repo,
+            "--3way",
+            "--reason",
+            "reviewed",
+        ],
+        &[
+            ("BRGR_OWNER_ID", "codex:three-way"),
+            ("PATH", flaky_path.as_str()),
+        ],
+    );
+    assert!(!landed.status.success());
+    let stderr = String::from_utf8_lossy(&landed.stderr);
+    assert!(stderr.contains("brgr apply"), "{stderr}");
+    assert_eq!(
+        fs::read_to_string(repository.join("docs.md")).unwrap(),
+        "A\nb\nc\n",
+        "the failed apply must not have touched the repository"
+    );
+
+    let retried = json_output(&run(
+        &home,
+        &["apply", &task, "--workspace", repo, "--3way", "--execute"],
+        &owner,
+    ));
+    assert_eq!(retried["status"], "applied");
+    assert_eq!(
+        fs::read_to_string(repository.join("docs.md")).unwrap(),
+        "A\nb\nc\nTASK\n"
+    );
+}
+
 #[test]
 fn land_accepts_and_applies_in_one_step_and_leaves_nothing_to_acknowledge() {
     let (_temp, home, repository, task) = append_then_main_edit("A\nb\nc\n", false);
@@ -5145,6 +5305,108 @@ fn devin_process_recipe_reaches_owner_acceptance_without_shell_interpolation() {
         &owner,
     ));
     assert_eq!(accepted["verdict"], "accepted");
+}
+
+/// A harness an agent authored a manifest for is certified again from that
+/// manifest. Redrafting it from help text, as for a known CLI, fails for a CLI
+/// whose flags no recipe describes, so an update would strand it.
+#[test]
+fn an_agent_authored_harness_is_recertified_from_its_own_manifest() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("brgr");
+    let scratch = temp.path().join("scratch");
+    fs::create_dir_all(&scratch).unwrap();
+    let executable = temp.path().join("positional-agent");
+    fs::write(
+        &executable,
+        "#!/bin/sh\ncase \"$1\" in\n --version) echo 'positional 1';;\n --help) echo '  -p, --print prompt';;\n -p) printf '%s' \"$2\";;\n *) exit 2;;\nesac\n",
+    )
+    .unwrap();
+    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+    let manifest_path = temp.path().join("manifest.json");
+    let manifest = json!({
+        "schema": "brgr.harness/v1",
+        "id": "local.positional-agent",
+        "adapter": "process/v1",
+        "executable": executable.canonicalize().unwrap(),
+        "probe": {"version_argv": ["--version"], "help_argv": ["--help"]},
+        "launch": {
+            "argv": ["-p", "${input.prompt}"],
+            "model_argv": [], "effort_argv": [],
+            "env_allow": ["HOME", "PATH"], "mode": "one_shot"
+        },
+        "result": {
+            "source": {"kind": "stdout"}, "media_type": "text/plain",
+            "max_bytes": 1024, "success_exit_codes": [0]
+        },
+        "capabilities": {
+            "completion": {
+                "status": "supported", "semantics": "process_exit",
+                "evidence_ref": "help", "tested_identity": null
+            }
+        }
+    });
+    fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+    json_output(&run(
+        &home,
+        &[
+            "harness",
+            "activate",
+            "--manifest",
+            manifest_path.to_str().unwrap(),
+            "--workspace",
+            scratch.to_str().unwrap(),
+            "--prompt",
+            "scratch",
+        ],
+        &[],
+    ));
+    assert_eq!(
+        json_output(&run(
+            &home,
+            &["harness", "status", "local.positional-agent"],
+            &[]
+        ))["health"],
+        "healthy"
+    );
+
+    // The CLI updates.
+    writeln!(
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&executable)
+            .unwrap(),
+        "# updated"
+    )
+    .unwrap();
+    assert_eq!(
+        json_output(&run(
+            &home,
+            &["harness", "status", "local.positional-agent"],
+            &[]
+        ))["health"],
+        "executable_changed"
+    );
+
+    json_output(&run(
+        &home,
+        &[
+            "harness",
+            "recertify",
+            "local.positional-agent",
+            "--workspace",
+            scratch.to_str().unwrap(),
+        ],
+        &[],
+    ));
+    assert_eq!(
+        json_output(&run(
+            &home,
+            &["harness", "status", "local.positional-agent"],
+            &[]
+        ))["health"],
+        "healthy"
+    );
 }
 
 #[test]
@@ -6668,6 +6930,151 @@ fn add_slow_prompt_file_harness(home: &Path, root: &Path) {
         ],
         &[],
     ));
+}
+
+/// `--observe` reads. It must not run the recovery that records a dead
+/// supervisor's task as lost, which `status` does for its owner.
+#[test]
+fn observing_a_status_does_not_recover_or_record_anything() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("brgr");
+    let repository = temp.path().join("repo");
+    fs::create_dir_all(&repository).unwrap();
+    seed_git_repo(&repository);
+    add_slow_prompt_file_harness(&home, &temp.path().join("slow"));
+    let owner = [("BRGR_OWNER_ID", "codex:observe-recovery")];
+    let observer = [
+        ("BRGR_OWNER_ID", "codex:observe-recovery"),
+        ("BRGR_SESSION_ID", "observer-session"),
+    ];
+    let started = json_output(&run(
+        &home,
+        &[
+            "run",
+            "SLOW_RUN",
+            "--harness",
+            "local.slow-agent",
+            "--workspace",
+            repository.to_str().unwrap(),
+        ],
+        &owner,
+    ));
+    let task = started["task_id"].as_str().unwrap();
+    let record = home.join("runs").join(format!("{task}.supervisor.json"));
+    let began = Instant::now();
+    while !record.is_file() && began.elapsed() < Duration::from_secs(10) {
+        thread::sleep(Duration::from_millis(50));
+    }
+    let supervisor: Value = serde_json::from_slice(&fs::read(&record).unwrap()).unwrap();
+    let pid = supervisor["identity"]["handle"].as_str().unwrap();
+    assert!(
+        Command::new("/bin/kill")
+            .args(["-9", pid])
+            .status()
+            .unwrap()
+            .success()
+    );
+    thread::sleep(Duration::from_millis(300));
+
+    let seen = json_output(&run(&home, &["status", task, "--observe"], &observer));
+    assert_ne!(seen["state"], "terminal", "{seen}");
+    let still_open = run(&home, &["result", task, "--observe"], &observer);
+    assert!(
+        !still_open.status.success(),
+        "observing recorded a result for the dead supervisor's task"
+    );
+
+    // The owner's own status is what recovers it.
+    let recovered = json_output(&run(&home, &["status", task], &owner));
+    assert_eq!(recovered["state"], "terminal", "{recovered}");
+}
+
+/// A lost run's worker can outlive its supervisor. Revising it then would start
+/// a second run beside the first and, by overwriting the shared pid record,
+/// hide the first worker from `prune`, which would delete its worktree.
+#[test]
+fn a_lost_run_whose_worker_still_runs_cannot_be_revised_until_it_stops() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("brgr");
+    let repository = temp.path().join("repo");
+    fs::create_dir_all(&repository).unwrap();
+    seed_git_repo(&repository);
+    add_slow_prompt_file_harness(&home, &temp.path().join("slow"));
+    let owner = [("BRGR_OWNER_ID", "codex:revise-live")];
+    let started = json_output(&run(
+        &home,
+        &[
+            "run",
+            "SLOW_RUN",
+            "--harness",
+            "local.slow-agent",
+            "--workspace",
+            repository.to_str().unwrap(),
+        ],
+        &owner,
+    ));
+    let task = started["task_id"].as_str().unwrap();
+    let record = home.join("runs").join(format!("{task}.supervisor.json"));
+    let began = Instant::now();
+    while !record.is_file() && began.elapsed() < Duration::from_secs(10) {
+        thread::sleep(Duration::from_millis(50));
+    }
+    let supervisor: Value = serde_json::from_slice(&fs::read(&record).unwrap()).unwrap();
+    assert!(
+        Command::new("/bin/kill")
+            .args(["-9", supervisor["identity"]["handle"].as_str().unwrap()])
+            .status()
+            .unwrap()
+            .success()
+    );
+    thread::sleep(Duration::from_millis(300));
+    // Recovery records the run as lost while its worker keeps sleeping.
+    let lost = json_output(&run(&home, &["status", task], &owner));
+    assert_eq!(lost["state"], "terminal", "{lost}");
+
+    let refused = run(
+        &home,
+        &[
+            "revise",
+            task,
+            "again",
+            "--workspace",
+            repository.to_str().unwrap(),
+        ],
+        &owner,
+    );
+    assert!(
+        !refused.status.success(),
+        "revised a run whose worker is alive"
+    );
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(stderr.contains("may still be running"), "{stderr}");
+    assert!(stderr.contains("wait for it to exit"), "{stderr}");
+
+    // Once the worker has stopped the same revision goes ahead.
+    let began = Instant::now();
+    loop {
+        let retried = run(
+            &home,
+            &[
+                "revise",
+                task,
+                "again",
+                "--workspace",
+                repository.to_str().unwrap(),
+            ],
+            &owner,
+        );
+        if retried.status.success() {
+            break;
+        }
+        assert!(
+            began.elapsed() < Duration::from_secs(20),
+            "{}",
+            String::from_utf8_lossy(&retried.stderr)
+        );
+        thread::sleep(Duration::from_millis(500));
+    }
 }
 
 #[test]
