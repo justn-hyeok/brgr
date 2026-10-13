@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- `accept`, `reject` and `land` take `--include-ignored`: the worktree of the
+  revision they decide is removed even when only ignored files (build output,
+  caches) kept it, so a result no longer needs a separate `prune --apply
+  --include-ignored`. Without it nothing changes.
 - `--observe` on `status`, `result` and `diff` reads a task owned by another
   session without the owner-session check, with a note on stderr. It cannot
   decide, acknowledge, apply or transfer the task, and `result --observe --ack`

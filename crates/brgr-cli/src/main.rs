@@ -281,11 +281,8 @@ async fn execute(paths: &Paths, command: Command, json_output: bool) -> Result<(
         ),
         Command::Cancel { task, tree } => cancel(paths, task, tree, json_output),
         Command::Bind { task, session } => bind(paths, task, session, json_output).await,
-        Command::Accept { task, reason } => {
-            decide(paths, task, DecisionVerdict::Accepted, reason, json_output)
-        }
-        Command::Reject { task, reason } => {
-            decide(paths, task, DecisionVerdict::Rejected, reason, json_output)
+        command @ (Command::Accept { .. } | Command::Reject { .. }) => {
+            decision_command(paths, &command, json_output)
         }
         command @ (Command::Status { .. } | Command::Result { .. } | Command::Diff { .. }) => {
             read_command(paths, &command, json_output)
@@ -456,6 +453,29 @@ fn owner_kind() -> &'static str {
     } else {
         "codex"
     }
+}
+
+/// `accept` and `reject`: the owner's decision on a candidate.
+fn decision_command(paths: &Paths, command: &Command, json_output: bool) -> Result<()> {
+    let (task, verdict, reason, include_ignored) = match command {
+        Command::Accept {
+            task,
+            reason,
+            include_ignored,
+        } => (*task, DecisionVerdict::Accepted, reason, *include_ignored),
+        Command::Reject {
+            task,
+            reason,
+            include_ignored,
+        } => (*task, DecisionVerdict::Rejected, reason, *include_ignored),
+        _ => bail!("not a decision command"),
+    };
+    decide(
+        paths,
+        task,
+        (verdict, reason.clone(), include_ignored),
+        json_output,
+    )
 }
 
 /// `status`, `result` and `diff`: the commands that only read a task.

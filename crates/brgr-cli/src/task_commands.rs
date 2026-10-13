@@ -305,11 +305,10 @@ pub(crate) async fn bind(
 pub(crate) fn decide(
     paths: &Paths,
     task: TaskId,
-    verdict: DecisionVerdict,
-    reason: String,
+    decision: (DecisionVerdict, String, bool),
     json_output: bool,
 ) -> Result<()> {
-    let persisted = record_verdict(paths, task, verdict, reason)?;
+    let persisted = record_verdict(paths, task, decision)?;
     print_value(&serde_json::to_value(persisted)?, json_output);
     Ok(())
 }
@@ -319,8 +318,7 @@ pub(crate) fn decide(
 pub(crate) fn record_verdict(
     paths: &Paths,
     task: TaskId,
-    verdict: DecisionVerdict,
-    reason: String,
+    (verdict, reason, include_ignored): (DecisionVerdict, String, bool),
 ) -> Result<Decision> {
     if reason.trim().is_empty() {
         bail!("decision reason must not be empty");
@@ -362,6 +360,9 @@ pub(crate) fn record_verdict(
         eprintln!("brgr pane cleanup queue could not be updated: {error}");
     } else if let Err(error) = pane_cleanup::close_if_eligible(&store, &paths.runs, task) {
         eprintln!("brgr pane cleanup remains pending: {error}");
+    }
+    if include_ignored {
+        crate::worktree_prune::allow_ignored(paths, task, spec.revision);
     }
     crate::worktree_prune::reclaim_and_report(paths, task, spec.revision);
     Ok(persisted)

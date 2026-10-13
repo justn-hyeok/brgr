@@ -298,6 +298,12 @@ because of it. `--keep-worktree` on `run` or `revise` keeps it, as does
 commit and the checkout recorded at admission, so it still works after the
 worktree is gone.
 
+`accept`, `reject` and `land` take `--include-ignored`, which also removes a
+worktree that only ignored files (build output, caches) kept, as `brgr prune
+--apply --include-ignored` would. Only the owner knows those files are
+disposable, so without the flag such a worktree is kept. The choice is written
+down, so a pane-mode worktree reclaimed later, when its pane closes, honours it.
+
 Each revision is assessed once: a worktree a decision kept is not looked at
 again automatically. Whatever a decision kept, and worktrees from before
 v2.12.0, are swept by hand:

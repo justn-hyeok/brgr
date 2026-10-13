@@ -106,12 +106,22 @@ pub(crate) enum Command {
         task: TaskId,
         #[arg(long, default_value = "acceptance criteria verified")]
         reason: String,
+        /// Also remove the task's worktree when only ignored files (build
+        /// output, caches) keep it, as `brgr prune --apply --include-ignored`
+        /// would. Without it such a worktree is kept.
+        #[arg(long)]
+        include_ignored: bool,
     },
     /// Record an explicit rejection with a reason, keeping the result intact.
     Reject {
         task: TaskId,
         #[arg(long)]
         reason: String,
+        /// Also remove the task's worktree when only ignored files (build
+        /// output, caches) keep it, as `brgr prune --apply --include-ignored`
+        /// would. Without it such a worktree is kept.
+        #[arg(long)]
+        include_ignored: bool,
     },
     /// Show a candidate's sealed Git diff, or its per-file summary.
     Diff {
@@ -156,6 +166,11 @@ pub(crate) enum Command {
         /// Merge with the target's own changes, as `apply --3way` does.
         #[arg(long = "3way")]
         three_way: bool,
+        /// Also remove the task's worktree when only ignored files (build
+        /// output, caches) keep it, as `brgr prune --apply --include-ignored`
+        /// would. Without it such a worktree is kept.
+        #[arg(long)]
+        include_ignored: bool,
     },
     /// Register, contract-test, activate, and inspect local harnesses.
     Harness {
