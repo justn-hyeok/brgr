@@ -6454,3 +6454,42 @@ fn foreground_admission_lock_is_released_before_slow_harness_execution() {
         "seed\n"
     );
 }
+
+/// A script reads `status --json` from stdout alone: it is one object, and the
+/// worktree and base commit are at the top level.
+#[test]
+fn status_json_is_one_object_with_workspace_and_base_commit_at_the_top() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("brgr");
+    let repository = temp.path().join("repo");
+    fs::create_dir_all(&repository).unwrap();
+    seed_git_repo(&repository);
+    add_fixture(&home, &gjc_fixture(), &temp.path().join("scratch"));
+    let owner = [("BRGR_OWNER_ID", "codex:status-json")];
+    let created = json_output(&run(
+        &home,
+        &[
+            "run",
+            "BRGR_FIXTURE_OK",
+            "--workspace",
+            repository.to_str().unwrap(),
+            "--capture-diff",
+            "--foreground",
+        ],
+        &owner,
+    ));
+    let task = created["task_id"].as_str().unwrap();
+    let output = run(&home, &["status", task], &owner);
+    assert!(output.status.success());
+    let status: Value = serde_json::from_slice(&output.stdout).expect("stdout is one JSON object");
+    assert_eq!(status["workspace"], status["task"]["workspace"]);
+    assert_eq!(
+        status["base_commit"],
+        status["task"]["evidence"]["base_commit"]
+    );
+    assert!(
+        status["base_commit"]
+            .as_str()
+            .is_some_and(|commit| commit.len() >= 7)
+    );
+}

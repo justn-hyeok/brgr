@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- `brgr status TASK --json` also puts `workspace` and `base_commit` at the top
+  level, and the reference lists its fields. brgr's own notes already go to
+  stderr, so stdout is one JSON object.
+- A failed model catalog probe is tried once more, and a probe that still fails
+  names the harness, the exit code or timeout, and one quoted line from the CLI.
+  A start that takes more than a few seconds says which step it is waiting for.
 - A failed or lost run keeps the diff of its worktree. A worker that changed
   files and then never wrote its report used to be lost with nothing to review;
   `brgr diff` now shows its changes, and the result still cannot be accepted.
