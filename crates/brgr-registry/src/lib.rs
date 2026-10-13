@@ -417,7 +417,13 @@ impl Registry {
             return Err(RegistryError::EmptyScratchPrompt);
         }
         if model.is_some() && manifest.launch.model_argv.is_empty() {
-            return Err(RegistryError::UnsupportedScratchModel);
+            return Err(match manifest.configured_model_hint() {
+                Some(hint) => RegistryError::ConfiguredModelOnly {
+                    harness: manifest.id.clone(),
+                    hint,
+                },
+                None => RegistryError::UnsupportedScratchModel,
+            });
         }
         if effort.is_some() && manifest.launch.effort_argv.is_empty() {
             return Err(RegistryError::UnsupportedScratchEffort);
@@ -1319,6 +1325,35 @@ mod tests {
                 .preflight_model(&cline, Some("anthropic/claude-haiku-4-5"))
                 .await,
             Err(RegistryError::ModelCatalogMissing(_))
+        ));
+    }
+
+    #[test]
+    fn a_configured_model_only_harness_says_how_to_change_its_model() {
+        let cline = generate_manifest(
+            "cline",
+            PathBuf::from("/bin/echo"),
+            "-p, --plan --auto-approve <boolean> -m, --model <model-id> --thinking <level>",
+        )
+        .unwrap();
+        let hint = cline.configured_model_hint().unwrap();
+        assert!(hint.contains("cline auth -m <model-id>"), "{hint}");
+        assert!(hint.ends_with("then run without --model"), "{hint}");
+        // A harness that selects models per run has nothing to explain.
+        let claude = generate_manifest(
+            "claude",
+            PathBuf::from("/bin/echo"),
+            "-p, --print --output-format <format> --model <model> --permission-mode <mode>",
+        )
+        .unwrap();
+        assert_eq!(claude.configured_model_hint(), None);
+        let message = RegistryError::ConfiguredModelOnly {
+            harness: cline.id.clone(),
+            hint,
+        }
+        .to_string();
+        assert!(message.starts_with(
+            "harness local.cline does not support required capability: model_select;"
         ));
     }
 

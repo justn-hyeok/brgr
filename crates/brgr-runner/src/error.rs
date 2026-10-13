@@ -20,6 +20,10 @@ pub enum RunnerError {
     HarnessRouteMismatch { requested: String, actual: String },
     #[error("harness does not support required capability: {0}")]
     UnsupportedCapability(String),
+    #[error(
+        "harness {harness} does not support required capability: model_select; it runs only the model set in its own configuration, so {hint}"
+    )]
+    ConfiguredModelOnly { harness: String, hint: String },
     #[error("invalid harness id: {0}")]
     InvalidHarnessId(String),
     #[error("executable must be an existing absolute file: {}", .0.display())]

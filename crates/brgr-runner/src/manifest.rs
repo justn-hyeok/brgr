@@ -264,6 +264,12 @@ impl HarnessManifest {
             self.require_capability(name)?;
         }
         if task.route.requested_model.is_some() {
+            if let Some(hint) = self.configured_model_hint() {
+                return Err(RunnerError::ConfiguredModelOnly {
+                    harness: self.id.clone(),
+                    hint,
+                });
+            }
             self.require_capability("model_select")?;
             if self.adapter != OMP_ROLE_ADAPTER_V1
                 && self.launch.model_argv.is_empty()
@@ -294,6 +300,25 @@ impl HarnessManifest {
             }
         }
         Ok(())
+    }
+
+    /// What to do instead, when the harness runs only the model its own
+    /// configuration names: brgr never edits another CLI's settings, so the
+    /// model is changed in that CLI. `None` for any other reason.
+    #[must_use]
+    pub fn configured_model_hint(&self) -> Option<String> {
+        let capability = self.capabilities.get("model_select")?;
+        if capability.status != CapabilityStatus::Unsupported
+            || capability.semantics != "configured_default_only"
+        {
+            return None;
+        }
+        let change = if self.id == "local.cline" {
+            "change it with `cline auth -m <model-id>`"
+        } else {
+            "change it in that CLI's own settings"
+        };
+        Some(format!("{change}, then run without --model"))
     }
 
     fn require_capability(&self, name: &str) -> Result<(), RunnerError> {
