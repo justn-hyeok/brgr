@@ -369,6 +369,9 @@ pub struct ArtifactRef {
 #[serde(rename_all = "snake_case")]
 pub enum ObservationSource {
     HarnessJsonl,
+    /// Read from the harness's own settings, not from the run: the model a
+    /// configured-default-only harness was set to use.
+    HarnessConfig,
     Unavailable,
 }
 

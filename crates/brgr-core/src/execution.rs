@@ -310,13 +310,8 @@ pub(crate) fn finish_execution(
                 artifacts,
                 None,
             );
-            if let Some(model) = observed_model {
-                result.route_observation = Some(RouteObservation {
-                    model: Some(model),
-                    model_source: ObservationSource::HarnessJsonl,
-                    effort: None,
-                    effort_source: ObservationSource::Unavailable,
-                });
+            if let Some(observation) = route_observation(manifest, observed_model) {
+                result.route_observation = Some(observation);
             }
             Ok(result)
         }
@@ -336,6 +331,29 @@ pub(crate) fn finish_execution(
             Some(error.to_string()),
         )),
     }
+}
+
+/// The model of a successful run: the one its JSONL stream reported, else, for
+/// a harness that takes no model per run, the one its own settings name.
+fn route_observation(
+    manifest: &HarnessManifest,
+    observed_model: Option<String>,
+) -> Option<RouteObservation> {
+    let (model, model_source) = if let Some(model) = observed_model {
+        (model, ObservationSource::HarnessJsonl)
+    } else {
+        manifest.configured_model_hint()?;
+        (
+            brgr_runner::configured_model(&manifest.id)?,
+            ObservationSource::HarnessConfig,
+        )
+    };
+    Some(RouteObservation {
+        model: Some(model),
+        model_source,
+        effort: None,
+        effort_source: ObservationSource::Unavailable,
+    })
 }
 
 pub(crate) fn execution_failure_reason(output: &ExecutionOutput) -> String {
