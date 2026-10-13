@@ -23,6 +23,9 @@ so moving a file breaks a test rather than a reader.
   loop, worktree cleanup, and development.
 - [Architecture](guides/architecture.md) — the managed-run contract: task
   identity, attempts, sealed results, and who may decide.
+- [Execution model roadmap](guides/roadmap.md) — current-quality improvements,
+  continuity foundations, Head Migration, Dynamic Workflows, and their integration;
+  future direction, not a claim of shipped capabilities.
 - [Agent-authored process manifests](guides/custom-harness-registration.md) —
   registering a new CLI harness, and the evidence that registration requires.
 - [v2 Herdr plugin contract](guides/v2-herdr-plugin.md) — ownership, context,
