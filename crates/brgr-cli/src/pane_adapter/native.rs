@@ -582,7 +582,7 @@ fn prepare_native_config(run: &PaneRunArgs, paths: &Paths) -> Result<(PathBuf, P
             argv,
             workspace: run.workspace.clone(),
             environment,
-            pane_environment: manifest.launch.env_allow.clone(),
+            pane_environment: crate::tui_host::pane_variables(&manifest.launch.env_allow),
             state: state.clone(),
         },
     )?;
