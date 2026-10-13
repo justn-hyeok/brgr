@@ -207,10 +207,11 @@ fn sealed_patch(
     if !spec.evidence.capture_diff {
         bail!("the task did not request a sealed Git diff; run it with --capture-diff");
     }
+    // A failed or lost result has no report, so its diff is not at a fixed index.
     let reference = result
         .artifacts
-        .get(1)
-        .filter(|artifact| artifact.media_type == "text/x-diff")
+        .iter()
+        .find(|artifact| artifact.media_type == "text/x-diff")
         .context("result has no sealed Git diff")?;
     let patch = store.read_artifact(reference, spec.artifact_contract.max_bytes)?;
     Ok((reference.clone(), patch))

@@ -814,7 +814,15 @@ PY
       echo unknown > "$d/state"
       echo '{}'; exit 0
     fi
-    if [ -e "$d/no-report" ]; then echo idle > "$d/state"; echo '{"result":{"type":"ok"}}'; exit 0; fi
+    if [ -e "$d/no-report" ]; then
+      if [ -e "$d/change" ]; then
+        # An agent that edits the worktree and then stops without its report.
+        report=$(printf '%s\n' "$4" | /usr/bin/grep -E '^/.*\.md$' | /usr/bin/tail -1)
+        root=$(/usr/bin/dirname "$(/usr/bin/dirname "$(/usr/bin/dirname "$(/usr/bin/dirname "$report")")")")
+        test -z "$report" || printf '%s\n' unreported > "$root/changed.txt"
+      fi
+      echo idle > "$d/state"; echo '{"result":{"type":"ok"}}'; exit 0
+    fi
     report=$(printf '%s\n' "$4" | /usr/bin/grep -E '^/.*\.md$' | /usr/bin/tail -1)
     if [ -n "$report" ]; then printf '%s' "$report" > "$d/report-path"; else report=$(/bin/cat "$d/report-path"); fi
     if [ -e "$d/hang" ]; then
@@ -1730,6 +1738,33 @@ fn an_agent_that_never_writes_its_report_fails_with_the_cause() {
         2,
         "the task prompt plus exactly one reminder: {calls}"
     );
+}
+
+/// A worker that changed files and then never wrote its report is lost, but
+/// its work stays reviewable: the worktree diff is sealed with the result.
+#[test]
+fn a_lost_run_without_a_report_keeps_its_worktree_diff_reviewable() {
+    let fixture = pane_fixture();
+    seed_git_repo(&fixture.workspace);
+    fs::create_dir_all(&fixture.state).unwrap();
+    for flag in ["no-report", "change"] {
+        fs::write(fixture.state.join(flag), "").unwrap();
+    }
+    let ran = fixture.run_with_env(&["--capture-diff"], &[("BRGR_TEST_REPORT_GRACE_MS", "300")]);
+    assert_eq!(ran["outcome"], "lost", "{ran}");
+    let task = ran["task_id"].as_str().unwrap();
+    let owner = [("BRGR_OWNER_ID", "codex:pane-test")];
+    let shown = run(&fixture.home, &["diff", task], &owner);
+    let diff = String::from_utf8(shown.stdout).unwrap();
+    assert!(
+        diff.contains("changed.txt"),
+        "stdout: {diff}\nstderr: {}",
+        String::from_utf8_lossy(&shown.stderr)
+    );
+    assert!(diff.contains("+unreported"), "{diff}");
+    // The change cannot be accepted: only a candidate can.
+    let accepted = run(&fixture.home, &["accept", task, "--reason", "x"], &owner);
+    assert!(!accepted.status.success());
 }
 
 /// A read-only request no longer turns the TUI off or into plan mode: the
