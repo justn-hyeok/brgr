@@ -26,7 +26,11 @@ pub(crate) fn status(
     observe: bool,
     json_output: bool,
 ) -> Result<()> {
-    reconcile_pending(paths)?;
+    // Recovery records dead supervisors' tasks as lost and runs cleanups, which
+    // are writes; an observer only reads what is already recorded.
+    if !observe {
+        reconcile_pending(paths)?;
+    }
     let store = Store::open(&paths.store)?;
     if tree {
         let root = task.context("--tree requires a task ID")?;

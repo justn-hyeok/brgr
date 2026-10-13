@@ -6830,6 +6830,63 @@ fn add_slow_prompt_file_harness(home: &Path, root: &Path) {
     ));
 }
 
+/// `--observe` reads. It must not run the recovery that records a dead
+/// supervisor's task as lost, which `status` does for its owner.
+#[test]
+fn observing_a_status_does_not_recover_or_record_anything() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("brgr");
+    let repository = temp.path().join("repo");
+    fs::create_dir_all(&repository).unwrap();
+    seed_git_repo(&repository);
+    add_slow_prompt_file_harness(&home, &temp.path().join("slow"));
+    let owner = [("BRGR_OWNER_ID", "codex:observe-recovery")];
+    let observer = [
+        ("BRGR_OWNER_ID", "codex:observe-recovery"),
+        ("BRGR_SESSION_ID", "observer-session"),
+    ];
+    let started = json_output(&run(
+        &home,
+        &[
+            "run",
+            "SLOW_RUN",
+            "--harness",
+            "local.slow-agent",
+            "--workspace",
+            repository.to_str().unwrap(),
+        ],
+        &owner,
+    ));
+    let task = started["task_id"].as_str().unwrap();
+    let record = home.join("runs").join(format!("{task}.supervisor.json"));
+    let began = Instant::now();
+    while !record.is_file() && began.elapsed() < Duration::from_secs(10) {
+        thread::sleep(Duration::from_millis(50));
+    }
+    let supervisor: Value = serde_json::from_slice(&fs::read(&record).unwrap()).unwrap();
+    let pid = supervisor["identity"]["handle"].as_str().unwrap();
+    assert!(
+        Command::new("/bin/kill")
+            .args(["-9", pid])
+            .status()
+            .unwrap()
+            .success()
+    );
+    thread::sleep(Duration::from_millis(300));
+
+    let observed = json_output(&run(&home, &["status", task, "--observe"], &observer));
+    assert_ne!(observed["state"], "terminal", "{observed}");
+    let still_open = run(&home, &["result", task, "--observe"], &observer);
+    assert!(
+        !still_open.status.success(),
+        "observing recorded a result for the dead supervisor's task"
+    );
+
+    // The owner's own status is what recovers it.
+    let recovered = json_output(&run(&home, &["status", task], &owner));
+    assert_eq!(recovered["state"], "terminal", "{recovered}");
+}
+
 #[test]
 fn foreground_admission_lock_is_released_before_slow_harness_execution() {
     let temp = TempDir::new().unwrap();
