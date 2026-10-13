@@ -48,6 +48,8 @@ pub(crate) fn status(
             &json!({
                 "task": spec,
                 "state": format!("{state:?}").to_lowercase(),
+                "workspace": spec.workspace,
+                "base_commit": spec.evidence.base_commit,
                 "workspace_present": workspace::workspace_is_present(&spec.workspace),
                 "session": crate::pane_adapter::session_status(paths, task_id, spec.revision),
                 "calling_options": launch.as_ref().and_then(|value|value.calling_options.as_ref()),

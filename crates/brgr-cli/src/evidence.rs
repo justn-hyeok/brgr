@@ -71,6 +71,7 @@ pub fn apply_result(
     task: TaskId,
     workspace_path: &Path,
     execute: bool,
+    three_way: bool,
     json_output: bool,
 ) -> Result<()> {
     let store = Store::open(&paths.store)?;
@@ -87,9 +88,81 @@ pub fn apply_result(
     if target != repository_root {
         bail!("integration target must be the repository root, not a subdirectory");
     }
-    // The worktree is removed once the result is decided and nothing in it
-    // would be lost, so the sealed patch, the recorded base commit, and the
-    // checkout recorded at admission are what integration relies on.
+    let (expected_head, target_head) = check_target(&store, &spec, task, &target)?;
+    let _admission = workspace::acquire_admission_lock(&paths.worktrees, &target)?;
+    let checked = git_apply(&target, &patch, true, three_way)?;
+    let mut conflicts = match checked {
+        Applied::Clean => Vec::new(),
+        Applied::Conflicts(files) => files,
+    };
+    let status = if execute {
+        let decision = store
+            .decision_for_result(result.result_id)?
+            .context("result has no owner decision")?;
+        if decision.verdict != DecisionVerdict::Accepted {
+            bail!("owner must accept the sealed result before integration");
+        }
+        let receipt = paths
+            .runs
+            .join(format!("{}-{}.apply.json", task, result.result_id));
+        let intent = json!({"task_id": task, "result_id": result.result_id,
+            "target": target, "patch_digest": reference.digest, "state": "started"});
+        write_json_new(&receipt, &intent)
+            .context("an integration receipt already exists or could not be written")?;
+        if let Applied::Conflicts(files) = git_apply(&target, &patch, false, three_way)? {
+            conflicts = files;
+        }
+        let state = if conflicts.is_empty() {
+            "applied"
+        } else {
+            "applied_with_conflicts"
+        };
+        write_json_atomic(
+            &receipt,
+            &json!({"task_id": task, "result_id": result.result_id, "target": target,
+                "patch_digest": reference.digest, "state": state, "conflicts": conflicts}),
+        )?;
+        state
+    } else if conflicts.is_empty() {
+        "ready"
+    } else {
+        "ready_with_conflicts"
+    };
+    print_value(
+        &json!({"task_id": task, "result_id": result.result_id,
+            "target": target, "patch_digest": reference.digest, "status": status,
+            "conflicts": conflicts,
+            "base_commit": expected_head, "target_head": target_head}),
+        json_output,
+    );
+    if !conflicts.is_empty() {
+        bail!(
+            "the diff {} with conflicts in {} file(s): {}; resolve them in {} and commit",
+            if execute {
+                "was applied"
+            } else {
+                "would apply"
+            },
+            conflicts.len(),
+            conflicts.join(", "),
+            target.display()
+        );
+    }
+    Ok(())
+}
+
+/// Confirms `target` is the task's repository at its base commit or a commit
+/// that descends from it, and returns the base and the target's head.
+///
+/// The worktree is removed once the result is decided and nothing in it would
+/// be lost, so the sealed patch, the recorded base commit, and the checkout
+/// recorded at admission are what integration relies on.
+fn check_target(
+    store: &Store,
+    spec: &TaskSpec,
+    task: TaskId,
+    target: &Path,
+) -> Result<(PathBuf, PathBuf)> {
     let worktree = Path::new(&spec.workspace).canonicalize().ok();
     let task_workspace = match &worktree {
         Some(worktree) => worktree.clone(),
@@ -106,52 +179,20 @@ pub fn apply_result(
             bail!("the task's base commit was not recorded and its worktree was removed")
         }
     };
-    let target_head = git_value(&target, &["rev-parse", "HEAD"])?;
+    let target_head = git_value(target, &["rev-parse", "HEAD"])?;
     if git_value(
-        &target,
+        target,
         &["rev-parse", "--path-format=absolute", "--git-common-dir"],
     )? != git_value(
         &task_workspace,
         &["rev-parse", "--path-format=absolute", "--git-common-dir"],
-    )? || !(target_head == expected_head || is_ancestor(&target, &expected_head, &target_head)?)
+    )? || !(target_head == expected_head || is_ancestor(target, &expected_head, &target_head)?)
     {
         bail!(
             "integration target must be the same repository at the task base commit or a commit that descends from it"
         );
     }
-    let _admission = workspace::acquire_admission_lock(&paths.worktrees, &target)?;
-    git_apply(&target, &patch, true)?;
-    let status = if execute {
-        let decision = store
-            .decision_for_result(result.result_id)?
-            .context("result has no owner decision")?;
-        if decision.verdict != DecisionVerdict::Accepted {
-            bail!("owner must accept the sealed result before integration");
-        }
-        let receipt = paths
-            .runs
-            .join(format!("{}-{}.apply.json", task, result.result_id));
-        let intent = json!({"task_id": task, "result_id": result.result_id,
-            "target": target, "patch_digest": reference.digest, "state": "started"});
-        write_json_new(&receipt, &intent)
-            .context("an integration receipt already exists or could not be written")?;
-        git_apply(&target, &patch, false)?;
-        write_json_atomic(
-            &receipt,
-            &json!({"task_id": task, "result_id": result.result_id, "target": target,
-                "patch_digest": reference.digest, "state": "applied"}),
-        )?;
-        "applied"
-    } else {
-        "ready"
-    };
-    print_value(
-        &json!({"task_id": task, "result_id": result.result_id,
-            "target": target, "patch_digest": reference.digest, "status": status,
-            "base_commit": expected_head, "target_head": target_head}),
-        json_output,
-    );
-    Ok(())
+    Ok((expected_head, target_head))
 }
 
 /// Prints a result's sealed Git diff, or with `stat` the files it changes.
@@ -207,10 +248,11 @@ fn sealed_patch(
     if !spec.evidence.capture_diff {
         bail!("the task did not request a sealed Git diff; run it with --capture-diff");
     }
+    // A failed or lost result has no report, so its diff is not at a fixed index.
     let reference = result
         .artifacts
-        .get(1)
-        .filter(|artifact| artifact.media_type == "text/x-diff")
+        .iter()
+        .find(|artifact| artifact.media_type == "text/x-diff")
         .context("result has no sealed Git diff")?;
     let patch = store.read_artifact(reference, spec.artifact_contract.max_bytes)?;
     Ok((reference.clone(), patch))
@@ -317,12 +359,22 @@ fn git_value(workspace: &Path, argv: &[&str]) -> Result<PathBuf> {
     }
 }
 
-fn git_apply(workspace: &Path, patch: &[u8], check_only: bool) -> Result<()> {
+/// What `git apply` did with a sealed diff.
+enum Applied {
+    Clean,
+    /// Only with `--3way`: the files left with conflict markers, or that would be.
+    Conflicts(Vec<String>),
+}
+
+fn git_apply(workspace: &Path, patch: &[u8], check_only: bool, three_way: bool) -> Result<Applied> {
     if patch.is_empty() {
-        return Ok(());
+        return Ok(Applied::Clean);
     }
     let mut command = Command::new("git");
     command.arg("-C").arg(workspace).args(["apply", "--binary"]);
+    if three_way {
+        command.arg("--3way");
+    }
     if check_only {
         command.arg("--check");
     }
@@ -339,12 +391,54 @@ fn git_apply(workspace: &Path, patch: &[u8], check_only: bool) -> Result<()> {
         .write_all(patch);
     let output = child.wait_with_output()?;
     write?;
+    let diagnostic = String::from_utf8_lossy(&output.stderr);
+    if three_way {
+        // A check reports conflicts and exits 0; an apply leaves the markers
+        // and exits 1. Either way the files are named on stderr or unmerged.
+        let mut files = conflicted_files(&diagnostic);
+        if !check_only && !output.status.success() {
+            files.extend(unmerged_files(workspace)?);
+            files.sort();
+            files.dedup();
+        }
+        if !files.is_empty() {
+            return Ok(Applied::Conflicts(files));
+        }
+    }
     if !output.status.success() {
-        let diagnostic = String::from_utf8_lossy(&output.stderr);
+        let hint = if three_way {
+            ""
+        } else {
+            "; `--3way` merges it with the target's own changes and marks conflicts"
+        };
         bail!(
-            "Git apply conflict or failure: {}",
+            "Git apply conflict or failure: {}{hint}",
             diagnostic.chars().take(2_048).collect::<String>()
         );
     }
-    Ok(())
+    Ok(Applied::Clean)
+}
+
+/// Files named by `Applied patch to 'PATH' with conflicts.` lines.
+fn conflicted_files(diagnostic: &str) -> Vec<String> {
+    diagnostic
+        .lines()
+        .filter_map(|line| {
+            let rest = line.strip_prefix("Applied patch to '")?;
+            let (path, tail) = rest.split_once('\'')?;
+            tail.contains("with conflicts").then(|| path.to_owned())
+        })
+        .collect()
+}
+
+fn unmerged_files(workspace: &Path) -> Result<Vec<String>> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(workspace)
+        .args(["diff", "--name-only", "--diff-filter=U"])
+        .output()?;
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::to_owned)
+        .collect())
 }

@@ -85,7 +85,7 @@ that was already running does not know brgr yet.
 The Herdr plugin adds a task board and workspace actions on top:
 
 ```bash
-herdr plugin install justn-hyeok/brgr --ref v2.13.5
+herdr plugin install justn-hyeok/brgr --ref v2.13.6
 ```
 
 ## Use it

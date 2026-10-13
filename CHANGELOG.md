@@ -1,5 +1,21 @@
 # Changelog
 
+## 2.13.6 — 2026-10-13
+
+- `brgr status TASK --json` also puts `workspace` and `base_commit` at the top
+  level, and the reference lists its fields. brgr's own notes already go to
+  stderr, so stdout is one JSON object.
+- A failed model catalog probe is tried once more, and a probe that still fails
+  names the harness, the exit code or timeout, and one quoted line from the CLI.
+  A start that takes more than a few seconds says which step it is waiting for.
+- A failed or lost run keeps the diff of its worktree. A worker that changed
+  files and then never wrote its report used to be lost with nothing to review;
+  `brgr diff` now shows its changes, and the result still cannot be accepted.
+- `brgr apply --3way` merges a sealed diff with the target's own changes, as
+  `git apply --3way` does. A conflict is written as standard markers and the
+  command fails naming the files, and a plain apply that fails now says to try
+  `--3way`.
+
 ## 2.13.5 — 2026-10-13
 
 - `brgr harness recertify HARNESS` registers an updated harness again at its

@@ -3,8 +3,8 @@
 use std::{fmt::Write as _, io::Cursor, path::Path, time::Duration};
 
 use brgr_protocol::{
-    AttemptId, AttemptState, Event, EventId, EventKind, ObservationSource, ResultEnvelope,
-    ResultId, RouteObservation, TaskId, TaskSpec, TerminalOutcome,
+    ArtifactRef, AttemptId, AttemptState, Event, EventId, EventKind, ObservationSource,
+    ResultEnvelope, ResultId, RouteObservation, TaskId, TaskSpec, TerminalOutcome,
 };
 use brgr_runner::{
     CauseSource, DelegationContext, ExecutionMode, ExecutionOutput, HarnessManifest, ProcessRunner,
@@ -396,15 +396,47 @@ pub(crate) fn terminal_with_requested_logs(
     reason: String,
     output: Option<&ExecutionOutput>,
 ) -> ResultEnvelope {
-    let (artifacts, error) = match output.map(|output| seal_requested_logs(store, spec, output)) {
-        Some(Ok(artifacts)) => (artifacts, reason),
-        Some(Err(log_error)) => (
-            vec![],
-            format!("{reason}; requested logs unavailable: {log_error}"),
-        ),
-        None => (vec![], reason),
-    };
+    let (mut artifacts, mut error) =
+        match output.map(|output| seal_requested_logs(store, spec, output)) {
+            Some(Ok(artifacts)) => (artifacts, reason),
+            Some(Err(log_error)) => (
+                vec![],
+                format!("{reason}; requested logs unavailable: {log_error}"),
+            ),
+            None => (vec![], reason),
+        };
+    // A worker that changed files and then failed to report still leaves its
+    // work in the worktree. Seal it, so the owner can review or export it; the
+    // outcome stays failed or lost, so it cannot be accepted.
+    if matches!(outcome, TerminalOutcome::Failed | TerminalOutcome::Lost)
+        && spec.evidence.capture_diff
+    {
+        match seal_unreported_diff(store, spec) {
+            Ok(Some(reference)) => artifacts.push(reference),
+            Ok(None) => {}
+            Err(diff_error) => {
+                error = format!("{error}; the worktree diff could not be sealed: {diff_error}");
+            }
+        }
+    }
     result_for(spec, attempt_id, outcome, artifacts, Some(error))
+}
+
+/// How long collecting the diff of a run that already failed may take.
+const UNREPORTED_DIFF_DEADLINE: Duration = Duration::from_secs(30);
+
+/// The worktree's change since the task's base, sealed as a diff, or `None`
+/// when the worker changed nothing.
+fn seal_unreported_diff(store: &Store, spec: &TaskSpec) -> Result<Option<ArtifactRef>, String> {
+    let limit = spec.artifact_contract.max_bytes.min(8 * 1024 * 1024);
+    let patch = crate::evidence::task_patch(spec, limit, UNREPORTED_DIFF_DEADLINE)?;
+    if patch.is_empty() {
+        return Ok(None);
+    }
+    store
+        .seal_artifact_reader(Cursor::new(patch), "text/x-diff", limit)
+        .map(Some)
+        .map_err(|error| error.to_string())
 }
 
 pub(crate) fn transition(
