@@ -5307,6 +5307,108 @@ fn devin_process_recipe_reaches_owner_acceptance_without_shell_interpolation() {
     assert_eq!(accepted["verdict"], "accepted");
 }
 
+/// A harness an agent authored a manifest for is certified again from that
+/// manifest. Redrafting it from help text, as for a known CLI, fails for a CLI
+/// whose flags no recipe describes, so an update would strand it.
+#[test]
+fn an_agent_authored_harness_is_recertified_from_its_own_manifest() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("brgr");
+    let scratch = temp.path().join("scratch");
+    fs::create_dir_all(&scratch).unwrap();
+    let executable = temp.path().join("positional-agent");
+    fs::write(
+        &executable,
+        "#!/bin/sh\ncase \"$1\" in\n --version) echo 'positional 1';;\n --help) echo '  -p, --print prompt';;\n -p) printf '%s' \"$2\";;\n *) exit 2;;\nesac\n",
+    )
+    .unwrap();
+    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+    let manifest_path = temp.path().join("manifest.json");
+    let manifest = json!({
+        "schema": "brgr.harness/v1",
+        "id": "local.positional-agent",
+        "adapter": "process/v1",
+        "executable": executable.canonicalize().unwrap(),
+        "probe": {"version_argv": ["--version"], "help_argv": ["--help"]},
+        "launch": {
+            "argv": ["-p", "${input.prompt}"],
+            "model_argv": [], "effort_argv": [],
+            "env_allow": ["HOME", "PATH"], "mode": "one_shot"
+        },
+        "result": {
+            "source": {"kind": "stdout"}, "media_type": "text/plain",
+            "max_bytes": 1024, "success_exit_codes": [0]
+        },
+        "capabilities": {
+            "completion": {
+                "status": "supported", "semantics": "process_exit",
+                "evidence_ref": "help", "tested_identity": null
+            }
+        }
+    });
+    fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+    json_output(&run(
+        &home,
+        &[
+            "harness",
+            "activate",
+            "--manifest",
+            manifest_path.to_str().unwrap(),
+            "--workspace",
+            scratch.to_str().unwrap(),
+            "--prompt",
+            "scratch",
+        ],
+        &[],
+    ));
+    assert_eq!(
+        json_output(&run(
+            &home,
+            &["harness", "status", "local.positional-agent"],
+            &[]
+        ))["health"],
+        "healthy"
+    );
+
+    // The CLI updates.
+    writeln!(
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&executable)
+            .unwrap(),
+        "# updated"
+    )
+    .unwrap();
+    assert_eq!(
+        json_output(&run(
+            &home,
+            &["harness", "status", "local.positional-agent"],
+            &[]
+        ))["health"],
+        "executable_changed"
+    );
+
+    json_output(&run(
+        &home,
+        &[
+            "harness",
+            "recertify",
+            "local.positional-agent",
+            "--workspace",
+            scratch.to_str().unwrap(),
+        ],
+        &[],
+    ));
+    assert_eq!(
+        json_output(&run(
+            &home,
+            &["harness", "status", "local.positional-agent"],
+            &[]
+        ))["health"],
+        "healthy"
+    );
+}
+
 #[test]
 fn authored_manifest_runs_unknown_positional_cli_to_owner_acceptance() {
     let temp = TempDir::new().unwrap();
