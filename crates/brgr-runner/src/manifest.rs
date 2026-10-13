@@ -95,7 +95,8 @@ pub struct InteractiveSpec {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub effort_print_only: bool,
     /// Likewise for the model arguments: `OpenCode` 2's TUI has no `--model`,
-    /// while `OpenCode` 1's has.
+    /// while `OpenCode` 1's has. The CLI's native standalone `OpenCode` 2 route
+    /// can instead prepare a model-selected session through its API.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub model_print_only: bool,
     /// Run the registered executable inside a native host when Herdr does not

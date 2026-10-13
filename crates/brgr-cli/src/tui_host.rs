@@ -11,6 +11,8 @@ use std::{
     process::{Command, Stdio},
 };
 
+mod opencode;
+
 #[derive(Serialize, Deserialize)]
 pub(crate) struct NativeLaunch {
     pub(crate) executable: PathBuf,
@@ -23,6 +25,10 @@ pub(crate) struct NativeLaunch {
     #[serde(default)]
     pub(crate) pane_environment: Vec<String>,
     pub(crate) state: PathBuf,
+    /// `OpenCode` 2 TUI resumes a model-selected session instead of taking a
+    /// `--model` flag. Absent in old launch files and for all other harnesses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) opencode_model: Option<String>,
 }
 
 /// What a terminal program reads to decide whether it may use colour. They
@@ -69,6 +75,8 @@ pub(crate) struct NativeState {
     pub(crate) birth: String,
     pub(crate) phase: String,
     pub(crate) exit_code: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) startup_error: Option<String>,
 }
 
 pub(crate) fn run(path: &Path) -> Result<()> {
@@ -112,6 +120,21 @@ pub(crate) fn run(path: &Path) -> Result<()> {
     if launch.digest.trim_start_matches("sha256:") != digest {
         bail!("registered native executable changed before TUI launch");
     }
+    if let Some(model) = launch.opencode_model.clone()
+        && let Err(error) = opencode::prepare(&mut launch, &model)
+    {
+        write_json_atomic(
+            &launch.state,
+            &NativeState {
+                pid: std::process::id(),
+                birth: String::new(),
+                phase: "failed".into(),
+                exit_code: Some(1),
+                startup_error: Some(format!("{error:#}")),
+            },
+        )?;
+        return Err(error);
+    }
     let mut child = Command::new(&launch.executable)
         .args(&launch.argv)
         .current_dir(&launch.workspace)
@@ -131,6 +154,7 @@ pub(crate) fn run(path: &Path) -> Result<()> {
             birth: birth.clone(),
             phase: "running".into(),
             exit_code: None,
+            startup_error: None,
         },
     )?;
     let status = child.wait()?;
@@ -141,6 +165,7 @@ pub(crate) fn run(path: &Path) -> Result<()> {
             birth,
             phase: "exited".into(),
             exit_code: status.code(),
+            startup_error: None,
         },
     )?;
     Ok(())

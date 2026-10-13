@@ -1399,9 +1399,9 @@ fn extra_argv_cannot_bypass_a_harness_effort_selector() {
 }
 
 /// `OpenCode` 2 runs in a private server in both modes. It checks its own model
-/// names, variant included; its TUI takes none, so a model needs `--headless`.
+/// names in headless mode; its TUI host prepares a model-selected session.
 #[test]
-fn opencode_2_runs_standalone_and_takes_a_model_only_headless() {
+fn opencode_2_runs_standalone_and_selects_tui_models_through_a_session() {
     let fixture = pane_fixture();
     let opencode = fixture.herdr.with_file_name("opencode");
     fs::write(&opencode, OPENCODE_2_FIXTURE).unwrap();
@@ -1460,7 +1460,7 @@ fn opencode_2_runs_standalone_and_takes_a_model_only_headless() {
             "--harness",
             "local.opencode",
             "--model",
-            "opencode/big-pickle",
+            "opencode/big-pickle#high",
             "--workspace",
             fixture.workspace.to_str().unwrap(),
             "--foreground",
@@ -1472,13 +1472,32 @@ fn opencode_2_runs_standalone_and_takes_a_model_only_headless() {
             ("BRGR_OWNER_ID", "codex:pane-test"),
         ],
     );
-    assert!(!modelled.status.success());
-    assert!(String::from_utf8_lossy(&modelled.stderr).contains("--headless"));
-    assert!(!fixture.state("calls.log").contains("pane split"));
+    let modelled = json_output(&modelled);
+    assert_eq!(modelled["outcome"], "candidate", "{modelled}");
+    let native: Value = serde_json::from_str(&fixture.state("native-config.json")).unwrap();
+    assert_eq!(native["opencode_model"], "opencode/big-pickle#high");
+    assert_eq!(native["argv"], json!(["--standalone", "--auto"]));
     let paned = fixture.run_on("local.opencode", &[]);
     assert_eq!(paned["outcome"], "candidate", "{paned}");
     let start = fixture.state("start-args");
     assert!(start.contains("--kind\nopencode\n--standalone"), "{start}");
+    json_output(&run(
+        &fixture.home,
+        &[
+            "config",
+            "set",
+            "model",
+            "opencode/big-pickle#high",
+            "--harness",
+            "local.opencode",
+        ],
+        &herdr,
+    ));
+    json_output(&run(&fixture.home, &["config", "check"], &herdr));
+    let configured = fixture.run_on("local.opencode", &[]);
+    assert_eq!(configured["outcome"], "candidate", "{configured}");
+    let native: Value = serde_json::from_str(&fixture.state("native-config.json")).unwrap();
+    assert_eq!(native["opencode_model"], "opencode/big-pickle#high");
 }
 
 /// Herdr may never show an agent working: Cursor went from unknown straight to

@@ -85,7 +85,7 @@ that was already running does not know brgr yet.
 The Herdr plugin adds a task board and workspace actions on top:
 
 ```bash
-herdr plugin install justn-hyeok/brgr --ref v2.13.9
+herdr plugin install justn-hyeok/brgr --ref v2.14.0
 ```
 
 ## Use it
@@ -121,6 +121,9 @@ it changes quickly; see the [changelog](CHANGELOG.md). Two checks from its
 readiness record are still open: concurrency across several processes at once,
 and a full review of the code by someone other than the author. See
 [the readiness status](docs/readiness/status.md).
+
+The [execution model roadmap](docs/guides/roadmap.md) plans continuity foundations,
+Head Migration, and Dynamic Workflows while preserving the existing run contract.
 
 brgr is written by AI coding agents under one maintainer's direction, so its
 code quality is not guaranteed; its behaviour is what the tests check.

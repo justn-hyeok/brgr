@@ -1,5 +1,19 @@
 # Changelog
 
+## 2.14.0 — 2026-10-14
+
+- OpenCode 2's native TUI now honours `--model provider/model#variant` through
+  a model-selected session. A temporary private server checks the task location's
+  catalog, creates the session and verifies it before the standalone TUI resumes
+  it. Missing models, variants, conflicting calling options and failed read-back
+  stop the run instead of selecting another model or changing to headless.
+- The temporary server exits when its host connection closes; API deadlines and
+  output limits also apply during preparation. User configuration is unchanged.
+- The execution model roadmap records continuity foundations, Head Migration,
+  Dynamic Workflows and their integration. These are future plans, not shipped
+  capabilities; the existing sealed-result and explicit-owner-decision contract
+  remains the foundation.
+
 ## 2.13.9 — 2026-10-13
 
 - A worker's TUI gets its pane's `TERM`, `COLORTERM` and `NO_COLOR`. brgr cleared

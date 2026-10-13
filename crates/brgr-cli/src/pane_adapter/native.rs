@@ -156,6 +156,9 @@ pub(crate) fn serve_session(paths: &Paths, task: TaskId) -> Result<()> {
         let run = PaneRunArgs {
             caller: launch.source_pane,
             native_executable: interactive.native_host.then(|| manifest.executable.clone()),
+            opencode_model: super::session_model_supported(interactive)
+                .then(|| spec.route.requested_model.clone())
+                .flatten(),
             prompt_file: PathBuf::new(),
             workspace: PathBuf::from(spec.workspace),
             task,
@@ -524,6 +527,15 @@ fn prepare_native_config(run: &PaneRunArgs, paths: &Paths) -> Result<(PathBuf, P
         .manifest
         .as_ref()
         .context("native host has no pinned manifest")?;
+    let opencode_model = manifest
+        .launch
+        .interactive
+        .as_ref()
+        .filter(|interactive| super::session_model_supported(interactive))
+        .and(launch.spec.route.requested_model.clone());
+    if run.opencode_model != opencode_model {
+        bail!("native OpenCode model differs from the pinned task route");
+    }
     let state = paths
         .runs
         .join(format!("{}-r{}.native-state.json", run.task, run.revision));
@@ -583,6 +595,7 @@ fn prepare_native_config(run: &PaneRunArgs, paths: &Paths) -> Result<(PathBuf, P
             workspace: run.workspace.clone(),
             environment,
             pane_environment: crate::tui_host::pane_variables(&manifest.launch.env_allow),
+            opencode_model,
             state: state.clone(),
         },
     )?;
@@ -610,6 +623,14 @@ pub(super) fn start_native(
         .map_err(|e| anyhow::anyhow!("native host bootstrap failed: {e}"))?;
     let opened = Instant::now();
     while !crate::tui_host::alive(&state) {
+        if let Some(error) = fs::read(&state)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<crate::tui_host::NativeState>(&bytes).ok())
+            .filter(|state| state.phase == "failed")
+            .and_then(|state| state.startup_error)
+        {
+            bail!("native TUI preparation failed: {error}");
+        }
         if opened.elapsed() > SHELL_READY {
             bail!("native TUI host did not start; inspect task session state");
         }
