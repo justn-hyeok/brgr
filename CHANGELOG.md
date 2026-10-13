@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.13.6 — 2026-10-13
 
 - `brgr status TASK --json` also puts `workspace` and `base_commit` at the top
   level, and the reference lists its fields. brgr's own notes already go to
