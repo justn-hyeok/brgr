@@ -80,9 +80,11 @@ pub(crate) fn validate_bridge_host_command(
             }
             Ok(())
         }
-        // Turning on issue filing publishes text from this machine.
+        // Turning on issue filing publishes text from this machine; turning on
+        // auto-recertify lets paid scratch runs start without a command.
         Command::Config {
-            command: ConfigCommand::SetIssueReporting { .. },
+            command:
+                ConfigCommand::SetIssueReporting { .. } | ConfigCommand::SetAutoRecertify { .. },
         } => bail!(
             "this brgr command is unavailable through the Herdr host bridge; run it explicitly outside the plugin Codex pane"
         ),

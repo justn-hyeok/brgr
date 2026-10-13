@@ -43,8 +43,8 @@ accept or reject.
   for it.
 
 Workers can be Claude Code, Codex CLI, Gemini CLI, GitHub Copilot CLI, Pi,
-OpenCode, Cursor CLI, Devin CLI, Cline, GJC, OMP or Command Code; brgr calls
-each registered worker CLI a *harness*. The agent that starts workers, the
+OpenCode, Cursor CLI, Devin CLI, Cline, OMP or Command Code (GJC is
+experimental); brgr calls each registered worker CLI a *harness*. The agent that starts workers, the
 *owner*, can be a Codex or Claude Code session.
 
 > **Workers always run with full permissions** (`--yolo`,
@@ -85,7 +85,7 @@ that was already running does not know brgr yet.
 The Herdr plugin adds a task board and workspace actions on top:
 
 ```bash
-herdr plugin install justn-hyeok/brgr --ref v2.13.4
+herdr plugin install justn-hyeok/brgr --ref v2.13.5
 ```
 
 ## Use it

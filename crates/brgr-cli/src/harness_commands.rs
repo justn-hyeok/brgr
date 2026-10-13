@@ -79,7 +79,20 @@ pub(crate) async fn harness(
             };
             print_value(&serde_json::to_value(receipt)?, json_output);
         }
+        HarnessCommand::Recertify {
+            harness,
+            workspace,
+            prompt,
+        } => {
+            let receipt = recertify_harness(&registry, &harness, workspace, prompt).await?;
+            print_value(&serde_json::to_value(receipt)?, json_output);
+        }
         HarnessCommand::Status { harness } => {
+            let configured = crate::config::Config::load(&paths.config)?.defaults.harness;
+            let harness = match harness {
+                Some(harness) => harness,
+                None => default_harness(&registry, configured.as_deref())?,
+            };
             let health = registry.health_probed(&harness).await?;
             let action = registry
                 .recertify_action_for(&harness)
@@ -134,6 +147,45 @@ pub(crate) async fn add_harness(
             .unwrap_or_else(|_| recertify_action_fallback()),
     )?;
     Ok(receipt)
+}
+
+/// Default scratch prompt for a re-certification. Any nonempty, successful
+/// answer certifies, so the shortest one keeps the paid run cheap.
+pub(crate) const RECERTIFY_PROMPT: &str = "say ok";
+
+/// Registers a harness again at the path it was certified with.
+pub(crate) async fn recertify_harness(
+    registry: &Registry,
+    harness: &str,
+    workspace: Option<PathBuf>,
+    prompt: Option<String>,
+) -> Result<ActivationReceipt> {
+    let (executable, presentation_only) = registry
+        .certified_executable(harness)
+        .with_context(|| format!("harness {harness} is not registered; use `brgr harness add`"))?;
+    let args = if presentation_only {
+        AddHarnessArgs {
+            executable,
+            workspace: None,
+            prompt: None,
+            model: None,
+            effort: None,
+            presentation_only: true,
+        }
+    } else {
+        AddHarnessArgs {
+            executable,
+            workspace: Some(match workspace {
+                Some(path) => path,
+                None => std::env::current_dir().context("cannot read the current directory")?,
+            }),
+            prompt: Some(prompt.unwrap_or_else(|| RECERTIFY_PROMPT.to_owned())),
+            model: None,
+            effort: None,
+            presentation_only: false,
+        }
+    };
+    add_harness(registry, args).await
 }
 
 pub(crate) async fn harness_manifest_input(
@@ -246,6 +298,26 @@ pub(crate) async fn doctor(paths: &Paths, json_output: bool) -> Result<()> {
         Ok(())
     } else {
         bail!("brgr doctor found an unavailable personal-use path")
+    }
+}
+
+/// The harness a call uses when it names none: the configured default, else
+/// the only registered one. With several registered and no default, brgr stops
+/// and lists them rather than picking one the owner did not choose.
+pub(crate) fn default_harness(registry: &Registry, configured: Option<&str>) -> Result<String> {
+    if let Some(id) = configured {
+        return Ok(id.to_owned());
+    }
+    let mut ids = registry.registered_harness_ids().unwrap_or_default();
+    match ids.len() {
+        1 => Ok(ids.remove(0)),
+        0 => bail!(
+            "no harness is registered; run `brgr harness add <executable> --workspace <dir> --prompt <prompt>`"
+        ),
+        _ => bail!(
+            "no harness named and no default configured; pass `--harness ID` or set `harness` under `[defaults]` in the brgr config. Registered: {}",
+            ids.join(", ")
+        ),
     }
 }
 

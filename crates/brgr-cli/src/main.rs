@@ -393,6 +393,10 @@ async fn config_command(paths: &Paths, command: &ConfigCommand, json_output: boo
             config.herdr.prefer_print_mode = !*enabled;
             config.save(&paths.config)?;
         }
+        ConfigCommand::SetAutoRecertify { enabled } => {
+            config.recertify.auto = *enabled;
+            config.save(&paths.config)?;
+        }
         ConfigCommand::SetIssueReporting { repo, min_count } => {
             if repo.split('/').count() != 2 || repo.contains(char::is_whitespace) {
                 bail!("repository must be OWNER/NAME");

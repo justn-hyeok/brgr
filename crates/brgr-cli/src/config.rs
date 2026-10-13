@@ -30,6 +30,8 @@ pub struct Config {
     // keys and share this file. They are written only once they hold something.
     #[serde(skip_serializing_if = "IssuesConfig::is_default")]
     pub issues: IssuesConfig,
+    #[serde(skip_serializing_if = "RecertifyConfig::is_default")]
+    pub recertify: RecertifyConfig,
     #[serde(skip_serializing_if = "CallingOptions::is_unset")]
     pub defaults: CallingOptions,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
@@ -56,6 +58,21 @@ pub struct WorkerConfig {
     /// full default.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_permission: Option<brgr_protocol::PermissionLevel>,
+}
+
+/// Whether `brgr run` re-certifies a harness whose CLI was updated instead of
+/// stopping. Off by default: each re-certification is a paid scratch run and
+/// trusts the changed binary.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct RecertifyConfig {
+    pub auto: bool,
+}
+
+impl RecertifyConfig {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
 }
 
 /// Whether brgr files GitHub issues for the failures it records. Off by default:
@@ -325,19 +342,18 @@ pub(crate) async fn check(paths: &crate::Paths, config: &Config, json_output: bo
     let registry = brgr_registry::Registry::open_with_control_home(&paths.registry, &paths.home)?;
     validate_argv(&config.defaults.argv)?;
     let mut checked = Vec::new();
-    let default = config
-        .defaults
-        .harness
-        .as_deref()
-        .unwrap_or("local.gjc")
-        .to_owned();
+    // With no default configured and several harnesses registered, only the
+    // per-harness entries are checked: a run would ask for one by name.
+    let default =
+        crate::harness_commands::default_harness(&registry, config.defaults.harness.as_deref())
+            .ok();
     for id in config
         .harnesses
         .keys()
-        .chain(std::iter::once(&default))
+        .chain(default.iter())
         .collect::<std::collections::BTreeSet<_>>()
     {
-        let (manifest, _) = crate::admission::load_harness(&registry, id).await?;
+        let (manifest, _) = crate::admission::load_harness(&registry, id, false).await?;
         let options = config.calling(id);
         validate_manifest_argv(&options.argv, &manifest)?;
         manifest.permission_arguments(options.permission)?;

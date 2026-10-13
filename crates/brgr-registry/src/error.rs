@@ -59,6 +59,10 @@ pub enum RegistryError {
     InvalidControlHome,
     #[error("this harness cannot select a model for its scratch run")]
     UnsupportedScratchModel,
+    #[error(
+        "harness {harness} does not support required capability: model_select; it runs only the model set in its own configuration, so {hint}"
+    )]
+    ConfiguredModelOnly { harness: String, hint: String },
     #[error("this harness cannot select effort for its scratch run")]
     UnsupportedScratchEffort,
     #[error("scratch run did not produce a successful nonempty result: {0}")]

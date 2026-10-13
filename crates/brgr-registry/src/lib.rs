@@ -48,8 +48,7 @@
 //! # }"#;
 //! let manifest: HarnessManifest = serde_json::from_str(wire)?;
 //! let action = recertify_action(&manifest);
-//! assert!(action.contains("'/opt/my harness/bin/run'"), "{action}");
-//! assert!(action.contains("brgr harness add"));
+//! assert_eq!(action, format!("re-certify with `brgr harness recertify {}`", manifest.id));
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
@@ -142,31 +141,10 @@ impl Health {
 }
 
 /// Concrete re-certification command. Never updates, copies, or activates.
-/// The executable path is POSIX-quoted so spaces are copy-safe; probe bytes are never included.
+/// Names the harness id, so the command needs no path or probe bytes.
 #[must_use]
 pub fn recertify_action(manifest: &HarnessManifest) -> String {
-    let executable = quote_executable(&manifest.executable);
-    if manifest.adapter == OMP_ROLE_ADAPTER_V1 {
-        format!("re-certify with `brgr harness add {executable} --presentation-only`")
-    } else {
-        format!(
-            "re-certify with `brgr harness add {executable} --workspace <dir> --prompt <prompt>`"
-        )
-    }
-}
-
-fn quote_executable(path: &Path) -> String {
-    let raw = path.to_string_lossy();
-    let mut quoted = String::from("'");
-    for ch in raw.chars() {
-        if ch == '\'' {
-            quoted.push_str("'\\''");
-        } else {
-            quoted.push(ch);
-        }
-    }
-    quoted.push('\'');
-    quoted
+    format!("re-certify with `brgr harness recertify {}`", manifest.id)
 }
 
 impl Registry {
@@ -439,7 +417,13 @@ impl Registry {
             return Err(RegistryError::EmptyScratchPrompt);
         }
         if model.is_some() && manifest.launch.model_argv.is_empty() {
-            return Err(RegistryError::UnsupportedScratchModel);
+            return Err(match manifest.configured_model_hint() {
+                Some(hint) => RegistryError::ConfiguredModelOnly {
+                    harness: manifest.id.clone(),
+                    hint,
+                },
+                None => RegistryError::UnsupportedScratchModel,
+            });
         }
         if effort.is_some() && manifest.launch.effort_argv.is_empty() {
             return Err(RegistryError::UnsupportedScratchEffort);
@@ -463,9 +447,8 @@ impl Registry {
         .await?;
         if !output.succeeded(manifest) || output.result.is_empty() {
             // Say which condition failed. The bare "did not succeed" left a
-            // working CLI looking broken with nothing to go on. The harness's own
-            // output is never echoed, as everywhere else in this crate.
-            return Err(RegistryError::ScratchRunFailed(format!(
+            // working CLI looking broken with nothing to go on.
+            let mut reason = format!(
                 "exit code {}, timed out {}, output truncated {}, {} result bytes, {} stderr bytes",
                 output
                     .exit_code
@@ -474,7 +457,17 @@ impl Registry {
                 output.output_truncated,
                 output.result.len(),
                 output.stderr.len()
-            )));
+            );
+            // The CLI usually says why: a spent quota, a login. It is quoted
+            // as one bounded line of untrusted text, never as the full output.
+            if let Some(cause) = output.failure_cause() {
+                let mark = match cause.source {
+                    brgr_runner::CauseSource::Stderr => "last stderr:",
+                    brgr_runner::CauseSource::ErrorEvent => "last error event:",
+                };
+                reason = format!("{reason}; {mark} {}", cause.text);
+            }
+            return Err(RegistryError::ScratchRunFailed(reason));
         }
         let after = match authority {
             RecipeAuthority::Generated => {
@@ -639,6 +632,20 @@ impl Registry {
         let manifest: HarnessManifest =
             serde_json::from_slice(&fs::read(self.manifest_path(harness_id))?)?;
         Ok(recertify_action(&manifest))
+    }
+
+    /// The executable and registration kind a stored harness was certified
+    /// with, so a re-certification names the same path. Does not re-run it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RegistryError`] when the manifest cannot be read.
+    pub fn certified_executable(&self, harness_id: &str) -> Result<(PathBuf, bool), RegistryError> {
+        validate_harness_id(harness_id)?;
+        let manifest: HarnessManifest =
+            serde_json::from_slice(&fs::read(self.manifest_path(harness_id))?)?;
+        let presentation_only = manifest.adapter == OMP_ROLE_ADAPTER_V1;
+        Ok((manifest.executable, presentation_only))
     }
 
     /// Resolves an exact requested model through a bounded native catalog
@@ -1318,6 +1325,35 @@ mod tests {
                 .preflight_model(&cline, Some("anthropic/claude-haiku-4-5"))
                 .await,
             Err(RegistryError::ModelCatalogMissing(_))
+        ));
+    }
+
+    #[test]
+    fn a_configured_model_only_harness_says_how_to_change_its_model() {
+        let cline = generate_manifest(
+            "cline",
+            PathBuf::from("/bin/echo"),
+            "-p, --plan --auto-approve <boolean> -m, --model <model-id> --thinking <level>",
+        )
+        .unwrap();
+        let hint = cline.configured_model_hint().unwrap();
+        assert!(hint.contains("cline auth -m <model-id>"), "{hint}");
+        assert!(hint.ends_with("then run without --model"), "{hint}");
+        // A harness that selects models per run has nothing to explain.
+        let claude = generate_manifest(
+            "claude",
+            PathBuf::from("/bin/echo"),
+            "-p, --print --output-format <format> --model <model> --permission-mode <mode>",
+        )
+        .unwrap();
+        assert_eq!(claude.configured_model_hint(), None);
+        let message = RegistryError::ConfiguredModelOnly {
+            harness: cline.id.clone(),
+            hint,
+        }
+        .to_string();
+        assert!(message.starts_with(
+            "harness local.cline does not support required capability: model_select;"
         ));
     }
 
@@ -2392,31 +2428,32 @@ mod tests {
         fs::write(&manifest_path, original_manifest).unwrap();
         let action = registry.recertify_action_for(&draft.id).unwrap();
         assert!(action.contains("re-certify"));
-        assert!(action.contains("--prompt"));
+        assert!(action.contains("brgr harness recertify"));
         assert!(!action.contains("--help"));
     }
 
     #[test]
-    fn recertify_action_quotes_executable_paths_with_spaces() {
+    fn recertify_action_names_the_harness_and_runs_as_printed() {
         let help =
             "--expected-report --reuse-worktree-objective --reuse-worktree-owner --model --effort";
         let presentation =
             generate_manifest("omp-role", PathBuf::from("/tmp/my harness/omp-role"), help).unwrap();
-        let action = recertify_action(&presentation);
-        assert!(action.contains("'/tmp/my harness/omp-role'"));
-        assert!(action.contains("--presentation-only"));
-        assert!(!action.contains("unused-help"));
-        assert!(!action.contains("--expected-report"));
-
         let process = generate_manifest(
             "mystery-agent",
             PathBuf::from("/opt/my tools/agent"),
             "  --prompt-file <path>\n",
         )
         .unwrap();
-        let action = recertify_action(&process);
-        assert!(action.contains("'/opt/my tools/agent'"));
-        assert!(action.contains("--prompt"));
-        assert!(!action.contains("--prompt-file <path>"));
+        for manifest in [&presentation, &process] {
+            let action = recertify_action(manifest);
+            assert_eq!(
+                action,
+                format!("re-certify with `brgr harness recertify {}`", manifest.id)
+            );
+            assert!(
+                !action.contains('<'),
+                "action must run as printed: {action}"
+            );
+        }
     }
 }

@@ -58,7 +58,8 @@ headless. The separate `local.omp-herdr` route retains its legacy
 
 | Route or operation | v1 status |
 |---|---|
-| OMP process, GJC, Cursor CLI, Command Code, Devin CLI, Codex CLI, GitHub Copilot CLI, Gemini CLI, Pi | Certified bounded fresh-run contract; exact model/effort only where the activated recipe supports it |
+| OMP process, Cursor CLI, Command Code, Devin CLI, Codex CLI, GitHub Copilot CLI, Gemini CLI, Pi | Certified bounded fresh-run contract; exact model/effort only where the activated recipe supports it |
+| GJC | Experimental: the recipe is kept and registered harnesses keep working, but it is not part of the certified set and is not rechecked on each release |
 | Approved unfamiliar one-shot CLI | Supported after manifest contract test and authorized scratch activation |
 | `local.omp-herdr` presentation | Optional best effort; external worker stop is not certified and uncertain failure is `lost` |
 | Resume, in-flight steering, provider-side undo | Deferred; unsupported requests must fail rather than silently fall back |
@@ -226,6 +227,19 @@ model-catalog recipe. Older activations lacking it must be re-certified; an
 unknown selector fails before a task worktree or model request is started.
 Presentation-only Herdr model requests are checked against OMP's native
 catalog before brgr admission and checked again by `omp-role` at dispatch.
+
+When a harness CLI updates, its executable or probe evidence changes and a run
+stops with `executable_changed` or `probe_evidence_changed`. `brgr harness
+recertify HARNESS` registers it again at the path it was certified with, using
+one scratch run (prompt `say ok`, the current directory unless `--workspace`
+is given). `brgr config set-auto-recertify true` lets a new run or a revision do
+that themselves, in an empty temporary directory, and print a
+warning each time. It is off by default because each re-certification is a paid
+run that trusts the changed binary; any other health, and a re-certification
+that fails, still stop the run. A harness that takes no model per run (Cline,
+Devin) refuses `--model` and says how to change its own setting; a successful
+run records the model its settings name, as `harness_config` rather than an
+observation from the run.
 
 `brgr doctor` probes every registered harness as well as the Codex integration
 and store. It exits with `needs_attention` and names an unhealthy harness when
