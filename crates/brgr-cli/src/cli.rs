@@ -263,6 +263,14 @@ pub(crate) enum ConfigCommand {
         #[arg(action = clap::ArgAction::Set)]
         enabled: bool,
     },
+    /// Re-certify a harness automatically when `brgr run` finds its CLI
+    /// updated (true), or stop and name the command (false, the default).
+    /// Each re-certification is one paid scratch run, and it trusts the
+    /// changed binary; brgr warns every time it happens.
+    SetAutoRecertify {
+        #[arg(action = clap::ArgAction::Set)]
+        enabled: bool,
+    },
     /// File a GitHub issue for each failure brgr records, in `OWNER/NAME`.
     /// Issue text holds only the redacted error class and counts.
     SetIssueReporting {

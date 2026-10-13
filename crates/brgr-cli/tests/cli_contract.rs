@@ -3966,6 +3966,98 @@ fn doctor_reports_changed_harness_instead_of_ok() {
     assert!(!dumped.contains("BRGR_FIXTURE_OK"));
 }
 
+/// A copy of the GJC fixture registered, then changed as an update would.
+fn drifted_gjc_home() -> (TempDir, PathBuf, PathBuf) {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("brgr");
+    let workspace = temp.path().join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    let executable = temp.path().join("gjc");
+    fs::copy(gjc_fixture(), &executable).unwrap();
+    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+    add_fixture(&home, &executable, &temp.path().join("scratch"));
+    writeln!(
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&executable)
+            .unwrap(),
+        "# update"
+    )
+    .unwrap();
+    (temp, home, workspace)
+}
+
+#[test]
+fn a_run_stops_on_an_updated_harness_unless_auto_recertify_is_on() {
+    let (_temp, home, workspace) = drifted_gjc_home();
+    let envs = [("BRGR_OWNER_ID", "codex:recertify-test")];
+    let args = [
+        "run",
+        "BRGR_FIXTURE_OK",
+        "--workspace",
+        workspace.to_str().unwrap(),
+        "--foreground",
+    ];
+
+    let stopped = run(&home, &args, &envs);
+    assert!(!stopped.status.success());
+    let stderr = String::from_utf8_lossy(&stopped.stderr);
+    assert!(stderr.contains("executable_changed"), "{stderr}");
+    assert!(
+        stderr.contains("brgr harness recertify local.gjc"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("warning"), "{stderr}");
+
+    json_output(&run(
+        &home,
+        &["config", "set-auto-recertify", "true"],
+        &envs,
+    ));
+    let created = run(&home, &args, &envs);
+    let stderr = String::from_utf8_lossy(&created.stderr);
+    assert!(
+        stderr.contains("warning: local.gjc changed (executable_changed"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("set-auto-recertify false"), "{stderr}");
+    assert_eq!(json_output(&created)["outcome"], "candidate");
+    assert_eq!(
+        json_output(&run(&home, &["harness", "status", "local.gjc"], &envs))["health"],
+        "healthy"
+    );
+}
+
+#[test]
+fn a_failed_automatic_recertification_still_stops_the_run() {
+    let (temp, home, workspace) = drifted_gjc_home();
+    let envs = [("BRGR_OWNER_ID", "codex:recertify-test")];
+    json_output(&run(
+        &home,
+        &["config", "set-auto-recertify", "true"],
+        &envs,
+    ));
+    // The updated CLI no longer runs at all.
+    fs::write(temp.path().join("gjc"), "#!/bin/sh\nexit 1\n").unwrap();
+    let failed = run(
+        &home,
+        &[
+            "run",
+            "BRGR_FIXTURE_OK",
+            "--workspace",
+            workspace.to_str().unwrap(),
+            "--foreground",
+        ],
+        &envs,
+    );
+    assert!(!failed.status.success());
+    let stderr = String::from_utf8_lossy(&failed.stderr);
+    assert!(
+        stderr.contains("automatic re-certification of local.gjc failed"),
+        "{stderr}"
+    );
+}
+
 #[test]
 fn named_process_harness_cannot_activate_without_authorized_scratch() {
     let temp = TempDir::new().unwrap();

@@ -21,7 +21,7 @@ use brgr_protocol::{
     ArtifactContract, AttemptBudget, AttemptId, DecisionVerdict, OwnerId, PermissionLevel, Route,
     SCHEMA_V1, TaskId, TaskInstructions, TaskSpec, TerminalOutcome,
 };
-use brgr_registry::{ActivationReceipt, Registry};
+use brgr_registry::{ActivationReceipt, Health, Registry};
 use brgr_runner::HarnessManifest;
 use brgr_store::Store;
 use config::Config;
@@ -106,7 +106,7 @@ pub(crate) async fn run_task(paths: &Paths, mut args: RunArgs, json_output: bool
     let (user_instructions, instructions_digest) = read_user_instructions(paths)?;
     add_user_instructions(&mut args.role_instructions, user_instructions)?;
     let registry = Registry::open_with_control_home(&paths.registry, &paths.home)?;
-    let (activated, activation) = load_harness(&registry, &harness).await?;
+    let (activated, activation) = load_harness(&registry, &harness, config.recertify.auto).await?;
     config::validate_manifest_argv(&calling.argv, &activated)?;
     let task_id = TaskId::new();
     let forward_criteria = args.forwards_criteria();
@@ -270,7 +270,12 @@ pub(crate) async fn revise_task(paths: &Paths, args: ReviseArgs, json_output: bo
         .clone();
 
     let registry = Registry::open_with_control_home(&paths.registry, &paths.home)?;
-    let (activated, activation) = load_harness(&registry, &replacement.route.harness_id).await?;
+    let (activated, activation) = load_harness(
+        &registry,
+        &replacement.route.harness_id,
+        Config::load(&paths.config)?.recertify.auto,
+    )
+    .await?;
     activated.validate_task_route(&replacement)?;
     registry
         .preflight_model(&activated, replacement.route.requested_model.as_deref())
@@ -340,11 +345,57 @@ fn rejected_revision(store: &Store, previous: &TaskSpec) -> Result<u32> {
     Ok(next_revision)
 }
 
+/// When the CLI was updated (`executable_changed`, `probe_evidence_changed`)
+/// and the owner turned on `set-auto-recertify`, re-certifies it and says so on
+/// stderr. Any other health, and any failed re-certification, still stops.
+async fn recertify_if_allowed(
+    registry: &Registry,
+    harness: &str,
+    probed: Health,
+    auto: bool,
+) -> Result<Health> {
+    let (what, expected, observed) = match &probed {
+        Health::ExecutableChanged { expected, observed }
+        | Health::EvidenceChanged { expected, observed } => {
+            (probed.code(), expected.clone(), observed.clone())
+        }
+        _ => return Ok(probed),
+    };
+    if !auto {
+        return Ok(probed);
+    }
+    let short = |digest: &str| digest.chars().take(12).collect::<String>();
+    eprintln!(
+        "brgr: warning: {harness} changed ({what}: {} -> {}); auto-recertify is on, so brgr is \
+         re-certifying it now with one scratch run. Turn it off with `brgr config \
+         set-auto-recertify false`.",
+        short(&expected),
+        short(&observed)
+    );
+    // An empty directory only this call can reach, outside the brgr control
+    // directory, so the paid run never touches a project.
+    let scratch = tempfile::Builder::new()
+        .prefix("brgr-recertify-")
+        .tempdir()
+        .context("cannot create a scratch directory for re-certification")?;
+    crate::harness_commands::recertify_harness(
+        registry,
+        harness,
+        Some(scratch.path().to_path_buf()),
+        None,
+    )
+    .await
+    .with_context(|| format!("automatic re-certification of {harness} failed"))?;
+    Ok(registry.health_probed(harness).await?)
+}
+
 pub(crate) async fn load_harness(
     registry: &Registry,
     harness: &str,
+    auto_recertify: bool,
 ) -> Result<(HarnessManifest, ActivationReceipt)> {
     let probed = registry.health_probed(harness).await?;
+    let probed = recertify_if_allowed(registry, harness, probed, auto_recertify).await?;
     require_healthy_harness(
         harness,
         probed,

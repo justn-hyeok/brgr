@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased
+
+- `brgr harness recertify HARNESS` registers an updated harness again at its
+  recorded path with one `say ok` scratch run, and the stop message for an
+  updated harness is that command, with no placeholders to fill in.
+- `brgr config set-auto-recertify true` (off by default) lets `brgr run` and
+  `brgr revise` re-certify an updated harness themselves, in an empty
+  temporary directory, with a warning each time. It is refused through the
+  Herdr host bridge. A config file that sets it is refused by older releases.
+- A failed run now quotes why it failed when stderr is empty, from the
+  harness's `errorMessage` event on stdout (GJC reports a spent quota there).
+  The scratch run of `harness add` quotes it too. The quote is one bounded line
+  and is never copied into the error memo or an issue.
+- Cline and Devin run only the model their own settings name, so `--model` is
+  still refused, now with the command that changes it (`cline auth -m`). Cline
+  3.0.70 still saves an unknown `-m` as its default, which is why. A successful
+  Cline run records the model its settings name, labelled `harness_config`.
+- GJC is marked experimental in the README and the reference.
+
 ## 2.13.4 — 2026-10-06
 
 - A run on a harness registered with an older recipe warns that it runs

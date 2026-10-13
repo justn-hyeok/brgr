@@ -43,8 +43,8 @@ accept or reject.
   for it.
 
 Workers can be Claude Code, Codex CLI, Gemini CLI, GitHub Copilot CLI, Pi,
-OpenCode, Cursor CLI, Devin CLI, Cline, GJC, OMP or Command Code; brgr calls
-each registered worker CLI a *harness*. The agent that starts workers, the
+OpenCode, Cursor CLI, Devin CLI, Cline, OMP or Command Code (GJC is
+experimental); brgr calls each registered worker CLI a *harness*. The agent that starts workers, the
 *owner*, can be a Codex or Claude Code session.
 
 > **Workers always run with full permissions** (`--yolo`,
