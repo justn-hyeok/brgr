@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.13.5 — 2026-10-13
 
 - `brgr harness recertify HARNESS` registers an updated harness again at its
   recorded path with one `say ok` scratch run, and the stop message for an
