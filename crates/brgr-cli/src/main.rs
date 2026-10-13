@@ -21,6 +21,7 @@ mod omp_adapter;
 mod pane_adapter;
 mod pane_cleanup;
 mod plugin_bridge;
+mod sleep_guard;
 mod supervision;
 mod task_commands;
 mod tree_status;
@@ -265,8 +266,6 @@ async fn execute(paths: &Paths, command: Command, json_output: bool) -> Result<(
     match command {
         Command::Run(args) => run_task(paths, args, json_output).await,
         Command::Revise(args) => revise_task(paths, args, json_output).await,
-        Command::Status { task, tree } => status(paths, task, tree, json_output),
-        Command::Result { task, ack } => result(paths, task, ack, json_output),
         Command::Artifact { command } => evidence::artifact_command(paths, command, json_output),
         Command::Wait {
             task,
@@ -283,13 +282,12 @@ async fn execute(paths: &Paths, command: Command, json_output: bool) -> Result<(
         ),
         Command::Cancel { task, tree } => cancel(paths, task, tree, json_output),
         Command::Bind { task, session } => bind(paths, task, session, json_output).await,
-        Command::Accept { task, reason } => {
-            decide(paths, task, DecisionVerdict::Accepted, reason, json_output)
+        command @ (Command::Accept { .. } | Command::Reject { .. }) => {
+            decision_command(paths, &command, json_output)
         }
-        Command::Reject { task, reason } => {
-            decide(paths, task, DecisionVerdict::Rejected, reason, json_output)
+        command @ (Command::Status { .. } | Command::Result { .. } | Command::Diff { .. }) => {
+            read_command(paths, &command, json_output)
         }
-        Command::Diff { task, stat } => evidence::show_diff(paths, task, stat, json_output),
         command @ (Command::Apply { .. } | Command::Land { .. }) => {
             evidence::integrate(paths, command, json_output)
         }
@@ -458,6 +456,47 @@ fn owner_kind() -> &'static str {
     }
 }
 
+/// `accept` and `reject`: the owner's decision on a candidate.
+fn decision_command(paths: &Paths, command: &Command, json_output: bool) -> Result<()> {
+    let (task, verdict, reason, include_ignored) = match command {
+        Command::Accept {
+            task,
+            reason,
+            include_ignored,
+        } => (*task, DecisionVerdict::Accepted, reason, *include_ignored),
+        Command::Reject {
+            task,
+            reason,
+            include_ignored,
+        } => (*task, DecisionVerdict::Rejected, reason, *include_ignored),
+        _ => bail!("not a decision command"),
+    };
+    decide(
+        paths,
+        task,
+        (verdict, reason.clone(), include_ignored),
+        json_output,
+    )
+}
+
+/// `status`, `result` and `diff`: the commands that only read a task.
+fn read_command(paths: &Paths, command: &Command, json_output: bool) -> Result<()> {
+    match *command {
+        Command::Status {
+            task,
+            tree,
+            observe,
+        } => status(paths, task, tree, observe, json_output),
+        Command::Result { task, ack, observe } => result(paths, task, ack, observe, json_output),
+        Command::Diff {
+            task,
+            stat,
+            observe,
+        } => evidence::show_diff(paths, task, stat, observe, json_output),
+        _ => bail!("not a read command"),
+    }
+}
+
 fn current_session() -> Result<Option<String>> {
     if let Some(session) = &invocation::current().session {
         if session.trim().is_empty() {
@@ -482,6 +521,13 @@ fn current_session() -> Result<Option<String>> {
         .ok()
         .filter(|value| !value.trim().is_empty());
     Ok(codex.or(explicit).or(claude))
+}
+
+/// `--observe`: a read by someone who does not own the task. The store is in the
+/// caller's own control home, so reaching it is the access check; what changes
+/// is only that the owner's session is not asked for. Nothing here writes.
+fn observe_owner(expected: &OwnerId) {
+    eprintln!("brgr: observing a task owned by {expected}; read only");
 }
 
 fn require_owner(store: &Store, expected: &OwnerId) -> Result<(String, u64)> {

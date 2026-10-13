@@ -160,7 +160,11 @@ routes before worker admission.
 bounded review artifacts. `brgr artifact export TASK 0 --output PATH`
 exports a result's artifact by index, starting at 0, for binary evidence. `brgr diff TASK` prints a sealed diff and
 `brgr diff TASK --stat` lists the files it changes.
-`brgr status TASK --json` prints one object on stdout; every note brgr adds goes to
+`--observe` on `status`, `result` and `diff` reads a task owned by another session
+(for example an orchestrator's task, reviewed by a person or another agent) without
+the owner-session check, and prints a note on stderr that it did. It only reads:
+it cannot be combined with `result --ack`, and `accept`, `reject`, `land`, `apply`
+and `bind` still need the owner's session. `brgr status TASK --json` prints one object on stdout; every note brgr adds goes to
 stderr. Its fields are `task` (the stored task: `task.workspace` is the worktree,
 `task.evidence.base_commit` the commit it started from), `state`, `workspace`
 and `base_commit` (copies of those two), `workspace_present` (the worktree still
@@ -259,6 +263,12 @@ Devin) refuses `--model` and says how to change its own setting; a successful
 run records the model its settings name, as `harness_config` rather than an
 observation from the run.
 
+On macOS, `run` and `revise` hold an idle-sleep assertion (`caffeinate -i -w`, tied to
+the brgr process, so it ends with it) while they start a task; a machine that sleeps
+mid-start wakes with the network down and the model catalog probe fails. A probe
+that fails after the wall clock ran 20 s or more ahead of the monotonic clock says the
+machine was asleep, and its retry waits longer.
+
 `brgr doctor` probes every registered harness as well as the Codex integration
 and store. It exits with `needs_attention` and names an unhealthy harness when
 an executable or recipe has changed; re-add that harness with an authorized
@@ -293,6 +303,12 @@ because of it. `--keep-worktree` on `run` or `revise` keeps it, as does
 `--keep-pane`. `brgr apply TASK --workspace PATH` works from the sealed patch, the recorded base
 commit and the checkout recorded at admission, so it still works after the
 worktree is gone.
+
+`accept`, `reject` and `land` take `--include-ignored`, which also removes a
+worktree that only ignored files (build output, caches) kept, as `brgr prune
+--apply --include-ignored` would. Only the owner knows those files are
+disposable, so without the flag such a worktree is kept. The choice is written
+down, so a pane-mode worktree reclaimed later, when its pane closes, honours it.
 
 Each revision is assessed once: a worktree a decision kept is not looked at
 again automatically. Whatever a decision kept, and worktrees from before

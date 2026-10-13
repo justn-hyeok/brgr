@@ -85,7 +85,15 @@ pub(crate) fn integrate(
             workspace,
             reason,
             three_way,
-        } => land_result(paths, task, &workspace, reason, three_way, json_output),
+            include_ignored,
+        } => land_result(
+            paths,
+            task,
+            &workspace,
+            (reason, include_ignored),
+            three_way,
+            json_output,
+        ),
         _ => bail!("not an integration command"),
     }
 }
@@ -110,7 +118,7 @@ fn land_result(
     paths: &Paths,
     task: TaskId,
     workspace_path: &Path,
-    reason: String,
+    (reason, include_ignored): (String, bool),
     three_way: bool,
     json_output: bool,
 ) -> Result<()> {
@@ -119,8 +127,11 @@ fn land_result(
     }
     // A plain conflict fails here, before any decision is written.
     apply_core(paths, task, workspace_path, false, three_way)?;
-    let decision =
-        crate::task_commands::record_verdict(paths, task, DecisionVerdict::Accepted, reason)?;
+    let decision = crate::task_commands::record_verdict(
+        paths,
+        task,
+        (DecisionVerdict::Accepted, reason, include_ignored),
+    )?;
     let report = apply_core(paths, task, workspace_path, true, three_way).with_context(|| {
         format!(
             "the candidate was accepted but its diff could not be applied; retry with `brgr apply {task} --workspace {} --execute`",
@@ -281,10 +292,16 @@ fn check_target(
 }
 
 /// Prints a result's sealed Git diff, or with `stat` the files it changes.
-pub fn show_diff(paths: &Paths, task: TaskId, stat: bool, json_output: bool) -> Result<()> {
+pub fn show_diff(
+    paths: &Paths,
+    task: TaskId,
+    stat: bool,
+    observe: bool,
+    json_output: bool,
+) -> Result<()> {
     let store = Store::open(&paths.store)?;
     let spec = store.task(task)?;
-    require_owner(&store, &spec.owner_id)?;
+    crate::task_commands::check_reader(&store, &spec.owner_id, observe)?;
     let result = store.latest_result(task)?;
     let (reference, patch) = sealed_patch(&store, &spec, &result)?;
     if !stat && !json_output {

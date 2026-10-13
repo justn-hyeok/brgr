@@ -682,6 +682,47 @@ fn row<'a>(receipt: &'a Value, slug: &str) -> &'a Value {
         .unwrap_or_else(|| panic!("no row for {slug} in {receipt}"))
 }
 
+/// A worktree kept only for an ignored file is removed by a decision that says
+/// so, and kept by one that does not: the owner, not brgr, knows the file is
+/// disposable.
+#[test]
+fn a_decision_removes_a_worktree_with_ignored_files_only_when_told_to() {
+    let fixture = Fixture::new();
+    let kept = fixture.run_with("kept", &[]);
+    let removed = fixture.run_with("removed", &[]);
+    for task in [&kept, &removed] {
+        fs::write(fixture.worktree(task).join(".env"), b"CACHE=1\n").unwrap();
+    }
+
+    fixture.json(&["accept", &kept, "--reason", "verified"]);
+    assert!(
+        fixture.worktree(&kept).join(".env").is_file(),
+        "an ignored file was removed without the owner asking"
+    );
+
+    fixture.json(&[
+        "accept",
+        &removed,
+        "--reason",
+        "verified",
+        "--include-ignored",
+    ]);
+    assert!(
+        !fixture.worktree(&removed).exists(),
+        "--include-ignored left the worktree"
+    );
+    assert!(
+        !fixture
+            .branches()
+            .contains(&format!("brgr/task-{}", Fixture::slug(&removed)))
+    );
+    // The sealed record stays either way.
+    assert_eq!(
+        fixture.json(&["result", &removed])["result"]["outcome"],
+        "candidate"
+    );
+}
+
 #[test]
 fn accepting_a_clean_task_reclaims_its_worktree_and_branch_at_once() {
     let fixture = Fixture::new();

@@ -44,12 +44,20 @@ pub(crate) enum Command {
         /// Include the delegation tree beneath the task.
         #[arg(long)]
         tree: bool,
+        /// Read without owning the task: skips the owner-session check and
+        /// changes nothing. It never decides, acknowledges, or applies.
+        #[arg(long)]
+        observe: bool,
     },
     /// Show a task's sealed result, optionally acknowledging a failed one.
     Result {
         task: TaskId,
         #[arg(long)]
         ack: bool,
+        /// Read without owning the task: skips the owner-session check and
+        /// changes nothing. It cannot be combined with `--ack`.
+        #[arg(long, conflicts_with = "ack")]
+        observe: bool,
     },
     /// Export a sealed result artifact to a file.
     Artifact {
@@ -98,12 +106,22 @@ pub(crate) enum Command {
         task: TaskId,
         #[arg(long, default_value = "acceptance criteria verified")]
         reason: String,
+        /// Also remove the task's worktree when only ignored files (build
+        /// output, caches) keep it, as `brgr prune --apply --include-ignored`
+        /// would. Without it such a worktree is kept.
+        #[arg(long)]
+        include_ignored: bool,
     },
     /// Record an explicit rejection with a reason, keeping the result intact.
     Reject {
         task: TaskId,
         #[arg(long)]
         reason: String,
+        /// Also remove the task's worktree when only ignored files (build
+        /// output, caches) keep it, as `brgr prune --apply --include-ignored`
+        /// would. Without it such a worktree is kept.
+        #[arg(long)]
+        include_ignored: bool,
     },
     /// Show a candidate's sealed Git diff, or its per-file summary.
     Diff {
@@ -111,6 +129,10 @@ pub(crate) enum Command {
         /// Print changed files with added and deleted line counts instead.
         #[arg(long)]
         stat: bool,
+        /// Read without owning the task: skips the owner-session check and
+        /// changes nothing. It never decides, acknowledges, or applies.
+        #[arg(long)]
+        observe: bool,
     },
     /// Integrate a candidate's sealed Git diff into a matching workspace.
     Apply {
@@ -144,6 +166,11 @@ pub(crate) enum Command {
         /// Merge with the target's own changes, as `apply --3way` does.
         #[arg(long = "3way")]
         three_way: bool,
+        /// Also remove the task's worktree when only ignored files (build
+        /// output, caches) keep it, as `brgr prune --apply --include-ignored`
+        /// would. Without it such a worktree is kept.
+        #[arg(long)]
+        include_ignored: bool,
     },
     /// Register, contract-test, activate, and inspect local harnesses.
     Harness {
@@ -434,6 +461,9 @@ pub(crate) struct ReviseArgs {
     pub(crate) evidence: EvidenceArgs,
     #[arg(long)]
     pub(crate) max_children: Option<u8>,
+    /// Repository the revision starts from, at its current HEAD, so work merged
+    /// since the previous revision is part of its base. Defaults to the
+    /// repository the task was first checked out from.
     #[arg(long)]
     pub(crate) workspace: Option<PathBuf>,
     #[arg(long)]

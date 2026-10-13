@@ -23,6 +23,7 @@ pub(crate) fn status(
     paths: &Paths,
     task: Option<TaskId>,
     tree: bool,
+    observe: bool,
     json_output: bool,
 ) -> Result<()> {
     reconcile_pending(paths)?;
@@ -30,12 +31,12 @@ pub(crate) fn status(
     if tree {
         let root = task.context("--tree requires a task ID")?;
         let spec = store.task(root)?;
-        require_owner(&store, &spec.owner_id)?;
+        check_reader(&store, &spec.owner_id, observe)?;
         return tree_status::show(&store, root, json_output);
     }
     if let Some(task_id) = task {
         let spec = store.task(task_id)?;
-        require_owner(&store, &spec.owner_id)?;
+        check_reader(&store, &spec.owner_id, observe)?;
         let state = match store.attempt_state(task_id) {
             Ok(state) => state,
             Err(StoreError::TaskNotFound(_)) => AttemptState::Queued,
@@ -78,10 +79,31 @@ pub(crate) fn status(
     Ok(())
 }
 
-pub(crate) fn result(paths: &Paths, task: TaskId, ack: bool, json_output: bool) -> Result<()> {
+/// The owner's session for a read, or, with `--observe`, no check at all.
+pub(crate) fn check_reader(store: &Store, owner: &OwnerId, observe: bool) -> Result<()> {
+    if observe {
+        crate::observe_owner(owner);
+        Ok(())
+    } else {
+        require_owner(store, owner).map(|_| ())
+    }
+}
+
+pub(crate) fn result(
+    paths: &Paths,
+    task: TaskId,
+    ack: bool,
+    observe: bool,
+    json_output: bool,
+) -> Result<()> {
     let store = Store::open(&paths.store)?;
     let spec = store.task(task)?;
-    let (session_id, binding_epoch) = require_owner(&store, &spec.owner_id)?;
+    let (session_id, binding_epoch) = if observe {
+        crate::observe_owner(&spec.owner_id);
+        (String::new(), 0)
+    } else {
+        require_owner(&store, &spec.owner_id)?
+    };
     let result = store.latest_result(task)?;
     let route_observation = store
         .route_observation(result.result_id)?
@@ -283,11 +305,10 @@ pub(crate) async fn bind(
 pub(crate) fn decide(
     paths: &Paths,
     task: TaskId,
-    verdict: DecisionVerdict,
-    reason: String,
+    decision: (DecisionVerdict, String, bool),
     json_output: bool,
 ) -> Result<()> {
-    let persisted = record_verdict(paths, task, verdict, reason)?;
+    let persisted = record_verdict(paths, task, decision)?;
     print_value(&serde_json::to_value(persisted)?, json_output);
     Ok(())
 }
@@ -297,8 +318,7 @@ pub(crate) fn decide(
 pub(crate) fn record_verdict(
     paths: &Paths,
     task: TaskId,
-    verdict: DecisionVerdict,
-    reason: String,
+    (verdict, reason, include_ignored): (DecisionVerdict, String, bool),
 ) -> Result<Decision> {
     if reason.trim().is_empty() {
         bail!("decision reason must not be empty");
@@ -329,7 +349,18 @@ pub(crate) fn record_verdict(
         verdict,
         reason,
     };
-    store.record_decision_and_ack(&decision)?;
+    // Written before the decision, not after: recording it lets the pane's own
+    // cleanup reclaim the worktree at once, and a reclaim that ran first would
+    // assess it without the flag and mark it assessed for good.
+    if include_ignored {
+        crate::worktree_prune::allow_ignored(paths, task, spec.revision);
+    }
+    if let Err(error) = store.record_decision_and_ack(&decision) {
+        if include_ignored {
+            crate::worktree_prune::forget_ignored(paths, task, spec.revision);
+        }
+        return Err(error.into());
+    }
     if let Err(error) = crate::pane_adapter::cleanup_settled(paths, task, spec.revision) {
         eprintln!("brgr cleanup pending: {error}");
     }

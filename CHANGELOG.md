@@ -1,5 +1,25 @@
 # Changelog
 
+## 2.13.8 — 2026-10-13
+
+- On macOS, `brgr run` and `brgr revise` hold an idle-sleep assertion
+  (`caffeinate -i -w`, tied to the brgr process) while they start a task, so a
+  machine that sleeps mid-start no longer wakes with the network down. A
+  foreground run keeps it for the whole run.
+- A model catalog probe that fails says when the machine was asleep during it
+  (the wall clock ran on while the monotonic clock stopped), and waits longer
+  before its retry in that case.
+- `accept`, `reject` and `land` take `--include-ignored`: the worktree of the
+  revision they decide is removed even when only ignored files (build output,
+  caches) kept it, so a result no longer needs a separate `prune --apply
+  --include-ignored`. Without it nothing changes.
+- `--observe` on `status`, `result` and `diff` reads a task owned by another
+  session without the owner-session check, with a note on stderr. It cannot
+  decide, acknowledge, apply or transfer the task, and `result --observe --ack`
+  is refused.
+- `brgr revise --help` says what `--workspace` does: the revision starts from
+  that repository's current HEAD. A test now holds it.
+
 ## 2.13.7 — 2026-10-13
 
 - `brgr land TASK --workspace REPO --reason WHY` checks a candidate's sealed

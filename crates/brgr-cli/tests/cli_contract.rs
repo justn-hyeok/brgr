@@ -1740,6 +1740,52 @@ fn an_agent_that_never_writes_its_report_fails_with_the_cause() {
     );
 }
 
+/// `--include-ignored` reaches the reclaim that a pane's own cleanup runs when a
+/// decision lands. In pane mode that cleanup can reclaim the worktree before the
+/// deciding command does, and it used to assess it without the flag and mark it
+/// assessed for good.
+#[test]
+fn include_ignored_reaches_the_reclaim_a_pane_cleanup_runs() {
+    let fixture = pane_fixture();
+    seed_git_repo(&fixture.workspace);
+    fs::write(fixture.workspace.join(".gitignore"), ".env\n").unwrap();
+    for argv in [&["add", ".gitignore"][..], &["commit", "-m", "ignore"][..]] {
+        assert!(
+            Command::new("git")
+                .arg("-C")
+                .arg(&fixture.workspace)
+                .args(argv)
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+    let ran = fixture.run(&[]);
+    assert_eq!(ran["outcome"], "candidate", "{ran}");
+    let task = ran["task_id"].as_str().unwrap();
+    let herdr = fixture.herdr.to_str().unwrap();
+    let env = [
+        ("BRGR_OWNER_ID", "codex:pane-test"),
+        ("HERDR_ENV", "1"),
+        ("HERDR_PANE_ID", "w9:p1"),
+        ("HERDR_BIN_PATH", herdr),
+    ];
+    let status = json_output(&run(&fixture.home, &["status", task], &env));
+    let worktree = PathBuf::from(status["workspace"].as_str().unwrap());
+    assert!(worktree.is_dir(), "{status}");
+    fs::write(worktree.join(".env"), "CACHE=1\n").unwrap();
+
+    json_output(&run(
+        &fixture.home,
+        &["accept", task, "--reason", "verified", "--include-ignored"],
+        &env,
+    ));
+    assert!(
+        !worktree.exists(),
+        "--include-ignored did not reach the pane cleanup's reclaim"
+    );
+}
+
 /// A worker that changed files and then never wrote its report is lost, but
 /// its work stays reviewable: the worktree diff is sealed with the result.
 #[test]
@@ -4367,6 +4413,110 @@ fn land_with_three_way_accepts_and_leaves_conflict_markers_to_resolve() {
             .unwrap()
             .contains("<<<<<<<")
     );
+}
+
+/// A revision starts from the repository's current HEAD, not from the base of
+/// the revision it replaces, so work merged in between does not make it conflict.
+#[test]
+fn a_revision_starts_from_the_current_head_not_the_old_base() {
+    let (_temp, home, repository, task) = append_then_main_edit("A\nb\nc\n", false);
+    let owner = [("BRGR_OWNER_ID", "codex:three-way")];
+    let repo = repository.to_str().unwrap();
+    let old = json_output(&run(&home, &["status", &task], &owner));
+    let old_base = old["base_commit"].as_str().unwrap().to_owned();
+    json_output(&run(
+        &home,
+        &["reject", &task, "--reason", "redo on current HEAD"],
+        &owner,
+    ));
+    let head = String::from_utf8(
+        Command::new("git")
+            .arg("-C")
+            .arg(&repository)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap()
+    .trim()
+    .to_owned();
+    assert_ne!(
+        head, old_base,
+        "the repository moved after the first revision"
+    );
+
+    let revised = json_output(&run(
+        &home,
+        &[
+            "revise",
+            &task,
+            "append TASK again",
+            "--workspace",
+            repo,
+            "--foreground",
+        ],
+        &owner,
+    ));
+    assert_eq!(revised["revision"], 2);
+    let status = json_output(&run(&home, &["status", &task], &owner));
+    assert_eq!(status["base_commit"], head.as_str(), "{status}");
+}
+
+/// Another session can read a task with `--observe`, and only read it: the
+/// owner's session is still needed to decide, acknowledge, or apply.
+#[test]
+fn observe_reads_another_sessions_task_and_changes_nothing() {
+    let (_temp, home, repository, task) = append_then_main_edit("A\nb\nc\n", false);
+    let repo = repository.to_str().unwrap();
+    // The helper's runs are owned by the runner's default session.
+    let owner = [("BRGR_OWNER_ID", "codex:three-way")];
+    let other = [
+        ("BRGR_OWNER_ID", "codex:three-way"),
+        ("BRGR_SESSION_ID", "session-b"),
+    ];
+    json_output(&run(&home, &["status", &task], &owner));
+
+    for args in [
+        vec!["diff", &task],
+        vec!["result", &task],
+        vec!["status", &task],
+    ] {
+        let denied = run(&home, &args, &other);
+        assert!(!denied.status.success(), "{args:?}");
+        assert!(
+            String::from_utf8_lossy(&denied.stderr).contains("bound to another session"),
+            "{args:?}"
+        );
+        let mut observed_args = args.clone();
+        observed_args.push("--observe");
+        let seen = run(&home, &observed_args, &other);
+        assert!(
+            seen.status.success(),
+            "{observed_args:?}: {}",
+            String::from_utf8_lossy(&seen.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&seen.stderr).contains("observing a task owned by"),
+            "{observed_args:?}"
+        );
+    }
+    let diff = String::from_utf8(run(&home, &["diff", &task, "--observe"], &other).stdout).unwrap();
+    assert!(diff.contains("+TASK"), "{diff}");
+
+    // Reading never decides, and observing cannot acknowledge.
+    let combined = run(&home, &["result", &task, "--observe", "--ack"], &other);
+    assert!(!combined.status.success());
+    for args in [
+        vec!["accept", &task, "--reason", "x"],
+        vec!["land", &task, "--workspace", repo, "--reason", "x"],
+        vec!["apply", &task, "--workspace", repo],
+    ] {
+        let refused = run(&home, &args, &other);
+        assert!(!refused.status.success(), "{args:?}");
+    }
+    // The owner still decides.
+    json_output(&run(&home, &["accept", &task, "--reason", "owner"], &owner));
 }
 
 #[test]

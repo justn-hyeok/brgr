@@ -1131,7 +1131,8 @@ fn lossy(path: &Path) -> String {
 }
 
 /// Removes one decided revision's worktree when nothing in it would be lost,
-/// with the same checks as `brgr prune --apply` and never `--include-ignored`.
+/// with the same checks as `brgr prune --apply`, and `--include-ignored` only
+/// when the owner gave it to the decision.
 /// Returns what happened, for a note on stderr; `None` when there was nothing
 /// to do. Never fails the decision that triggered it.
 pub(crate) fn reclaim_task(paths: &Paths, task: TaskId, revision: u32) -> Option<String> {
@@ -1208,7 +1209,7 @@ pub(crate) fn reclaim_task(paths: &Paths, task: TaskId, revision: u32) -> Option
     let sweep = Sweep {
         store: &store,
         current_dir: current_dir.as_deref(),
-        include_ignored: false,
+        include_ignored: include_ignored_marker(paths, task, revision).exists(),
         worker_alive: &|task| crate::supervision::worker_may_be_running(paths, task),
     };
     let slug = file_name(&worktree);
@@ -1252,6 +1253,25 @@ pub(crate) fn reclaim_task(paths: &Paths, task: TaskId, revision: u32) -> Option
 /// How long a decision waits for a worker that is exiting after sealing its
 /// result.
 const WORKER_EXIT_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// The marker that records the owner's `--include-ignored` on a decision. A
+/// pane-mode worktree is reclaimed later, when its pane closes, by a process
+/// that never saw the flag, so the choice is written down.
+fn include_ignored_marker(paths: &Paths, task: TaskId, revision: u32) -> std::path::PathBuf {
+    paths
+        .runs
+        .join(format!("{task}-r{revision}.include-ignored"))
+}
+
+/// Records that this decision also removes the worktree's ignored files.
+pub(crate) fn allow_ignored(paths: &Paths, task: TaskId, revision: u32) {
+    let _ = fs::write(include_ignored_marker(paths, task, revision), b"");
+}
+
+/// Withdraws [`allow_ignored`] when the decision it was written for failed.
+pub(crate) fn forget_ignored(paths: &Paths, task: TaskId, revision: u32) {
+    let _ = fs::remove_file(include_ignored_marker(paths, task, revision));
+}
 
 /// Runs [`reclaim_task`] and notes the outcome on stderr.
 pub(crate) fn reclaim_and_report(paths: &Paths, task: TaskId, revision: u32) {
