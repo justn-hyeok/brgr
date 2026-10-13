@@ -4332,6 +4332,102 @@ fn apply_three_way_marks_a_conflict_instead_of_refusing_everything() {
     assert_eq!(String::from_utf8_lossy(&unmerged.stdout).trim(), "docs.md");
 }
 
+/// A candidate that rewrote `a` and `z`, in a repository whose `a` has since
+/// changed on the target (a conflict) and whose `z` is edited but not staged
+/// (git refuses to touch it). Returns the home, repository and task.
+fn candidate_with_conflict_and_dirty_file() -> (TempDir, PathBuf, PathBuf, String) {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("brgr");
+    let repository = temp.path().join("repo");
+    let executable = temp.path().join("gjc");
+    fs::create_dir_all(&repository).unwrap();
+    seed_git_repo(&repository);
+    for name in ["a", "z"] {
+        fs::write(repository.join(name), "base\n").unwrap();
+    }
+    for argv in [&["add", "a", "z"][..], &["commit", "-m", "files"][..]] {
+        assert!(
+            Command::new("git")
+                .arg("-C")
+                .arg(&repository)
+                .args(argv)
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+    fs::write(&executable, "#!/bin/sh\ncase \"$1\" in\n --version) echo 'gjc v-mixed-fixture'; exit 0;;\n --help) printf '%s\\n' '-p, --print' '--mode=<value>' '--no-session' '--no-mcp' '--model' '--thinking'; exit 0;;\nesac\nprintf 'task\\n' > a\nprintf 'task\\n' > z\nprintf '%s\\n' '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"OK\"}]}}'\nprintf '%s\\n' '{\"type\":\"agent_end\",\"stopReason\":\"completed\"}'\n").unwrap();
+    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+    add_fixture(&home, &executable, &temp.path().join("scratch"));
+    let owner = [("BRGR_OWNER_ID", "codex:three-way")];
+    let result = json_output(&run(
+        &home,
+        &[
+            "run",
+            "rewrite a and z",
+            "--workspace",
+            repository.to_str().unwrap(),
+            "--capture-diff",
+            "--foreground",
+        ],
+        &owner,
+    ));
+    assert_eq!(result["outcome"], "candidate");
+    let task = result["task_id"].as_str().unwrap().to_owned();
+    for name in ["a", "z"] {
+        fs::write(repository.join(name), "main\n").unwrap();
+    }
+    for argv in [&["add", "a", "z"][..], &["commit", "-m", "main"][..]] {
+        assert!(
+            Command::new("git")
+                .arg("-C")
+                .arg(&repository)
+                .args(argv)
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+    fs::write(repository.join("z"), "dirty\n").unwrap();
+    (temp, home, repository, task)
+}
+
+/// `git apply --3way` reports a conflict in one file and a hard refusal in
+/// another in the same run, and applies nothing. That is a failure, not a
+/// merge to resolve: no decision, no receipt claiming conflicts, no advice to
+/// resolve markers that were never written.
+#[test]
+fn land_three_way_is_a_failure_not_a_conflict_when_git_refuses_another_file() {
+    let (_temp, home, repository, task) = candidate_with_conflict_and_dirty_file();
+    let owner = [("BRGR_OWNER_ID", "codex:three-way")];
+    let repo = repository.to_str().unwrap();
+    let landed = run(
+        &home,
+        &[
+            "land",
+            &task,
+            "--workspace",
+            repo,
+            "--3way",
+            "--reason",
+            "reviewed",
+        ],
+        &owner,
+    );
+    assert!(!landed.status.success());
+    let stderr = String::from_utf8_lossy(&landed.stderr);
+    assert!(!stderr.contains("resolve them"), "{stderr}");
+    assert!(stderr.contains("does not match index"), "{stderr}");
+    assert_eq!(fs::read_to_string(repository.join("a")).unwrap(), "main\n");
+    assert_eq!(fs::read_to_string(repository.join("z")).unwrap(), "dirty\n");
+    // Nothing was decided: the owner can still reject it.
+    json_output(&run(
+        &home,
+        &["reject", &task, "--reason", "rework"],
+        &owner,
+    ));
+}
+
 #[test]
 fn land_accepts_and_applies_in_one_step_and_leaves_nothing_to_acknowledge() {
     let (_temp, home, repository, task) = append_then_main_edit("A\nb\nc\n", false);

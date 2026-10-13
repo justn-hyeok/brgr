@@ -472,6 +472,12 @@ fn git_apply(workspace: &Path, patch: &[u8], check_only: bool, three_way: bool) 
     if patch.is_empty() {
         return Ok(Applied::Clean);
     }
+    // Files already unmerged are not this apply's conflicts.
+    let unmerged_before = if three_way && !check_only {
+        unmerged_files(workspace)?
+    } else {
+        Vec::new()
+    };
     let mut command = Command::new("git");
     command.arg("-C").arg(workspace).args(["apply", "--binary"]);
     if three_way {
@@ -495,16 +501,28 @@ fn git_apply(workspace: &Path, patch: &[u8], check_only: bool, three_way: bool) 
     write?;
     let diagnostic = String::from_utf8_lossy(&output.stderr);
     if three_way {
-        // A check reports conflicts and exits 0; an apply leaves the markers
-        // and exits 1. Either way the files are named on stderr or unmerged.
-        let mut files = conflicted_files(&diagnostic);
-        if !check_only && !output.status.success() {
-            files.extend(unmerged_files(workspace)?);
+        // A check that finds conflicts still exits 0 and names the files; one
+        // that exits non-zero found something git refuses (a file that differs
+        // from the index, a missing blob), whatever else it printed. An apply
+        // that conflicts exits 1 and leaves the files unmerged, so what counts
+        // is what became unmerged, not what was printed.
+        if check_only {
+            if output.status.success() {
+                let files = conflicted_files(&diagnostic);
+                if !files.is_empty() {
+                    return Ok(Applied::Conflicts(files));
+                }
+            }
+        } else if !output.status.success() {
+            let mut files: Vec<String> = unmerged_files(workspace)?
+                .into_iter()
+                .filter(|file| !unmerged_before.contains(file))
+                .collect();
             files.sort();
             files.dedup();
-        }
-        if !files.is_empty() {
-            return Ok(Applied::Conflicts(files));
+            if !files.is_empty() {
+                return Ok(Applied::Conflicts(files));
+            }
         }
     }
     if !output.status.success() {
