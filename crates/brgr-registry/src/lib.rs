@@ -789,9 +789,25 @@ const CATALOG_PROBE_RETRY_DELAY: Duration = Duration::from_secs(2);
 #[cfg(test)]
 const CATALOG_PROBE_RETRY_DELAY: Duration = Duration::from_millis(10);
 
+/// A gap this large between the wall clock and the monotonic clock means the
+/// machine slept: the wall clock kept running and the monotonic one stopped.
+const SLEEP_NOTICE: Duration = Duration::from_secs(20);
+/// After a sleep the network is often not back yet; wait longer before retrying.
+#[cfg(not(test))]
+const CATALOG_PROBE_RETRY_AFTER_SLEEP: Duration = Duration::from_secs(8);
+#[cfg(test)]
+const CATALOG_PROBE_RETRY_AFTER_SLEEP: Duration = Duration::from_millis(30);
+
+/// How long the machine was asleep, from how far apart the two clocks drifted.
+fn sleep_gap(wall: Duration, monotonic: Duration) -> Option<Duration> {
+    wall.checked_sub(monotonic)
+        .filter(|gap| *gap >= SLEEP_NOTICE)
+}
+
 /// Runs a harness's model catalog command. A failure is often transient (a
-/// cold start, a busy machine), so it is tried once more; if it still fails the
-/// error says which harness, how, and the one line the CLI gave.
+/// cold start, a busy machine, a machine that just woke), so it is tried once
+/// more; if it still fails the error says which harness, how, the one line the
+/// CLI gave, and whether the machine slept meanwhile.
 async fn probe_catalog(
     harness: &str,
     executable: &Path,
@@ -799,6 +815,7 @@ async fn probe_catalog(
 ) -> Result<ExecutionOutput, RegistryError> {
     let mut reason = String::new();
     for attempt in 1..=CATALOG_PROBE_ATTEMPTS {
+        let (wall_start, mono_start) = (std::time::SystemTime::now(), std::time::Instant::now());
         match ProcessRunner::probe(executable, argv, PROBE_DEADLINE).await {
             Ok(output)
                 if output.exit_code == Some(0) && !output.timed_out && !output.output_truncated =>
@@ -824,8 +841,23 @@ async fn probe_catalog(
             }
             Err(error) => reason = error.to_string(),
         }
+        let slept = wall_start
+            .elapsed()
+            .ok()
+            .and_then(|wall| sleep_gap(wall, mono_start.elapsed()));
+        if let Some(gap) = slept {
+            reason = format!(
+                "{reason}; the machine was asleep for about {}s during this probe, so the network may not have been up yet",
+                gap.as_secs()
+            );
+        }
         if attempt < CATALOG_PROBE_ATTEMPTS {
-            tokio::time::sleep(CATALOG_PROBE_RETRY_DELAY).await;
+            let wait = if slept.is_some() {
+                CATALOG_PROBE_RETRY_AFTER_SLEEP
+            } else {
+                CATALOG_PROBE_RETRY_DELAY
+            };
+            tokio::time::sleep(wait).await;
         }
     }
     Err(RegistryError::ModelCatalogProbeFailed {
@@ -1376,6 +1408,17 @@ mod tests {
                 .await,
             Err(RegistryError::ModelCatalogMissing(_))
         ));
+    }
+
+    #[test]
+    fn a_wall_clock_gap_over_twenty_seconds_means_the_machine_slept() {
+        let secs = Duration::from_secs;
+        assert_eq!(sleep_gap(secs(1_000), secs(10)), Some(secs(990)));
+        assert_eq!(sleep_gap(secs(30), secs(5)), Some(secs(25)));
+        // Ordinary runs: the clocks agree, or the wall clock is a little behind.
+        assert_eq!(sleep_gap(secs(15), secs(15)), None);
+        assert_eq!(sleep_gap(secs(10), secs(12)), None);
+        assert_eq!(sleep_gap(secs(34), secs(15)), None);
     }
 
     fn catalog_script(dir: &tempfile::TempDir, body: &str) -> PathBuf {

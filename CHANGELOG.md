@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- On macOS, `brgr run` and `brgr revise` hold an idle-sleep assertion
+  (`caffeinate -i -w`, tied to the brgr process) while they start a task, so a
+  machine that sleeps mid-start no longer wakes with the network down. A
+  foreground run keeps it for the whole run.
+- A model catalog probe that fails says when the machine was asleep during it
+  (the wall clock ran on while the monotonic clock stopped), and waits longer
+  before its retry in that case.
 - `accept`, `reject` and `land` take `--include-ignored`: the worktree of the
   revision they decide is removed even when only ignored files (build output,
   caches) kept it, so a result no longer needs a separate `prune --apply

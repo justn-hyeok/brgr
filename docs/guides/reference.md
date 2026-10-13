@@ -263,6 +263,12 @@ Devin) refuses `--model` and says how to change its own setting; a successful
 run records the model its settings name, as `harness_config` rather than an
 observation from the run.
 
+On macOS, `run` and `revise` hold an idle-sleep assertion (`caffeinate -i -w`, tied to
+the brgr process, so it ends with it) while they start a task; a machine that sleeps
+mid-start wakes with the network down and the model catalog probe fails. A probe
+that fails after the wall clock ran 20 s or more ahead of the monotonic clock says the
+machine was asleep, and its retry waits longer.
+
 `brgr doctor` probes every registered harness as well as the Codex integration
 and store. It exits with `needs_attention` and names an unhealthy harness when
 an executable or recipe has changed; re-add that harness with an authorized

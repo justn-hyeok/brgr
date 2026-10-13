@@ -92,6 +92,7 @@ pub(crate) enum ExecutionDisposition {
 }
 
 pub(crate) async fn run_task(paths: &Paths, mut args: RunArgs, json_output: bool) -> Result<()> {
+    let _awake = crate::sleep_guard::keep_awake();
     let config = Config::load(&paths.config)?;
     let registry = Registry::open_with_control_home(&paths.registry, &paths.home)?;
     let harness = default_harness(
@@ -295,6 +296,7 @@ fn revise_source(
 }
 
 pub(crate) async fn revise_task(paths: &Paths, args: ReviseArgs, json_output: bool) -> Result<()> {
+    let _awake = crate::sleep_guard::keep_awake();
     let store = Store::open(&paths.store)?;
     let previous = store.task(args.task)?;
     let parent = store

@@ -21,6 +21,7 @@ mod omp_adapter;
 mod pane_adapter;
 mod pane_cleanup;
 mod plugin_bridge;
+mod sleep_guard;
 mod supervision;
 mod task_commands;
 mod tree_status;
