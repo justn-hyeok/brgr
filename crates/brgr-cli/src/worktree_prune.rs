@@ -1209,7 +1209,7 @@ pub(crate) fn reclaim_task(paths: &Paths, task: TaskId, revision: u32) -> Option
     let sweep = Sweep {
         store: &store,
         current_dir: current_dir.as_deref(),
-        include_ignored: include_ignored_marker(paths, task, revision).exists(),
+        include_ignored: ignored_files_allowed(&store, paths, task, revision),
         worker_alive: &|task| crate::supervision::worker_may_be_running(paths, task),
     };
     let slug = file_name(&worktree);
@@ -1256,16 +1256,42 @@ const WORKER_EXIT_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// The marker that records the owner's `--include-ignored` on a decision. A
 /// pane-mode worktree is reclaimed later, when its pane closes, by a process
-/// that never saw the flag, so the choice is written down.
+/// that never saw the flag, so the choice is written down, with the id of the
+/// decision it belongs to. It is written before the decision is recorded, so a
+/// process that dies in between leaves a marker for a decision that never
+/// existed; honouring it only for the decision actually recorded keeps that
+/// from reaching a later one.
 fn include_ignored_marker(paths: &Paths, task: TaskId, revision: u32) -> std::path::PathBuf {
     paths
         .runs
         .join(format!("{task}-r{revision}.include-ignored"))
 }
 
-/// Records that this decision also removes the worktree's ignored files.
-pub(crate) fn allow_ignored(paths: &Paths, task: TaskId, revision: u32) {
-    let _ = fs::write(include_ignored_marker(paths, task, revision), b"");
+/// Records that the decision `decision` also removes the worktree's ignored files.
+pub(crate) fn allow_ignored(paths: &Paths, task: TaskId, revision: u32, decision: &str) {
+    let _ = fs::write(
+        include_ignored_marker(paths, task, revision),
+        decision.as_bytes(),
+    );
+}
+
+/// Whether the owner asked, in the decision that was actually recorded for this
+/// revision, to remove ignored files too.
+fn ignored_files_allowed(store: &Store, paths: &Paths, task: TaskId, revision: u32) -> bool {
+    let Ok(marked) = fs::read_to_string(include_ignored_marker(paths, task, revision)) else {
+        return false;
+    };
+    let Ok(result) = store.latest_result(task) else {
+        return false;
+    };
+    if result.revision != revision {
+        return false;
+    }
+    store
+        .decision_for_result(result.result_id)
+        .ok()
+        .flatten()
+        .is_some_and(|decision| decision.decision_id.to_string() == marked.trim())
 }
 
 /// Withdraws [`allow_ignored`] when the decision it was written for failed.
