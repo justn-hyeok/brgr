@@ -447,9 +447,10 @@ fn revisable_revision(paths: &Paths, store: &Store, previous: &TaskSpec) -> Resu
             if crate::supervision::worker_may_be_running(paths, previous.task_id) {
                 // `brgr cancel` refuses a task that is already terminal, so the
                 // way out is the worker itself.
-                let worker = fs::read_to_string(paths.pid(previous.task_id))
-                    .map(|text| format!("process {}", text.trim()))
-                    .unwrap_or_else(|_| "its process".to_owned());
+                let worker = fs::read_to_string(paths.pid(previous.task_id)).map_or_else(
+                    |_| "its process".to_owned(),
+                    |text| format!("process {}", text.trim()),
+                );
                 bail!(
                     "the previous run's worker ({worker}) may still be running; wait for it to exit, or stop it, and revise again"
                 );

@@ -367,7 +367,7 @@ pub struct ArtifactRef {
 
 /// Where a recorded model or effort came from.
 ///
-/// A value this build does not know reads as [`Unavailable`](Self::Unavailable):
+/// A value this build does not know reads as `Unavailable`:
 /// a store written by a newer brgr stays readable, and says only that the source
 /// cannot be vouched for. (A release before this one rejected a source it did
 /// not know, so a store with `harness_config` rows cannot be read by v2.13.4

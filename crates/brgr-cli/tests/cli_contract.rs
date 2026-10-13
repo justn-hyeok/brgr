@@ -6976,8 +6976,8 @@ fn observing_a_status_does_not_recover_or_record_anything() {
     );
     thread::sleep(Duration::from_millis(300));
 
-    let observed = json_output(&run(&home, &["status", task, "--observe"], &observer));
-    assert_ne!(observed["state"], "terminal", "{observed}");
+    let seen = json_output(&run(&home, &["status", task, "--observe"], &observer));
+    assert_ne!(seen["state"], "terminal", "{seen}");
     let still_open = run(&home, &["result", task, "--observe"], &observer);
     assert!(
         !still_open.status.success(),
