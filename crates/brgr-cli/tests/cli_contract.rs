@@ -4369,6 +4369,54 @@ fn land_with_three_way_accepts_and_leaves_conflict_markers_to_resolve() {
     );
 }
 
+/// A revision starts from the repository's current HEAD, not from the base of
+/// the revision it replaces, so work merged in between does not make it conflict.
+#[test]
+fn a_revision_starts_from_the_current_head_not_the_old_base() {
+    let (_temp, home, repository, task) = append_then_main_edit("A\nb\nc\n", false);
+    let owner = [("BRGR_OWNER_ID", "codex:three-way")];
+    let repo = repository.to_str().unwrap();
+    let old = json_output(&run(&home, &["status", &task], &owner));
+    let old_base = old["base_commit"].as_str().unwrap().to_owned();
+    json_output(&run(
+        &home,
+        &["reject", &task, "--reason", "redo on current HEAD"],
+        &owner,
+    ));
+    let head = String::from_utf8(
+        Command::new("git")
+            .arg("-C")
+            .arg(&repository)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap()
+    .trim()
+    .to_owned();
+    assert_ne!(
+        head, old_base,
+        "the repository moved after the first revision"
+    );
+
+    let revised = json_output(&run(
+        &home,
+        &[
+            "revise",
+            &task,
+            "append TASK again",
+            "--workspace",
+            repo,
+            "--foreground",
+        ],
+        &owner,
+    ));
+    assert_eq!(revised["revision"], 2);
+    let status = json_output(&run(&home, &["status", &task], &owner));
+    assert_eq!(status["base_commit"], head.as_str(), "{status}");
+}
+
 #[test]
 fn apply_three_way_merges_cleanly_when_the_edits_do_not_overlap() {
     let (_temp, home, repository, task) = accepted_append_then_main_edit("A\nb\nc\n");

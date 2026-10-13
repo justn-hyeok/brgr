@@ -434,6 +434,9 @@ pub(crate) struct ReviseArgs {
     pub(crate) evidence: EvidenceArgs,
     #[arg(long)]
     pub(crate) max_children: Option<u8>,
+    /// Repository the revision starts from, at its current HEAD, so work merged
+    /// since the previous revision is part of its base. Defaults to the
+    /// repository the task was first checked out from.
     #[arg(long)]
     pub(crate) workspace: Option<PathBuf>,
     #[arg(long)]
