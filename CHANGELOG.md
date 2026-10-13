@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.13.8 — 2026-10-13
 
 - On macOS, `brgr run` and `brgr revise` hold an idle-sleep assertion
   (`caffeinate -i -w`, tied to the brgr process) while they start a task, so a
