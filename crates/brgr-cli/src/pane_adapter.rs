@@ -117,6 +117,16 @@ fn report_waits() -> (Duration, Duration) {
 const SHELL_READY: Duration = Duration::from_secs(20);
 const SHELL_POLL: Duration = Duration::from_millis(250);
 
+/// `OpenCode` 2 can resume a session whose model was set through its API, even
+/// though its TUI has no model flag. Keep this exception tied to the pinned
+/// native, private-server recipe; other print-only harnesses still fail closed.
+pub(crate) fn session_model_supported(interactive: &brgr_runner::InteractiveSpec) -> bool {
+    interactive.herdr_kind == "opencode"
+        && interactive.native_host
+        && interactive.model_print_only
+        && interactive.argv == ["--standalone"]
+}
+
 /// Validates the requested native TUI without changing execution shape.
 /// Unsupported options fail before admission; headless requires an explicit flag.
 pub(crate) fn require_tui(manifest: &HarnessManifest, spec: &TaskSpec) -> Result<()> {
@@ -128,7 +138,10 @@ pub(crate) fn require_tui(manifest: &HarnessManifest, spec: &TaskSpec) -> Result
             "this native TUI cannot honour --effort; change the requested option or explicitly request --headless"
         );
     }
-    if interactive.model_print_only && spec.route.requested_model.is_some() {
+    if interactive.model_print_only
+        && spec.route.requested_model.is_some()
+        && !session_model_supported(interactive)
+    {
         bail!(
             "this native TUI cannot honour --model; change the requested option or explicitly request --headless"
         );
@@ -225,7 +238,7 @@ fn pane_argv(
         agent_args.extend(options.argv.clone());
     }
     agent_args.extend_from_slice(activated.permission_arguments(launch.spec.permission)?);
-    if launch.spec.route.requested_model.is_some() {
+    if launch.spec.route.requested_model.is_some() && !session_model_supported(interactive) {
         agent_args.extend(activated.launch.model_argv.iter().cloned());
     }
     if launch.spec.route.requested_effort.is_some() {
@@ -254,6 +267,9 @@ fn pane_argv(
             "--native-executable".to_owned(),
             activated.executable.to_string_lossy().into_owned(),
         ]);
+    }
+    if session_model_supported(interactive) && launch.spec.route.requested_model.is_some() {
+        argv.push("--opencode-model=${route.model}".to_owned());
     }
     for arg in agent_args {
         argv.push(format!("--agent-arg={arg}"));

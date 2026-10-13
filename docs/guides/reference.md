@@ -76,8 +76,16 @@ fail for this route instead of guessing a family variant. See the
 (OpenCode 2), in its pane as well. Without it the task runs in OpenCode's shared
 background service, which carries on after brgr stops the run. OpenCode checks
 model names itself, so `--model provider/model#variant` selects a variant.
-Its TUI takes no effort option, and on OpenCode 2 no model option either, so a
-task that names one runs only with `--headless`.
+Its TUI takes no effort option; use `--model provider/model#variant` for an
+OpenCode 2 variant instead of a separate `--effort`. Although OpenCode 2's TUI
+has no model flag, brgr supports model selection through its native private
+server recipe: a temporary loopback server settles the location's catalog,
+checks the model and variant, creates a model-selected session, and reads it
+back. That server is stopped before the TUI resumes with `--standalone
+--session SESSION`. No global or project configuration is rewritten. Missing
+models, variants, mismatched read-back, or preparation failures stop the run;
+brgr never retries with another model or silently changes to headless. Calling
+arguments that override the session, server, or model conflict with this route.
 
 For JSONL OMP process results, brgr checks every assistant event's native
 `provider/model` against an explicitly requested selector before publishing a

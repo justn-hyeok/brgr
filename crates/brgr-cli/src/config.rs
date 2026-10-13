@@ -371,7 +371,10 @@ pub(crate) async fn check(paths: &crate::Paths, config: &Config, json_output: bo
         if interactive.effort_print_only && options.effort.is_some() {
             bail!("{id} cannot apply effort in its TUI");
         }
-        if interactive.model_print_only && options.model.is_some() {
+        if interactive.model_print_only
+            && options.model.is_some()
+            && !crate::pane_adapter::session_model_supported(interactive)
+        {
             bail!("{id} cannot apply a model in its TUI");
         }
         if options

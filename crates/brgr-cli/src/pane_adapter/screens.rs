@@ -944,6 +944,7 @@ esac
         let run = PaneRunArgs {
             caller: None,
             native_executable: None,
+            opencode_model: None,
             prompt_file: PathBuf::new(),
             workspace: PathBuf::from("/repo/task"),
             task: brgr_protocol::TaskId::new(),

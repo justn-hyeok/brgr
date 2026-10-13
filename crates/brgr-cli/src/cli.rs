@@ -669,6 +669,9 @@ pub(crate) struct PaneRunArgs {
     pub(crate) caller: Option<String>,
     #[arg(long)]
     pub(crate) native_executable: Option<PathBuf>,
+    /// The native `OpenCode` host selects this model through a verified session.
+    #[arg(long)]
+    pub(crate) opencode_model: Option<String>,
     #[arg(long)]
     pub(crate) prompt_file: PathBuf,
     #[arg(long)]
