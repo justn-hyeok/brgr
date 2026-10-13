@@ -4123,6 +4123,129 @@ fn a_run_without_a_harness_uses_the_only_registered_one_and_refuses_to_pick() {
     );
 }
 
+/// A repository whose `docs.md` a worker appended `TASK` to, accepted, and
+/// then a commit on the target changed `docs.md` too (`main_edit`).
+fn accepted_append_then_main_edit(main_edit: &str) -> (TempDir, PathBuf, PathBuf, String) {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("brgr");
+    let repository = temp.path().join("repo");
+    let executable = temp.path().join("gjc");
+    fs::create_dir_all(&repository).unwrap();
+    seed_git_repo(&repository);
+    fs::write(repository.join("docs.md"), "a\nb\nc\n").unwrap();
+    for argv in [&["add", "docs.md"][..], &["commit", "-m", "docs"][..]] {
+        assert!(
+            Command::new("git")
+                .arg("-C")
+                .arg(&repository)
+                .args(argv)
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+    fs::write(&executable, "#!/bin/sh\ncase \"$1\" in\n --version) echo 'gjc v-3way-fixture'; exit 0;;\n --help) printf '%s\\n' '-p, --print' '--mode=<value>' '--no-session' '--no-mcp' '--model' '--thinking'; exit 0;;\nesac\nprintf 'a\\nb\\nc\\nTASK\\n' > docs.md\nprintf '%s\\n' '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"OK\"}]}}'\nprintf '%s\\n' '{\"type\":\"agent_end\",\"stopReason\":\"completed\"}'\n").unwrap();
+    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+    add_fixture(&home, &executable, &temp.path().join("scratch"));
+    let owner = [("BRGR_OWNER_ID", "codex:three-way")];
+    let result = json_output(&run(
+        &home,
+        &[
+            "run",
+            "append TASK",
+            "--workspace",
+            repository.to_str().unwrap(),
+            "--capture-diff",
+            "--foreground",
+        ],
+        &owner,
+    ));
+    assert_eq!(result["outcome"], "candidate");
+    let task = result["task_id"].as_str().unwrap().to_owned();
+    json_output(&run(&home, &["accept", &task], &owner));
+    fs::write(repository.join("docs.md"), main_edit).unwrap();
+    for argv in [&["add", "docs.md"][..], &["commit", "-m", "main edit"][..]] {
+        assert!(
+            Command::new("git")
+                .arg("-C")
+                .arg(&repository)
+                .args(argv)
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+    (temp, home, repository, task)
+}
+
+#[test]
+fn apply_three_way_marks_a_conflict_instead_of_refusing_everything() {
+    let (_temp, home, repository, task) = accepted_append_then_main_edit("a\nb\nc\nMAIN\n");
+    let owner = [("BRGR_OWNER_ID", "codex:three-way")];
+    let repo = repository.to_str().unwrap();
+
+    let plain = run(
+        &home,
+        &["apply", &task, "--workspace", repo, "--execute"],
+        &owner,
+    );
+    assert!(!plain.status.success());
+    assert!(String::from_utf8_lossy(&plain.stderr).contains("--3way"));
+
+    let dry = run(
+        &home,
+        &["apply", &task, "--workspace", repo, "--3way"],
+        &owner,
+    );
+    assert!(!dry.status.success());
+    let report: Value = serde_json::from_slice(&dry.stdout).unwrap();
+    assert_eq!(report["status"], "ready_with_conflicts");
+    assert_eq!(report["conflicts"][0], "docs.md");
+    assert_eq!(
+        fs::read_to_string(repository.join("docs.md")).unwrap(),
+        "a\nb\nc\nMAIN\n",
+        "a dry run must not touch the target"
+    );
+
+    let applied = run(
+        &home,
+        &["apply", &task, "--workspace", repo, "--3way", "--execute"],
+        &owner,
+    );
+    assert!(!applied.status.success());
+    let report: Value = serde_json::from_slice(&applied.stdout).unwrap();
+    assert_eq!(report["status"], "applied_with_conflicts");
+    let docs = fs::read_to_string(repository.join("docs.md")).unwrap();
+    assert!(
+        docs.contains("<<<<<<<") && docs.contains("MAIN") && docs.contains("TASK"),
+        "{docs}"
+    );
+    let unmerged = Command::new("git")
+        .arg("-C")
+        .arg(&repository)
+        .args(["diff", "--name-only", "--diff-filter=U"])
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&unmerged.stdout).trim(), "docs.md");
+}
+
+#[test]
+fn apply_three_way_merges_cleanly_when_the_edits_do_not_overlap() {
+    let (_temp, home, repository, task) = accepted_append_then_main_edit("A\nb\nc\n");
+    let owner = [("BRGR_OWNER_ID", "codex:three-way")];
+    let repo = repository.to_str().unwrap();
+    let applied = json_output(&run(
+        &home,
+        &["apply", &task, "--workspace", repo, "--3way", "--execute"],
+        &owner,
+    ));
+    assert_eq!(applied["status"], "applied");
+    assert_eq!(
+        fs::read_to_string(repository.join("docs.md")).unwrap(),
+        "A\nb\nc\nTASK\n"
+    );
+}
+
 #[test]
 fn named_process_harness_cannot_activate_without_authorized_scratch() {
     let temp = TempDir::new().unwrap();

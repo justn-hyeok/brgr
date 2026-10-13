@@ -122,6 +122,11 @@ pub(crate) enum Command {
         /// Write the diff instead of only checking that it would apply.
         #[arg(long)]
         execute: bool,
+        /// Merge with the target's own changes (`git apply --3way`) when the
+        /// diff does not apply as is. A conflict is written as standard
+        /// markers and the command then fails, naming the files to resolve.
+        #[arg(long = "3way")]
+        three_way: bool,
     },
     /// Register, contract-test, activate, and inspect local harnesses.
     Harness {

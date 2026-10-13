@@ -164,7 +164,12 @@ diff; `--execute` applies it only after an explicit accepted result. The diff
 includes files the worker created without staging them, except ignored files
 and files named with `--evidence-file`. The integration target must be the
 repository root at the task's starting commit or a later commit on the same
-history, and the diff must still apply cleanly there. `brgr status TASK --tree` shows time and question/approval waits;
+history, and the diff must still apply cleanly there. When it does not, for
+example because parallel workers each appended to the same file, `--3way` merges
+it with the target's own changes (`git apply --3way`): a clean merge applies,
+and a conflict is written as standard markers, leaves the files unmerged, prints
+the files in `conflicts`, records `applied_with_conflicts` in the receipt, and
+exits with an error so a script cannot mistake it for success. `brgr status TASK --tree` shows time and question/approval waits;
 `brgr cancel TASK --tree` records cancellation for the subtree before stopping
 its active processes. See [the completion loop plan](completion-loop-plan.md)
 for the current scope and limits.
