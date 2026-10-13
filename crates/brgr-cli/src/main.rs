@@ -290,12 +290,9 @@ async fn execute(paths: &Paths, command: Command, json_output: bool) -> Result<(
             decide(paths, task, DecisionVerdict::Rejected, reason, json_output)
         }
         Command::Diff { task, stat } => evidence::show_diff(paths, task, stat, json_output),
-        Command::Apply {
-            task,
-            workspace,
-            execute,
-            three_way,
-        } => evidence::apply_result(paths, task, &workspace, execute, three_way, json_output),
+        command @ (Command::Apply { .. } | Command::Land { .. }) => {
+            evidence::integrate(paths, command, json_output)
+        }
         Command::Harness { command } => harness(paths, command, json_output).await,
         Command::Integrate { command } => integrate(paths, command, json_output),
         Command::Doctor => doctor(paths, json_output).await,

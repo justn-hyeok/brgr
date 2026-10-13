@@ -66,6 +66,30 @@ fn export_artifact(
     Ok(())
 }
 
+/// Runs `apply` or `land`.
+pub(crate) fn integrate(
+    paths: &Paths,
+    command: crate::cli::Command,
+    json_output: bool,
+) -> Result<()> {
+    use crate::cli::Command;
+    match command {
+        Command::Apply {
+            task,
+            workspace,
+            execute,
+            three_way,
+        } => apply_result(paths, task, &workspace, execute, three_way, json_output),
+        Command::Land {
+            task,
+            workspace,
+            reason,
+            three_way,
+        } => land_result(paths, task, &workspace, reason, three_way, json_output),
+        _ => bail!("not an integration command"),
+    }
+}
+
 pub fn apply_result(
     paths: &Paths,
     task: TaskId,
@@ -74,6 +98,79 @@ pub fn apply_result(
     three_way: bool,
     json_output: bool,
 ) -> Result<()> {
+    let report = apply_core(paths, task, workspace_path, execute, three_way)?;
+    print_value(&report.json, json_output);
+    report.fail_on_conflicts(execute)
+}
+
+/// Accepts a candidate and integrates its diff, in the order that leaves no
+/// half-done state: the diff is checked first, so a diff that cannot be
+/// applied records no decision.
+fn land_result(
+    paths: &Paths,
+    task: TaskId,
+    workspace_path: &Path,
+    reason: String,
+    three_way: bool,
+    json_output: bool,
+) -> Result<()> {
+    if reason.trim().is_empty() {
+        bail!("decision reason must not be empty");
+    }
+    // A plain conflict fails here, before any decision is written.
+    apply_core(paths, task, workspace_path, false, three_way)?;
+    let decision =
+        crate::task_commands::record_verdict(paths, task, DecisionVerdict::Accepted, reason)?;
+    let report = apply_core(paths, task, workspace_path, true, three_way).with_context(|| {
+        format!(
+            "the candidate was accepted but its diff could not be applied; retry with `brgr apply {task} --workspace {} --execute`",
+            workspace_path.display()
+        )
+    })?;
+    print_value(
+        &json!({"task_id": task, "decision": decision, "apply": report.json}),
+        json_output,
+    );
+    report.fail_on_conflicts(true)
+}
+
+/// What an apply or a dry run found.
+pub(crate) struct ApplyReport {
+    pub(crate) json: serde_json::Value,
+    pub(crate) conflicts: Vec<String>,
+    target: PathBuf,
+}
+
+impl ApplyReport {
+    /// A conflict is reported and then fails the command, so a script cannot
+    /// take a merge that needs hands for a clean one.
+    pub(crate) fn fail_on_conflicts(&self, applied: bool) -> Result<()> {
+        if self.conflicts.is_empty() {
+            return Ok(());
+        }
+        bail!(
+            "the diff {} with conflicts in {} file(s): {}; resolve them in {} and commit",
+            if applied {
+                "was applied"
+            } else {
+                "would apply"
+            },
+            self.conflicts.len(),
+            self.conflicts.join(", "),
+            self.target.display()
+        )
+    }
+}
+
+/// Checks that a candidate's sealed diff applies to `workspace_path`, and with
+/// `execute` applies it. Prints nothing.
+pub(crate) fn apply_core(
+    paths: &Paths,
+    task: TaskId,
+    workspace_path: &Path,
+    execute: bool,
+    three_way: bool,
+) -> Result<ApplyReport> {
     let store = Store::open(&paths.store)?;
     let spec = store.task(task)?;
     require_owner(&store, &spec.owner_id)?;
@@ -128,27 +225,15 @@ pub fn apply_result(
     } else {
         "ready_with_conflicts"
     };
-    print_value(
-        &json!({"task_id": task, "result_id": result.result_id,
-            "target": target, "patch_digest": reference.digest, "status": status,
-            "conflicts": conflicts,
-            "base_commit": expected_head, "target_head": target_head}),
-        json_output,
-    );
-    if !conflicts.is_empty() {
-        bail!(
-            "the diff {} with conflicts in {} file(s): {}; resolve them in {} and commit",
-            if execute {
-                "was applied"
-            } else {
-                "would apply"
-            },
-            conflicts.len(),
-            conflicts.join(", "),
-            target.display()
-        );
-    }
-    Ok(())
+    let json = json!({"task_id": task, "result_id": result.result_id,
+        "target": target, "patch_digest": reference.digest, "status": status,
+        "conflicts": conflicts,
+        "base_commit": expected_head, "target_head": target_head});
+    Ok(ApplyReport {
+        json,
+        conflicts,
+        target,
+    })
 }
 
 /// Confirms `target` is the task's repository at its base commit or a commit

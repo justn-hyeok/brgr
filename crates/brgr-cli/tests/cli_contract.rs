@@ -1767,6 +1767,56 @@ fn a_lost_run_without_a_report_keeps_its_worktree_diff_reviewable() {
     assert!(!accepted.status.success());
 }
 
+/// A lost result has no candidate to accept or reject, so it can be revised
+/// without a decision; revising it is the owner's answer to it. An accepted
+/// result still cannot be.
+#[test]
+fn a_lost_result_can_be_revised_without_a_decision() {
+    let fixture = pane_fixture();
+    fs::create_dir_all(&fixture.state).unwrap();
+    fs::write(fixture.state.join("no-report"), "").unwrap();
+    let lost = fixture.run_with_env(&[], &[("BRGR_TEST_REPORT_GRACE_MS", "300")]);
+    assert_eq!(lost["outcome"], "lost", "{lost}");
+    let task = lost["task_id"].as_str().unwrap();
+    fs::remove_file(fixture.state.join("no-report")).unwrap();
+
+    let herdr = fixture.herdr.to_str().unwrap();
+    let env = [
+        ("BRGR_OWNER_ID", "codex:pane-test"),
+        ("HERDR_ENV", "1"),
+        ("HERDR_PANE_ID", "w9:p1"),
+        ("HERDR_BIN_PATH", herdr),
+    ];
+    let revised = run(
+        &fixture.home,
+        &["revise", task, "Explain again", "--foreground"],
+        &env,
+    );
+    let stderr = String::from_utf8_lossy(&revised.stderr).into_owned();
+    assert!(stderr.contains("the previous run was lost"), "{stderr}");
+    let revised = json_output(&revised);
+    assert_eq!(revised["outcome"], "candidate", "{revised}");
+    assert_eq!(revised["revision"], 2);
+
+    // The revision answered the lost result: nothing is left to acknowledge.
+    let status = run(&fixture.home, &["status", task], &env);
+    let stderr = String::from_utf8_lossy(&status.stderr);
+    assert!(!stderr.contains("not acknowledged"), "{stderr}");
+
+    // An accepted candidate is still final.
+    let revised_id = revised["task_id"].as_str().unwrap();
+    json_output(&run(&fixture.home, &["accept", revised_id], &env));
+    let again = run(
+        &fixture.home,
+        &["revise", revised_id, "Once more", "--foreground"],
+        &env,
+    );
+    assert!(!again.status.success());
+    assert!(
+        String::from_utf8_lossy(&again.stderr).contains("only a rejected result can be revised")
+    );
+}
+
 /// A read-only request no longer turns the TUI off or into plan mode: the
 /// worker runs in its own pane with full permissions.
 #[test]
@@ -4126,6 +4176,11 @@ fn a_run_without_a_harness_uses_the_only_registered_one_and_refuses_to_pick() {
 /// A repository whose `docs.md` a worker appended `TASK` to, accepted, and
 /// then a commit on the target changed `docs.md` too (`main_edit`).
 fn accepted_append_then_main_edit(main_edit: &str) -> (TempDir, PathBuf, PathBuf, String) {
+    append_then_main_edit(main_edit, true)
+}
+
+/// The same, optionally leaving the candidate undecided.
+fn append_then_main_edit(main_edit: &str, accept: bool) -> (TempDir, PathBuf, PathBuf, String) {
     let temp = TempDir::new().unwrap();
     let home = temp.path().join("brgr");
     let repository = temp.path().join("repo");
@@ -4162,7 +4217,9 @@ fn accepted_append_then_main_edit(main_edit: &str) -> (TempDir, PathBuf, PathBuf
     ));
     assert_eq!(result["outcome"], "candidate");
     let task = result["task_id"].as_str().unwrap().to_owned();
-    json_output(&run(&home, &["accept", &task], &owner));
+    if accept {
+        json_output(&run(&home, &["accept", &task], &owner));
+    }
     fs::write(repository.join("docs.md"), main_edit).unwrap();
     for argv in [&["add", "docs.md"][..], &["commit", "-m", "main edit"][..]] {
         assert!(
@@ -4227,6 +4284,89 @@ fn apply_three_way_marks_a_conflict_instead_of_refusing_everything() {
         .output()
         .unwrap();
     assert_eq!(String::from_utf8_lossy(&unmerged.stdout).trim(), "docs.md");
+}
+
+#[test]
+fn land_accepts_and_applies_in_one_step_and_leaves_nothing_to_acknowledge() {
+    let (_temp, home, repository, task) = append_then_main_edit("A\nb\nc\n", false);
+    let owner = [("BRGR_OWNER_ID", "codex:three-way")];
+    let repo = repository.to_str().unwrap();
+    let landed = json_output(&run(
+        &home,
+        &[
+            "land",
+            &task,
+            "--workspace",
+            repo,
+            "--3way",
+            "--reason",
+            "reviewed",
+        ],
+        &owner,
+    ));
+    assert_eq!(landed["decision"]["verdict"], "accepted");
+    assert_eq!(landed["apply"]["status"], "applied");
+    assert_eq!(
+        fs::read_to_string(repository.join("docs.md")).unwrap(),
+        "A\nb\nc\nTASK\n"
+    );
+    // The decision acknowledged the result: no failure banner, no ack needed.
+    let status = run(&home, &["status", &task], &owner);
+    assert!(!String::from_utf8_lossy(&status.stderr).contains("not acknowledged"));
+}
+
+#[test]
+fn land_records_no_decision_when_the_diff_cannot_be_applied() {
+    let (_temp, home, repository, task) = append_then_main_edit("a\nb\nc\nMAIN\n", false);
+    let owner = [("BRGR_OWNER_ID", "codex:three-way")];
+    let repo = repository.to_str().unwrap();
+    let refused = run(
+        &home,
+        &["land", &task, "--workspace", repo, "--reason", "reviewed"],
+        &owner,
+    );
+    assert!(!refused.status.success());
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(stderr.contains("--3way"), "{stderr}");
+    assert_eq!(
+        fs::read_to_string(repository.join("docs.md")).unwrap(),
+        "a\nb\nc\nMAIN\n"
+    );
+    // Still undecided: it can be landed later, or rejected.
+    json_output(&run(
+        &home,
+        &["reject", &task, "--reason", "rework"],
+        &owner,
+    ));
+}
+
+#[test]
+fn land_with_three_way_accepts_and_leaves_conflict_markers_to_resolve() {
+    let (_temp, home, repository, task) = append_then_main_edit("a\nb\nc\nMAIN\n", false);
+    let owner = [("BRGR_OWNER_ID", "codex:three-way")];
+    let repo = repository.to_str().unwrap();
+    let landed = run(
+        &home,
+        &[
+            "land",
+            &task,
+            "--workspace",
+            repo,
+            "--3way",
+            "--reason",
+            "reviewed",
+        ],
+        &owner,
+    );
+    assert!(!landed.status.success());
+    let report: Value = serde_json::from_slice(&landed.stdout).unwrap();
+    assert_eq!(report["decision"]["verdict"], "accepted");
+    assert_eq!(report["apply"]["status"], "applied_with_conflicts");
+    assert!(
+        fs::read_to_string(repository.join("docs.md"))
+            .unwrap()
+            .contains("<<<<<<<")
+    );
 }
 
 #[test]

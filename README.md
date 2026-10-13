@@ -85,7 +85,7 @@ that was already running does not know brgr yet.
 The Herdr plugin adds a task board and workspace actions on top:
 
 ```bash
-herdr plugin install justn-hyeok/brgr --ref v2.13.6
+herdr plugin install justn-hyeok/brgr --ref v2.13.7
 ```
 
 ## Use it
@@ -101,6 +101,7 @@ The agent runs commands like these, which you can also run yourself:
 brgr run "Review this change" --harness local.claude-code --criterion "findings cite changed lines"
 brgr result TASK
 brgr accept TASK --reason "criteria verified"
+brgr land TASK --workspace . --reason "criteria verified"   # code: check, accept, apply
 ```
 
 ## Troubleshooting

@@ -113,7 +113,9 @@ pub(crate) fn validate_bridge_host_command(
         Command::Artifact {
             command: ArtifactCommand::Export { output, .. },
         } => require_bridge_workspace(output.parent().unwrap_or(current_dir), &workspace_root),
-        Command::Apply { workspace, .. } => require_bridge_workspace(workspace, &workspace_root),
+        Command::Apply { workspace, .. } | Command::Land { workspace, .. } => {
+            require_bridge_workspace(workspace, &workspace_root)
+        }
         Command::Harness { .. }
         | Command::Integrate { .. }
         | Command::Prune { .. }
