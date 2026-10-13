@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.13.7 — 2026-10-13
 
 - `brgr land TASK --workspace REPO --reason WHY` checks a candidate's sealed
   diff against the repository, then accepts it and applies it. A diff that
