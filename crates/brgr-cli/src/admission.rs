@@ -304,7 +304,7 @@ pub(crate) async fn revise_task(paths: &Paths, args: ReviseArgs, json_output: bo
         .map(|(task, attempt, _depth)| (task, attempt));
     let previous_launch: LaunchEnvelope =
         serde_json::from_slice(&fs::read(paths.launch(args.task, previous.revision))?)?;
-    let revisable = revisable_revision(&store, &previous)?;
+    let revisable = revisable_revision(paths, &store, &previous)?;
     let next_revision = revisable.next_revision;
     let forward_criteria = args.forwards_criteria();
     // A brgr task worktree lies under the control home, which admission never
@@ -424,7 +424,7 @@ impl Revisable {
 
 /// A rejected candidate can be revised, and so can a failed or lost result,
 /// which has no candidate to decide. An accepted or cancelled result cannot.
-fn revisable_revision(store: &Store, previous: &TaskSpec) -> Result<Revisable> {
+fn revisable_revision(paths: &Paths, store: &Store, previous: &TaskSpec) -> Result<Revisable> {
     let (session, epoch) = require_owner(store, &previous.owner_id)?;
     let result = store.latest_result(previous.task_id)?;
     if result.revision != previous.revision {
@@ -441,6 +441,19 @@ fn revisable_revision(store: &Store, previous: &TaskSpec) -> Result<Revisable> {
             }
         }
         TerminalOutcome::Failed | TerminalOutcome::Lost => {
+            // A lost run's worker can outlive its supervisor. A second run would
+            // share the task's pid record, hide the first worker from `prune`,
+            // and have its worktree removed from under it.
+            if crate::supervision::worker_may_be_running(paths, previous.task_id) {
+                // `brgr cancel` refuses a task that is already terminal, so the
+                // way out is the worker itself.
+                let worker = fs::read_to_string(paths.pid(previous.task_id))
+                    .map(|text| format!("process {}", text.trim()))
+                    .unwrap_or_else(|_| "its process".to_owned());
+                bail!(
+                    "the previous run's worker ({worker}) may still be running; wait for it to exit, or stop it, and revise again"
+                );
+            }
             if result.outcome == TerminalOutcome::Lost {
                 eprintln!(
                     "brgr: warning: the previous run was lost, so its worker may still be running or may have caused external effects: {}",

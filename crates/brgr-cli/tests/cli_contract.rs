@@ -6887,6 +6887,94 @@ fn observing_a_status_does_not_recover_or_record_anything() {
     assert_eq!(recovered["state"], "terminal", "{recovered}");
 }
 
+/// A lost run's worker can outlive its supervisor. Revising it then would start
+/// a second run beside the first and, by overwriting the shared pid record,
+/// hide the first worker from `prune`, which would delete its worktree.
+#[test]
+fn a_lost_run_whose_worker_still_runs_cannot_be_revised_until_it_stops() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("brgr");
+    let repository = temp.path().join("repo");
+    fs::create_dir_all(&repository).unwrap();
+    seed_git_repo(&repository);
+    add_slow_prompt_file_harness(&home, &temp.path().join("slow"));
+    let owner = [("BRGR_OWNER_ID", "codex:revise-live")];
+    let started = json_output(&run(
+        &home,
+        &[
+            "run",
+            "SLOW_RUN",
+            "--harness",
+            "local.slow-agent",
+            "--workspace",
+            repository.to_str().unwrap(),
+        ],
+        &owner,
+    ));
+    let task = started["task_id"].as_str().unwrap();
+    let record = home.join("runs").join(format!("{task}.supervisor.json"));
+    let began = Instant::now();
+    while !record.is_file() && began.elapsed() < Duration::from_secs(10) {
+        thread::sleep(Duration::from_millis(50));
+    }
+    let supervisor: Value = serde_json::from_slice(&fs::read(&record).unwrap()).unwrap();
+    assert!(
+        Command::new("/bin/kill")
+            .args(["-9", supervisor["identity"]["handle"].as_str().unwrap()])
+            .status()
+            .unwrap()
+            .success()
+    );
+    thread::sleep(Duration::from_millis(300));
+    // Recovery records the run as lost while its worker keeps sleeping.
+    let lost = json_output(&run(&home, &["status", task], &owner));
+    assert_eq!(lost["state"], "terminal", "{lost}");
+
+    let refused = run(
+        &home,
+        &[
+            "revise",
+            task,
+            "again",
+            "--workspace",
+            repository.to_str().unwrap(),
+        ],
+        &owner,
+    );
+    assert!(
+        !refused.status.success(),
+        "revised a run whose worker is alive"
+    );
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(stderr.contains("may still be running"), "{stderr}");
+    assert!(stderr.contains("wait for it to exit"), "{stderr}");
+
+    // Once the worker has stopped the same revision goes ahead.
+    let began = Instant::now();
+    loop {
+        let retried = run(
+            &home,
+            &[
+                "revise",
+                task,
+                "again",
+                "--workspace",
+                repository.to_str().unwrap(),
+            ],
+            &owner,
+        );
+        if retried.status.success() {
+            break;
+        }
+        assert!(
+            began.elapsed() < Duration::from_secs(20),
+            "{}",
+            String::from_utf8_lossy(&retried.stderr)
+        );
+        thread::sleep(Duration::from_millis(500));
+    }
+}
+
 #[test]
 fn foreground_admission_lock_is_released_before_slow_harness_execution() {
     let temp = TempDir::new().unwrap();
