@@ -4428,6 +4428,70 @@ fn land_three_way_is_a_failure_not_a_conflict_when_git_refuses_another_file() {
     ));
 }
 
+/// A `git` that passes everything through except the real `git apply` (not
+/// `--check`), which it fails once: the diff checks out, then the write fails.
+fn git_that_fails_the_real_apply_once(dir: &Path) -> String {
+    let bin = dir.join("flaky-bin");
+    fs::create_dir_all(&bin).unwrap();
+    let marker = dir.join("failed-once");
+    fs::write(
+        bin.join("git"),
+        format!(
+            "#!/bin/sh\napply=0; check=0\nfor a in \"$@\"; do\n  [ \"$a\" = apply ] && apply=1\n  [ \"$a\" = --check ] && check=1\ndone\nif [ $apply = 1 ] && [ $check = 0 ] && [ ! -e '{marker}' ]; then\n  : > '{marker}'\n  echo 'error: injected transient write failure' >&2\n  exit 1\nfi\nexec /usr/bin/git \"$@\"\n",
+            marker = marker.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(bin.join("git"), fs::Permissions::from_mode(0o700)).unwrap();
+    format!("{}:{}", bin.display(), std::env::var("PATH").unwrap())
+}
+
+/// `land` accepts, then applies. If that apply fails for a reason that leaves
+/// the repository untouched, the error names `brgr apply` to retry, and the
+/// retry has to work: a failed apply must not leave a receipt that blocks it.
+#[test]
+fn a_failed_apply_after_land_can_be_retried_as_the_error_says() {
+    let (temp, home, repository, task) = append_then_main_edit("A\nb\nc\n", false);
+    let owner = [("BRGR_OWNER_ID", "codex:three-way")];
+    let repo = repository.to_str().unwrap();
+    let flaky_path = git_that_fails_the_real_apply_once(temp.path());
+    let landed = run(
+        &home,
+        &[
+            "land",
+            &task,
+            "--workspace",
+            repo,
+            "--3way",
+            "--reason",
+            "reviewed",
+        ],
+        &[
+            ("BRGR_OWNER_ID", "codex:three-way"),
+            ("PATH", flaky_path.as_str()),
+        ],
+    );
+    assert!(!landed.status.success());
+    let stderr = String::from_utf8_lossy(&landed.stderr);
+    assert!(stderr.contains("brgr apply"), "{stderr}");
+    assert_eq!(
+        fs::read_to_string(repository.join("docs.md")).unwrap(),
+        "A\nb\nc\n",
+        "the failed apply must not have touched the repository"
+    );
+
+    let retried = json_output(&run(
+        &home,
+        &["apply", &task, "--workspace", repo, "--3way", "--execute"],
+        &owner,
+    ));
+    assert_eq!(retried["status"], "applied");
+    assert_eq!(
+        fs::read_to_string(repository.join("docs.md")).unwrap(),
+        "A\nb\nc\nTASK\n"
+    );
+}
+
 #[test]
 fn land_accepts_and_applies_in_one_step_and_leaves_nothing_to_acknowledge() {
     let (_temp, home, repository, task) = append_then_main_edit("A\nb\nc\n", false);

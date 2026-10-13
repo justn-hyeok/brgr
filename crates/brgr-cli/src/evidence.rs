@@ -1,4 +1,5 @@
 use std::{
+    fs,
     io::{self, Write as _},
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -145,6 +146,13 @@ fn land_result(
     report.fail_on_conflicts(true)
 }
 
+/// The `state` an integration receipt recorded, if it can be read.
+fn receipt_state(receipt: &Path) -> Option<String> {
+    let bytes = fs::read(receipt).ok()?;
+    let value: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    value.get("state")?.as_str().map(str::to_owned)
+}
+
 /// What an apply or a dry run found.
 pub(crate) struct ApplyReport {
     pub(crate) json: serde_json::Value,
@@ -215,10 +223,27 @@ pub(crate) fn apply_core(
             .join(format!("{}-{}.apply.json", task, result.result_id));
         let intent = json!({"task_id": task, "result_id": result.result_id,
             "target": target, "patch_digest": reference.digest, "state": "started"});
+        // An apply that failed before touching anything left a `failed` receipt;
+        // it must not block the retry its own error asks for. A `started`
+        // receipt (the process died mid-apply) may mean a partial apply, so it
+        // still does.
+        if receipt_state(&receipt).as_deref() == Some("failed") {
+            fs::remove_file(&receipt)?;
+        }
         write_json_new(&receipt, &intent)
             .context("an integration receipt already exists or could not be written")?;
-        if let Applied::Conflicts(files) = git_apply(&target, &patch, false, three_way)? {
-            conflicts = files;
+        match git_apply(&target, &patch, false, three_way) {
+            Ok(Applied::Conflicts(files)) => conflicts = files,
+            Ok(Applied::Clean) => {}
+            Err(error) => {
+                let _ = write_json_atomic(
+                    &receipt,
+                    &json!({"task_id": task, "result_id": result.result_id, "target": target,
+                        "patch_digest": reference.digest, "state": "failed",
+                        "error": error.to_string().chars().take(512).collect::<String>()}),
+                );
+                return Err(error);
+            }
         }
         let state = if conflicts.is_empty() {
             "applied"
