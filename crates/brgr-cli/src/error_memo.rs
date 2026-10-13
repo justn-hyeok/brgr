@@ -37,11 +37,15 @@ fn without_free_text(error: &str) -> &str {
         .unwrap_or(error);
     // Only a stderr quote is trimmed of its separator, so classes recorded
     // before it existed keep their fingerprints.
-    let error = match error
-        .split_once(brgr_core::LAST_STDERR)
-        .or_else(|| error.split_once(brgr_core::LAST_ERROR_EVENT))
-    {
-        Some((before, _)) => before.trim_end_matches([';', ' ']),
+    // Cut at whichever quote marker comes first: a quoted stdout error event
+    // may itself contain the other marker, and cutting at that one would leave
+    // the start of the quote in the sample.
+    let first_quote = [brgr_core::LAST_STDERR, brgr_core::LAST_ERROR_EVENT]
+        .iter()
+        .filter_map(|marker| error.find(marker))
+        .min();
+    let error = match first_quote {
+        Some(at) => error[..at].trim_end_matches([';', ' ']),
         None => error,
     };
     match error.find(SCREEN_MARK) {
@@ -653,6 +657,22 @@ mod tests {
     #[test]
     fn a_quoted_stderr_line_never_reaches_a_class_or_a_sample() {
         let error = "process produced no result artifact; last stderr: Error: quota for acme-prod-key exhausted";
+        assert_eq!(
+            without_free_text(error),
+            "process produced no result artifact"
+        );
+    }
+
+    #[test]
+    fn a_quote_that_contains_the_other_marker_is_still_cut_at_the_first() {
+        // The quoted event text is the harness's own, so it can say anything,
+        // including the marker of the other kind of quote.
+        let error = "process produced no result artifact; last error event: SECRET_START last stderr: harmless";
+        assert_eq!(
+            without_free_text(error),
+            "process produced no result artifact"
+        );
+        let error = "process produced no result artifact; last stderr: SECRET_START last error event: harmless";
         assert_eq!(
             without_free_text(error),
             "process produced no result artifact"
