@@ -699,10 +699,7 @@ impl Registry {
         } else {
             manifest.executable.clone()
         };
-        let output = ProcessRunner::probe(&catalog_executable, &argv, PROBE_DEADLINE).await?;
-        if output.exit_code != Some(0) || output.timed_out || output.output_truncated {
-            return Err(RegistryError::ModelCatalogProbeFailed);
-        }
+        let output = probe_catalog(&manifest.id, &catalog_executable, &argv).await?;
         let selectors = parse_model_catalog(&catalog.format, &output.stdout)?;
         if !selectors.contains(requested) {
             return Err(RegistryError::ModelNotInCatalog(requested.to_owned()));
@@ -783,6 +780,59 @@ impl RecipeAuthority {
             Self::Custom => "agent_authored",
         }
     }
+}
+
+/// How many times a catalog probe is tried before the run is refused.
+const CATALOG_PROBE_ATTEMPTS: u32 = 2;
+#[cfg(not(test))]
+const CATALOG_PROBE_RETRY_DELAY: Duration = Duration::from_secs(2);
+#[cfg(test)]
+const CATALOG_PROBE_RETRY_DELAY: Duration = Duration::from_millis(10);
+
+/// Runs a harness's model catalog command. A failure is often transient (a
+/// cold start, a busy machine), so it is tried once more; if it still fails the
+/// error says which harness, how, and the one line the CLI gave.
+async fn probe_catalog(
+    harness: &str,
+    executable: &Path,
+    argv: &[String],
+) -> Result<ExecutionOutput, RegistryError> {
+    let mut reason = String::new();
+    for attempt in 1..=CATALOG_PROBE_ATTEMPTS {
+        match ProcessRunner::probe(executable, argv, PROBE_DEADLINE).await {
+            Ok(output)
+                if output.exit_code == Some(0) && !output.timed_out && !output.output_truncated =>
+            {
+                return Ok(output);
+            }
+            Ok(output) => {
+                reason = if output.timed_out {
+                    format!("timed out after {}s", PROBE_DEADLINE.as_secs())
+                } else if output.output_truncated {
+                    "output exceeded the limit".to_owned()
+                } else {
+                    format!(
+                        "exit code {}",
+                        output
+                            .exit_code
+                            .map_or_else(|| "none".to_owned(), |code| code.to_string())
+                    )
+                };
+                if let Some(cause) = output.failure_cause() {
+                    reason = format!("{reason}; quoted: {}", cause.text);
+                }
+            }
+            Err(error) => reason = error.to_string(),
+        }
+        if attempt < CATALOG_PROBE_ATTEMPTS {
+            tokio::time::sleep(CATALOG_PROBE_RETRY_DELAY).await;
+        }
+    }
+    Err(RegistryError::ModelCatalogProbeFailed {
+        harness: harness.to_owned(),
+        attempts: CATALOG_PROBE_ATTEMPTS,
+        reason,
+    })
 }
 
 async fn probe_custom_contract(manifest: &HarnessManifest) -> Result<ProbeEvidence, RegistryError> {
@@ -1326,6 +1376,45 @@ mod tests {
                 .await,
             Err(RegistryError::ModelCatalogMissing(_))
         ));
+    }
+
+    fn catalog_script(dir: &tempfile::TempDir, body: &str) -> PathBuf {
+        let path = dir.path().join("catalog");
+        fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
+        path
+    }
+
+    #[tokio::test]
+    async fn a_catalog_probe_that_fails_once_is_tried_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("first");
+        let script = catalog_script(
+            &dir,
+            &format!(
+                "if [ ! -e '{m}' ]; then : > '{m}'; echo 'Error: warming up' >&2; exit 1; fi; echo model-a",
+                m = marker.display()
+            ),
+        );
+        let output = probe_catalog("local.x", &script, &[]).await.unwrap();
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "model-a");
+    }
+
+    #[tokio::test]
+    async fn a_catalog_probe_that_keeps_failing_names_the_harness_and_the_cause() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = catalog_script(&dir, "echo 'Error: not logged in' >&2; exit 3");
+        let message = probe_catalog("local.x", &script, &[])
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(message.contains("local.x"), "{message}");
+        assert!(message.contains("after 2 attempts"), "{message}");
+        assert!(message.contains("exit code 3"), "{message}");
+        assert!(
+            message.contains("quoted: Error: not logged in"),
+            "{message}"
+        );
     }
 
     #[test]

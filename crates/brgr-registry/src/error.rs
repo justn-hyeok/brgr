@@ -51,8 +51,12 @@ pub enum RegistryError {
     ModelCatalogExecutableMissing(String),
     #[error("model catalog recipe or output is malformed")]
     InvalidModelCatalog,
-    #[error("bounded model catalog probe failed")]
-    ModelCatalogProbeFailed,
+    #[error("bounded model catalog probe of {harness} failed after {attempts} attempts: {reason}")]
+    ModelCatalogProbeFailed {
+        harness: String,
+        attempts: u32,
+        reason: String,
+    },
     #[error("requested model is absent from the current catalog: {0}")]
     ModelNotInCatalog(String),
     #[error("registry root is outside its declared control home")]

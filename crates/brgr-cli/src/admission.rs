@@ -156,38 +156,109 @@ pub(crate) async fn run_task(paths: &Paths, mut args: RunArgs, json_output: bool
     };
     spec.validate()?;
     activated.validate_task_route(&spec)?;
-    registry
-        .preflight_model(&activated, spec.route.requested_model.as_deref())
-        .await?;
-    start_task(
-        paths,
-        spec,
-        &activated,
-        &activation,
-        StartOptions {
-            source_workspace: &source_workspace,
-            snapshot_paths: &args.snapshot_paths,
-            parent,
-            enable_delegation: args.delegation.enable_delegation,
-            snapshot: if args.allow_clean_head_snapshot {
-                WorkspaceSnapshot::AllowCleanHead
-            } else {
-                WorkspaceSnapshot::RequireClean
+    preflight_with_notice(&registry, &activated, &spec).await?;
+    with_slow_notice(
+        "preparing the worktree and starting the worker",
+        Box::pin(start_task(
+            paths,
+            spec,
+            &activated,
+            &activation,
+            StartOptions {
+                source_workspace: &source_workspace,
+                snapshot_paths: &args.snapshot_paths,
+                parent,
+                enable_delegation: args.delegation.enable_delegation,
+                snapshot: if args.allow_clean_head_snapshot {
+                    WorkspaceSnapshot::AllowCleanHead
+                } else {
+                    WorkspaceSnapshot::RequireClean
+                },
+                worktree: args.keep.worktree(),
+                pane: args.keep.pane(),
+                execution: if args.foreground {
+                    ExecutionDisposition::Foreground
+                } else {
+                    ExecutionDisposition::Detached
+                },
+                json_output,
+                headless: crate::invocation::current().headless,
+                calling_options: calling,
+                instructions_digest,
             },
-            worktree: args.keep.worktree(),
-            pane: args.keep.pane(),
-            execution: if args.foreground {
-                ExecutionDisposition::Foreground
-            } else {
-                ExecutionDisposition::Detached
-            },
-            json_output,
-            headless: crate::invocation::current().headless,
-            calling_options: calling,
-            instructions_digest,
-        },
+        )),
     )
     .await
+}
+
+/// How long a stage of starting a task may run before brgr says what it is
+/// waiting for. A fast run prints nothing.
+const SLOW_STAGE: std::time::Duration = std::time::Duration::from_secs(8);
+
+async fn preflight_with_notice(
+    registry: &Registry,
+    activated: &HarnessManifest,
+    spec: &TaskSpec,
+) -> Result<()> {
+    with_slow_notice(
+        "checking the requested model against the harness catalog",
+        registry.preflight_model(activated, spec.route.requested_model.as_deref()),
+    )
+    .await?;
+    Ok(())
+}
+
+/// Runs `stage`; if it is still going after [`SLOW_STAGE`], says once on stderr
+/// what brgr is waiting for, so a long start is not a silent one.
+async fn with_slow_notice<T>(waiting_for: &str, stage: impl std::future::Future<Output = T>) -> T {
+    notice_if_slow(SLOW_STAGE, waiting_for, stage, |message| {
+        eprintln!("{message}");
+    })
+    .await
+}
+
+async fn notice_if_slow<T>(
+    after: std::time::Duration,
+    waiting_for: &str,
+    stage: impl std::future::Future<Output = T>,
+    say: impl FnOnce(&str),
+) -> T {
+    tokio::pin!(stage);
+    tokio::select! {
+        done = &mut stage => return done,
+        () = tokio::time::sleep(after) => say(&format!("brgr: still {waiting_for}...")),
+    }
+    stage.await
+}
+
+#[cfg(test)]
+mod slow_stage_tests {
+    use super::*;
+    use std::{cell::RefCell, time::Duration};
+
+    #[tokio::test]
+    async fn a_slow_stage_says_what_it_waits_for_and_a_fast_one_is_silent() {
+        let said = RefCell::new(Vec::new());
+        let value = notice_if_slow(
+            Duration::from_millis(20),
+            "preparing the worktree",
+            async {
+                tokio::time::sleep(Duration::from_millis(80)).await;
+                7
+            },
+            |message| said.borrow_mut().push(message.to_owned()),
+        )
+        .await;
+        assert_eq!(value, 7);
+        assert_eq!(*said.borrow(), ["brgr: still preparing the worktree..."]);
+
+        let silent = RefCell::new(Vec::new());
+        notice_if_slow(Duration::from_millis(200), "x", async {}, |message| {
+            silent.borrow_mut().push(message.to_owned());
+        })
+        .await;
+        assert!(silent.borrow().is_empty());
+    }
 }
 
 /// A revision keeps what its task was asked to keep, plus what `revise` adds.
