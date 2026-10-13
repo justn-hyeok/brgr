@@ -349,7 +349,18 @@ pub(crate) fn record_verdict(
         verdict,
         reason,
     };
-    store.record_decision_and_ack(&decision)?;
+    // Written before the decision, not after: recording it lets the pane's own
+    // cleanup reclaim the worktree at once, and a reclaim that ran first would
+    // assess it without the flag and mark it assessed for good.
+    if include_ignored {
+        crate::worktree_prune::allow_ignored(paths, task, spec.revision);
+    }
+    if let Err(error) = store.record_decision_and_ack(&decision) {
+        if include_ignored {
+            crate::worktree_prune::forget_ignored(paths, task, spec.revision);
+        }
+        return Err(error.into());
+    }
     if let Err(error) = crate::pane_adapter::cleanup_settled(paths, task, spec.revision) {
         eprintln!("brgr cleanup pending: {error}");
     }
@@ -360,9 +371,6 @@ pub(crate) fn record_verdict(
         eprintln!("brgr pane cleanup queue could not be updated: {error}");
     } else if let Err(error) = pane_cleanup::close_if_eligible(&store, &paths.runs, task) {
         eprintln!("brgr pane cleanup remains pending: {error}");
-    }
-    if include_ignored {
-        crate::worktree_prune::allow_ignored(paths, task, spec.revision);
     }
     crate::worktree_prune::reclaim_and_report(paths, task, spec.revision);
     Ok(persisted)

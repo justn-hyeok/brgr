@@ -1268,6 +1268,11 @@ pub(crate) fn allow_ignored(paths: &Paths, task: TaskId, revision: u32) {
     let _ = fs::write(include_ignored_marker(paths, task, revision), b"");
 }
 
+/// Withdraws [`allow_ignored`] when the decision it was written for failed.
+pub(crate) fn forget_ignored(paths: &Paths, task: TaskId, revision: u32) {
+    let _ = fs::remove_file(include_ignored_marker(paths, task, revision));
+}
+
 /// Runs [`reclaim_task`] and notes the outcome on stderr.
 pub(crate) fn reclaim_and_report(paths: &Paths, task: TaskId, revision: u32) {
     if let Some(note) = reclaim_task(paths, task, revision) {

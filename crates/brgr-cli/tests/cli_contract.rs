@@ -1740,6 +1740,52 @@ fn an_agent_that_never_writes_its_report_fails_with_the_cause() {
     );
 }
 
+/// `--include-ignored` reaches the reclaim that a pane's own cleanup runs when a
+/// decision lands. In pane mode that cleanup can reclaim the worktree before the
+/// deciding command does, and it used to assess it without the flag and mark it
+/// assessed for good.
+#[test]
+fn include_ignored_reaches_the_reclaim_a_pane_cleanup_runs() {
+    let fixture = pane_fixture();
+    seed_git_repo(&fixture.workspace);
+    fs::write(fixture.workspace.join(".gitignore"), ".env\n").unwrap();
+    for argv in [&["add", ".gitignore"][..], &["commit", "-m", "ignore"][..]] {
+        assert!(
+            Command::new("git")
+                .arg("-C")
+                .arg(&fixture.workspace)
+                .args(argv)
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+    let ran = fixture.run(&[]);
+    assert_eq!(ran["outcome"], "candidate", "{ran}");
+    let task = ran["task_id"].as_str().unwrap();
+    let herdr = fixture.herdr.to_str().unwrap();
+    let env = [
+        ("BRGR_OWNER_ID", "codex:pane-test"),
+        ("HERDR_ENV", "1"),
+        ("HERDR_PANE_ID", "w9:p1"),
+        ("HERDR_BIN_PATH", herdr),
+    ];
+    let status = json_output(&run(&fixture.home, &["status", task], &env));
+    let worktree = PathBuf::from(status["workspace"].as_str().unwrap());
+    assert!(worktree.is_dir(), "{status}");
+    fs::write(worktree.join(".env"), "CACHE=1\n").unwrap();
+
+    json_output(&run(
+        &fixture.home,
+        &["accept", task, "--reason", "verified", "--include-ignored"],
+        &env,
+    ));
+    assert!(
+        !worktree.exists(),
+        "--include-ignored did not reach the pane cleanup's reclaim"
+    );
+}
+
 /// A worker that changed files and then never wrote its report is lost, but
 /// its work stays reviewable: the worktree diff is sealed with the result.
 #[test]
