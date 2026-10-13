@@ -101,6 +101,7 @@ The agent runs commands like these, which you can also run yourself:
 brgr run "Review this change" --harness local.claude-code --criterion "findings cite changed lines"
 brgr result TASK
 brgr accept TASK --reason "criteria verified"
+brgr land TASK --workspace . --reason "criteria verified"   # code: check, accept, apply
 ```
 
 ## Troubleshooting

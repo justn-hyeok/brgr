@@ -302,7 +302,8 @@ pub(crate) async fn revise_task(paths: &Paths, args: ReviseArgs, json_output: bo
         .map(|(task, attempt, _depth)| (task, attempt));
     let previous_launch: LaunchEnvelope =
         serde_json::from_slice(&fs::read(paths.launch(args.task, previous.revision))?)?;
-    let next_revision = rejected_revision(&store, &previous)?;
+    let revisable = revisable_revision(&store, &previous)?;
+    let next_revision = revisable.next_revision;
     let forward_criteria = args.forwards_criteria();
     // A brgr task worktree lies under the control home, which admission never
     // takes as a source, and is removed once its result is decided: a revision
@@ -364,6 +365,7 @@ pub(crate) async fn revise_task(paths: &Paths, args: ReviseArgs, json_output: bo
     calling.permission = replacement.permission;
     calling.deadline_seconds = Some(replacement.budget.deadline_seconds);
     config::validate_manifest_argv(&calling.argv, &activated)?;
+    revisable.acknowledge_previous(&store);
     start_task(
         paths,
         replacement,
@@ -401,23 +403,66 @@ fn ran_headless(previous: &LaunchEnvelope) -> bool {
     !previous.pane_mode && previous.source_pane.is_none()
 }
 
-fn rejected_revision(store: &Store, previous: &TaskSpec) -> Result<u32> {
-    require_owner(store, &previous.owner_id)?;
+/// What `revise` found about the result it replaces.
+struct Revisable {
+    next_revision: u32,
+    /// A failed or lost result has no decision to record; revising it is the
+    /// owner's answer, so it is acknowledged once the revision is ready.
+    unacknowledged: Option<(OwnerId, brgr_protocol::ResultId, String, u64)>,
+}
+
+impl Revisable {
+    /// Best effort: a revision already started must not fail over bookkeeping.
+    fn acknowledge_previous(&self, store: &Store) {
+        if let Some((owner, result_id, session, epoch)) = &self.unacknowledged {
+            let _ = store.acknowledge_bound(owner, *result_id, session, *epoch);
+        }
+    }
+}
+
+/// A rejected candidate can be revised, and so can a failed or lost result,
+/// which has no candidate to decide. An accepted or cancelled result cannot.
+fn revisable_revision(store: &Store, previous: &TaskSpec) -> Result<Revisable> {
+    let (session, epoch) = require_owner(store, &previous.owner_id)?;
     let result = store.latest_result(previous.task_id)?;
     if result.revision != previous.revision {
         bail!("the latest revision has not produced a terminal result");
     }
-    let decision = store
-        .decision_for_result(result.result_id)?
-        .context("the previous result has no Codex decision")?;
-    if decision.verdict != DecisionVerdict::Rejected {
-        bail!("only a rejected result can be revised");
+    let mut unacknowledged = None;
+    match result.outcome {
+        TerminalOutcome::Candidate => {
+            let decision = store
+                .decision_for_result(result.result_id)?
+                .context("the previous result has no Codex decision")?;
+            if decision.verdict != DecisionVerdict::Rejected {
+                bail!("only a rejected result can be revised");
+            }
+        }
+        TerminalOutcome::Failed | TerminalOutcome::Lost => {
+            if result.outcome == TerminalOutcome::Lost {
+                eprintln!(
+                    "brgr: warning: the previous run was lost, so its worker may still be running or may have caused external effects: {}",
+                    if result.unresolved_effects.is_empty() {
+                        "none recorded".to_owned()
+                    } else {
+                        result.unresolved_effects.join("; ")
+                    }
+                );
+            }
+            unacknowledged = Some((previous.owner_id.clone(), result.result_id, session, epoch));
+        }
+        TerminalOutcome::Cancelled => {
+            bail!("only a rejected candidate, or a failed or lost result, can be revised")
+        }
     }
     let next_revision = previous
         .revision
         .checked_add(1)
         .context("revision overflow")?;
-    Ok(next_revision)
+    Ok(Revisable {
+        next_revision,
+        unacknowledged,
+    })
 }
 
 /// When the CLI was updated (`executable_changed`, `probe_evidence_changed`)

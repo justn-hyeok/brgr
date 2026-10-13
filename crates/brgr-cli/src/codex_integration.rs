@@ -39,7 +39,7 @@ brgr hands bounded work to registered coding agents and seals what they return f
 2. Wait: do not poll. A `FROM BRGR` notice arrives in your pane when you are idle. If you must block, `brgr wait TASK` returns early with `state: awaiting_input` while the worker has a question for you.
 3. Read: `brgr result TASK`, and for code `brgr diff TASK --stat` then `brgr diff TASK`.
 4. Decide: `brgr accept TASK --reason "<why>"` or `brgr reject TASK --reason "<why>"`. To try again, `brgr revise TASK "<corrected objective>"`.
-5. Integrate: `brgr apply TASK --workspace <repo>` checks the sealed diff; add `--execute` after accepting. Use the brgr-diff-review skill for code you keep.
+5. Integrate: `brgr apply TASK --workspace <repo>` checks the sealed diff; add `--execute` after accepting, and `--3way` to merge with the repository's own changes. Or `brgr land TASK --workspace <repo> --reason "<why>"` to check, accept and apply in one step. Use the brgr-diff-review skill for code you keep.
 
 ## Notices
 

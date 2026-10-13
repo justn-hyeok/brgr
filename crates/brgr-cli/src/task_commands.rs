@@ -287,6 +287,19 @@ pub(crate) fn decide(
     reason: String,
     json_output: bool,
 ) -> Result<()> {
+    let persisted = record_verdict(paths, task, verdict, reason)?;
+    print_value(&serde_json::to_value(persisted)?, json_output);
+    Ok(())
+}
+
+/// Records the owner's accept or reject of a candidate, acknowledges it, and
+/// starts the cleanup its decision allows. Prints nothing.
+pub(crate) fn record_verdict(
+    paths: &Paths,
+    task: TaskId,
+    verdict: DecisionVerdict,
+    reason: String,
+) -> Result<Decision> {
     if reason.trim().is_empty() {
         bail!("decision reason must not be empty");
     }
@@ -329,6 +342,5 @@ pub(crate) fn decide(
         eprintln!("brgr pane cleanup remains pending: {error}");
     }
     crate::worktree_prune::reclaim_and_report(paths, task, spec.revision);
-    print_value(&serde_json::to_value(persisted)?, json_output);
-    Ok(())
+    Ok(persisted)
 }

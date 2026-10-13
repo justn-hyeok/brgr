@@ -174,7 +174,15 @@ example because parallel workers each appended to the same file, `--3way` merges
 it with the target's own changes (`git apply --3way`): a clean merge applies,
 and a conflict is written as standard markers, leaves the files unmerged, prints
 the files in `conflicts`, records `applied_with_conflicts` in the receipt, and
-exits with an error so a script cannot mistake it for success. `brgr status TASK --tree` shows time and question/approval waits;
+exits with an error so a script cannot mistake it for success.
+`brgr land TASK --workspace PATH --reason WHY` is `diff`'s natural next step: it checks
+the sealed diff against the workspace first, and only if that passes records the
+accept (which also acknowledges the result, so no `result --ack` follows) and applies
+the diff. A diff that cannot be applied records no decision; with `--3way` it
+accepts and leaves conflict markers, like `apply --3way --execute`. If the apply
+fails after the accept, the error says so and names the `apply` command to retry.
+A failed or lost result needs no decision to be revised: a revision accepts it
+and counts as the owner's acknowledgement of it. `brgr status TASK --tree` shows time and question/approval waits;
 `brgr cancel TASK --tree` records cancellation for the subtree before stopping
 its active processes. See [the completion loop plan](completion-loop-plan.md)
 for the current scope and limits.

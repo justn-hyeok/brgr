@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+- `brgr land TASK --workspace REPO --reason WHY` checks a candidate's sealed
+  diff against the repository, then accepts it and applies it. A diff that
+  cannot be applied records no decision. `--3way` is passed through. `accept`
+  and `reject` already acknowledge the result, so no `result --ack` follows.
+- A revision accepts a failed or lost result without a decision, and counts
+  as the owner's acknowledgement of it. A lost result warns that its worker may
+  still be running. An accepted or cancelled result still cannot be revised.
+- The Codex skill's integrate step mentions `land` and `--3way`; run `brgr
+  integrate codex install` to refresh an installed copy.
+
 ## 2.13.6 — 2026-10-13
 
 - `brgr status TASK --json` also puts `workspace` and `base_commit` at the top

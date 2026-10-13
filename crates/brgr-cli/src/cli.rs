@@ -128,6 +128,23 @@ pub(crate) enum Command {
         #[arg(long = "3way")]
         three_way: bool,
     },
+    /// Accept a candidate and integrate its sealed Git diff in one step.
+    ///
+    /// The diff is checked against the workspace first; if it does not apply
+    /// (and `--3way` is not given), nothing is decided or written. Then the
+    /// candidate is accepted, which also acknowledges it, and the diff applied.
+    Land {
+        task: TaskId,
+        /// Repository root to integrate into, as for `apply`.
+        #[arg(long)]
+        workspace: PathBuf,
+        /// Why the candidate is accepted.
+        #[arg(long)]
+        reason: String,
+        /// Merge with the target's own changes, as `apply --3way` does.
+        #[arg(long = "3way")]
+        three_way: bool,
+    },
     /// Register, contract-test, activate, and inspect local harnesses.
     Harness {
         #[command(subcommand)]
