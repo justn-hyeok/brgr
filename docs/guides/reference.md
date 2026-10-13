@@ -160,7 +160,7 @@ routes before worker admission.
 bounded review artifacts. `brgr artifact export TASK 0 --output PATH`
 exports a result's artifact by index, starting at 0, for binary evidence. `brgr diff TASK` prints a sealed diff and
 `brgr diff TASK --stat` lists the files it changes.
-`--observe` on `status`, `result` and `diff` reads a task owned by another session
+`status --observe` does not run the recovery that records a dead supervisor's task as lost: an observer sees what is recorded and records nothing. `--observe` on `status`, `result` and `diff` reads a task owned by another session
 (for example an orchestrator's task, reviewed by a person or another agent) without
 the owner-session check, and prints a note on stderr that it did. It only reads:
 it cannot be combined with `result --ack`, and `accept`, `reject`, `land`, `apply`
@@ -186,7 +186,9 @@ the diff. A diff that cannot be applied records no decision; with `--3way` it
 accepts and leaves conflict markers, like `apply --3way --execute`. If the apply
 fails after the accept, the error says so and names the `apply` command to retry.
 A failed or lost result needs no decision to be revised: a revision accepts it
-and counts as the owner's acknowledgement of it. `brgr status TASK --tree` shows time and question/approval waits;
+and counts as the owner's acknowledgement of it. A lost run whose worker may still
+be running is refused, with the worker's process named: a second run would share
+the task's pid record and hide the first worker from `prune`. `brgr status TASK --tree` shows time and question/approval waits;
 `brgr cancel TASK --tree` records cancellation for the subtree before stopping
 its active processes. See [the completion loop plan](completion-loop-plan.md)
 for the current scope and limits.

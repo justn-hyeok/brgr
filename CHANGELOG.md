@@ -1,5 +1,33 @@
 # Changelog
 
+## 2.13.9 — 2026-10-13
+
+- A worker's TUI gets its pane's `TERM`, `COLORTERM` and `NO_COLOR`. brgr cleared
+  the environment of the worker and passed neither, so Codex and Claude Code in
+  a brgr pane fell back to a reduced palette (no truecolor).
+- A quoted failure is cut at whichever quote marker comes first, so quoted
+  harness text containing `last stderr:` no longer leaves its start in the
+  error memo or an issue.
+- `apply --3way` and `land --3way` treat a git refusal (a file that differs from
+  the index) as a failure. They used to report a conflict, accept, and write a
+  receipt claiming conflicts when nothing had been applied.
+- A failed apply leaves a `failed` receipt that the retry its error names can
+  replace; a `started` receipt (the process died mid-apply) still blocks.
+- `status --observe` no longer runs recovery, so an observer cannot record a
+  dead supervisor's task as lost.
+- An `--include-ignored` marker names the decision it was written for and applies
+  only to that one, so a process that dies before recording the decision cannot
+  make a later decision delete ignored files.
+- `brgr revise` refuses a lost run whose worker may still be running, and names
+  its process. A second run would share the task's pid record and hide the first
+  worker from `prune`.
+- `brgr harness recertify` certifies an agent-authored harness from its own
+  manifest instead of redrafting it from help text.
+- An observation source this build does not know reads as `unavailable`. A store
+  with `harness_config` rows (v2.13.5 and later) cannot be read by v2.13.4 or
+  earlier.
+
+
 ## 2.13.8 — 2026-10-13
 
 - On macOS, `brgr run` and `brgr revise` hold an idle-sleep assertion
