@@ -1316,6 +1316,54 @@ fn a_repeated_terminal_outcome_reports_the_record_unchanged() {
     );
 }
 
+#[test]
+fn a_different_retire_outcome_on_replay_is_a_state_conflict() {
+    let root = TempDir::new().unwrap();
+    let mut store = Store::open(root.path()).unwrap();
+    let owner_id = owner();
+    head(&store, &owner_id);
+    let takeover_id = resumed_handoff(&mut store, &owner_id, FROM, TO, "handoff-1");
+    let retired = store
+        .retire_takeover(takeover_id, RetireOutcome::Completed)
+        .unwrap();
+    let events = kinds(&store, takeover_id);
+
+    assert_eq!(
+        store
+            .retire_takeover(takeover_id, RetireOutcome::Completed)
+            .unwrap(),
+        retired,
+        "the same outcome rewrote the retirement"
+    );
+    assert_eq!(
+        kinds(&store, takeover_id),
+        events,
+        "the same outcome appended a second retirement"
+    );
+
+    assert!(
+        matches!(
+            store.retire_takeover(takeover_id, RetireOutcome::Superseded),
+            Err(StoreError::TakeoverStateConflict {
+                from: TakeoverState::Retired,
+                to: TakeoverState::Retired,
+                ..
+            })
+        ),
+        "a different retire outcome was accepted"
+    );
+    assert_eq!(state(&store, takeover_id), TakeoverState::Retired);
+    assert_eq!(
+        store
+            .takeover_events(takeover_id)
+            .unwrap()
+            .last()
+            .and_then(|event| event.detail.clone()),
+        Some("completed".to_owned())
+    );
+    assert_eq!(kinds(&store, takeover_id), events);
+}
+
 /// A handoff driven all the way to `resumed`, by a decision the incoming head
 /// records at the epoch the commit raised the binding to.
 fn resumed_handoff(

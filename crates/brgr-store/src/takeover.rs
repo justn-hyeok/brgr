@@ -623,10 +623,27 @@ impl Store {
         let takeover = load_takeover(&transaction, &takeover_id.to_string())?;
         // The lost-response replay of the same outcome: the record already says
         // this, so it is reported as it stands rather than closed a second time.
-        // A different terminal outcome is still a conflict.
+        // The state alone cannot tell two retire outcomes apart; the audit
+        // event's detail is the outcome that was recorded.
         if takeover.state == to {
-            transaction.commit()?;
-            return Ok(takeover);
+            let stored_detail: Option<Option<String>> = transaction
+                .query_row(
+                    "SELECT detail FROM takeover_events
+                     WHERE takeover_id = ?1 AND kind = ?2
+                     ORDER BY seq DESC LIMIT 1",
+                    params![takeover_id.to_string(), to.as_str()],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let same_outcome = match stored_detail {
+                Some(stored) => stored.as_deref() == detail,
+                None => false,
+            };
+            if same_outcome {
+                transaction.commit()?;
+                return Ok(takeover);
+            }
+            return Err(takeover_state_conflict(takeover_id, takeover.state, to));
         }
         require_transition(takeover_id, takeover.state, to)?;
         set_state(&transaction, takeover_id, to, failure_reason)?;
