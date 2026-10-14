@@ -550,13 +550,14 @@ fn a_resumed_handoff_can_be_retired_and_a_retirement_records_its_outcome() {
         Some("completed".to_owned()),
         "the retirement outcome is not on the record"
     );
-    assert!(matches!(
-        store.retire_takeover(takeover_id, RetireOutcome::Completed),
-        Err(StoreError::TakeoverStateConflict {
-            from: TakeoverState::Retired,
-            ..
-        })
-    ));
+    // Repeating the retirement is the lost-response replay: the record is reported
+    // as it stands, not closed a second time.
+    assert_eq!(
+        store
+            .retire_takeover(takeover_id, RetireOutcome::Completed)
+            .unwrap(),
+        retired
+    );
 
     // The owner is free again once the handoff is closed.
     assert_eq!(
@@ -1149,6 +1150,142 @@ fn an_aborted_handoff_cannot_be_prepared_again_with_the_same_manifest() {
         TakeoverState::Prepared,
         "a prepared handoff refused the replay of its own manifest"
     );
+}
+
+#[test]
+fn a_repeated_terminal_outcome_reports_the_record_unchanged() {
+    let root = TempDir::new().unwrap();
+    let mut store = Store::open(root.path()).unwrap();
+    let owner_id = owner();
+    head(&store, &owner_id);
+
+    // An abort: the lost-response replay of the same outcome is answered with
+    // the record as it stands, not with a second refusal.
+    let aborted = store
+        .request_takeover(&owner_id, FROM, TO, "handoff-1")
+        .unwrap();
+    let first = store
+        .abort_takeover(aborted.takeover_id, "the owner changed their mind")
+        .unwrap();
+    assert_eq!(
+        store
+            .abort_takeover(aborted.takeover_id, "the owner changed their mind")
+            .unwrap(),
+        first,
+        "the replay rewrote the aborted record"
+    );
+    assert_eq!(
+        store
+            .abort_takeover(aborted.takeover_id, "changed my mind again")
+            .unwrap(),
+        first,
+        "re-aborting rewrote the record rather than reporting it"
+    );
+    assert_eq!(
+        kinds(&store, aborted.takeover_id),
+        vec![TakeoverState::Requested, TakeoverState::Aborted],
+        "the replay appended a second abort"
+    );
+
+    // A retirement: same, and the outcome already on the record is what stays.
+    let retired = resumed_handoff(&mut store, &owner_id, FROM, TO, "handoff-2");
+    let closed = store
+        .retire_takeover(retired, RetireOutcome::Completed)
+        .unwrap();
+    assert_eq!(
+        store
+            .retire_takeover(retired, RetireOutcome::Completed)
+            .unwrap(),
+        closed,
+        "the replay rewrote the retirement"
+    );
+    assert_eq!(closed.failure_reason, None);
+    assert_eq!(
+        store
+            .takeover_events(retired)
+            .unwrap()
+            .last()
+            .and_then(|event| event.detail.clone()),
+        Some("completed".to_owned()),
+        "the replay changed the recorded outcome"
+    );
+    assert_eq!(
+        kinds(&store, retired)
+            .iter()
+            .filter(|kind| **kind == TakeoverState::Retired)
+            .count(),
+        1,
+        "the replay retired the handoff twice"
+    );
+
+    // A failed close: replayed the same way.
+    let failed = resumed_handoff(&mut store, &owner_id, TO, FROM, "handoff-3");
+    let broken = store
+        .fail_retirement(failed, "the old pane was already gone")
+        .unwrap();
+    assert_eq!(
+        store
+            .fail_retirement(failed, "the old pane was already gone")
+            .unwrap(),
+        broken,
+        "the replay rewrote the failed close"
+    );
+    assert_eq!(
+        kinds(&store, failed)
+            .iter()
+            .filter(|kind| **kind == TakeoverState::RetireFailed)
+            .count(),
+        1
+    );
+
+    // A DIFFERENT terminal outcome is still a conflict: a closed handoff is not
+    // reopened, failed, or retold as a clean retirement.
+    assert!(
+        matches!(
+            store.fail_retirement(retired, "too late"),
+            Err(StoreError::TakeoverStateConflict {
+                from: TakeoverState::Retired,
+                ..
+            })
+        ),
+        "a retired handoff was turned into a failed close"
+    );
+    assert!(
+        matches!(
+            store.retire_takeover(failed, RetireOutcome::Completed),
+            Err(StoreError::TakeoverStateConflict {
+                from: TakeoverState::RetireFailed,
+                ..
+            })
+        ),
+        "a failed close was later turned into a clean one"
+    );
+}
+
+/// A handoff driven all the way to `resumed`, by a decision the incoming head
+/// records at the epoch the commit raised the binding to.
+fn resumed_handoff(
+    store: &mut Store,
+    owner_id: &OwnerId,
+    from: &str,
+    to: &str,
+    key: &str,
+) -> TakeoverId {
+    let (task, envelope) = candidate(store, owner_id);
+    let takeover_id = store
+        .request_takeover(owner_id, from, to, key)
+        .unwrap()
+        .takeover_id;
+    store
+        .prepare_takeover(takeover_id, &manifest(from, &task, &envelope))
+        .unwrap();
+    store.commit_takeover(takeover_id).unwrap();
+    let epoch = recorded_binding(store, owner_id).unwrap().1;
+    store
+        .record_decision(&decision(owner_id, &task, &envelope, to, epoch))
+        .unwrap();
+    assert_eq!(state(store, takeover_id), TakeoverState::Resumed);
+    takeover_id
 }
 
 #[test]

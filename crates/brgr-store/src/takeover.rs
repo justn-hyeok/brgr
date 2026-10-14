@@ -496,10 +496,16 @@ impl Store {
     /// Only a handoff that resumed may be retired, so a record cannot present a
     /// finished move the incoming head never picked up.
     ///
+    /// Repeating the same terminal outcome is not an error: the record is
+    /// reported as it stands, with the outcome already on it, and no second
+    /// event is appended. A different outcome, or a handoff that never resumed,
+    /// is a state conflict.
+    ///
     /// # Errors
     ///
     /// Returns [`StoreError::TakeoverNotFound`] or
-    /// [`StoreError::TakeoverStateConflict`] unless the takeover is `resumed`.
+    /// [`StoreError::TakeoverStateConflict`] unless the takeover is `resumed`
+    /// or already `retired`.
     pub fn retire_takeover(
         &self,
         takeover_id: TakeoverId,
@@ -521,10 +527,14 @@ impl Store {
     /// from here to `retired` — a failed close is reported, not retried into a
     /// different story.
     ///
+    /// Repeating the same terminal outcome reports the record as it stands and
+    /// appends no second event.
+    ///
     /// # Errors
     ///
     /// Returns [`StoreError::TakeoverNotFound`] or
-    /// [`StoreError::TakeoverStateConflict`] unless the takeover is `resumed`.
+    /// [`StoreError::TakeoverStateConflict`] unless the takeover is `resumed`
+    /// or already `retire_failed`.
     pub fn fail_retirement(
         &self,
         takeover_id: TakeoverId,
@@ -544,11 +554,16 @@ impl Store {
     /// After the commit there is nothing to abort: the binding is on its new
     /// session and the only way forward is roll-forward.
     ///
+    /// Repeating the same terminal outcome reports the record as it stands,
+    /// with the reason already on it, and appends no second event. Any other
+    /// terminal outcome, or a state from which no abort is allowed, is a state
+    /// conflict.
+    ///
     /// # Errors
     ///
     /// Returns [`StoreError::TakeoverNotFound`] or
     /// [`StoreError::TakeoverStateConflict`] unless the takeover is `requested`
-    /// or `prepared`.
+    /// or `prepared`, or is already `aborted`.
     pub fn abort_takeover(
         &self,
         takeover_id: TakeoverId,
@@ -557,6 +572,10 @@ impl Store {
         let reason = bounded_reason(reason)?;
         let transaction = self.write_transaction()?;
         let takeover = load_takeover(&transaction, &takeover_id.to_string())?;
+        if takeover.state == TakeoverState::Aborted {
+            transaction.commit()?;
+            return Ok(takeover);
+        }
         require_transition(takeover_id, takeover.state, TakeoverState::Aborted)?;
         set_state(
             &transaction,
@@ -587,6 +606,13 @@ impl Store {
     ) -> Result<Takeover, StoreError> {
         let transaction = self.write_transaction()?;
         let takeover = load_takeover(&transaction, &takeover_id.to_string())?;
+        // The lost-response replay of the same outcome: the record already says
+        // this, so it is reported as it stands rather than closed a second time.
+        // A different terminal outcome is still a conflict.
+        if takeover.state == to {
+            transaction.commit()?;
+            return Ok(takeover);
+        }
         require_transition(takeover_id, takeover.state, to)?;
         set_state(&transaction, takeover_id, to, failure_reason)?;
         append_event(&transaction, takeover_id, to, detail)?;
