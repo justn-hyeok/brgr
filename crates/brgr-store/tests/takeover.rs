@@ -13,7 +13,8 @@ use brgr_protocol::{
 };
 use brgr_store::{
     HandoffManifest, ManifestTask, MessageDirection, MessageDraft, MessageKind, OwnerProof,
-    RetireOutcome, Store, StoreError, TakeoverId, TakeoverState, TaskMessage, WriteOutcome,
+    PeerDraft, RetireOutcome, Store, StoreError, TakeoverId, TakeoverState, TaskMessage,
+    WriteOutcome,
 };
 use rusqlite::Connection;
 use serde_json::json;
@@ -1507,6 +1508,135 @@ fn a_stale_session_cannot_cancel_or_record_a_revision() {
         TakeoverState::Resumed,
         "the incoming session's new revision did not resume the handoff"
     );
+}
+
+/// A reply, a cancel, and a debate send are owner writes. After the commit each
+/// one, from the incoming session, is what moves the handoff to `resumed`.
+#[test]
+fn a_reply_a_cancel_and_a_debate_send_after_commit_each_resume_the_handoff() {
+    reply_after_commit_resumes();
+    cancel_after_commit_resumes();
+    debate_send_after_commit_resumes();
+}
+
+fn committed_handoff(store: &Store, owner_id: &OwnerId) -> (TakeoverId, OwnerProof, OwnerProof) {
+    let epoch = head(store, owner_id);
+    let takeover_id = prepared(store, owner_id, "handoff-1", &bare_manifest(FROM));
+    store.commit_takeover(takeover_id).unwrap();
+    let outgoing = OwnerProof::new(owner_id.clone(), FROM, epoch).unwrap();
+    let incoming = OwnerProof::new(owner_id.clone(), TO, epoch + 1).unwrap();
+    (takeover_id, outgoing, incoming)
+}
+
+fn foreign_proof(store: &Store) -> OwnerProof {
+    let foreign = OwnerId::new("codex:someone-else").unwrap();
+    store.bind_owner(&foreign, "codex:foreign", 1).unwrap();
+    OwnerProof::new(foreign, "codex:foreign", 1).unwrap()
+}
+
+fn reply_after_commit_resumes() {
+    let root = TempDir::new().unwrap();
+    let mut store = Store::open(root.path()).unwrap();
+    let owner_id = owner();
+    let (task_id, attempt_id) = running_attempt(&mut store, &owner_id);
+    let question = store
+        .post_message(&message(
+            task_id,
+            attempt_id,
+            MessageDirection::WorkerToOwner,
+            MessageKind::Question,
+            "Which branch?",
+        ))
+        .unwrap();
+    let (takeover_id, outgoing, incoming) = committed_handoff(&store, &owner_id);
+    let foreign = foreign_proof(&store);
+    let reply = MessageDraft::new(
+        task_id,
+        attempt_id,
+        MessageDirection::OwnerToWorker,
+        MessageKind::Reply,
+        "main".to_owned(),
+        Some(question.message_id),
+    );
+    assert!(matches!(
+        store.post_message_bound(&reply, &outgoing),
+        Err(StoreError::OwnerBindingConflict)
+    ));
+    assert!(matches!(
+        store.post_message_bound(&reply, &foreign),
+        Err(StoreError::OwnerBindingConflict | StoreError::OwnerProofMismatch)
+    ));
+    assert_eq!(
+        state(&store, takeover_id),
+        TakeoverState::Committed,
+        "a refused reply resumed the handoff"
+    );
+    store.post_message_bound(&reply, &incoming).unwrap();
+    assert_eq!(state(&store, takeover_id), TakeoverState::Resumed);
+}
+
+fn cancel_after_commit_resumes() {
+    let root = TempDir::new().unwrap();
+    let mut store = Store::open(root.path()).unwrap();
+    let owner_id = owner();
+    let task_id = running_attempt(&mut store, &owner_id).0;
+    let (takeover_id, outgoing, incoming) = committed_handoff(&store, &owner_id);
+    let foreign = foreign_proof(&store);
+    assert!(matches!(
+        store.record_cancellation_intents_bound(task_id, false, &outgoing),
+        Err(StoreError::OwnerBindingConflict)
+    ));
+    assert!(matches!(
+        store.record_cancellation_intents_bound(task_id, false, &foreign),
+        Err(StoreError::OwnerBindingConflict | StoreError::OwnerProofMismatch)
+    ));
+    assert_eq!(
+        state(&store, takeover_id),
+        TakeoverState::Committed,
+        "a refused cancel resumed the handoff"
+    );
+    store
+        .record_cancellation_intents_bound(task_id, false, &incoming)
+        .unwrap();
+    assert_eq!(state(&store, takeover_id), TakeoverState::Resumed);
+}
+
+fn debate_send_after_commit_resumes() {
+    let root = TempDir::new().unwrap();
+    let mut store = Store::open(root.path()).unwrap();
+    let owner_id = owner();
+    let (left, left_attempt) = running_attempt(&mut store, &owner_id);
+    let (right, _) = running_attempt(&mut store, &owner_id);
+    let group = uuid::Uuid::new_v4().to_string();
+    store.create_debate(&group, &[left, right]).unwrap();
+    let (takeover_id, outgoing, incoming) = committed_handoff(&store, &owner_id);
+    let foreign = foreign_proof(&store);
+    let send = PeerDraft {
+        id: uuid::Uuid::new_v4().to_string(),
+        group,
+        from: left,
+        to: right,
+        kind: MessageKind::Question,
+        body: "What is your approach?".to_owned(),
+        reply_to: None,
+    };
+    assert!(matches!(
+        store.post_peer_message_from_bound(&send, left_attempt, &outgoing),
+        Err(StoreError::OwnerBindingConflict)
+    ));
+    assert!(matches!(
+        store.post_peer_message_from_bound(&send, left_attempt, &foreign),
+        Err(StoreError::OwnerBindingConflict | StoreError::OwnerProofMismatch)
+    ));
+    assert_eq!(
+        state(&store, takeover_id),
+        TakeoverState::Committed,
+        "a refused debate send resumed the handoff"
+    );
+    store
+        .post_peer_message_from_bound(&send, left_attempt, &incoming)
+        .unwrap();
+    assert_eq!(state(&store, takeover_id), TakeoverState::Resumed);
 }
 
 /// The schema text as it stood before the handoff tables existed, verbatim.

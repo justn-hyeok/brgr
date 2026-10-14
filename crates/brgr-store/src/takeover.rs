@@ -834,6 +834,14 @@ pub(crate) fn assert_owner_proof(
         &proof.owner_id,
         Some(&proof.session_id),
         Some(proof.binding_epoch),
+    )?;
+    // Every bound write proves the head is acting, so `resumed` is derived here
+    // once rather than at each call site. A later explicit call is a no-op.
+    note_owner_action(
+        transaction,
+        &proof.owner_id,
+        &proof.session_id,
+        proof.binding_epoch,
     )
 }
 
