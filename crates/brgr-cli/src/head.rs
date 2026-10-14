@@ -7,7 +7,7 @@ use std::env;
 
 use anyhow::{Context as _, Result, bail};
 use brgr_protocol::{OwnerId, TaskId};
-use brgr_store::{HandoffManifest, RetireOutcome, Store, Takeover, TakeoverId};
+use brgr_store::{HandoffManifest, RetireOutcome, Store, Takeover, TakeoverId, TakeoverState};
 use clap::Subcommand;
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -126,7 +126,16 @@ pub(crate) fn run(paths: &Paths, command: HeadCommand, json_output: bool) -> Res
                         "state": takeover.state.as_str(),
                         "from_session": takeover.from_session,
                         "to_session": takeover.to_session,
-                        "epoch": takeover.from_epoch,
+                        "from_epoch": takeover.from_epoch,
+                        "committed_epoch": match takeover.state {
+                            TakeoverState::Requested
+                            | TakeoverState::Prepared
+                            | TakeoverState::Aborted => None,
+                            TakeoverState::Committed
+                            | TakeoverState::Resumed
+                            | TakeoverState::Retired
+                            | TakeoverState::RetireFailed => Some(takeover.committed_epoch()),
+                        },
                         "updated_at": takeover.updated_at,
                     })).collect::<Vec<_>>(),
                 }),

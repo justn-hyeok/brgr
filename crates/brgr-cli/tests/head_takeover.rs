@@ -310,7 +310,11 @@ fn head_mutations_refuse_a_mismatched_owner_id() {
         );
         assert_eq!(
             takeover_state(&home, &takeover_id),
-            if action == "retire" { "resumed" } else { "prepared" }
+            if action == "retire" {
+                "resumed"
+            } else {
+                "prepared"
+            }
         );
     }
 }
@@ -420,7 +424,11 @@ fn bind_during_open_takeover_is_refused_without_changing_state() {
     assert_eq!(after.unwrap().0, "session-head");
     assert_eq!(takeover_state(&home, &takeover_id), "prepared");
     let committed = run(&home, &["head", "commit", &takeover_id], &incoming_env());
-    assert!(committed.status.success(), "{}", String::from_utf8_lossy(&committed.stderr));
+    assert!(
+        committed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&committed.stderr)
+    );
     assert_eq!(takeover_state(&home, &takeover_id), "committed");
 }
 
@@ -787,6 +795,31 @@ fn head_status_lists_the_owners_takeovers_newest_first() {
     assert_eq!(listed[1]["state"], "aborted");
     assert_eq!(listed[0]["from_session"], "session-head");
     assert_eq!(listed[0]["to_session"], "session-incoming");
-    assert!(listed[0]["epoch"].as_u64().is_some() || listed[0]["from_epoch"].as_u64().is_some());
+    assert!(listed[0]["from_epoch"].as_u64().is_some());
+    assert_eq!(listed[0]["committed_epoch"], Value::Null);
+    assert!(listed[0].get("epoch").is_none());
     assert!(listed[0]["updated_at"].as_i64().is_some());
+}
+
+#[test]
+fn head_status_reports_the_epoch_after_commit() {
+    let (_temp, home, workspace) = gjc_home();
+    let task_id = start_task(&home, &workspace);
+    let takeover_id = request_and_prepare(&home, &task_id, "status-committed-epoch");
+    let from_epoch = brgr_store::Store::open(home.join("store"))
+        .unwrap()
+        .takeover(takeover_id.parse().unwrap())
+        .unwrap()
+        .unwrap()
+        .from_epoch;
+    json_output(&run(
+        &home,
+        &["head", "commit", &takeover_id],
+        &incoming_env(),
+    ));
+    let status = json_output(&run(&home, &["head", "status", &task_id], &incoming_env()));
+    let takeover = &status["takeovers"][0];
+    assert_eq!(takeover["from_epoch"], from_epoch);
+    assert_eq!(takeover["committed_epoch"], from_epoch + 1);
+    assert!(takeover.get("epoch").is_none());
 }
