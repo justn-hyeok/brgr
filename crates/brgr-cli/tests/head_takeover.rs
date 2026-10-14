@@ -151,6 +151,233 @@ fn manifest_count(home: &Path) -> i64 {
         .unwrap()
 }
 
+fn takeover_state(home: &Path, takeover_id: &str) -> String {
+    let store = brgr_store::Store::open(home.join("store")).unwrap();
+    store
+        .takeover(takeover_id.parse().unwrap())
+        .unwrap()
+        .unwrap()
+        .state
+        .as_str()
+        .to_owned()
+}
+
+fn takeover_epoch(home: &Path, takeover_id: &str) -> u64 {
+    let store = brgr_store::Store::open(home.join("store")).unwrap();
+    store
+        .takeover(takeover_id.parse().unwrap())
+        .unwrap()
+        .unwrap()
+        .committed_epoch()
+}
+
+fn incoming_env() -> [(&'static str, &'static str); 2] {
+    [
+        ("BRGR_OWNER_ID", "codex:head-takeover"),
+        ("BRGR_SESSION_ID", "session-incoming"),
+    ]
+}
+
+fn unrelated_env() -> [(&'static str, &'static str); 2] {
+    [
+        ("BRGR_OWNER_ID", "codex:head-takeover"),
+        ("BRGR_SESSION_ID", "session-unrelated"),
+    ]
+}
+
+fn request_and_prepare(home: &Path, task_id: &str, key: &str) -> String {
+    let requested = json_output(&run(
+        home,
+        &[
+            "head",
+            "request",
+            task_id,
+            "--to",
+            "session-incoming",
+            "--key",
+            key,
+        ],
+        &head_env(),
+    ));
+    let takeover_id = requested["takeover_id"].as_str().unwrap().to_owned();
+    json_output(&run(
+        home,
+        &[
+            "head",
+            "prepare",
+            &takeover_id,
+            "--goal",
+            "Finish the handoff",
+        ],
+        &head_env(),
+    ));
+    takeover_id
+}
+
+#[test]
+fn head_takeover_resumes_retires_and_refuses_the_stale_outgoing_session() {
+    let (_temp, home, workspace) = gjc_home();
+    let task_id = start_task(&home, &workspace);
+    let takeover_id = request_and_prepare(&home, &task_id, "takeover-e2e");
+    let shown = json_output(&run(
+        &home,
+        &["head", "show", &takeover_id],
+        &incoming_env(),
+    ));
+    assert_eq!(shown["takeover"]["state"], "prepared");
+    let committed = json_output(&run(
+        &home,
+        &["head", "commit", &takeover_id],
+        &incoming_env(),
+    ));
+    assert_eq!(committed["takeover"]["state"], "committed");
+    assert!(committed["previous_session_stale"].as_bool().unwrap());
+    assert_eq!(takeover_state(&home, &takeover_id), "committed");
+    json_output(&run(
+        &home,
+        &["accept", &task_id, "--reason", "incoming head acted"],
+        &incoming_env(),
+    ));
+    assert_eq!(takeover_state(&home, &takeover_id), "resumed");
+    let retired = json_output(&run(
+        &home,
+        &["head", "retire", &takeover_id],
+        &incoming_env(),
+    ));
+    assert_eq!(retired["state"], "retired");
+    let stale = run(&home, &["result", &task_id, "--ack"], &head_env());
+    assert!(!stale.status.success());
+    assert!(String::from_utf8_lossy(&stale.stderr).contains("bound to another session"));
+}
+
+#[test]
+fn head_commit_abort_and_retire_refuse_wrong_callers_without_writes() {
+    let (_temp, home, workspace) = gjc_home();
+    let task_id = start_task(&home, &workspace);
+    let takeover_id = request_and_prepare(&home, &task_id, "wrong-callers");
+    let outgoing_commit = run(&home, &["head", "commit", &takeover_id], &head_env());
+    assert!(!outgoing_commit.status.success());
+    assert!(
+        String::from_utf8_lossy(&outgoing_commit.stderr)
+            .contains("only the incoming session may commit")
+    );
+    assert_eq!(takeover_state(&home, &takeover_id), "prepared");
+    let outgoing_retire = run(&home, &["head", "retire", &takeover_id], &head_env());
+    assert!(!outgoing_retire.status.success());
+    assert_eq!(takeover_state(&home, &takeover_id), "prepared");
+    let unrelated_abort = run(
+        &home,
+        &["head", "abort", &takeover_id, "--reason", "not my handoff"],
+        &unrelated_env(),
+    );
+    assert!(!unrelated_abort.status.success());
+    assert_eq!(takeover_state(&home, &takeover_id), "prepared");
+}
+
+#[test]
+fn head_commit_is_idempotent_abort_after_commit_is_refused_and_retirement_requires_resumed() {
+    let (_temp, home, workspace) = gjc_home();
+    let task_id = start_task(&home, &workspace);
+    let takeover_id = request_and_prepare(&home, &task_id, "transitions");
+    let first = json_output(&run(
+        &home,
+        &["head", "commit", &takeover_id],
+        &incoming_env(),
+    ));
+    let epoch = takeover_epoch(&home, &takeover_id);
+    let second = json_output(&run(
+        &home,
+        &["head", "commit", &takeover_id],
+        &incoming_env(),
+    ));
+    assert_eq!(
+        first["takeover"]["takeover_id"],
+        second["takeover"]["takeover_id"]
+    );
+    assert_eq!(takeover_epoch(&home, &takeover_id), epoch);
+    let abort = run(
+        &home,
+        &["head", "abort", &takeover_id, "--reason", "too late"],
+        &incoming_env(),
+    );
+    assert!(!abort.status.success());
+    assert_eq!(takeover_state(&home, &takeover_id), "committed");
+    let retire = run(&home, &["head", "retire", &takeover_id], &incoming_env());
+    assert!(!retire.status.success());
+    assert_eq!(takeover_state(&home, &takeover_id), "committed");
+    json_output(&run(
+        &home,
+        &["accept", &task_id, "--reason", "resumed"],
+        &incoming_env(),
+    ));
+    let failed = json_output(&run(
+        &home,
+        &["head", "retire", &takeover_id, "--failed", "cleanup failed"],
+        &incoming_env(),
+    ));
+    assert_eq!(failed["state"], "retire_failed");
+}
+
+#[test]
+fn head_request_replay_after_commit_returns_the_existing_record() {
+    let (_temp, home, workspace) = gjc_home();
+    let task_id = start_task(&home, &workspace);
+    let takeover_id = request_and_prepare(&home, &task_id, "post-commit-replay");
+    json_output(&run(
+        &home,
+        &["head", "commit", &takeover_id],
+        &incoming_env(),
+    ));
+    let replay = json_output(&run(
+        &home,
+        &[
+            "head",
+            "request",
+            &task_id,
+            "--to",
+            "session-incoming",
+            "--key",
+            "post-commit-replay",
+        ],
+        &head_env(),
+    ));
+    assert_eq!(replay["takeover_id"], takeover_id);
+    assert_eq!(replay["state"], "committed");
+    assert_eq!(takeover_count(&home), 1);
+}
+
+#[test]
+fn bind_during_open_takeover_makes_commit_fail_without_changing_state() {
+    let (_temp, home, workspace) = gjc_home();
+    let task_id = start_task(&home, &workspace);
+    let takeover_id = request_and_prepare(&home, &task_id, "binding-conflict");
+    let third_env = [
+        ("BRGR_OWNER_ID", "codex:head-takeover"),
+        ("BRGR_SESSION_ID", "session-third"),
+    ];
+    json_output(&run(&home, &["bind", &task_id], &third_env));
+    let committed = run(&home, &["head", "commit", &takeover_id], &incoming_env());
+    assert!(!committed.status.success());
+    assert!(
+        String::from_utf8_lossy(&committed.stderr)
+            .contains("owner binding moved after it was requested")
+    );
+    assert_eq!(takeover_state(&home, &takeover_id), "prepared");
+}
+
+#[test]
+fn head_commit_alone_never_marks_takeover_resumed() {
+    let (_temp, home, workspace) = gjc_home();
+    let task_id = start_task(&home, &workspace);
+    let takeover_id = request_and_prepare(&home, &task_id, "commit-is-not-resume");
+    json_output(&run(
+        &home,
+        &["head", "commit", &takeover_id],
+        &incoming_env(),
+    ));
+    assert_eq!(takeover_state(&home, &takeover_id), "committed");
+}
+
 #[test]
 fn head_request_by_the_current_head_returns_the_same_record_for_the_same_key() {
     let (_temp, home, workspace) = gjc_home();

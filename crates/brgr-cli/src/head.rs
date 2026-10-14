@@ -7,7 +7,7 @@ use std::env;
 
 use anyhow::{Context as _, Result, bail};
 use brgr_protocol::{OwnerId, TaskId};
-use brgr_store::{HandoffManifest, Store, Takeover, TakeoverId};
+use brgr_store::{HandoffManifest, RetireOutcome, Store, Takeover, TakeoverId};
 use clap::Subcommand;
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -40,17 +40,27 @@ pub(crate) enum HeadCommand {
     Show { takeover: TakeoverId },
     /// List this owner's handoffs, newest first.
     Status { task: TaskId },
+    /// Transfer the owner binding to the incoming session.
+    Commit { takeover: TakeoverId },
+    /// Stop a takeover before the binding moves.
+    Abort {
+        takeover: TakeoverId,
+        #[arg(long)]
+        reason: String,
+    },
+    /// Close a resumed takeover, or record why closing failed.
+    Retire {
+        takeover: TakeoverId,
+        #[arg(long)]
+        failed: Option<String>,
+    },
 }
 
 pub(crate) fn run(paths: &Paths, command: HeadCommand, json_output: bool) -> Result<()> {
     let store = Store::open(&paths.store)?;
     match command {
         HeadCommand::Request { task, to, key } => {
-            let owner_id = store.task(task)?.owner_id;
-            let (session, _) = require_owner(&store, &owner_id)?;
-            let key = key.unwrap_or_else(|| Uuid::new_v4().to_string());
-            let takeover = store.request_takeover(&owner_id, &session, &to, &key)?;
-            print_value(&takeover_json(&takeover), json_output);
+            request(&store, task, &to, key, json_output)?;
         }
         HeadCommand::Prepare {
             takeover,
@@ -123,7 +133,89 @@ pub(crate) fn run(paths: &Paths, command: HeadCommand, json_output: bool) -> Res
                 json_output,
             );
         }
+        HeadCommand::Commit { takeover } => {
+            commit(&store, takeover, json_output)?;
+        }
+        HeadCommand::Abort { takeover, reason } => {
+            abort(&store, takeover, &reason, json_output)?;
+        }
+        HeadCommand::Retire { takeover, failed } => {
+            retire(&store, takeover, failed.as_deref(), json_output)?;
+        }
     }
+    Ok(())
+}
+
+fn request(
+    store: &Store,
+    task: TaskId,
+    to: &str,
+    key: Option<String>,
+    json_output: bool,
+) -> Result<()> {
+    let owner_id = store.task(task)?.owner_id;
+    let key = key.unwrap_or_else(|| Uuid::new_v4().to_string());
+    if let Some(session) = crate::current_session()?
+        && let Some(existing) = store
+            .owner_takeovers(&owner_id)?
+            .into_iter()
+            .find(|takeover| takeover.idempotency_key == key && takeover.from_session == session)
+    {
+        print_value(&takeover_json(&existing), json_output);
+        return Ok(());
+    }
+    let (session, _) = require_owner(store, &owner_id)?;
+    let takeover = store.request_takeover(&owner_id, &session, to, &key)?;
+    print_value(&takeover_json(&takeover), json_output);
+    Ok(())
+}
+
+fn commit(store: &Store, takeover: TakeoverId, json_output: bool) -> Result<()> {
+    let record = load_takeover(store, takeover)?;
+    let session = crate::current_session()?.context("a Codex session is required")?;
+    if record.to_session != session {
+        bail!("only the incoming session may commit");
+    }
+    let committed = store.commit_takeover(takeover)?;
+    print_value(
+        &json!({
+            "takeover": takeover_json(&committed),
+            "binding_epoch": committed.committed_epoch(),
+            "previous_session_stale": true,
+        }),
+        json_output,
+    );
+    Ok(())
+}
+
+fn abort(store: &Store, takeover: TakeoverId, reason: &str, json_output: bool) -> Result<()> {
+    let record = load_takeover(store, takeover)?;
+    let session = crate::current_session()?.context("a Codex session is required")?;
+    if session != record.from_session && session != record.to_session {
+        bail!("only the outgoing or incoming session may abort");
+    }
+    let aborted = store.abort_takeover(takeover, reason)?;
+    print_value(&takeover_json(&aborted), json_output);
+    Ok(())
+}
+
+fn retire(
+    store: &Store,
+    takeover: TakeoverId,
+    failed: Option<&str>,
+    json_output: bool,
+) -> Result<()> {
+    let record = load_takeover(store, takeover)?;
+    let session = crate::current_session()?.context("a Codex session is required")?;
+    if session != record.to_session {
+        bail!("only the incoming session may retire");
+    }
+    let retired = if let Some(reason) = failed {
+        store.fail_retirement(takeover, reason)?
+    } else {
+        store.retire_takeover(takeover, RetireOutcome::Completed)?
+    };
+    print_value(&takeover_json(&retired), json_output);
     Ok(())
 }
 
