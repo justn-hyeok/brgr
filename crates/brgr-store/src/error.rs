@@ -139,7 +139,7 @@ pub enum StoreError {
     TakeoverNotFound(TakeoverId),
     #[error("stored takeover state is invalid: {0}")]
     InvalidTakeoverState(String),
-    #[error("takeover {takeover_id:?} cannot go from {from:?} to {to:?}")]
+    #[error("takeover {takeover_id} cannot go from {} to {}", from.as_str(), to.as_str())]
     TakeoverStateConflict {
         takeover_id: TakeoverId,
         from: TakeoverState,

@@ -305,6 +305,11 @@ fn head_commit_is_idempotent_abort_after_commit_is_refused_and_retirement_requir
     let retire = run(&home, &["head", "retire", &takeover_id], &incoming_env());
     assert!(!retire.status.success());
     assert_eq!(takeover_state(&home, &takeover_id), "committed");
+    let message = String::from_utf8_lossy(&retire.stderr);
+    assert!(
+        message.contains("cannot go from committed to retired") && !message.contains("TakeoverId("),
+        "the refusal should name the states and print the id plainly: {message}"
+    );
     json_output(&run(
         &home,
         &["accept", &task_id, "--reason", "resumed"],
