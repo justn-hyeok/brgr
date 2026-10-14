@@ -3,7 +3,11 @@ use rusqlite::{OptionalExtension as _, Transaction, params};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use super::{Store, StoreError, contention::retry_busy};
+use super::{
+    OwnerProof, Store, StoreError,
+    contention::retry_busy,
+    takeover::{assert_owner_proof, assert_task_owner},
+};
 
 const MAX_BODY_BYTES: usize = 8 * 1024;
 
@@ -190,8 +194,39 @@ impl Store {
     /// Returns an error for invalid content, stale attempts, mismatched replies,
     /// conflicting replay, or database failure.
     pub fn post_message(&self, draft: &MessageDraft) -> Result<TaskMessage, StoreError> {
+        self.post_message_with_proof(draft, None)
+    }
+
+    /// Inserts an owner message only while the caller's session and epoch are
+    /// still the owner's binding, and only for a task that owner holds.
+    ///
+    /// The worker side has no such proof — it is identified by its attempt — so
+    /// the guard is one-directional: a session that used to be the head cannot
+    /// answer a worker on behalf of the owner after the head has moved.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a stale session, a task owned by somebody else, a
+    /// draft that is not owner-to-worker, and otherwise the same errors as
+    /// [`Self::post_message`].
+    pub fn post_message_bound(
+        &self,
+        draft: &MessageDraft,
+        proof: &OwnerProof,
+    ) -> Result<TaskMessage, StoreError> {
+        self.post_message_with_proof(draft, Some(proof))
+    }
+
+    fn post_message_with_proof(
+        &self,
+        draft: &MessageDraft,
+        proof: Option<&OwnerProof>,
+    ) -> Result<TaskMessage, StoreError> {
         validate_draft(draft)?;
         let transaction = self.write_transaction()?;
+        if let Some(proof) = proof {
+            assert_owner_message(&transaction, proof, draft)?;
+        }
         if let Some(existing) = load_message(&transaction, &draft.message_id)? {
             if message_matches_draft(&existing, draft) {
                 return Ok(existing);
@@ -294,6 +329,46 @@ impl Store {
         Ok(())
     }
 
+    /// Acknowledges a worker message only while the caller's session and epoch
+    /// are still the owner's binding.
+    ///
+    /// One transaction, so a message cannot be marked read by a session that
+    /// stopped being the head between the check and the write.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a stale session, a task owned by somebody else, a
+    /// message the owner did not receive, or a database failure.
+    pub fn acknowledge_message_bound(
+        &self,
+        task_id: TaskId,
+        attempt_id: AttemptId,
+        direction: MessageDirection,
+        message_id: &str,
+        proof: &OwnerProof,
+    ) -> Result<(), StoreError> {
+        if direction != MessageDirection::WorkerToOwner {
+            return Err(StoreError::InvalidTaskMessage);
+        }
+        let transaction = self.write_transaction()?;
+        assert_task_owner(&transaction, proof, task_id)?;
+        let changed = transaction.execute(
+            "UPDATE task_messages SET acknowledged = 1 WHERE message_id = ?1
+             AND task_id = ?2 AND attempt_id = ?3 AND direction = ?4",
+            params![
+                message_id,
+                task_id.to_string(),
+                attempt_id.to_string(),
+                direction.as_str()
+            ],
+        )?;
+        if changed != 1 {
+            return Err(StoreError::TaskMessageNotFound(message_id.to_owned()));
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
     /// Withdraws a question the worker itself sent, once the thing it asked
     /// about resolved without an answer: a pane-mode agent that someone
     /// unblocked in its pane. A withdrawn question no longer holds the result
@@ -387,6 +462,31 @@ impl Store {
         ids.map(|id| load_message(&self.connection, &id?)?.ok_or(StoreError::InvalidTaskMessage))
             .collect()
     }
+}
+
+/// Asserts that an owner may speak for this task right now: the proof is the
+/// current binding, and the task belongs to that owner.
+fn assert_owner_message(
+    transaction: &Transaction<'_>,
+    proof: &OwnerProof,
+    draft: &MessageDraft,
+) -> Result<(), StoreError> {
+    if draft.direction != MessageDirection::OwnerToWorker {
+        return Err(StoreError::InvalidTaskMessage);
+    }
+    let owner_id: Option<String> = transaction
+        .query_row(
+            "SELECT t.owner_id FROM attempts a
+             JOIN tasks t ON t.task_id = a.task_id AND t.revision = a.revision
+             WHERE a.attempt_id = ?1",
+            [draft.attempt_id.to_string()],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if owner_id.as_deref() != Some(proof.owner_id.as_str()) {
+        return Err(StoreError::OwnerProofMismatch);
+    }
+    assert_owner_proof(transaction, proof)
 }
 
 fn validate_draft(draft: &MessageDraft) -> Result<(), StoreError> {

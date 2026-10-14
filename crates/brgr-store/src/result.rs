@@ -7,7 +7,7 @@ use rusqlite::{OptionalExtension as _, params};
 
 use super::{
     Store, StoreError, WriteOutcome, contention::retry_busy, owner::assert_owner_binding,
-    record_decision_in_transaction,
+    record_decision_in_transaction, takeover::note_owner_action,
 };
 
 /// Whether a task revision is finished with, as far as its checkout goes.
@@ -193,7 +193,8 @@ impl Store {
     }
 
     /// Acknowledges an inbox item only while the caller's session epoch is
-    /// still current. The binding check and acknowledgment are one transaction.
+    /// still current. The binding check, the acknowledgement, and the handoff
+    /// state this implies are one transaction.
     ///
     /// # Errors
     ///
@@ -212,6 +213,8 @@ impl Store {
             Some(session_id),
             Some(binding_epoch),
         )?;
+        // The second owner-side action a committed handoff waits to observe.
+        note_owner_action(&transaction, owner_id, session_id, binding_epoch)?;
         let changed = transaction.execute(
             "UPDATE inbox_items SET acknowledged = 1 WHERE owner_id = ?1 AND result_id = ?2",
             params![owner_id.as_str(), result_id.to_string()],

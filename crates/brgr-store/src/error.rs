@@ -4,6 +4,8 @@ use std::path::PathBuf;
 
 use brgr_protocol::{AttemptId, AttemptState, OwnerId, ResultId, TaskId};
 
+use crate::takeover::{TakeoverId, TakeoverState};
+
 /// Failures surfaced by durable metadata and artifact operations.
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -129,6 +131,34 @@ pub enum StoreError {
     OwnerBindingConflict,
     #[error("owner {0} has no bound Codex session")]
     OwnerUnbound(OwnerId),
+    #[error("the owner session proof does not belong to this task or message")]
+    OwnerProofMismatch,
+    #[error("stored takeover id is invalid: {0}")]
+    InvalidTakeoverId(String),
+    #[error("takeover {0} does not exist")]
+    TakeoverNotFound(TakeoverId),
+    #[error("stored takeover state is invalid: {0}")]
+    InvalidTakeoverState(String),
+    #[error("takeover {takeover_id:?} cannot go from {from:?} to {to:?}")]
+    TakeoverStateConflict {
+        takeover_id: TakeoverId,
+        from: TakeoverState,
+        to: TakeoverState,
+    },
+    #[error("takeover {0} is stale: the owner binding moved after it was requested")]
+    TakeoverBindingConflict(TakeoverId),
+    #[error("takeover idempotency key {0} was replayed for a different handoff")]
+    TakeoverIdempotencyConflict(String),
+    #[error("owner already has a non-terminal takeover: {0}")]
+    TakeoverInProgress(TakeoverId),
+    #[error("takeover request is invalid: {0}")]
+    InvalidTakeoverRequest(String),
+    #[error("handoff manifest is invalid: {0}")]
+    InvalidHandoffManifest(&'static str),
+    #[error("takeover {0} already stores a different manifest")]
+    HandoffManifestConflict(TakeoverId),
+    #[error("stored handoff manifest does not match its recorded digest")]
+    HandoffManifestIntegrity,
     #[error("artifact limit must be positive")]
     InvalidArtifactLimit,
     #[error("artifact media type must not be empty")]
