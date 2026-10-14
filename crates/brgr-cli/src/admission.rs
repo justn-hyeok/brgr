@@ -598,6 +598,76 @@ fn bind_owner_session(store: &Store, owner: &OwnerId, session: Option<&str>) -> 
     Ok(())
 }
 
+/// The owner proof `start_task` writes task admission with: the session that
+/// just passed `bind_owner_session`, at the binding epoch it read, so the
+/// guarded `record_task`/`record_child_task` variants re-assert the same
+/// binding inside the transaction that records the revision. `None` for a
+/// session-less run or an owner that no cell has bound yet: nothing can be
+/// taken over, so the plain unguarded write is the worker-safe path.
+fn admission_proof(
+    store: &Store,
+    owner_id: &OwnerId,
+    session: Option<&str>,
+) -> Result<Option<brgr_store::OwnerProof>> {
+    let Some(session_id) = session else {
+        return Ok(None);
+    };
+    let Some((bound, binding_epoch)) = store.owner_binding(owner_id)? else {
+        return Ok(None);
+    };
+    if bound != session_id {
+        // `bind_owner_session` already refuses a moved binding; keep the
+        // unguarded write here only for a defensive no-op.
+        return Ok(None);
+    }
+    Ok(Some(brgr_store::OwnerProof::new(
+        owner_id.clone(),
+        session_id,
+        binding_epoch,
+    )?))
+}
+
+/// Records the task (or, with a parent, its delegation edge) with the proof
+/// `start_task` read right after its binding check. Within one transaction the
+/// guarded store variants re-assert that the session still holds the head, so
+/// a takeover landing while the workspace was being prepared writes nothing.
+/// A proof is `None` only when the owner had no binding at all — the
+/// worker-safe, nothing-to-take-over path — which keeps the unguarded writes.
+fn record_admission(
+    store: &mut Store,
+    launch: &LaunchEnvelope,
+    request_digest_text: &str,
+    parent: Option<(TaskId, AttemptId)>,
+    proof: Option<&brgr_store::OwnerProof>,
+) -> Result<()> {
+    match (parent, proof) {
+        (Some((parent_task, parent_attempt)), Some(proof)) => {
+            store.record_child_task_bound(
+                &launch.spec,
+                request_digest_text,
+                parent_task,
+                parent_attempt,
+                proof,
+            )?;
+        }
+        (Some((parent_task, parent_attempt)), None) => {
+            store.record_child_task(
+                &launch.spec,
+                request_digest_text,
+                parent_task,
+                parent_attempt,
+            )?;
+        }
+        (None, Some(proof)) => {
+            store.record_task_bound(&launch.spec, request_digest_text, proof)?;
+        }
+        (None, None) => {
+            store.record_task(&launch.spec, request_digest_text)?;
+        }
+    }
+    Ok(())
+}
+
 /// Pane mode puts the agent's own TUI in the split pane, so brgr's worker
 /// pane would only be a second, empty one.
 /// Refusals that need the resolved source and the activated harness.
@@ -673,6 +743,12 @@ pub(crate) async fn start_task(
     }
     let session = current_session()?;
     bind_owner_session(&store, &spec.owner_id, session.as_deref())?;
+    // The proof this session will hand to the guarded admission write: read
+    // right after the binding was checked, so the write that records the task
+    // re-checks it in the same transaction and refuses a takeover that lands
+    // while the workspace is being prepared. An unbound owner has nothing to
+    // take over and keeps the plain write.
+    let proof = admission_proof(&store, &spec.owner_id, session.as_deref())?;
     let task_id = spec.task_id;
     let harness_id = spec.route.harness_id.clone();
     let workspace = prepare_task_workspace(paths, &mut spec, &activated.adapter, &options)?;
@@ -704,14 +780,21 @@ pub(crate) async fn start_task(
         store.record_task_checkout(task_id, launch.spec.revision, &primary.to_string_lossy())?;
     }
     if let Some((parent_task, parent_attempt)) = options.parent {
-        store.record_child_task(
-            &launch.spec,
+        record_admission(
+            &mut store,
+            &launch,
             &request_digest_text,
-            parent_task,
-            parent_attempt,
+            Some((parent_task, parent_attempt)),
+            proof.as_ref(),
         )?;
     } else {
-        store.record_task(&launch.spec, &request_digest_text)?;
+        record_admission(
+            &mut store,
+            &launch,
+            &request_digest_text,
+            None,
+            proof.as_ref(),
+        )?;
     }
     drop(admission);
     // Claude Code has no hook that binds its pane, and the detached dispatcher
