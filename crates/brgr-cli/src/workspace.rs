@@ -595,6 +595,11 @@ pub(crate) fn prepare_workspace(
         std::process::exit(78);
     }
     let relative = source.strip_prefix(&root).unwrap_or(Path::new(""));
+    // `join("")` appends a separator, and OpenCode compares the workspace as an
+    // exact string, so a root-level source must stay the bare worktree path.
+    if relative.as_os_str().is_empty() {
+        return Ok(target);
+    }
     Ok(target.join(relative))
 }
 
@@ -865,6 +870,29 @@ mod tests {
         assert_eq!(
             fs::read_to_string(repo.join("user-note.txt")).unwrap(),
             "keep me\n"
+        );
+    }
+
+    #[test]
+    fn repository_root_workspace_has_no_trailing_separator() {
+        let temp = TempDir::new().unwrap();
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        seed_repo(&repo);
+        let worktrees = temp.path().join("worktrees");
+        let workspace = prepare_workspace(
+            &worktrees,
+            &repo,
+            task("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"),
+            1,
+            "process/v1",
+            false,
+        )
+        .unwrap();
+        assert!(
+            !workspace.to_str().unwrap().ends_with('/'),
+            "workspace {} must not end with a separator",
+            workspace.display()
         );
     }
 
