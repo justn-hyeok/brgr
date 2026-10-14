@@ -352,7 +352,7 @@ fn head_request_replay_after_commit_returns_the_existing_record() {
 }
 
 #[test]
-fn bind_during_open_takeover_makes_commit_fail_without_changing_state() {
+fn bind_during_open_takeover_is_refused_without_changing_state() {
     let (_temp, home, workspace) = gjc_home();
     let task_id = start_task(&home, &workspace);
     let takeover_id = request_and_prepare(&home, &task_id, "binding-conflict");
@@ -360,14 +360,53 @@ fn bind_during_open_takeover_makes_commit_fail_without_changing_state() {
         ("BRGR_OWNER_ID", "codex:head-takeover"),
         ("BRGR_SESSION_ID", "session-third"),
     ];
-    json_output(&run(&home, &["bind", &task_id], &third_env));
-    let committed = run(&home, &["head", "commit", &takeover_id], &incoming_env());
-    assert!(!committed.status.success());
-    assert!(
-        String::from_utf8_lossy(&committed.stderr)
-            .contains("owner binding moved after it was requested")
-    );
+    let owner_id = brgr_protocol::OwnerId::new("codex:head-takeover").unwrap();
+    let before = brgr_store::Store::open(home.join("store"))
+        .unwrap()
+        .owner_binding(&owner_id)
+        .unwrap();
+    let refused = run(&home, &["bind", &task_id], &third_env);
+    assert!(!refused.status.success());
+    let error = String::from_utf8_lossy(&refused.stderr);
+    assert!(error.contains(&takeover_id), "{error}");
+    assert!(error.contains("prepared"), "{error}");
+    assert!(error.contains("finish or abort"), "{error}");
+    let after = brgr_store::Store::open(home.join("store"))
+        .unwrap()
+        .owner_binding(&owner_id)
+        .unwrap();
+    assert_eq!(after, before);
+    assert_eq!(after.unwrap().0, "session-head");
     assert_eq!(takeover_state(&home, &takeover_id), "prepared");
+    let committed = run(&home, &["head", "commit", &takeover_id], &incoming_env());
+    assert!(committed.status.success(), "{}", String::from_utf8_lossy(&committed.stderr));
+    assert_eq!(takeover_state(&home, &takeover_id), "committed");
+}
+
+#[test]
+fn bind_is_allowed_again_after_takeover_is_terminal() {
+    let (_temp, home, workspace) = gjc_home();
+    let task_id = start_task(&home, &workspace);
+    let takeover_id = request_and_prepare(&home, &task_id, "binding-after-abort");
+    json_output(&run(
+        &home,
+        &["head", "abort", &takeover_id, "--reason", "cancelled"],
+        &head_env(),
+    ));
+    let third_env = [
+        ("BRGR_OWNER_ID", "codex:head-takeover"),
+        ("BRGR_SESSION_ID", "session-third"),
+    ];
+    json_output(&run(&home, &["bind", &task_id], &third_env));
+    let store = brgr_store::Store::open(home.join("store")).unwrap();
+    assert_eq!(
+        store
+            .owner_binding(&brgr_protocol::OwnerId::new("codex:head-takeover").unwrap())
+            .unwrap()
+            .unwrap()
+            .0,
+        "session-third"
+    );
 }
 
 #[test]

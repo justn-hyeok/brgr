@@ -544,7 +544,7 @@ fn require_owner(store: &Store, expected: &OwnerId) -> Result<(String, u64)> {
     })?;
     if bound != session {
         bail!(
-            "owner {expected} is bound to another session; use `brgr bind TASK --session {session}` to transfer it"
+            "owner {expected} is bound to another session; a handoff goes through `brgr head request` first; `brgr bind` is for an unbound or abandoned owner (use `brgr bind TASK --session {session}`)"
         );
     }
     Ok((session, epoch))

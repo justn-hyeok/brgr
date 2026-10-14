@@ -286,6 +286,17 @@ pub(crate) async fn bind(
     if observed.as_ref().is_some_and(|value| value != &session) {
         bail!("requested session does not match the current Codex session");
     }
+    if let Some(takeover) = store
+        .owner_takeovers(&spec.owner_id)?
+        .into_iter()
+        .find(|takeover| !takeover.state.is_terminal())
+    {
+        bail!(
+            "takeover {} is {}; finish or abort it with `brgr head ...` before binding",
+            takeover.takeover_id,
+            takeover.state.as_str()
+        );
+    }
     let epoch = store.rebind_owner(&spec.owner_id, &session)?;
     let surface_ready =
         match notification::register_current_surface(paths, &store, &spec.owner_id, &session).await
