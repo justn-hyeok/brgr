@@ -1997,9 +1997,11 @@ const RETRY_DECISIONS: &[(&str, bool)] = &[
     ("record_question_notice", false),
     // Debate commands are idempotent and reissuable. Native delivery
     // retains uncertain claims and releases confirmed unattempted ones.
-    ("create_debate", false),
-    ("stop_debate", false),
-    ("post_peer_message_from", false),
+    // The bound variants share these bodies, so each write is classified once
+    // under the function that holds its transaction.
+    ("create_debate_with_proof", false),
+    ("stop_debate_with_proof", false),
+    ("post_peer_message_with_proof", false),
     ("acknowledge_peer", false),
     ("claim_native_delivery", false),
     ("finish_native_delivery", false),
