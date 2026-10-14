@@ -15,11 +15,33 @@ fn brgr() -> &'static str {
     env!("CARGO_BIN_EXE_brgr")
 }
 
+/// A worker's own identity. `cargo test` inside a worker inherits it, and a
+/// fixture command must not: a stale parent attempt or a session that disagrees
+/// with `CODEX_THREAD_ID` fails the command before the fixture runs.
+const INHERITED_WORKER_ENV: &[&str] = &[
+    "BRGR_HOME",
+    "BRGR_BIN",
+    "BRGR_OWNER_ID",
+    "BRGR_SESSION_ID",
+    "BRGR_PARENT_TASK_ID",
+    "BRGR_PARENT_ATTEMPT_ID",
+    "BRGR_WORKER_HERDR_CONTEXT",
+    "CODEX_THREAD_ID",
+    "CLAUDE_CODE_SESSION_ID",
+];
+
+fn clear_inherited_worker_env(command: &mut Command) {
+    for name in INHERITED_WORKER_ENV {
+        command.env_remove(name);
+    }
+}
+
 /// brgr for a test. Debug builds trust a faked `HERDR_PANE_ID` only with this
 /// variable: a test's own process chain never runs inside the pane it claims.
 fn brgr_command() -> Command {
     let mut command = Command::new(brgr());
     command.env("BRGR_TEST_TRUST_HERDR_PANE", "1");
+    clear_inherited_worker_env(&mut command);
     command
 }
 
@@ -1590,7 +1612,7 @@ fn cancelling_a_pane_mode_task_closes_its_pane() {
 #[test]
 fn an_unverified_caller_is_never_split_beside_and_the_error_says_what_to_give() {
     let fixture = pane_fixture();
-    let output = Command::new(brgr())
+    let output = brgr_command()
         .arg("--home")
         .arg(&fixture.home)
         .arg("--json")

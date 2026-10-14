@@ -107,6 +107,14 @@ fn harness_schema_describes_a_drafted_manifest() {
         .args(["harness", "draft"])
         .arg(fixture())
         .env_remove("BRGR_HOME")
+        .env_remove("BRGR_BIN")
+        .env_remove("BRGR_OWNER_ID")
+        .env_remove("BRGR_SESSION_ID")
+        .env_remove("BRGR_PARENT_TASK_ID")
+        .env_remove("BRGR_PARENT_ATTEMPT_ID")
+        .env_remove("BRGR_WORKER_HERDR_CONTEXT")
+        .env_remove("CODEX_THREAD_ID")
+        .env_remove("CLAUDE_CODE_SESSION_ID")
         .output()
         .unwrap();
     assert!(

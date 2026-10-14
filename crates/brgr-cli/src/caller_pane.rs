@@ -499,7 +499,7 @@ mod tests {
         let binary = temp.path().join("herdr");
         fs::write(
             &binary,
-            "#!/bin/sh\nd=$(/usr/bin/dirname \"$0\")\ncase \"$1 $2\" in\n 'agent list') /bin/cat \"$d/list.json\";;\n 'pane read') f=$(printf %s \"$3\" | /usr/bin/sed 's/:/_/'); /bin/cat \"$d/$f\";;\n *) exit 2;;\nesac\n",
+            "#!/bin/sh\nd=$(/usr/bin/dirname \"$0\")\nif [ \"$1\" = --session ]; then shift 2; fi\ncase \"$1 $2\" in\n 'agent list') /bin/cat \"$d/list.json\";;\n 'pane read') f=$(printf %s \"$3\" | /usr/bin/sed 's/:/_/'); /bin/cat \"$d/$f\";;\n *) exit 2;;\nesac\n",
         )
         .unwrap();
         fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
@@ -521,6 +521,36 @@ mod tests {
         let out = run();
         HERDR.with(|slot| *slot.borrow_mut() = None);
         out
+    }
+
+    /// `herdr_output` forwards `HERDR_SESSION` as `--session`. The fixture must
+    /// still serve `agent list` and `pane read` when that flag is present, so
+    /// these tests do not depend on the variable being unset.
+    #[test]
+    fn a_session_flag_does_not_hide_the_fixture_panes() {
+        let (_temp, binary) = fake_herdr(&[("w1:p2", "codex", "idle")]);
+        let list = Command::new(&binary)
+            .args(["--session", "ambient-session", "agent", "list"])
+            .output()
+            .unwrap();
+        assert!(
+            list.status.success(),
+            "{}",
+            String::from_utf8_lossy(&list.stderr)
+        );
+        let agents: Value = serde_json::from_slice(&list.stdout).unwrap();
+        assert_eq!(
+            agents
+                .pointer("/result/agents/0/pane_id")
+                .and_then(Value::as_str),
+            Some("w1:p2")
+        );
+        let screen = Command::new(&binary)
+            .args(["--session", "ambient-session", "pane", "read", "w1:p2"])
+            .output()
+            .unwrap();
+        assert!(screen.status.success());
+        assert_eq!(String::from_utf8_lossy(&screen.stdout), "idle");
     }
 
     #[test]
