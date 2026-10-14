@@ -11,6 +11,7 @@ mod error_memo;
 mod evidence;
 mod failure_banner;
 mod harness_commands;
+mod head;
 mod herdr_plugin;
 mod hook;
 mod invocation;
@@ -282,6 +283,7 @@ async fn execute(paths: &Paths, command: Command, json_output: bool) -> Result<(
         ),
         Command::Cancel { task, tree } => cancel(paths, task, tree, json_output),
         Command::Bind { task, session } => bind(paths, task, session, json_output).await,
+        Command::Head { command } => head::run(paths, command, json_output),
         command @ (Command::Accept { .. } | Command::Reject { .. }) => {
             decision_command(paths, &command, json_output)
         }

@@ -98,6 +98,7 @@ pub(crate) fn validate_bridge_host_command(
         | Command::Report { .. }
         | Command::Cancel { .. }
         | Command::Bind { .. }
+        | Command::Head { .. }
         | Command::Accept { .. }
         | Command::Reject { .. }
         | Command::Doctor
