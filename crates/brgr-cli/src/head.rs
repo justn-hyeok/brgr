@@ -159,7 +159,11 @@ fn request(
         && let Some(existing) = store
             .owner_takeovers(&owner_id)?
             .into_iter()
-            .find(|takeover| takeover.idempotency_key == key && takeover.from_session == session)
+            .find(|takeover| {
+                takeover.idempotency_key == key
+                    && takeover.from_session == session
+                    && takeover.to_session == to
+            })
     {
         print_value(&takeover_json(&existing), json_output);
         return Ok(());

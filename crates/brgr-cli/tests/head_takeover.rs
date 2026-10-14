@@ -417,6 +417,44 @@ fn head_request_by_the_current_head_returns_the_same_record_for_the_same_key() {
 }
 
 #[test]
+fn head_request_with_the_same_key_and_another_destination_is_a_conflict() {
+    let (_temp, home, workspace) = gjc_home();
+    let task_id = start_task(&home, &workspace);
+    let first = run(
+        &home,
+        &[
+            "head",
+            "request",
+            &task_id,
+            "--to",
+            "session-incoming",
+            "--key",
+            "handoff-1",
+        ],
+        &head_env(),
+    );
+    assert!(first.status.success());
+    let retarget = run(
+        &home,
+        &[
+            "head",
+            "request",
+            &task_id,
+            "--to",
+            "session-elsewhere",
+            "--key",
+            "handoff-1",
+        ],
+        &head_env(),
+    );
+    assert!(
+        !retarget.status.success(),
+        "a replayed key for a different destination was answered with the old takeover"
+    );
+    assert_eq!(takeover_count(&home), 1);
+}
+
+#[test]
 fn head_request_by_a_non_head_is_refused_and_writes_nothing() {
     let (_temp, home, workspace) = gjc_home();
     let task_id = start_task(&home, &workspace);
