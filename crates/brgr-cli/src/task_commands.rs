@@ -206,7 +206,8 @@ pub(crate) async fn wait_for_result(
 pub(crate) fn cancel(paths: &Paths, task: TaskId, tree: bool, json_output: bool) -> Result<()> {
     let store = Store::open(&paths.store)?;
     let spec = store.task(task)?;
-    require_owner(&store, &spec.owner_id)?;
+    let (session_id, binding_epoch) = require_owner(&store, &spec.owner_id)?;
+    let proof = brgr_store::OwnerProof::new(spec.owner_id.clone(), &session_id, binding_epoch)?;
     let nodes = if tree {
         store.subtree(task)?
     } else {
@@ -238,7 +239,10 @@ pub(crate) fn cancel(paths: &Paths, task: TaskId, tree: bool, json_output: bool)
     if active.is_empty() && !tree {
         bail!("task {task} is already terminal");
     }
-    let recorded = store.record_cancellation_intents(task, tree)?;
+    // The intent records live inside the same transaction that checks the
+    // session is still the head: work handed away is stopped by the new head,
+    // not by a session that lost it while this command ran.
+    let recorded = store.record_cancellation_intents_bound(task, tree, &proof)?;
     let mut requested = Vec::new();
     for node in &recorded {
         if task_needs_cancel(&store, node.task_id)? {

@@ -7553,17 +7553,17 @@ fn an_old_session_stops_nothing_after_a_handoff() {
     ];
     // Nothing changed hands: the task still runs (it never produced a result
     // the head could read).
-    assert_eq!(
-        run_with_error(&home, task, &head).ok,
-        false,
+    assert!(
+        !run_with_error(&home, task, &head).ok,
         "the cancellation the stale session refused still happened"
     );
     json_output(&run(&home, &["cancel", task], &head));
     let deadline = Instant::now() + Duration::from_secs(20);
     loop {
-        if Instant::now() > deadline {
-            panic!("the task did not stop after the head cancelled it");
-        }
+        assert!(
+            Instant::now() <= deadline,
+            "the task did not stop after the head cancelled it"
+        );
         let result = run_with_error(&home, task, &head);
         if result.ok {
             assert_eq!(result.outcome, "cancelled", "{result:?}");
