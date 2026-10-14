@@ -50,9 +50,13 @@ item as received.
 The decision also records the currently bound Codex session and monotonically
 increasing binding epoch. An unbound task cannot be read or decided through the
 CLI. A SessionStart hook may establish a first binding but cannot replace a
-different session; explicit `brgr bind TASK` transfers the stable owner and
-invalidates stale-session commands. This is cooperative identity checking,
-not authentication against another process running as the same OS user.
+different session. A handoff to another session goes through `brgr head`
+(request, prepare, commit by the incoming session, then retire): the store
+records each step, moves the binding in a single transaction and raises the
+epoch, which invalidates stale-session commands; explicit `brgr bind TASK` is for
+an unbound or abandoned owner and is refused while a handoff is open. This is
+cooperative identity checking, not authentication against another process
+running as the same OS user.
 
 The v1 trust model assumes installed same-user harnesses are cooperative. File
 permissions, digest locks, size limits, typed events, and environment allowlists
