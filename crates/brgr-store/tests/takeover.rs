@@ -893,6 +893,55 @@ fn a_manifest_may_only_name_rows_the_outgoing_head_actually_held() {
 }
 
 #[test]
+fn a_manifest_may_only_name_an_attempt_of_the_task_revision_it_names() {
+    let root = TempDir::new().unwrap();
+    let mut store = Store::open(root.path()).unwrap();
+    let owner_id = owner();
+    head(&store, &owner_id);
+    let (task, envelope) = candidate(&mut store, &owner_id);
+    // A second task of the same owner, so its attempt is real and still owned:
+    // only the link the manifest asserts is wrong.
+    let (_, other_envelope) = candidate(&mut store, &owner_id);
+    let takeover = store
+        .request_takeover(&owner_id, FROM, TO, "handoff-1")
+        .unwrap();
+
+    for attempt_id in [AttemptId::new(), other_envelope.attempt_id] {
+        let bad = HandoffManifest {
+            tasks: vec![ManifestTask {
+                task_id: task.task_id,
+                revision: task.revision,
+                attempt_id,
+            }],
+            ..bare_manifest(FROM)
+        };
+        assert!(
+            matches!(
+                store.prepare_takeover(takeover.takeover_id, &bad),
+                Err(StoreError::InvalidHandoffManifest(_))
+            ),
+            "a manifest named attempt {attempt_id} against a task revision it does not \
+             belong to"
+        );
+    }
+    assert_eq!(
+        state(&store, takeover.takeover_id),
+        TakeoverState::Requested,
+        "a refused manifest moved the takeover"
+    );
+
+    // The attempt this revision really ran, so the refusal above is about the
+    // attempt and nothing else.
+    assert_eq!(
+        store
+            .prepare_takeover(takeover.takeover_id, &manifest(FROM, &task, &envelope))
+            .unwrap()
+            .state,
+        TakeoverState::Prepared
+    );
+}
+
+#[test]
 fn a_stale_session_cannot_send_or_acknowledge_as_the_owner() {
     let root = TempDir::new().unwrap();
     let mut store = Store::open(root.path()).unwrap();

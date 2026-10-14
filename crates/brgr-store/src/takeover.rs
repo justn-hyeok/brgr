@@ -176,6 +176,9 @@ impl RetireOutcome {
 }
 
 /// One task revision and the attempt a handoff names.
+///
+/// The store holds the two together: an attempt that does not belong to this
+/// revision is refused rather than carried forward as a reference to nothing.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ManifestTask {
     pub task_id: TaskId,
@@ -861,6 +864,23 @@ fn validate_manifest(
         if owned.is_none() {
             return Err(StoreError::InvalidHandoffManifest(
                 "a named task revision is not this owner's",
+            ));
+        }
+        let attempt: Option<()> = transaction
+            .query_row(
+                "SELECT 1 FROM attempts
+                 WHERE attempt_id = ?1 AND task_id = ?2 AND revision = ?3",
+                params![
+                    reference.attempt_id.to_string(),
+                    reference.task_id.to_string(),
+                    reference.revision
+                ],
+                |_| Ok(()),
+            )
+            .optional()?;
+        if attempt.is_none() {
+            return Err(StoreError::InvalidHandoffManifest(
+                "a named attempt is not an attempt of that task revision",
             ));
         }
     }
