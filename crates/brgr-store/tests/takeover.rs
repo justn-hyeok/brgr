@@ -993,6 +993,41 @@ fn a_manifest_may_only_name_rows_the_outgoing_head_actually_held() {
 }
 
 #[test]
+fn prepare_rejects_a_manifest_from_another_origin_session() {
+    let root = TempDir::new().unwrap();
+    let store = Store::open(root.path()).unwrap();
+    let owner_id = owner();
+    head(&store, &owner_id);
+    let takeover = store
+        .request_takeover(&owner_id, FROM, TO, "handoff-1")
+        .unwrap();
+
+    for origin in [TO, "codex:someone-else"] {
+        assert!(
+            matches!(
+                store.prepare_takeover(takeover.takeover_id, &bare_manifest(origin)),
+                Err(StoreError::InvalidHandoffManifest(_))
+            ),
+            "a manifest from {origin} was prepared for a handoff leaving {FROM}"
+        );
+    }
+    assert_eq!(
+        state(&store, takeover.takeover_id),
+        TakeoverState::Requested,
+        "a refused origin moved the takeover"
+    );
+    assert!(store.handoff_manifest(takeover.takeover_id).unwrap().is_none());
+
+    assert_eq!(
+        store
+            .prepare_takeover(takeover.takeover_id, &bare_manifest(FROM))
+            .unwrap()
+            .state,
+        TakeoverState::Prepared
+    );
+}
+
+#[test]
 fn a_manifest_may_only_name_an_attempt_of_the_task_revision_it_names() {
     let root = TempDir::new().unwrap();
     let mut store = Store::open(root.path()).unwrap();

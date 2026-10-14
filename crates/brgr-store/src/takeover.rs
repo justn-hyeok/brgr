@@ -427,7 +427,12 @@ impl Store {
             return Ok(takeover);
         }
         require_transition(takeover_id, takeover.state, TakeoverState::Prepared)?;
-        validate_manifest(&transaction, &takeover.owner_id, manifest)?;
+        validate_manifest(
+            &transaction,
+            &takeover.owner_id,
+            &takeover.from_session,
+            manifest,
+        )?;
         let manifest_id = Uuid::new_v4().to_string();
         transaction.execute(
             "INSERT INTO handoff_manifests
@@ -941,6 +946,7 @@ fn bounded_reason(reason: &str) -> Result<String, StoreError> {
 fn validate_manifest(
     transaction: &Transaction<'_>,
     owner_id: &OwnerId,
+    from_session: &str,
     manifest: &HandoffManifest,
 ) -> Result<(), StoreError> {
     if manifest.goal.trim().is_empty() || manifest.goal.len() > MAX_GOAL_BYTES {
@@ -958,6 +964,11 @@ fn validate_manifest(
     {
         return Err(StoreError::InvalidHandoffManifest(
             "the origin session is empty or oversized",
+        ));
+    }
+    if manifest.origin_session != from_session {
+        return Err(StoreError::InvalidHandoffManifest(
+            "the origin session is not the outgoing session",
         ));
     }
     if manifest.tasks.len() > MAX_TASK_REFS
