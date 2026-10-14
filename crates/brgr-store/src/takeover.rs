@@ -369,9 +369,13 @@ impl Store {
     /// Stores the handoff manifest and moves the takeover to `prepared`.
     ///
     /// The manifest is written once: preparing again with the same content is
-    /// accepted, and preparing with different content is refused rather than
-    /// replacing what the incoming session may already have read. The incoming
-    /// session is still not in command here.
+    /// accepted while the handoff is still open, and preparing with different
+    /// content is refused rather than replacing what the incoming session may
+    /// already have read. The incoming session is still not in command here.
+    ///
+    /// An `aborted` handoff answers a replay with
+    /// [`StoreError::TakeoverStateConflict`]: it stopped before the binding
+    /// moved, and the same bytes arriving late must not make it look prepared.
     ///
     /// # Errors
     ///
@@ -390,6 +394,17 @@ impl Store {
         let transaction = self.write_transaction()?;
         let takeover = load_takeover(&transaction, &takeover_id.to_string())?;
         if let Some((_, stored_digest)) = stored_manifest(&transaction, takeover_id)? {
+            // The manifest is already written, so this is a replay and not a new
+            // step, and it is answered while the handoff is still open. An
+            // aborted one has stopped for good and must not look prepared again
+            // because the caller happens to resend the same bytes.
+            if takeover.state == TakeoverState::Aborted {
+                return Err(takeover_state_conflict(
+                    takeover_id,
+                    takeover.state,
+                    TakeoverState::Prepared,
+                ));
+            }
             if stored_digest != digest {
                 return Err(StoreError::HandoffManifestConflict(takeover_id));
             }

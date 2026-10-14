@@ -1096,6 +1096,62 @@ fn a_manifest_may_only_name_rows_that_are_still_pending_for_this_owner() {
 }
 
 #[test]
+fn an_aborted_handoff_cannot_be_prepared_again_with_the_same_manifest() {
+    let root = TempDir::new().unwrap();
+    let mut store = Store::open(root.path()).unwrap();
+    let owner_id = owner();
+    head(&store, &owner_id);
+    let (task, envelope) = candidate(&mut store, &owner_id);
+    let expected = manifest(FROM, &task, &envelope);
+    let takeover = store
+        .request_takeover(&owner_id, FROM, TO, "handoff-1")
+        .unwrap();
+    store
+        .prepare_takeover(takeover.takeover_id, &expected)
+        .unwrap();
+    store
+        .abort_takeover(takeover.takeover_id, "the owner changed their mind")
+        .unwrap();
+    let before = kinds(&store, takeover.takeover_id);
+
+    // The identical manifest is a replay of the stored bytes, not a new step: an
+    // aborted handoff has already stopped and cannot start over.
+    assert!(
+        matches!(
+            store.prepare_takeover(takeover.takeover_id, &expected),
+            Err(StoreError::TakeoverStateConflict {
+                from: TakeoverState::Aborted,
+                to: TakeoverState::Prepared,
+                ..
+            })
+        ),
+        "an aborted handoff prepared itself again"
+    );
+    assert_eq!(state(&store, takeover.takeover_id), TakeoverState::Aborted);
+    assert_eq!(
+        kinds(&store, takeover.takeover_id),
+        before,
+        "the refused replay added an event"
+    );
+
+    // Before the abort the same call is the ordinary lost-response replay.
+    let second = store
+        .request_takeover(&owner_id, FROM, "codex:session-second", "handoff-2")
+        .unwrap();
+    store
+        .prepare_takeover(second.takeover_id, &expected)
+        .unwrap();
+    assert_eq!(
+        store
+            .prepare_takeover(second.takeover_id, &expected)
+            .unwrap()
+            .state,
+        TakeoverState::Prepared,
+        "a prepared handoff refused the replay of its own manifest"
+    );
+}
+
+#[test]
 fn a_stale_session_cannot_send_or_acknowledge_as_the_owner() {
     let root = TempDir::new().unwrap();
     let mut store = Store::open(root.path()).unwrap();
