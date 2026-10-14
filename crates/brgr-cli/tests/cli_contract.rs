@@ -7231,3 +7231,518 @@ fn status_json_is_one_object_with_workspace_and_base_commit_at_the_top() {
             .is_some_and(|commit| commit.len() >= 7)
     );
 }
+
+// ---- Slice 2B: owner writes after a head handoff ----
+
+/// A worker that asks once, then — only after its owner answered — announces it
+/// finished, from the worker side, while the owner head is already elsewhere.
+const ANNOUNCING_GJC_FIXTURE: &str = r#"#!/bin/sh
+set -u
+case "${1:-}" in
+  --version) echo 'gjc v-announce-fixture'; exit 0;;
+  --help)
+    printf '%s\n' '-p, --print' '--mode=<value>' '--no-session' '--no-mcp' '--model' '--thinking'
+    exit 0;;
+esac
+prompt_file=
+for argument in "$@"; do
+  case "$argument" in @*) prompt_file=${argument#@};; esac
+done
+result=NO_WORKER_IDENTITY
+if test -n "${BRGR_PARENT_ATTEMPT_ID:-}" && /usr/bin/grep -q '^ANNOUNCE' "$prompt_file"; then
+  "$BRGR_BIN" --json message send "$BRGR_PARENT_TASK_ID" --to owner --kind question --body 'Any word?' >/dev/null
+  reply=$("$BRGR_BIN" --json message wait "$BRGR_PARENT_TASK_ID" --for worker --timeout-seconds 30)
+  reply_id=$(printf '%s\n' "$reply" | /usr/bin/sed -n 's/.*"message_id":"\([^"]*\)".*/\1/p')
+  "$BRGR_BIN" --json message ack "$BRGR_PARENT_TASK_ID" "$reply_id" --for worker >/dev/null || result=WORKER_ACK_FAILED
+  if "$BRGR_BIN" --json message send "$BRGR_PARENT_TASK_ID" --to owner --kind note --body 'post-takeover note' >/dev/null; then
+    result=POST_TAKEOVER_NOTE_SENT
+  else
+    result=NOTE_SEND_FAILED
+  fi
+fi
+printf '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"%s"}]}}\n' "$result"
+printf '%s\n' '{"type":"agent_end","stopReason":"completed"}'
+"#;
+
+fn announcing_home() -> (TempDir, PathBuf, PathBuf) {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("brgr");
+    let workspace = temp.path().join("work");
+    let executable = temp.path().join("gjc");
+    fs::create_dir_all(&workspace).unwrap();
+    fs::write(&executable, ANNOUNCING_GJC_FIXTURE).unwrap();
+    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+    add_fixture(&home, &executable, &temp.path().join("scratch"));
+    (temp, home, workspace)
+}
+
+/// Requests, prepares and commits a handoff straight through the store: the
+/// takeover choreography does not go through the CLI, and no CLI command does
+/// any of it.
+fn committed_takeover(
+    home: &Path,
+    owner_str: &str,
+    from_session: &str,
+    to_session: &str,
+    idempotency_key: &str,
+) {
+    let store = brgr_store::Store::open(home.join("store")).unwrap();
+    let owner_id = brgr_protocol::OwnerId::new(owner_str.to_owned()).unwrap();
+    let takeover = store
+        .request_takeover(&owner_id, from_session, to_session, idempotency_key)
+        .unwrap();
+    let takeover = store
+        .prepare_takeover(
+            takeover.takeover_id,
+            &brgr_store::HandoffManifest {
+                goal: "Keep the work moving".to_owned(),
+                origin_session: from_session.to_owned(),
+                tasks: Vec::new(),
+                pending_result_ids: Vec::new(),
+                pending_message_ids: Vec::new(),
+                decision_notes: String::new(),
+            },
+        )
+        .unwrap();
+    assert_eq!(takeover.state, brgr_store::TakeoverState::Prepared);
+    let takeover = store.commit_takeover(takeover.takeover_id).unwrap();
+    assert_eq!(takeover.state, brgr_store::TakeoverState::Committed);
+}
+
+fn takeover_state(
+    home: &Path,
+    owner_str: &str,
+    idempotency_key: &str,
+) -> brgr_store::TakeoverState {
+    let store = brgr_store::Store::open(home.join("store")).unwrap();
+    let owner_id = brgr_protocol::OwnerId::new(owner_str.to_owned()).unwrap();
+    let takeovers = store.owner_takeovers(&owner_id).unwrap();
+    let found = takeovers
+        .iter()
+        .find(|takeover| takeover.idempotency_key == idempotency_key)
+        .unwrap_or_else(|| panic!("no handoff {idempotency_key} for {owner_str}: {takeovers:?}"));
+    found.state
+}
+
+fn retire_resumed_takeovers(home: &Path, owner_str: &str) {
+    let store = brgr_store::Store::open(home.join("store")).unwrap();
+    let owner_id = brgr_protocol::OwnerId::new(owner_str.to_owned()).unwrap();
+    for takeover in store.owner_takeovers(&owner_id).unwrap() {
+        if takeover.state == brgr_store::TakeoverState::Resumed {
+            store
+                .retire_takeover(takeover.takeover_id, brgr_store::RetireOutcome::Completed)
+                .unwrap();
+        }
+    }
+}
+
+fn manual(home: &Path, args: &[&str], envs: &[(&str, &str)]) -> std::process::Output {
+    let mut command = brgr_command();
+    command.arg("--home").arg(home).arg("--json").args(args);
+    for (name, value) in envs {
+        command.env(name, value);
+    }
+    command.output().unwrap()
+}
+
+/// A task whose worker asked a question, whose owner just handed the head to
+/// `session-b`, with the question still waiting for an owner answer.
+fn handing_over_home() -> (TempDir, PathBuf, String, String) {
+    let (temp, home, workspace) = announcing_home();
+    let owner = [("BRGR_OWNER_ID", "codex:handoff-message")];
+    let launched = json_output(&run(
+        &home,
+        &[
+            "run",
+            "ANNOUNCE",
+            "--workspace",
+            workspace.to_str().unwrap(),
+        ],
+        &owner,
+    ));
+    let task = launched["task_id"].as_str().unwrap();
+    let question = json_output(&run(
+        &home,
+        &[
+            "message",
+            "wait",
+            task,
+            "--for",
+            "owner",
+            "--timeout-seconds",
+            "30",
+        ],
+        &owner,
+    ));
+    let question_id = question["message_id"].as_str().unwrap().to_owned();
+    committed_takeover(
+        &home,
+        "codex:handoff-message",
+        "fixture-session",
+        "session-b",
+        "handoff-message-1",
+    );
+    let task = task.to_owned();
+    (temp, home, task, question_id)
+}
+
+/// A stale session's send and ack change nothing.
+#[test]
+fn a_stale_session_writes_no_owner_message_after_a_handoff() {
+    let (_temp, home, task, question_id) = handing_over_home();
+    let stale = [
+        ("BRGR_OWNER_ID", "codex:handoff-message"),
+        ("BRGR_SESSION_ID", "fixture-session"),
+    ];
+    let sent = run(
+        &home,
+        &[
+            "message",
+            "send",
+            &task,
+            "--to",
+            "worker",
+            "--kind",
+            "reply",
+            "--reply-to",
+            &question_id,
+            "--body",
+            "stale answer",
+        ],
+        &stale,
+    );
+    assert!(
+        !sent.status.success(),
+        "a session that handed its head away sent an owner message: {}",
+        String::from_utf8_lossy(&sent.stderr)
+    );
+    let acked = run(
+        &home,
+        &["message", "ack", &task, &question_id, "--for", "owner"],
+        &stale,
+    );
+    assert!(
+        !acked.status.success(),
+        "a session that handed its head away acknowledged a worker message: {}",
+        String::from_utf8_lossy(&acked.stderr)
+    );
+    // Nothing was written: the question is still there, unacknowledged, and no
+    // stale reply reached the worker.
+    let store = brgr_store::Store::open(home.join("store")).unwrap();
+    let task_id = task.parse().unwrap();
+    let attempt = store.latest_message_attempt(task_id).unwrap();
+    let inbox = store
+        .task_messages(
+            task_id,
+            attempt,
+            brgr_store::MessageDirection::WorkerToOwner,
+            true,
+        )
+        .unwrap();
+    assert_eq!(inbox.len(), 1, "{inbox:?}");
+    assert!(!inbox[0].acknowledged, "{inbox:?}");
+    let replies = store
+        .task_messages(
+            task_id,
+            attempt,
+            brgr_store::MessageDirection::OwnerToWorker,
+            true,
+        )
+        .unwrap();
+    assert!(
+        replies.iter().all(|message| message.body != "stale answer"),
+        "{replies:?}"
+    );
+}
+
+/// The worker side stays unguarded: after the handoff, the incoming session
+/// answers the question and the worker still reports on its own.
+#[test]
+fn the_worker_still_reports_to_the_head_after_a_handoff() {
+    let (_temp, home, task, question_id) = handing_over_home();
+    let head = [
+        ("BRGR_OWNER_ID", "codex:handoff-message"),
+        ("BRGR_SESSION_ID", "session-b"),
+    ];
+    json_output(&run(
+        &home,
+        &[
+            "message",
+            "send",
+            &task,
+            "--to",
+            "worker",
+            "--kind",
+            "reply",
+            "--reply-to",
+            &question_id,
+            "--body",
+            "all word",
+        ],
+        &head,
+    ));
+    json_output(&run(
+        &home,
+        &["message", "ack", &task, &question_id, "--for", "owner"],
+        &head,
+    ));
+
+    json_output(&run(
+        &home,
+        &["wait", &task, "--timeout-seconds", "40"],
+        &head,
+    ));
+    let result = json_output(&run(&home, &["result", &task], &head));
+    assert_eq!(
+        result["artifacts"][0]["text"], "POST_TAKEOVER_NOTE_SENT",
+        "{result}"
+    );
+    // The worker's post-takeover note reached the head (worker reporting stays
+    // unguarded) and can be answered from there.
+    let note = json_output(&run(
+        &home,
+        &[
+            "message",
+            "wait",
+            &task,
+            "--for",
+            "owner",
+            "--timeout-seconds",
+            "10",
+        ],
+        &head,
+    ));
+    assert_eq!(note["body"], "post-takeover note", "{note}");
+}
+
+/// The same refusal for a cancellation: the outgoing session may not stop work
+/// it handed away; the incoming session cancels and the cancellation lands.
+#[test]
+fn an_old_session_stops_nothing_after_a_handoff() {
+    let (_temp, home, workspace) = asking_home();
+    let owner = [("BRGR_OWNER_ID", "codex:handoff-cancel")];
+    let launched = json_output(&run(
+        &home,
+        &["run", "ASK", "--workspace", workspace.to_str().unwrap()],
+        &owner,
+    ));
+    let task = launched["task_id"].as_str().unwrap();
+    // The worker is waiting on its owner, so the task is still running.
+
+    committed_takeover(
+        &home,
+        "codex:handoff-cancel",
+        "fixture-session",
+        "session-b",
+        "handoff-cancel-1",
+    );
+    let stale = [
+        ("BRGR_OWNER_ID", "codex:handoff-cancel"),
+        ("BRGR_SESSION_ID", "fixture-session"),
+    ];
+    let cancelled = run(&home, &["cancel", task], &stale);
+    assert!(
+        !cancelled.status.success(),
+        "a session that handed its head away cancelled the work: {}",
+        String::from_utf8_lossy(&cancelled.stderr)
+    );
+    // The head cancels it instead, and the run stops on its own.
+    let head = [
+        ("BRGR_OWNER_ID", "codex:handoff-cancel"),
+        ("BRGR_SESSION_ID", "session-b"),
+    ];
+    // Nothing changed hands: the task still runs (it never produced a result
+    // the head could read).
+    assert_eq!(
+        run_with_error(&home, task, &head).ok,
+        false,
+        "the cancellation the stale session refused still happened"
+    );
+    json_output(&run(&home, &["cancel", task], &head));
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        if Instant::now() > deadline {
+            panic!("the task did not stop after the head cancelled it");
+        }
+        let result = run_with_error(&home, task, &head);
+        if result.ok {
+            assert_eq!(result.outcome, "cancelled", "{result:?}");
+            break;
+        }
+        thread::sleep(Duration::from_millis(200));
+    }
+}
+
+#[derive(Debug)]
+struct Poll {
+    ok: bool,
+    outcome: String,
+}
+
+fn run_with_error(home: &Path, task: &str, envs: &[(&str, &str)]) -> Poll {
+    let output = run(home, &["result", task], envs);
+    let text = String::from_utf8_lossy(&output.stderr);
+    if output.status.success() {
+        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+        return Poll {
+            ok: true,
+            outcome: value["result"]["outcome"].as_str().unwrap().to_owned(),
+        };
+    }
+    assert!(text.contains("does not exist"), "{text}");
+    Poll {
+        ok: false,
+        outcome: String::new(),
+    }
+}
+
+/// Starting a task as the owner is also an owner-side write: after a handoff
+/// commits, the incoming session's first admitted revision is what proves it
+/// took the work over, so admission goes through the guarded store write.
+#[test]
+fn the_incoming_session_admits_the_next_task_through_the_guard() {
+    let (_temp, home, workspace) = gjc_home();
+    let owner = [("BRGR_OWNER_ID", "codex:handoff-admission")];
+    let first = json_output(&run(
+        &home,
+        &[
+            "run",
+            "BRGR_FIXTURE_OK",
+            "--workspace",
+            workspace.to_str().unwrap(),
+            "--foreground",
+        ],
+        &owner,
+    ));
+    assert_eq!(first["outcome"], "candidate", "{first}");
+    committed_takeover(
+        &home,
+        "codex:handoff-admission",
+        "fixture-session",
+        "session-b",
+        "handoff-admission-1",
+    );
+
+    let stale = [
+        ("BRGR_OWNER_ID", "codex:handoff-admission"),
+        ("BRGR_SESSION_ID", "fixture-session"),
+    ];
+    let refused = run(
+        &home,
+        &[
+            "run",
+            "BRGR_FIXTURE_OK",
+            "--workspace",
+            workspace.to_str().unwrap(),
+            "--foreground",
+        ],
+        &stale,
+    );
+    assert!(
+        !refused.status.success(),
+        "a session that handed its head away started another revision: {}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+
+    // The head starts the next task, and the handoff is resumed by that write.
+    let head = [
+        ("BRGR_OWNER_ID", "codex:handoff-admission"),
+        ("BRGR_SESSION_ID", "session-b"),
+    ];
+    let second = json_output(&run(
+        &home,
+        &[
+            "run",
+            "BRGR_FIXTURE_OK",
+            "--workspace",
+            workspace.to_str().unwrap(),
+            "--foreground",
+        ],
+        &head,
+    ));
+    assert_eq!(second["outcome"], "candidate", "{second}");
+    assert_eq!(
+        takeover_state(&home, "codex:handoff-admission", "handoff-admission-1"),
+        brgr_store::TakeoverState::Resumed,
+        "an admitted task did not resume the handoff"
+    );
+}
+
+/// Revising replaces the head's result with a new revision, so the new revision
+/// must be recorded inside the transaction that still proves the session is the
+/// head. The old session revises nothing, and the head's revision resumes.
+#[test]
+fn the_incoming_session_records_the_next_revision_through_the_guard() {
+    let (_temp, home, workspace) = gjc_home();
+    let owner = [("BRGR_OWNER_ID", "codex:handoff-revise")];
+    let created = json_output(&run(
+        &home,
+        &[
+            "run",
+            "BRGR_FIXTURE_OK",
+            "--workspace",
+            workspace.to_str().unwrap(),
+            "--foreground",
+        ],
+        &owner,
+    ));
+    let task = created["task_id"].as_str().unwrap();
+
+    committed_takeover(
+        &home,
+        "codex:handoff-revise",
+        "fixture-session",
+        "session-b",
+        "handoff-revise-1",
+    );
+    let stale = [
+        ("BRGR_OWNER_ID", "codex:handoff-revise"),
+        ("BRGR_SESSION_ID", "fixture-session"),
+    ];
+    let refused = manual(&home, &["revise", task, "ex again", "--foreground"], &stale);
+    assert!(
+        !refused.status.success(),
+        "a session that handed its head away revised the task: {}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    let spec = store_task(&home, task);
+    assert_eq!(spec.revision, 1, "the refused revision was recorded");
+
+    // The head rejects the candidate (that resumes handoff 1), closes it, and
+    // requests a second handoff so the revise stands on its own.
+    let head = [
+        ("BRGR_OWNER_ID", "codex:handoff-revise"),
+        ("BRGR_SESSION_ID", "session-b"),
+    ];
+    json_output(&run(&home, &["reject", task, "--reason", "handoff"], &head));
+    retire_resumed_takeovers(&home, "codex:handoff-revise");
+    committed_takeover(
+        &home,
+        "codex:handoff-revise",
+        "session-b",
+        "session-c",
+        "handoff-revise-2",
+    );
+
+    let newer = [
+        ("BRGR_OWNER_ID", "codex:handoff-revise"),
+        ("BRGR_SESSION_ID", "session-c"),
+    ];
+    let revised = manual(
+        &home,
+        &["revise", task, "ex a third time", "--foreground"],
+        &newer,
+    );
+    assert!(
+        revised.status.success(),
+        "{}",
+        String::from_utf8_lossy(&revised.stderr)
+    );
+    let revised: Value = serde_json::from_slice(&revised.stdout).unwrap();
+    assert_eq!(revised["revision"], 2, "{revised}");
+    assert_eq!(
+        takeover_state(&home, "codex:handoff-revise", "handoff-revise-2"),
+        brgr_store::TakeoverState::Resumed,
+        "a recorded revision did not resume the handoff"
+    );
+}

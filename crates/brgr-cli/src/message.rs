@@ -97,16 +97,21 @@ pub async fn run(paths: &Paths, command: MessageCommand, json_output: bool) -> R
             request_id,
         } => {
             let store = Store::open(&paths.store)?;
-            let attempt = authorized_attempt(&store, task, to.sender(), true)?;
+            let (attempt, proof) = authorized_attempt(&store, task, to.sender(), true)?;
             let mut draft =
                 MessageDraft::new(task, attempt, to.direction(), kind.into(), body, reply_to);
             if let Some(id) = request_id {
                 draft.message_id = id;
             }
-            print_value(
-                &serde_json::to_value(store.post_message(&draft)?)?,
-                json_output,
-            );
+            // The write sits inside the same transaction that checks the
+            // session is still the owner's head: a takeover that lands while
+            // this command runs cannot accept a message the new head no longer
+            // owns. The worker side has no proof and writes unguarded.
+            let posted = match proof {
+                Some(proof) => store.post_message_bound(&draft, &proof)?,
+                None => store.post_message(&draft)?,
+            };
+            print_value(&serde_json::to_value(posted)?, json_output);
         }
         MessageCommand::List {
             task,
@@ -114,7 +119,7 @@ pub async fn run(paths: &Paths, command: MessageCommand, json_output: bool) -> R
             all,
         } => {
             let store = Store::open(&paths.store)?;
-            let attempt = authorized_attempt(&store, task, recipient, false)?;
+            let (attempt, _proof) = authorized_attempt(&store, task, recipient, false)?;
             let messages = store.task_messages(task, attempt, recipient.direction(), all)?;
             print_value(&serde_json::to_value(messages)?, json_output);
         }
@@ -131,8 +136,21 @@ pub async fn run(paths: &Paths, command: MessageCommand, json_output: bool) -> R
             recipient,
         } => {
             let store = Store::open(&paths.store)?;
-            let attempt = authorized_attempt(&store, task, recipient, false)?;
-            store.acknowledge_message(task, attempt, recipient.direction(), &message_id)?;
+            let (attempt, proof) = authorized_attempt(&store, task, recipient, false)?;
+            // Same transaction, for the same reason as `send`: a stale session
+            // must mark nothing read once its head has moved.
+            match &proof {
+                Some(owner_proof) => store.acknowledge_message_bound(
+                    task,
+                    attempt,
+                    recipient.direction(),
+                    &message_id,
+                    owner_proof,
+                )?,
+                None => {
+                    store.acknowledge_message(task, attempt, recipient.direction(), &message_id)?;
+                }
+            }
             print_value(
                 &json!({"message_id": message_id, "acknowledged": true}),
                 json_output,
@@ -156,7 +174,7 @@ async fn wait_for_message(
     let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_seconds);
     loop {
         let attempt = match authorized_attempt(&store, task, recipient, false) {
-            Ok(attempt) => Some(attempt),
+            Ok((attempt, _proof)) => Some(attempt),
             Err(error)
                 if recipient == MessageSide::Owner
                     && matches!(
@@ -189,16 +207,19 @@ fn authorized_attempt(
     task: TaskId,
     side: MessageSide,
     require_active: bool,
-) -> Result<AttemptId> {
+) -> Result<(AttemptId, Option<brgr_store::OwnerProof>)> {
     match side {
         MessageSide::Owner => {
             let spec = store.task(task)?;
-            require_owner(store, &spec.owner_id)?;
-            if require_active {
-                Ok(store.active_message_attempt(task)?)
+            let (session_id, binding_epoch) = require_owner(store, &spec.owner_id)?;
+            let proof =
+                brgr_store::OwnerProof::new(spec.owner_id.clone(), &session_id, binding_epoch)?;
+            let attempt = if require_active {
+                store.active_message_attempt(task)?
             } else {
-                Ok(store.latest_message_attempt(task)?)
-            }
+                store.latest_message_attempt(task)?
+            };
+            Ok((attempt, Some(proof)))
         }
         MessageSide::Worker => {
             let own_task: TaskId = env::var("BRGR_PARENT_TASK_ID")
@@ -217,7 +238,7 @@ fn authorized_attempt(
             if own_task != task || !permitted {
                 bail!("message target differs from the current worker attempt");
             }
-            Ok(own_attempt)
+            Ok((own_attempt, None))
         }
     }
 }
