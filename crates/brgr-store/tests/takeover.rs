@@ -1028,6 +1028,53 @@ fn prepare_rejects_a_manifest_from_another_origin_session() {
 }
 
 #[test]
+fn a_manifest_that_repeats_a_pending_id_is_rejected() {
+    let root = TempDir::new().unwrap();
+    let mut store = Store::open(root.path()).unwrap();
+    let owner_id = owner();
+    head(&store, &owner_id);
+    let (task, envelope, question) = open_candidate_with_question(&mut store, &owner_id);
+    let takeover = store
+        .request_takeover(&owner_id, FROM, TO, "handoff-1")
+        .unwrap();
+    let honest = manifest(FROM, &task, &envelope);
+    let repeated_result = HandoffManifest {
+        pending_result_ids: vec![envelope.result_id, envelope.result_id],
+        pending_message_ids: vec![question.message_id.clone()],
+        ..honest.clone()
+    };
+    let repeated_message = HandoffManifest {
+        pending_message_ids: vec![question.message_id.clone(), question.message_id.clone()],
+        ..honest.clone()
+    };
+    for bad in [&repeated_result, &repeated_message] {
+        assert!(
+            matches!(
+                store.prepare_takeover(takeover.takeover_id, bad),
+                Err(StoreError::InvalidHandoffManifest(_))
+            ),
+            "a repeated pending id was accepted"
+        );
+    }
+    assert_eq!(
+        state(&store, takeover.takeover_id),
+        TakeoverState::Requested,
+        "a repeated pending id moved the takeover"
+    );
+    let once = HandoffManifest {
+        pending_message_ids: vec![question.message_id.clone()],
+        ..honest
+    };
+    assert_eq!(
+        store
+            .prepare_takeover(takeover.takeover_id, &once)
+            .unwrap()
+            .state,
+        TakeoverState::Prepared
+    );
+}
+
+#[test]
 fn a_manifest_may_only_name_an_attempt_of_the_task_revision_it_names() {
     let root = TempDir::new().unwrap();
     let mut store = Store::open(root.path()).unwrap();

@@ -1046,7 +1046,14 @@ fn validate_pending_results(
     result_ids: &[ResultId],
 ) -> Result<(), StoreError> {
     let pending = pending_result_ids(transaction, owner_id)?;
+    let mut seen = Vec::with_capacity(result_ids.len());
     for result_id in result_ids {
+        if seen.contains(result_id) {
+            return Err(StoreError::InvalidHandoffManifest(
+                "a pending result is named twice",
+            ));
+        }
+        seen.push(*result_id);
         if !pending.contains(result_id) {
             return Err(StoreError::InvalidHandoffManifest(
                 "a pending result is not undecided and unacknowledged in this owner's inbox",
@@ -1064,7 +1071,14 @@ fn validate_pending_messages(
     message_ids: &[String],
 ) -> Result<(), StoreError> {
     let pending = pending_message_ids(transaction, owner_id)?;
+    let mut seen = Vec::with_capacity(message_ids.len());
     for message_id in message_ids {
+        if seen.iter().any(|stored: &String| stored == message_id) {
+            return Err(StoreError::InvalidHandoffManifest(
+                "a pending message is named twice",
+            ));
+        }
+        seen.push(message_id.clone());
         if !pending.iter().any(|stored| stored == message_id) {
             return Err(StoreError::InvalidHandoffManifest(
                 "a pending message is not an unanswered worker message on this owner's task",
