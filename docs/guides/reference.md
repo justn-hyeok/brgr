@@ -234,9 +234,9 @@ Git is needed for Git-backed tasks; a non-Git workspace can run without Git.
 Codex sessions bind their owner automatically at first task or SessionStart.
 A bare CLI run without a session can finish but cannot expose, acknowledge, or
 decide its result until `brgr bind TASK --session SESSION` explicitly claims it.
-When the owning session changes, hand the head over with `brgr head` (below)
-rather than `brgr bind`: `bind` is for an unbound or abandoned owner, and it is
-refused while the owner has an open handoff. For a CLI fixture, set both
+When the owning session changes, hand the head over with the `head` commands
+(below) rather than `bind`: `bind` is for an unbound or abandoned owner, and it
+is refused while the owner has an open handoff. For a CLI fixture, set both
 `BRGR_OWNER_ID=codex:example` and `BRGR_SESSION_ID=example-session` on run and
 follow-up commands.
 
@@ -249,11 +249,15 @@ TASK of that owner, like `bind`.
 
 | Step | Command | Who may run it |
 | --- | --- | --- |
-| request | `brgr head request TASK --to SESSION [--key KEY]` | the current head |
-| prepare | `brgr head prepare TAKEOVER --goal TEXT [--notes TEXT]` | the outgoing session, still the head |
+| request | `brgr head request TASK --to SESSION` | the current head |
+| prepare | `brgr head prepare TAKEOVER --goal TEXT` | the outgoing session, still the head |
 | read | `brgr head show TAKEOVER` | anyone with the store (read only) |
 | commit | `brgr head commit TAKEOVER` | only the incoming session |
-| close | `brgr head retire TAKEOVER [--failed REASON]` | only the incoming session, after it has resumed |
+| close | `brgr head retire TAKEOVER` | only the incoming session, after it has resumed |
+
+`request` takes an optional `--key` idempotency key (default: a fresh one),
+`prepare` an optional `--notes`, and `retire` an optional `--failed` with a reason
+that records a failed close instead of a clean one.
 
 `brgr head abort TAKEOVER --reason TEXT` stops a handoff that has not committed
 (either session may run it), and `brgr head status TASK` lists the owner's
@@ -278,7 +282,7 @@ handoffs, newest first.
   same record, even from the outgoing session after the commit; a repeated `commit`
   does not raise the epoch again; a different destination for the same key is a
   conflict.
-- While a handoff is open (requested, prepared, committed or resumed) `brgr bind`
+- While a handoff is open (requested, prepared, committed or resumed) `bind`
   is refused, and only one handoff may be open per owner. Finish it, or abort it
   before the commit.
 
