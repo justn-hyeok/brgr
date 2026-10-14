@@ -807,11 +807,12 @@ fn bounded_reason(reason: &str) -> Result<String, StoreError> {
 }
 
 /// Checks that a manifest is bounded, does not repeat itself, and names rows
-/// this owner actually has.
+/// this owner actually has and still owes.
 ///
 /// The last part is what keeps the manifest honest: a handoff may only point at
-/// results and messages the outgoing head really held, so the incoming session
-/// cannot be handed a pointer into somebody else's work or into nothing.
+/// results and messages the outgoing head really held and has not settled, so
+/// the incoming session cannot be handed a pointer into somebody else's work,
+/// into nothing, or into a question already answered.
 fn validate_manifest(
     transaction: &Transaction<'_>,
     owner_id: &OwnerId,
@@ -842,8 +843,21 @@ fn validate_manifest(
             "a reference list is oversized",
         ));
     }
-    let mut named = Vec::with_capacity(manifest.tasks.len());
-    for reference in &manifest.tasks {
+    validate_task_references(transaction, owner_id, &manifest.tasks)?;
+    validate_pending_results(transaction, owner_id, &manifest.pending_result_ids)?;
+    validate_pending_messages(transaction, owner_id, &manifest.pending_message_ids)
+}
+
+/// Each named revision is this owner's, is named once, and names an attempt that
+/// really ran it. Without the attempt check a manifest could point at another
+/// revision's work under this one's identity.
+fn validate_task_references(
+    transaction: &Transaction<'_>,
+    owner_id: &OwnerId,
+    tasks: &[ManifestTask],
+) -> Result<(), StoreError> {
+    let mut named = Vec::with_capacity(tasks.len());
+    for reference in tasks {
         if named.contains(&(reference.task_id, reference.revision)) {
             return Err(StoreError::InvalidHandoffManifest(
                 "a task revision is named twice",
@@ -884,35 +898,60 @@ fn validate_manifest(
             ));
         }
     }
-    for result_id in &manifest.pending_result_ids {
-        let owned: Option<()> = transaction
+    Ok(())
+}
+
+/// A pending result is one the owner has still to settle: undecided and
+/// unacknowledged in this owner's inbox. Anything settled is the owner's own
+/// history and does not travel.
+fn validate_pending_results(
+    transaction: &Transaction<'_>,
+    owner_id: &OwnerId,
+    result_ids: &[ResultId],
+) -> Result<(), StoreError> {
+    for result_id in result_ids {
+        let pending: Option<()> = transaction
             .query_row(
                 "SELECT 1 FROM results r JOIN inbox_items i ON i.result_id = r.result_id
-                 WHERE r.result_id = ?1 AND i.owner_id = ?2",
+                 WHERE r.result_id = ?1 AND i.owner_id = ?2 AND i.acknowledged = 0
+                   AND NOT EXISTS (
+                     SELECT 1 FROM decisions d WHERE d.result_id = r.result_id
+                   )",
                 params![result_id.to_string(), owner_id.as_str()],
                 |_| Ok(()),
             )
             .optional()?;
-        if owned.is_none() {
+        if pending.is_none() {
             return Err(StoreError::InvalidHandoffManifest(
-                "a pending result is not in this owner's inbox",
+                "a pending result is not undecided and unacknowledged in this owner's inbox",
             ));
         }
     }
-    for message_id in &manifest.pending_message_ids {
-        let owned: Option<()> = transaction
+    Ok(())
+}
+
+/// A pending message is an unanswered worker message on one of the owner's own
+/// tasks. The outgoing head's own replies are not work the incoming one inherits.
+fn validate_pending_messages(
+    transaction: &Transaction<'_>,
+    owner_id: &OwnerId,
+    message_ids: &[String],
+) -> Result<(), StoreError> {
+    for message_id in message_ids {
+        let pending: Option<()> = transaction
             .query_row(
                 "SELECT 1 FROM task_messages m
                  JOIN attempts a ON a.attempt_id = m.attempt_id
                  JOIN tasks t ON t.task_id = a.task_id AND t.revision = a.revision
-                 WHERE m.message_id = ?1 AND t.owner_id = ?2",
+                 WHERE m.message_id = ?1 AND t.owner_id = ?2
+                   AND m.direction = 'worker_to_owner' AND m.acknowledged = 0",
                 params![message_id, owner_id.as_str()],
                 |_| Ok(()),
             )
             .optional()?;
-        if owned.is_none() {
+        if pending.is_none() {
             return Err(StoreError::InvalidHandoffManifest(
-                "a pending message is not on this owner's task",
+                "a pending message is not an unanswered worker message on this owner's task",
             ));
         }
     }

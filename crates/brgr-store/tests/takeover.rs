@@ -624,6 +624,33 @@ fn recorded_binding(store: &Store, owner_id: &OwnerId) -> Option<(String, u64)> 
     store.owner_binding(owner_id).unwrap()
 }
 
+/// A task whose attempt is still running, so the worker can still send messages.
+fn running_attempt(store: &mut Store, owner_id: &OwnerId) -> (TaskId, AttemptId) {
+    let task = spec(owner_id, 1, TaskId::new());
+    store.record_task(&task, "digest-running").unwrap();
+    let attempt_id = AttemptId::new();
+    store
+        .claim_attempt(task.task_id, task.revision, attempt_id)
+        .unwrap();
+    store
+        .set_attempt_state(attempt_id, AttemptState::Starting)
+        .unwrap();
+    store
+        .set_attempt_state(attempt_id, AttemptState::Running)
+        .unwrap();
+    (task.task_id, attempt_id)
+}
+
+fn message(
+    task_id: TaskId,
+    attempt_id: AttemptId,
+    direction: MessageDirection,
+    kind: MessageKind,
+    body: &str,
+) -> MessageDraft {
+    MessageDraft::new(task_id, attempt_id, direction, kind, body.to_owned(), None)
+}
+
 #[test]
 fn a_restart_mid_handoff_reports_the_exact_state_reached() {
     let root = TempDir::new().unwrap();
@@ -772,8 +799,22 @@ fn the_handoff_manifest_holds_references_only_and_never_overwrites_a_decision() 
     let takeover = store
         .request_takeover(&owner_id, FROM, TO, "handoff-1")
         .unwrap();
+    // A result the owner has already decided is not pending, so it cannot be
+    // handed forward as work still owed; the decision itself lives in
+    // `decisions` and the manifest only refers to the revision that produced it.
+    assert!(
+        matches!(
+            store.prepare_takeover(takeover.takeover_id, &manifest(FROM, &task, &envelope)),
+            Err(StoreError::InvalidHandoffManifest(_))
+        ),
+        "a decided result was carried forward as still pending"
+    );
+    let carried = HandoffManifest {
+        pending_result_ids: vec![],
+        ..manifest(FROM, &task, &envelope)
+    };
     store
-        .prepare_takeover(takeover.takeover_id, &manifest(FROM, &task, &envelope))
+        .prepare_takeover(takeover.takeover_id, &carried)
         .unwrap();
     store.commit_takeover(takeover.takeover_id).unwrap();
 
@@ -781,7 +822,11 @@ fn the_handoff_manifest_holds_references_only_and_never_overwrites_a_decision() 
         .handoff_manifest(takeover.takeover_id)
         .unwrap()
         .expect("a prepared handoff keeps its manifest");
-    assert_eq!(stored.manifest.pending_result_ids, vec![envelope.result_id]);
+    assert!(
+        stored.manifest.pending_result_ids.is_empty(),
+        "a decided result was stored as pending: {:?}",
+        stored.manifest.pending_result_ids
+    );
     assert_eq!(
         stored.manifest.tasks,
         vec![ManifestTask {
@@ -820,7 +865,7 @@ fn the_handoff_manifest_holds_references_only_and_never_overwrites_a_decision() 
     // not, so the incoming session cannot be handed two manifests.
     assert_eq!(
         store
-            .prepare_takeover(takeover.takeover_id, &manifest(FROM, &task, &envelope))
+            .prepare_takeover(takeover.takeover_id, &carried)
             .unwrap()
             .state,
         TakeoverState::Committed
@@ -830,7 +875,7 @@ fn the_handoff_manifest_holds_references_only_and_never_overwrites_a_decision() 
             takeover.takeover_id,
             &HandoffManifest {
                 goal: "Something else".to_owned(),
-                ..manifest(FROM, &task, &envelope)
+                ..carried.clone()
             }
         ),
         Err(StoreError::HandoffManifestConflict(_))
@@ -935,6 +980,115 @@ fn a_manifest_may_only_name_an_attempt_of_the_task_revision_it_names() {
     assert_eq!(
         store
             .prepare_takeover(takeover.takeover_id, &manifest(FROM, &task, &envelope))
+            .unwrap()
+            .state,
+        TakeoverState::Prepared
+    );
+}
+
+#[test]
+fn a_manifest_may_only_name_rows_that_are_still_pending_for_this_owner() {
+    let root = TempDir::new().unwrap();
+    let mut store = Store::open(root.path()).unwrap();
+    let owner_id = owner();
+    let epoch = head(&store, &owner_id);
+    let (decided_task, decided) = candidate(&mut store, &owner_id);
+    let (_, acked) = candidate(&mut store, &owner_id);
+    let (waiting_task, waiting) = candidate(&mut store, &owner_id);
+    store
+        .record_decision(&decision(&owner_id, &decided_task, &decided, FROM, epoch))
+        .unwrap();
+    store.acknowledge(&owner_id, acked.result_id).unwrap();
+
+    // A still-running attempt, so the worker can ask while the head is busy.
+    let (asking, running_attempt) = running_attempt(&mut store, &owner_id);
+    let open = store
+        .post_message(&message(
+            asking,
+            running_attempt,
+            MessageDirection::WorkerToOwner,
+            MessageKind::Question,
+            "Which branch?",
+        ))
+        .unwrap();
+    let read = store
+        .post_message(&message(
+            asking,
+            running_attempt,
+            MessageDirection::WorkerToOwner,
+            MessageKind::Question,
+            "Still which branch?",
+        ))
+        .unwrap();
+    let owner_note = store
+        .post_message(&message(
+            asking,
+            running_attempt,
+            MessageDirection::OwnerToWorker,
+            MessageKind::Note,
+            "Going with main",
+        ))
+        .unwrap();
+    store
+        .acknowledge_message(
+            asking,
+            running_attempt,
+            MessageDirection::WorkerToOwner,
+            &read.message_id,
+        )
+        .unwrap();
+
+    let takeover = store
+        .request_takeover(&owner_id, FROM, TO, "handoff-1")
+        .unwrap();
+    for bad in [
+        HandoffManifest {
+            pending_result_ids: vec![decided.result_id],
+            ..bare_manifest(FROM)
+        },
+        HandoffManifest {
+            pending_result_ids: vec![acked.result_id],
+            ..bare_manifest(FROM)
+        },
+        HandoffManifest {
+            pending_message_ids: vec![read.message_id.clone()],
+            ..bare_manifest(FROM)
+        },
+        HandoffManifest {
+            pending_message_ids: vec![owner_note.message_id.clone()],
+            ..bare_manifest(FROM)
+        },
+    ] {
+        assert!(
+            matches!(
+                store.prepare_takeover(takeover.takeover_id, &bad),
+                Err(StoreError::InvalidHandoffManifest(_))
+            ),
+            "a manifest named a settled row as pending: {bad:?}"
+        );
+    }
+    assert_eq!(
+        state(&store, takeover.takeover_id),
+        TakeoverState::Requested,
+        "a refused manifest moved the takeover"
+    );
+
+    // What really is still owed to the head goes through.
+    assert_eq!(
+        store
+            .prepare_takeover(
+                takeover.takeover_id,
+                &HandoffManifest {
+                    tasks: vec![ManifestTask {
+                        task_id: waiting_task.task_id,
+                        revision: waiting_task.revision,
+                        attempt_id: waiting.attempt_id,
+                    }],
+                    pending_result_ids: vec![waiting.result_id],
+                    pending_message_ids: vec![open.message_id.clone()],
+                    ..bare_manifest(FROM)
+                }
+            )
             .unwrap()
             .state,
         TakeoverState::Prepared
