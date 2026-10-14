@@ -43,8 +43,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use takeover::note_owner_action;
 pub use takeover::{
-    HandoffManifest, ManifestTask, RetireOutcome, StoredHandoffManifest, Takeover, TakeoverEvent,
-    TakeoverId, TakeoverState,
+    HandoffManifest, HandoffReferences, ManifestTask, RetireOutcome, StoredHandoffManifest,
+    Takeover, TakeoverEvent, TakeoverId, TakeoverState,
 };
 pub use tree::SubtreeNode;
 

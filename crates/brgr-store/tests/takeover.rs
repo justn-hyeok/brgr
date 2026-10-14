@@ -13,7 +13,7 @@ use brgr_protocol::{
 };
 use brgr_store::{
     HandoffManifest, ManifestTask, MessageDirection, MessageDraft, MessageKind, OwnerProof,
-    RetireOutcome, Store, StoreError, TakeoverId, TakeoverState, WriteOutcome,
+    RetireOutcome, Store, StoreError, TakeoverId, TakeoverState, TaskMessage, WriteOutcome,
 };
 use rusqlite::Connection;
 use serde_json::json;
@@ -51,6 +51,59 @@ fn head(store: &Store, owner_id: &OwnerId) -> u64 {
 }
 
 /// A task with a sealed candidate result waiting in the owner's inbox.
+/// A candidate that also has an unanswered worker question, posted while the
+/// attempt is still running.
+fn open_candidate_with_question(
+    store: &mut Store,
+    owner_id: &OwnerId,
+) -> (TaskSpec, ResultEnvelope, TaskMessage) {
+    let task = spec(owner_id, 1, TaskId::new());
+    store.record_task(&task, "digest-task").unwrap();
+    let attempt_id = AttemptId::new();
+    store
+        .claim_attempt(task.task_id, task.revision, attempt_id)
+        .unwrap();
+    store
+        .set_attempt_state(attempt_id, AttemptState::Starting)
+        .unwrap();
+    store
+        .set_attempt_state(attempt_id, AttemptState::Running)
+        .unwrap();
+    let message = store
+        .post_message(&MessageDraft::new(
+            task.task_id,
+            attempt_id,
+            MessageDirection::WorkerToOwner,
+            MessageKind::Question,
+            "Which revision should land?".to_owned(),
+            None,
+        ))
+        .unwrap();
+    let envelope = ResultEnvelope {
+        schema: SCHEMA_V1.to_owned(),
+        task_id: task.task_id,
+        revision: task.revision,
+        attempt_id,
+        result_id: ResultId::new(),
+        outcome: TerminalOutcome::Candidate,
+        artifacts: vec![
+            store
+                .seal_artifact_reader(
+                    Cursor::new(b"sealed-artifact-bytes"),
+                    &task.artifact_contract.media_type,
+                    task.artifact_contract.max_bytes,
+                )
+                .unwrap(),
+        ],
+        error: None,
+        legacy_embedded_route_observation: None,
+        route_observation: None,
+        unresolved_effects: vec![],
+    };
+    store.commit_terminal_result(owner_id, &envelope).unwrap();
+    (task, envelope, message)
+}
+
 fn candidate(store: &mut Store, owner_id: &OwnerId) -> (TaskSpec, ResultEnvelope) {
     let task = spec(owner_id, 1, TaskId::new());
     store.record_task(&task, "digest-task").unwrap();
@@ -1741,5 +1794,117 @@ fn write_pre_takeover_store(root: &Path, owner_id: &OwnerId, task: &TaskSpec, st
         .unwrap();
     connection
         .pragma_update(None, "user_version", stamp)
+        .unwrap();
+}
+
+/// The reader and the manifest validator share one definition of "still owed".
+#[test]
+fn handoff_references_lists_only_this_owners_open_work_and_prepares() {
+    let root = TempDir::new().unwrap();
+    let mut store = Store::open(root.path()).unwrap();
+    let owner_id = owner();
+    let epoch = head(&store, &owner_id);
+
+    let (open_task, open_envelope, open_message) =
+        open_candidate_with_question(&mut store, &owner_id);
+
+    let (decided_task, decided_envelope) = candidate(&mut store, &owner_id);
+    store
+        .record_decision(&decision(
+            &owner_id,
+            &decided_task,
+            &decided_envelope,
+            FROM,
+            epoch,
+        ))
+        .unwrap();
+
+    let (_acked_task, acked_envelope) = candidate(&mut store, &owner_id);
+    store
+        .acknowledge(&owner_id, acked_envelope.result_id)
+        .unwrap();
+
+    let other = OwnerId::new("codex:other-owner").unwrap();
+    let (other_task, other_envelope) = candidate(&mut store, &other);
+
+    let unnamed = spec(&owner_id, 1, TaskId::new());
+    store.record_task(&unnamed, "digest-no-attempt").unwrap();
+
+    let references = store.handoff_references(&owner_id).unwrap();
+    assert!(
+        references
+            .pending_result_ids
+            .contains(&open_envelope.result_id),
+        "an undecided result is missing"
+    );
+    assert!(
+        !references
+            .pending_result_ids
+            .contains(&decided_envelope.result_id),
+        "a decided result was listed"
+    );
+    assert!(
+        !references
+            .pending_result_ids
+            .contains(&acked_envelope.result_id),
+        "an acknowledged result was listed"
+    );
+    assert!(
+        !references
+            .pending_result_ids
+            .contains(&other_envelope.result_id),
+        "another owner's result was listed"
+    );
+    assert!(
+        references
+            .tasks
+            .iter()
+            .any(|task| task.task_id == open_task.task_id
+                && task.revision == open_task.revision
+                && task.attempt_id == open_envelope.attempt_id),
+        "the open revision and its attempt were not named"
+    );
+    assert!(
+        references
+            .tasks
+            .iter()
+            .all(|task| task.task_id != decided_task.task_id),
+        "a settled revision was named"
+    );
+    assert!(
+        references
+            .tasks
+            .iter()
+            .all(|task| task.task_id != unnamed.task_id),
+        "a revision with no attempt was named"
+    );
+    assert!(
+        references
+            .tasks
+            .iter()
+            .all(|task| task.task_id != other_task.task_id),
+        "another owner's revision was named"
+    );
+
+    assert!(
+        references
+            .pending_message_ids
+            .contains(&open_message.message_id),
+        "an unanswered worker message was not listed"
+    );
+
+    let manifest = HandoffManifest {
+        goal: "Finish the answer".to_owned(),
+        decision_notes: String::new(),
+        origin_session: FROM.to_owned(),
+        tasks: references.tasks.clone(),
+        pending_result_ids: references.pending_result_ids.clone(),
+        pending_message_ids: references.pending_message_ids.clone(),
+    };
+    let takeover = store
+        .request_takeover(&owner_id, FROM, TO, "handoff-references")
+        .unwrap();
+    store
+        .prepare_takeover(takeover.takeover_id, &manifest)
         .unwrap();
 }

@@ -210,6 +210,21 @@ pub struct HandoffManifest {
     pub pending_message_ids: Vec<String>,
 }
 
+/// The references a handoff may name for one owner.
+///
+/// The pending lists come from the same queries that check a manifest's
+/// pending results and messages, so a manifest built from this value names
+/// only rows the store will accept.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct HandoffReferences {
+    /// Revisions that are still open and that have an attempt to name.
+    pub tasks: Vec<ManifestTask>,
+    /// Inbox results this owner has neither decided nor acknowledged.
+    pub pending_result_ids: Vec<ResultId>,
+    /// Worker messages on this owner's tasks that are still unacknowledged.
+    pub pending_message_ids: Vec<String>,
+}
+
 /// A stored manifest, as read back from the store.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StoredHandoffManifest {
@@ -727,6 +742,38 @@ impl Store {
             )
             .transpose()
     }
+
+    /// Lists the open work a handoff manifest may name for this owner.
+    ///
+    /// Open revisions are those [`crate::Settlement`] has not finished with.
+    /// A revision that has no attempt is omitted, because a manifest cannot
+    /// name one. Pending results and messages are the rows the manifest
+    /// validator accepts.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for malformed stored ids or a database failure.
+    pub fn handoff_references(&self, owner_id: &OwnerId) -> Result<HandoffReferences, StoreError> {
+        let mut tasks = Vec::new();
+        let revisions = open_revision_attempts(&self.connection, owner_id)?;
+        for (task_id, revision, attempt_id) in revisions {
+            if !matches!(
+                self.revision_settlement(task_id, revision)?,
+                crate::Settlement::Decided | crate::Settlement::Acknowledged(_)
+            ) {
+                tasks.push(ManifestTask {
+                    task_id,
+                    revision,
+                    attempt_id,
+                });
+            }
+        }
+        Ok(HandoffReferences {
+            tasks,
+            pending_result_ids: pending_result_ids(&self.connection, owner_id)?,
+            pending_message_ids: pending_message_ids(&self.connection, owner_id)?,
+        })
+    }
 }
 
 /// Moves a committed handoff to `resumed` when the incoming head acts.
@@ -962,19 +1009,9 @@ fn validate_pending_results(
     owner_id: &OwnerId,
     result_ids: &[ResultId],
 ) -> Result<(), StoreError> {
+    let pending = pending_result_ids(transaction, owner_id)?;
     for result_id in result_ids {
-        let pending: Option<()> = transaction
-            .query_row(
-                "SELECT 1 FROM results r JOIN inbox_items i ON i.result_id = r.result_id
-                 WHERE r.result_id = ?1 AND i.owner_id = ?2 AND i.acknowledged = 0
-                   AND NOT EXISTS (
-                     SELECT 1 FROM decisions d WHERE d.result_id = r.result_id
-                   )",
-                params![result_id.to_string(), owner_id.as_str()],
-                |_| Ok(()),
-            )
-            .optional()?;
-        if pending.is_none() {
+        if !pending.contains(result_id) {
             return Err(StoreError::InvalidHandoffManifest(
                 "a pending result is not undecided and unacknowledged in this owner's inbox",
             ));
@@ -990,25 +1027,114 @@ fn validate_pending_messages(
     owner_id: &OwnerId,
     message_ids: &[String],
 ) -> Result<(), StoreError> {
+    let pending = pending_message_ids(transaction, owner_id)?;
     for message_id in message_ids {
-        let pending: Option<()> = transaction
-            .query_row(
-                "SELECT 1 FROM task_messages m
-                 JOIN attempts a ON a.attempt_id = m.attempt_id
-                 JOIN tasks t ON t.task_id = a.task_id AND t.revision = a.revision
-                 WHERE m.message_id = ?1 AND t.owner_id = ?2
-                   AND m.direction = 'worker_to_owner' AND m.acknowledged = 0",
-                params![message_id, owner_id.as_str()],
-                |_| Ok(()),
-            )
-            .optional()?;
-        if pending.is_none() {
+        if !pending.iter().any(|stored| stored == message_id) {
             return Err(StoreError::InvalidHandoffManifest(
                 "a pending message is not an unanswered worker message on this owner's task",
             ));
         }
     }
     Ok(())
+}
+
+/// Undecided, unacknowledged inbox results for one owner.
+///
+/// This is the only query that decides which results a handoff may name.
+fn pending_result_ids(
+    connection: &Connection,
+    owner_id: &OwnerId,
+) -> Result<Vec<ResultId>, StoreError> {
+    let mut statement = connection.prepare(
+        "SELECT r.result_id
+         FROM results r
+         JOIN inbox_items i ON i.result_id = r.result_id
+         WHERE i.owner_id = ?1 AND i.acknowledged = 0
+           AND NOT EXISTS (
+             SELECT 1 FROM decisions d WHERE d.result_id = r.result_id
+           )
+         ORDER BY r.rowid",
+    )?;
+    let rows = statement.query_map([owner_id.as_str()], |row| row.get::<_, String>(0))?;
+    rows.map(|row| parse_result_id(&row?)).collect()
+}
+
+/// Unacknowledged worker-to-owner messages on one owner's tasks.
+///
+/// This is the only query that decides which messages a handoff may name.
+fn pending_message_ids(
+    connection: &Connection,
+    owner_id: &OwnerId,
+) -> Result<Vec<String>, StoreError> {
+    let mut statement = connection.prepare(
+        "SELECT m.message_id
+         FROM task_messages m
+         JOIN attempts a ON a.attempt_id = m.attempt_id
+         JOIN tasks t ON t.task_id = a.task_id AND t.revision = a.revision
+         WHERE t.owner_id = ?1
+           AND m.direction = 'worker_to_owner' AND m.acknowledged = 0
+         ORDER BY m.rowid",
+    )?;
+    let rows = statement.query_map([owner_id.as_str()], |row| row.get::<_, String>(0))?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(StoreError::from)
+}
+
+/// One attempt for each of this owner's revisions that has one.
+///
+/// The attempt is the non-terminal one when the revision still has one, and
+/// otherwise the latest attempt. A revision with no attempt is absent.
+fn open_revision_attempts(
+    connection: &Connection,
+    owner_id: &OwnerId,
+) -> Result<Vec<(TaskId, u32, AttemptId)>, StoreError> {
+    let mut statement = connection.prepare(
+        "SELECT t.task_id, t.revision, a.attempt_id
+         FROM tasks t
+         JOIN attempts a ON a.task_id = t.task_id AND a.revision = t.revision
+         WHERE t.owner_id = ?1
+           AND a.attempt_id = (
+             SELECT a2.attempt_id FROM attempts a2
+             WHERE a2.task_id = t.task_id AND a2.revision = t.revision
+             ORDER BY CASE WHEN a2.state = 'terminal' THEN 1 ELSE 0 END, a2.rowid DESC
+             LIMIT 1
+           )
+         ORDER BY t.task_id, t.revision",
+    )?;
+    let rows = statement.query_map([owner_id.as_str()], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, String>(2)?,
+        ))
+    })?;
+    rows.map(|row| {
+        let (task_id, revision, attempt_id) = row?;
+        Ok((
+            parse_task_id(&task_id)?,
+            u32::try_from(revision).map_err(|_| StoreError::NumericOverflow)?,
+            parse_attempt_id(&attempt_id)?,
+        ))
+    })
+    .collect()
+}
+
+fn parse_result_id(value: &str) -> Result<ResultId, StoreError> {
+    value
+        .parse()
+        .map_err(|_| StoreError::InvalidHandoffManifest("a stored result id is malformed"))
+}
+
+fn parse_task_id(value: &str) -> Result<TaskId, StoreError> {
+    value
+        .parse()
+        .map_err(|_| StoreError::InvalidHandoffManifest("a stored task id is malformed"))
+}
+
+fn parse_attempt_id(value: &str) -> Result<AttemptId, StoreError> {
+    value
+        .parse()
+        .map_err(|_| StoreError::InvalidAttemptId(value.to_owned()))
 }
 
 fn parse_takeover_id(value: &str) -> Result<TakeoverId, StoreError> {
