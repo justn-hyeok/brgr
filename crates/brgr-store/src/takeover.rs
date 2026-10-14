@@ -779,10 +779,7 @@ impl Store {
         let mut tasks = Vec::new();
         let revisions = open_revision_attempts(&self.connection, owner_id)?;
         for (task_id, revision, attempt_id) in revisions {
-            if !matches!(
-                self.revision_settlement(task_id, revision)?,
-                crate::Settlement::Decided | crate::Settlement::Acknowledged(_)
-            ) {
+            if handoff_revision_is_open(self.revision_settlement(task_id, revision)?) {
                 tasks.push(ManifestTask {
                     task_id,
                     revision,
@@ -1033,8 +1030,26 @@ fn validate_task_references(
                 "a named attempt is not an attempt of that task revision",
             ));
         }
+        if !handoff_revision_is_open(crate::result::revision_settlement_on(
+            transaction,
+            reference.task_id,
+            reference.revision,
+        )?) {
+            return Err(StoreError::InvalidHandoffManifest(
+                "a named task revision is already settled",
+            ));
+        }
     }
     Ok(())
+}
+
+/// The revisions a handoff may name: anything [`crate::Settlement`] has not
+/// finished with. The reader and the manifest validator both use this.
+fn handoff_revision_is_open(settlement: crate::Settlement) -> bool {
+    !matches!(
+        settlement,
+        crate::Settlement::Decided | crate::Settlement::Acknowledged(_)
+    )
 }
 
 /// A pending result is one the owner has still to settle: undecided and

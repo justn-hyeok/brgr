@@ -854,9 +854,8 @@ fn the_handoff_manifest_holds_references_only_and_never_overwrites_a_decision() 
     let takeover = store
         .request_takeover(&owner_id, FROM, TO, "handoff-1")
         .unwrap();
-    // A result the owner has already decided is not pending, so it cannot be
-    // handed forward as work still owed; the decision itself lives in
-    // `decisions` and the manifest only refers to the revision that produced it.
+    // A decided result is not pending, and the revision that produced it is
+    // settled, so neither travels. The decision itself stays in `decisions`.
     assert!(
         matches!(
             store.prepare_takeover(takeover.takeover_id, &manifest(FROM, &task, &envelope)),
@@ -865,6 +864,7 @@ fn the_handoff_manifest_holds_references_only_and_never_overwrites_a_decision() 
         "a decided result was carried forward as still pending"
     );
     let carried = HandoffManifest {
+        tasks: vec![],
         pending_result_ids: vec![],
         ..manifest(FROM, &task, &envelope)
     };
@@ -882,13 +882,9 @@ fn the_handoff_manifest_holds_references_only_and_never_overwrites_a_decision() 
         "a decided result was stored as pending: {:?}",
         stored.manifest.pending_result_ids
     );
-    assert_eq!(
-        stored.manifest.tasks,
-        vec![ManifestTask {
-            task_id: task.task_id,
-            revision: task.revision,
-            attempt_id: envelope.attempt_id,
-        }]
+    assert!(
+        stored.manifest.tasks.is_empty(),
+        "a settled revision was stored on the manifest"
     );
     assert_eq!(
         stored.digest,
@@ -1016,7 +1012,12 @@ fn prepare_rejects_a_manifest_from_another_origin_session() {
         TakeoverState::Requested,
         "a refused origin moved the takeover"
     );
-    assert!(store.handoff_manifest(takeover.takeover_id).unwrap().is_none());
+    assert!(
+        store
+            .handoff_manifest(takeover.takeover_id)
+            .unwrap()
+            .is_none()
+    );
 
     assert_eq!(
         store
@@ -2167,4 +2168,90 @@ fn handoff_references_lists_only_this_owners_open_work_and_prepares() {
     store
         .prepare_takeover(takeover.takeover_id, &manifest)
         .unwrap();
+}
+
+#[test]
+fn a_settled_revision_omitted_from_handoff_references_is_rejected() {
+    let root = TempDir::new().unwrap();
+    let mut store = Store::open(root.path()).unwrap();
+    let owner_id = owner();
+    let epoch = head(&store, &owner_id);
+
+    let (decided_task, decided_envelope) = candidate(&mut store, &owner_id);
+    store
+        .record_decision(&decision(
+            &owner_id,
+            &decided_task,
+            &decided_envelope,
+            FROM,
+            epoch,
+        ))
+        .unwrap();
+
+    let (acked_task, acked_envelope) = failed_result(&mut store, &owner_id);
+    store
+        .acknowledge(&owner_id, acked_envelope.result_id)
+        .unwrap();
+
+    let references = store.handoff_references(&owner_id).unwrap();
+    assert!(
+        references
+            .tasks
+            .iter()
+            .all(|task| task.task_id != decided_task.task_id && task.task_id != acked_task.task_id),
+        "handoff references named a settled revision"
+    );
+
+    let takeover = store
+        .request_takeover(&owner_id, FROM, TO, "handoff-settled")
+        .unwrap();
+    for (task, envelope) in [
+        (&decided_task, &decided_envelope),
+        (&acked_task, &acked_envelope),
+    ] {
+        let settled = HandoffManifest {
+            tasks: vec![ManifestTask {
+                task_id: task.task_id,
+                revision: task.revision,
+                attempt_id: envelope.attempt_id,
+            }],
+            ..bare_manifest(FROM)
+        };
+        assert!(
+            matches!(
+                store.prepare_takeover(takeover.takeover_id, &settled),
+                Err(StoreError::InvalidHandoffManifest(_))
+            ),
+            "a settled revision was accepted"
+        );
+    }
+    assert_eq!(
+        state(&store, takeover.takeover_id),
+        TakeoverState::Requested,
+        "a settled revision moved the takeover"
+    );
+}
+
+fn failed_result(store: &mut Store, owner_id: &OwnerId) -> (TaskSpec, ResultEnvelope) {
+    let task = spec(owner_id, 1, TaskId::new());
+    store.record_task(&task, "digest-failed").unwrap();
+    let attempt_id = AttemptId::new();
+    store
+        .claim_attempt(task.task_id, task.revision, attempt_id)
+        .unwrap();
+    let envelope = ResultEnvelope {
+        schema: SCHEMA_V1.to_owned(),
+        task_id: task.task_id,
+        revision: task.revision,
+        attempt_id,
+        result_id: ResultId::new(),
+        outcome: TerminalOutcome::Failed,
+        artifacts: vec![],
+        error: Some("the worker stopped".to_owned()),
+        legacy_embedded_route_observation: None,
+        route_observation: None,
+        unresolved_effects: vec![],
+    };
+    store.commit_terminal_result(owner_id, &envelope).unwrap();
+    (task, envelope)
 }
