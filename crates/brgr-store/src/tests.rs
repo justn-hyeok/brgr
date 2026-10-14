@@ -2002,6 +2002,7 @@ const RETRY_DECISIONS: &[(&str, bool)] = &[
     ("create_debate_with_proof", false),
     ("stop_debate_with_proof", false),
     ("post_peer_message_with_proof", false),
+    ("acknowledge_peer_with_proof", false),
     ("acknowledge_peer", false),
     ("claim_native_delivery", false),
     ("finish_native_delivery", false),

@@ -210,8 +210,12 @@ pub(crate) async fn run(paths: &Paths, command: DebateCommand, json_output: bool
         }
         DebateCommand::Ack { message, task } => {
             let task = worker_task(task)?;
-            let (attempt, _) = authorize(&store, task)?;
-            store.acknowledge_peer(&message, task, attempt)?;
+            let (attempt, proof) = authorize(&store, task)?;
+            if let Some(proof) = proof {
+                store.acknowledge_peer_bound(&message, task, attempt, &proof)?;
+            } else {
+                store.acknowledge_peer(&message, task, attempt)?;
+            }
             print_value(
                 &serde_json::json!({"message_id":message,"acknowledged":true}),
                 json_output,

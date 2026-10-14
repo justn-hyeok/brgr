@@ -216,6 +216,88 @@ fn unguarded_debate_writes_keep_working_after_a_takeover() {
 }
 
 #[test]
+fn incoming_session_acknowledges_peer_message_through_bound_function() {
+    let root = TempDir::new().unwrap();
+    let mut store = Store::open(root.path()).unwrap();
+    let owner_id = owner();
+    let (a, attempt_a) = running_task(&mut store, &owner_id);
+    let (b, attempt_b) = running_task(&mut store, &owner_id);
+    let group = uuid::Uuid::new_v4().to_string();
+    store.create_debate(&group, &[a, b]).unwrap();
+    let question = peer_draft(&group, a, b, "Please acknowledge me");
+    store.post_peer_message_from(&question, attempt_a).unwrap();
+    take_over(&store, &owner_id);
+    let current = OwnerProof::new(owner_id, TO, 2).unwrap();
+
+    store
+        .acknowledge_peer_bound(&question.id, b, attempt_b, &current)
+        .unwrap();
+
+    assert!(store.debate_history(&group).unwrap()[0].acknowledged);
+}
+
+#[test]
+fn old_session_ack_is_refused_and_writes_nothing() {
+    let root = TempDir::new().unwrap();
+    let mut store = Store::open(root.path()).unwrap();
+    let owner_id = owner();
+    let (a, attempt_a) = running_task(&mut store, &owner_id);
+    let (b, attempt_b) = running_task(&mut store, &owner_id);
+    let group = uuid::Uuid::new_v4().to_string();
+    store.create_debate(&group, &[a, b]).unwrap();
+    let question = peer_draft(&group, a, b, "Still waiting");
+    store.post_peer_message_from(&question, attempt_a).unwrap();
+    let old = OwnerProof::new(owner_id.clone(), FROM, 1).unwrap();
+    take_over(&store, &owner_id);
+
+    assert!(matches!(
+        store.acknowledge_peer_bound(&question.id, b, attempt_b, &old),
+        Err(StoreError::OwnerBindingConflict)
+    ));
+    assert!(!store.debate_history(&group).unwrap()[0].acknowledged);
+}
+
+#[test]
+fn another_owners_proof_cannot_acknowledge_peer_message() {
+    let root = TempDir::new().unwrap();
+    let mut store = Store::open(root.path()).unwrap();
+    let owner_id = owner();
+    let (a, attempt_a) = running_task(&mut store, &owner_id);
+    let (b, attempt_b) = running_task(&mut store, &owner_id);
+    let group = uuid::Uuid::new_v4().to_string();
+    store.create_debate(&group, &[a, b]).unwrap();
+    let question = peer_draft(&group, a, b, "Wrong owner");
+    store.post_peer_message_from(&question, attempt_a).unwrap();
+    let other = other_owner();
+    store.bind_owner(&other, TO, 1).unwrap();
+    let wrong = OwnerProof::new(other, TO, 1).unwrap();
+
+    assert!(matches!(
+        store.acknowledge_peer_bound(&question.id, b, attempt_b, &wrong),
+        Err(StoreError::OwnerProofMismatch)
+    ));
+    assert!(!store.debate_history(&group).unwrap()[0].acknowledged);
+}
+
+#[test]
+fn unguarded_peer_ack_still_works_after_takeover() {
+    let root = TempDir::new().unwrap();
+    let mut store = Store::open(root.path()).unwrap();
+    let owner_id = owner();
+    let (a, attempt_a) = running_task(&mut store, &owner_id);
+    let (b, attempt_b) = running_task(&mut store, &owner_id);
+    let group = uuid::Uuid::new_v4().to_string();
+    store.create_debate(&group, &[a, b]).unwrap();
+    let question = peer_draft(&group, a, b, "Worker acknowledgement");
+    store.post_peer_message_from(&question, attempt_a).unwrap();
+    take_over(&store, &owner_id);
+
+    store.acknowledge_peer(&question.id, b, attempt_b).unwrap();
+
+    assert!(store.debate_history(&group).unwrap()[0].acknowledged);
+}
+
+#[test]
 fn a_debate_with_one_foreign_task_is_refused_as_a_mismatch() {
     let root = TempDir::new().unwrap();
     let mut store = Store::open(root.path()).unwrap();

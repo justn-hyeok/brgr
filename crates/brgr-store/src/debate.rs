@@ -425,7 +425,53 @@ impl Store {
         task: TaskId,
         attempt: AttemptId,
     ) -> Result<(), StoreError> {
-        if self.connection.execute("UPDATE peer_messages SET acknowledged=1 WHERE message_id=?1 AND to_task=?2 AND to_attempt=?3",params![id,task.to_string(),attempt.to_string()])? != 1 { return Err(StoreError::TaskMessageNotFound(id.to_owned())); }
+        self.acknowledge_peer_with_proof(id, task, attempt, None)
+    }
+
+    /// Mark a peer message as read only while the caller's session and epoch
+    /// are still the owner's binding, and only for a group and recipient task
+    /// owned by that owner. A refused call writes nothing.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::OwnerBindingConflict`] for a stale session,
+    /// [`StoreError::OwnerProofMismatch`] for a group or task owned by somebody
+    /// else, and otherwise the same errors as [`Self::acknowledge_peer`].
+    pub fn acknowledge_peer_bound(
+        &self,
+        id: &str,
+        task: TaskId,
+        attempt: AttemptId,
+        proof: &OwnerProof,
+    ) -> Result<(), StoreError> {
+        self.acknowledge_peer_with_proof(id, task, attempt, Some(proof))
+    }
+
+    fn acknowledge_peer_with_proof(
+        &self,
+        id: &str,
+        task: TaskId,
+        attempt: AttemptId,
+        proof: Option<&OwnerProof>,
+    ) -> Result<(), StoreError> {
+        let transaction = self.write_transaction()?;
+        if let Some(proof) = proof {
+            assert_owner_proof(&transaction, proof)?;
+            let group_owner: Option<String> = transaction
+                .query_row(
+                    "SELECT g.owner_id FROM peer_messages p JOIN debate_groups g ON g.group_id=p.group_id WHERE p.message_id=?1",
+                    [id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if group_owner.as_deref() != Some(proof.owner_id.as_str())
+                || self.task(task)?.owner_id.as_str() != proof.owner_id.as_str()
+            {
+                return Err(StoreError::OwnerProofMismatch);
+            }
+        }
+        if transaction.execute("UPDATE peer_messages SET acknowledged=1 WHERE message_id=?1 AND to_task=?2 AND to_attempt=?3",params![id,task.to_string(),attempt.to_string()])? != 1 { return Err(StoreError::TaskMessageNotFound(id.to_owned())); }
+        transaction.commit()?;
         Ok(())
     }
 

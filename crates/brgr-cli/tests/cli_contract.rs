@@ -7590,6 +7590,89 @@ fn debate_worker_send_remains_available_after_owner_takeover() {
     assert_eq!(store.debate_history(&group).unwrap().len(), 1);
 }
 
+#[test]
+fn debate_ack_is_bound_for_owner_but_remains_available_to_worker() {
+    let owner = "codex:debate-ack-takeover";
+    let (_temp, home, tasks) = debate_home(owner);
+    let started = json_output(&run(
+        &home,
+        &[
+            "debate",
+            "start",
+            &tasks[0],
+            &tasks[1],
+            "--request-id",
+            "723e4567-e89b-12d3-a456-426614174000",
+        ],
+        &[("BRGR_OWNER_ID", owner)],
+    ));
+    let group = started["id"].as_str().unwrap().to_owned();
+    let store = brgr_store::Store::open(home.join("store")).unwrap();
+    let a: brgr_protocol::TaskId = tasks[0].parse().unwrap();
+    let b: brgr_protocol::TaskId = tasks[1].parse().unwrap();
+    let attempt_a = store.latest_message_attempt(a).unwrap();
+    let attempt_b = store.latest_message_attempt(b).unwrap();
+    let question = brgr_store::PeerDraft {
+        id: "823e4567-e89b-12d3-a456-426614174000".to_owned(),
+        group: group.clone(),
+        from: a,
+        to: b,
+        kind: brgr_store::MessageKind::Question,
+        body: "Please acknowledge".to_owned(),
+        reply_to: None,
+    };
+    store.post_peer_message_from(&question, attempt_a).unwrap();
+    debate_takeover(&home, owner, "debate-ack-handoff");
+
+    // Existing `authorize` already rejects an old owner before the ack write,
+    // so this CLI leg is expected to be green even before store-level binding.
+    let stale = run(
+        &home,
+        &["debate", "ack", &question.id, &tasks[1]],
+        &owner_env(owner, "fixture-session"),
+    );
+    assert!(!stale.status.success());
+    assert!(!String::from_utf8_lossy(&stale.stderr).is_empty());
+    assert!(!store.debate_history(&group).unwrap()[0].acknowledged);
+
+    let fresh = run(
+        &home,
+        &["debate", "ack", &question.id, &tasks[1]],
+        &[
+            ("BRGR_OWNER_ID", owner),
+            ("BRGR_SESSION_ID", "session-b"),
+            ("CODEX_THREAD_ID", "session-b"),
+        ],
+    );
+    assert!(
+        fresh.status.success(),
+        "{}",
+        String::from_utf8_lossy(&fresh.stderr)
+    );
+    assert!(store.debate_history(&group).unwrap()[0].acknowledged);
+
+    let second = brgr_store::PeerDraft {
+        id: "923e4567-e89b-12d3-a456-426614174000".to_owned(),
+        body: "Worker ack remains available".to_owned(),
+        ..question
+    };
+    store.post_peer_message_from(&second, attempt_a).unwrap();
+    let worker = run(
+        &home,
+        &["debate", "ack", &second.id],
+        &[
+            ("BRGR_PARENT_TASK_ID", &tasks[1]),
+            ("BRGR_PARENT_ATTEMPT_ID", &attempt_b.to_string()),
+        ],
+    );
+    assert!(
+        worker.status.success(),
+        "{}",
+        String::from_utf8_lossy(&worker.stderr)
+    );
+    assert!(store.debate_history(&group).unwrap()[1].acknowledged);
+}
+
 fn manual(home: &Path, args: &[&str], envs: &[(&str, &str)]) -> std::process::Output {
     let mut command = brgr_command();
     command.arg("--home").arg(home).arg("--json").args(args);
