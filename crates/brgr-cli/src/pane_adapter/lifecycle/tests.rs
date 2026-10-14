@@ -273,6 +273,53 @@ fn confirmed_absent_pane_settles_cleanup_and_archives_the_handled_report() {
     cleanup_settled(&fixture.paths, fixture.task, 1).unwrap();
 }
 
+#[test]
+fn a_changed_handled_report_is_refused_once_and_kept_in_place() {
+    let mut fixture = Fixture::new();
+    fixture.report = fixture
+        .temp
+        .path()
+        .join(format!("work/.brgr/tasks/{}-r1/report.md", fixture.task));
+    fs::create_dir_all(fixture.report.parent().unwrap()).unwrap();
+    fs::write(&fixture.report, "COMPLETE").unwrap();
+    update_receipt(&fixture.receipt, |receipt| {
+        receipt.report = Some(fixture.report.clone());
+        receipt.report_digest = Some(report_digest(b"COMPLETE"));
+    })
+    .unwrap();
+    let mut supervisor = brgr_core::Supervisor::open(&fixture.paths.store).unwrap();
+    assert!(collect_recovered(&fixture.paths, &fixture.unfinished(), &mut supervisor).unwrap());
+    let result = supervisor.store().latest_result(fixture.task).unwrap();
+    let owner = supervisor.store().task(fixture.task).unwrap().owner_id;
+    let decision: brgr_protocol::Decision = serde_json::from_value(serde_json::json!({
+        "schema":"brgr/v1", "decision_id":brgr_protocol::DecisionId::new(),
+        "owner_id":owner, "task_id":fixture.task, "revision":1,
+        "result_id":result.result_id, "result_digest":Store::result_digest(&result).unwrap(),
+        "session_id":"recovery", "binding_epoch":1, "verdict":"accepted", "reason":"COMPLETE verified"
+    }))
+    .unwrap();
+    supervisor
+        .store()
+        .record_decision_and_ack(&decision)
+        .unwrap();
+    fs::write(&fixture.report, "CHANGED AFTER THE DECISION").unwrap();
+
+    fs::write(fixture.temp.path().join("pane-gone"), "").unwrap();
+    cleanup_settled(&fixture.paths, fixture.task, 1).unwrap();
+    let refused: PaneReceipt =
+        serde_json::from_slice(&fs::read(&fixture.receipt).unwrap()).unwrap();
+    assert_eq!(
+        refused.archive_refused.as_deref(),
+        Some("handled report changed before archival")
+    );
+    assert!(refused.archived_report.is_none());
+    assert_eq!(
+        fs::read_to_string(&fixture.report).unwrap(),
+        "CHANGED AFTER THE DECISION"
+    );
+    cleanup_settled(&fixture.paths, fixture.task, 1).unwrap();
+}
+
 /// A decided task whose pane disappeared before brgr closed it takes the
 /// pane-already-gone path, which must reclaim the worktree like the others.
 #[test]
