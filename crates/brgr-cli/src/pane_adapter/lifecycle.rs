@@ -33,6 +33,10 @@ pub(crate) struct PaneReceipt {
     pub(crate) report_digest: Option<String>,
     #[serde(default)]
     pub(crate) archived_report: Option<PathBuf>,
+    /// Why a handled report was left in place instead of archived. Set once so a
+    /// permanent mismatch is reported once, not on every later command.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) archive_refused: Option<String>,
     #[serde(default)]
     pub(super) finished_at: Option<u64>,
     /// The pane the worker was opened beside, so its siblings can be laid out
@@ -394,7 +398,7 @@ fn archive_report(paths: &Paths, task: TaskId, revision: u32) -> Result<()> {
     crate::native_result::restore_cursor(paths, task, revision)?;
     let path = paths.pane_receipt(task, revision);
     let receipt: PaneReceipt = serde_json::from_slice(&fs::read(&path)?)?;
-    if receipt.archived_report.is_some() {
+    if receipt.archived_report.is_some() || receipt.archive_refused.is_some() {
         return Ok(());
     }
     let (Some(report), Some(expected), Some(attempt)) =
@@ -410,7 +414,17 @@ fn archive_report(paths: &Paths, task: TaskId, revision: u32) -> Result<()> {
     }
     let bytes = read_report(report, spec.artifact_contract.max_bytes)?;
     if report_digest(&bytes) != *expected {
-        bail!("handled report changed before archival");
+        // A permanent mismatch: leave the file for the owner and say so once.
+        // Returning an error made every later command retry and warn again.
+        let reason = "handled report changed before archival";
+        update_receipt(&path, |value| {
+            value.archive_refused = Some(reason.to_owned());
+        })?;
+        eprintln!(
+            "brgr kept the handled report of task {task} (revision {revision}) in place: {reason}: {}",
+            report.display()
+        );
+        return Ok(());
     }
     let archive = paths.runs.join(format!("{task}-r{revision}.report.md"));
     crate::write_bytes_atomic(&archive, &bytes)?;
