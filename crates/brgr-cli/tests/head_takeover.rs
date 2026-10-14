@@ -275,6 +275,47 @@ fn head_commit_abort_and_retire_refuse_wrong_callers_without_writes() {
 }
 
 #[test]
+fn head_mutations_refuse_a_mismatched_owner_id() {
+    let wrong_owner_incoming = [
+        ("BRGR_OWNER_ID", "codex:some-other-owner"),
+        ("BRGR_SESSION_ID", "session-incoming"),
+    ];
+    for action in ["commit", "abort", "retire"] {
+        let (_temp, home, workspace) = gjc_home();
+        let task_id = start_task(&home, &workspace);
+        let takeover_id = request_and_prepare(&home, &task_id, &format!("owner-mismatch-{action}"));
+        if action == "retire" {
+            json_output(&run(
+                &home,
+                &["head", "commit", &takeover_id],
+                &incoming_env(),
+            ));
+            json_output(&run(
+                &home,
+                &["accept", &task_id, "--reason", "resume for retirement"],
+                &incoming_env(),
+            ));
+        }
+        let args = match action {
+            "commit" => vec!["head", "commit", &takeover_id],
+            "abort" => vec!["head", "abort", &takeover_id, "--reason", "wrong owner"],
+            _ => vec!["head", "retire", &takeover_id],
+        };
+        let output = run(&home, &args, &wrong_owner_incoming);
+        assert!(!output.status.success());
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("BRGR_OWNER_ID differs"),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            takeover_state(&home, &takeover_id),
+            if action == "retire" { "resumed" } else { "prepared" }
+        );
+    }
+}
+
+#[test]
 fn head_commit_is_idempotent_abort_after_commit_is_refused_and_retirement_requires_resumed() {
     let (_temp, home, workspace) = gjc_home();
     let task_id = start_task(&home, &workspace);

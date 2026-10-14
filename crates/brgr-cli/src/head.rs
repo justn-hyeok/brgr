@@ -176,6 +176,7 @@ fn request(
 
 fn commit(store: &Store, takeover: TakeoverId, json_output: bool) -> Result<()> {
     let record = load_takeover(store, takeover)?;
+    owner_matches(&record.owner_id)?;
     let session = crate::current_session()?.context("a Codex session is required")?;
     if record.to_session != session {
         bail!("only the incoming session may commit");
@@ -194,6 +195,7 @@ fn commit(store: &Store, takeover: TakeoverId, json_output: bool) -> Result<()> 
 
 fn abort(store: &Store, takeover: TakeoverId, reason: &str, json_output: bool) -> Result<()> {
     let record = load_takeover(store, takeover)?;
+    owner_matches(&record.owner_id)?;
     let session = crate::current_session()?.context("a Codex session is required")?;
     if session != record.from_session && session != record.to_session {
         bail!("only the outgoing or incoming session may abort");
@@ -210,6 +212,7 @@ fn retire(
     json_output: bool,
 ) -> Result<()> {
     let record = load_takeover(store, takeover)?;
+    owner_matches(&record.owner_id)?;
     let session = crate::current_session()?.context("a Codex session is required")?;
     if session != record.to_session {
         bail!("only the incoming session may retire");
