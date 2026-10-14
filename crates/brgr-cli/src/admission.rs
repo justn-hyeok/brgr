@@ -616,9 +616,12 @@ fn admission_proof(
         return Ok(None);
     };
     if bound != session_id {
-        // `bind_owner_session` already refuses a moved binding; keep the
-        // unguarded write here only for a defensive no-op.
-        return Ok(None);
+        // The binding moved after `bind_owner_session` checked it. Falling back
+        // to the plain write here would record the task for a session that no
+        // longer holds the head, which is the window this proof exists to close.
+        bail!(
+            "owner is bound to another session; run `brgr bind TASK --session SESSION` before starting another revision"
+        );
     }
     Ok(Some(brgr_store::OwnerProof::new(
         owner_id.clone(),
@@ -1082,6 +1085,34 @@ mod instruction_tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("BRGR.md"), "{error}");
+    }
+}
+
+#[cfg(test)]
+mod proof_tests {
+    use super::*;
+
+    #[test]
+    fn an_owner_that_moved_on_is_refused_not_written_unguarded() {
+        let root = tempfile::TempDir::new().unwrap();
+        let store = Store::open(root.path()).unwrap();
+        let owner = OwnerId::new("codex:proof-test").unwrap();
+        store.rebind_owner(&owner, "session-a").unwrap();
+        let proof = admission_proof(&store, &owner, Some("session-a"))
+            .unwrap()
+            .expect("the bound session gets a proof");
+        assert_eq!(
+            (proof.session_id.as_str(), proof.binding_epoch),
+            ("session-a", 1)
+        );
+
+        // A takeover landed after the binding check: the old session must not
+        // fall back to the plain write that would record the task unguarded.
+        store.rebind_owner(&owner, "session-b").unwrap();
+        assert!(
+            admission_proof(&store, &owner, Some("session-a")).is_err(),
+            "a session that no longer holds the head was given the unguarded write"
+        );
     }
 }
 
