@@ -76,12 +76,14 @@ impl Store {
         if let Some(proof) = proof {
             assert_owner_proof(&transaction, proof)?;
         }
-        let first = self.task(tasks[0])?;
-        if let Some(proof) = proof
-            && first.owner_id.as_str() != proof.owner_id.as_str()
-        {
-            return Err(StoreError::OwnerProofMismatch);
+        if let Some(proof) = proof {
+            for task in tasks {
+                if self.task(*task)?.owner_id.as_str() != proof.owner_id.as_str() {
+                    return Err(StoreError::OwnerProofMismatch);
+                }
+            }
         }
+        let first = self.task(tasks[0])?;
         let parent = self.delegation_parent(tasks[0])?;
         let mut members = std::collections::BTreeSet::new();
         let mut attempts = Vec::new();

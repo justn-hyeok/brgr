@@ -214,3 +214,26 @@ fn unguarded_debate_writes_keep_working_after_a_takeover() {
     store.stop_debate(&group).unwrap();
     assert!(!store.debate(&group).unwrap().active);
 }
+
+#[test]
+fn a_debate_with_one_foreign_task_is_refused_as_a_mismatch() {
+    let root = TempDir::new().unwrap();
+    let mut store = Store::open(root.path()).unwrap();
+    let owner_id = owner();
+    let (a, _attempt_a) = running_task(&mut store, &owner_id);
+    let (foreign, _attempt_foreign) = running_task(&mut store, &other_owner());
+    store.bind_owner(&owner_id, FROM, 1).unwrap();
+    let proof = OwnerProof::new(owner_id.clone(), FROM, 1).unwrap();
+
+    // The first task is the proof owner's; the second is somebody else's. The
+    // refusal names the ownership, not the shape of the list.
+    let group = uuid::Uuid::new_v4().to_string();
+    assert!(matches!(
+        store.create_debate_bound(&group, &[a, foreign], &proof),
+        Err(StoreError::OwnerProofMismatch)
+    ));
+    assert!(matches!(
+        store.debate(&group),
+        Err(StoreError::TaskMessageNotFound(_))
+    ));
+}
