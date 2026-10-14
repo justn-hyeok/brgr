@@ -1,5 +1,26 @@
 # Changelog
 
+## 2.14.2 — 2026-10-14
+
+- A session can hand the owner's head to another session without losing the
+  owner's tasks, results or decisions. `brgr head request`, `prepare`, `show`,
+  `commit`, `abort`, `retire` and `status` drive a recorded handoff: request and
+  prepare by the current head, commit only by the incoming session (one
+  transaction that re-checks the binding, raises the epoch by one and requeues
+  unresolved completion notices), retire only by the incoming session after it has
+  resumed. The manifest is built from the store and holds references only.
+  `resumed` is recorded by the store when the incoming session performs an
+  owner-side write at the committed epoch; no command can set it.
+- Owner-side writes are checked against the session and epoch inside the writing
+  transaction: owner messages and their acknowledgement, cancel, task and
+  revision admission, and the debate writes including `debate ack`. After a
+  handoff commits, the outgoing session is refused for each of them. Worker-side
+  paths are unchanged.
+- `brgr bind` is refused while the owner has an open handoff, and the stale-session
+  hint now names `brgr head request` first.
+- New store tables `head_takeovers`, `takeover_events` and `handoff_manifests`;
+  existing stores open unchanged and an older brgr ignores the new tables.
+
 ## 2.14.1 — 2026-10-14
 
 - A run started from a repository root with an OpenCode model
