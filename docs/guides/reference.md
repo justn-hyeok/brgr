@@ -234,10 +234,60 @@ Git is needed for Git-backed tasks; a non-Git workspace can run without Git.
 Codex sessions bind their owner automatically at first task or SessionStart.
 A bare CLI run without a session can finish but cannot expose, acknowledge, or
 decide its result until `brgr bind TASK --session SESSION` explicitly claims it.
-When the owning Codex session changes, run `brgr bind TASK` in the new session
-before reading or deciding; the old session's epoch is then stale. For a CLI
-fixture, set both `BRGR_OWNER_ID=codex:example` and
-`BRGR_SESSION_ID=example-session` on run and follow-up commands.
+When the owning session changes, hand the head over with the `head` commands
+(below) rather than `bind`: `bind` is for an unbound or abandoned owner, and it
+is refused while the owner has an open handoff. For a CLI fixture, set both
+`BRGR_OWNER_ID=codex:example` and `BRGR_SESSION_ID=example-session` on run and
+follow-up commands.
+
+### Handing the head to another session
+
+A handoff moves the owner's binding from the session that holds the head to
+another session without losing the owner's tasks, results or decisions. It is a
+record in the store with five steps, each its own command. Every command takes a
+TASK of that owner, like `bind`.
+
+| Step | Command | Who may run it |
+| --- | --- | --- |
+| request | `brgr head request TASK --to SESSION` | the current head |
+| prepare | `brgr head prepare TAKEOVER --goal TEXT` | the outgoing session, still the head |
+| read | `brgr head show TAKEOVER` | anyone with the store (read only) |
+| commit | `brgr head commit TAKEOVER` | only the incoming session |
+| close | `brgr head retire TAKEOVER` | only the incoming session, after it has resumed |
+
+`request` takes an optional `--key` idempotency key (default: a fresh one),
+`prepare` an optional `--notes`, and `retire` an optional `--failed` with a reason
+that records a failed close instead of a clean one.
+
+`brgr head abort TAKEOVER --reason TEXT` stops a handoff that has not committed
+(either session may run it), and `brgr head status TASK` lists the owner's
+handoffs, newest first.
+
+- `prepare` builds the manifest from the store: the owner's open task revisions
+  with their attempt, the undecided and unacknowledged results, and the
+  unanswered worker messages. Nothing is passed in by hand, and the manifest holds
+  references only; it never copies a result or restates a decision. A task
+  revision with no attempt yet is not listed; the new head sees it in `brgr status`.
+- Preparing a new head and handing over command are different steps. Nothing moves
+  until the incoming session runs `commit`, one transaction that re-checks the
+  binding, raises the epoch by one and requeues unresolved completion notices for
+  the new head. A binding that moved since the request makes `commit` fail and
+  leave the handoff `prepared`.
+- `resumed` is never reported by a caller. The store records it when the incoming
+  session performs an owner-side write at the committed epoch: a decision, an
+  acknowledgement, a task admission, a reply or cancel, a debate write. `retire`
+  is refused until then, and after a commit the old session is stale for every
+  owner command.
+- Repeating a command is safe. A repeated `request` with the same key returns the
+  same record, even from the outgoing session after the commit; a repeated `commit`
+  does not raise the epoch again; a different destination for the same key is a
+  conflict.
+- While a handoff is open (requested, prepared, committed or resumed) `bind`
+  is refused, and only one handoff may be open per owner. Finish it, or abort it
+  before the commit.
+
+The epoch and session names are cooperative identity checks between harnesses
+run by the same user. They are not a credential and do not authenticate a process.
 
 `brgr integrate codex|claude status|uninstall` checks or removes only brgr-owned
 entries; the Claude Code skill goes to `$CLAUDE_CONFIG_DIR` or `~/.claude`. For OMP, Cursor CLI, Command Code, Devin CLI, or an approved unfamiliar CLI, use

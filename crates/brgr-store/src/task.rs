@@ -4,9 +4,11 @@ use brgr_protocol::{AttemptId, OwnerId, TaskId, TaskSpec};
 use rusqlite::{OptionalExtension as _, params};
 
 use super::{
-    Store, StoreError, WriteOutcome,
+    OwnerProof, Store, StoreError, WriteOutcome,
     delegation::{recorded_delegation_parent, validate_new_task_parent, validated_parent_depth},
-    prefix_upper_bound, record_idempotency, validate_digest,
+    prefix_upper_bound, record_idempotency,
+    takeover::{assert_owner_proof, note_owner_action},
+    validate_digest,
 };
 
 impl Store {
@@ -21,7 +23,28 @@ impl Store {
         task: &TaskSpec,
         request_digest: &str,
     ) -> Result<WriteOutcome, StoreError> {
-        self.record_task_with_parent(task, request_digest, None)
+        self.record_task_with_parent(task, request_digest, None, None)
+    }
+
+    /// Records a task revision only while the caller's session and epoch are
+    /// still the owner's binding.
+    ///
+    /// This is the owner-side admission path, and it is also how a committed
+    /// handoff learns that the incoming session took the work rather than only
+    /// the binding: the new revision is recorded in the same transaction that
+    /// moves the takeover to `resumed`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a stale session or an owner the proof does not
+    /// match, and otherwise the same errors as [`Self::record_task`].
+    pub fn record_task_bound(
+        &mut self,
+        task: &TaskSpec,
+        request_digest: &str,
+        proof: &OwnerProof,
+    ) -> Result<WriteOutcome, StoreError> {
+        self.record_task_with_parent(task, request_digest, None, Some(proof))
     }
 
     /// Records a child task only while its exact parent attempt is active.
@@ -42,6 +65,29 @@ impl Store {
             task,
             request_digest,
             Some((parent_task_id, parent_attempt_id)),
+            None,
+        )
+    }
+
+    /// [`Self::record_child_task`] for a session that proved it is the head.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a stale session or an owner the proof does not
+    /// match, and otherwise the same errors as [`Self::record_child_task`].
+    pub fn record_child_task_bound(
+        &mut self,
+        task: &TaskSpec,
+        request_digest: &str,
+        parent_task_id: TaskId,
+        parent_attempt_id: AttemptId,
+        proof: &OwnerProof,
+    ) -> Result<WriteOutcome, StoreError> {
+        self.record_task_with_parent(
+            task,
+            request_digest,
+            Some((parent_task_id, parent_attempt_id)),
+            Some(proof),
         )
     }
 
@@ -55,10 +101,26 @@ impl Store {
         task: &TaskSpec,
         request_digest: &str,
         parent: Option<(TaskId, AttemptId)>,
+        proof: Option<&OwnerProof>,
     ) -> Result<WriteOutcome, StoreError> {
         task.validate()?;
         validate_digest(request_digest)?;
         let transaction = self.write_transaction()?;
+        if let Some(proof) = proof {
+            assert_owner_proof(&transaction, proof)?;
+            // A revision may be the task's first, so the owner compared here is
+            // the one the spec claims, not one already on a row.
+            if task.owner_id != proof.owner_id {
+                return Err(StoreError::OwnerProofMismatch);
+            }
+            // The third owner-side action a committed handoff waits to observe.
+            note_owner_action(
+                &transaction,
+                &proof.owner_id,
+                &proof.session_id,
+                proof.binding_epoch,
+            )?;
+        }
         let idempotency =
             record_idempotency(&transaction, &task.create_request_id, request_digest)?;
         let recorded_parent = recorded_delegation_parent(&transaction, task.task_id)?;

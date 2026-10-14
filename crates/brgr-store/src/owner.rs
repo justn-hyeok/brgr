@@ -5,6 +5,43 @@ use rusqlite::{OptionalExtension as _, Transaction, params};
 use super::{Store, StoreError, WriteOutcome};
 use brgr_protocol::OwnerId;
 
+/// What an owner-side write proves about who is calling: the owner, the session
+/// that believes it is the head, and the binding epoch it read.
+///
+/// A write that takes one of these is rejected unless the binding still equals
+/// all three. It exists because "the owner" and "the session that is acting for
+/// the owner" are different facts, and only the second one moves when a head
+/// hands its work to another session.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OwnerProof {
+    pub owner_id: OwnerId,
+    pub session_id: String,
+    pub binding_epoch: u64,
+}
+
+impl OwnerProof {
+    /// Builds a proof from the pair `require_owner`-style callers already read.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a blank session or a zero epoch.
+    pub fn new(
+        owner_id: OwnerId,
+        session_id: impl Into<String>,
+        binding_epoch: u64,
+    ) -> Result<Self, StoreError> {
+        let session_id = session_id.into();
+        if session_id.trim().is_empty() || binding_epoch == 0 {
+            return Err(StoreError::InvalidOwnerBinding);
+        }
+        Ok(Self {
+            owner_id,
+            session_id,
+            binding_epoch,
+        })
+    }
+}
+
 impl Store {
     /// Initially binds an owner to an explicit session epoch without inferring
     /// focus. A late hook cannot replace a different session; use
@@ -82,42 +119,60 @@ impl Store {
             return Err(StoreError::InvalidOwnerBinding);
         }
         let transaction = self.write_transaction()?;
-        let prior: Option<(String, i64)> = transaction
-            .query_row(
-                "SELECT session_id, binding_epoch FROM owner_bindings WHERE owner_id = ?1",
-                [owner_id.as_str()],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()?;
-        if let Some((stored_session, epoch)) = &prior
-            && stored_session == session_id
-        {
-            return u64::try_from(*epoch).map_err(|_| StoreError::NumericOverflow);
-        }
-        let epoch = prior.map_or(Ok(1_i64), |(_, epoch)| {
-            epoch.checked_add(1).ok_or(StoreError::NumericOverflow)
-        })?;
-        transaction.execute(
-            "INSERT INTO owner_bindings (owner_id, session_id, binding_epoch)
-             VALUES (?1, ?2, ?3)
-             ON CONFLICT(owner_id) DO UPDATE SET
-               session_id = excluded.session_id,
-               binding_epoch = excluded.binding_epoch",
-            params![owner_id.as_str(), session_id, epoch],
-        )?;
-        transaction.execute(
-            "UPDATE completion_notifications SET delivered_session = NULL,
-               delivered_epoch = NULL, delivered_pane = NULL,
-               claim_token = NULL, claim_until = 0
-             WHERE owner_id = ?1 AND resolved = 0
-               AND EXISTS (SELECT 1 FROM inbox_items i
-                   WHERE i.result_id = completion_notifications.result_id
-                     AND i.owner_id = ?1 AND i.acknowledged = 0)",
-            [owner_id.as_str()],
-        )?;
+        let epoch = rebind_in_transaction(&transaction, owner_id, session_id)?;
         transaction.commit()?;
-        u64::try_from(epoch).map_err(|_| StoreError::NumericOverflow)
+        Ok(epoch)
     }
+}
+
+/// Moves an owner to `session_id` inside a caller's transaction, so a transfer
+/// that has to be atomic with something else is not two writes.
+///
+/// The same session is idempotent and returns the epoch it already has. A
+/// different session takes the next epoch and re-queues every unresolved
+/// completion notification, so work that arrived for the outgoing head is
+/// delivered to the incoming one instead of being marked as already told.
+/// Both halves live here so a second transfer path cannot quietly forget the
+/// notification reset.
+pub(crate) fn rebind_in_transaction(
+    transaction: &Transaction<'_>,
+    owner_id: &OwnerId,
+    session_id: &str,
+) -> Result<u64, StoreError> {
+    let prior: Option<(String, i64)> = transaction
+        .query_row(
+            "SELECT session_id, binding_epoch FROM owner_bindings WHERE owner_id = ?1",
+            [owner_id.as_str()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    if let Some((stored_session, epoch)) = &prior
+        && stored_session == session_id
+    {
+        return u64::try_from(*epoch).map_err(|_| StoreError::NumericOverflow);
+    }
+    let epoch = prior.map_or(Ok(1_i64), |(_, epoch)| {
+        epoch.checked_add(1).ok_or(StoreError::NumericOverflow)
+    })?;
+    transaction.execute(
+        "INSERT INTO owner_bindings (owner_id, session_id, binding_epoch)
+         VALUES (?1, ?2, ?3)
+         ON CONFLICT(owner_id) DO UPDATE SET
+           session_id = excluded.session_id,
+           binding_epoch = excluded.binding_epoch",
+        params![owner_id.as_str(), session_id, epoch],
+    )?;
+    transaction.execute(
+        "UPDATE completion_notifications SET delivered_session = NULL,
+           delivered_epoch = NULL, delivered_pane = NULL,
+           claim_token = NULL, claim_until = 0
+         WHERE owner_id = ?1 AND resolved = 0
+           AND EXISTS (SELECT 1 FROM inbox_items i
+               WHERE i.result_id = completion_notifications.result_id
+                 AND i.owner_id = ?1 AND i.acknowledged = 0)",
+        [owner_id.as_str()],
+    )?;
+    u64::try_from(epoch).map_err(|_| StoreError::NumericOverflow)
 }
 
 pub(crate) fn assert_owner_binding(

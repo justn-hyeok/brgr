@@ -4,7 +4,7 @@ use super::fixtures::{result, sealed_result, task};
 
 /// Every source file the write-path guards read. Checked against the modules
 /// `lib.rs` declares, so a new module cannot quietly escape them.
-const SCANNED: [(&str, &str); 17] = [
+const SCANNED: [(&str, &str); 18] = [
     ("lib.rs", include_str!("lib.rs")),
     ("artifact.rs", include_str!("artifact.rs")),
     ("attempt.rs", include_str!("attempt.rs")),
@@ -19,6 +19,7 @@ const SCANNED: [(&str, &str); 17] = [
     ("owner.rs", include_str!("owner.rs")),
     ("result.rs", include_str!("result.rs")),
     ("schema.rs", include_str!("schema.rs")),
+    ("takeover.rs", include_str!("takeover.rs")),
     ("task.rs", include_str!("task.rs")),
     ("tests.rs", include_str!("tests.rs")),
     ("tree.rs", include_str!("tree.rs")),
@@ -1946,64 +1947,84 @@ fn assert_every_module_is_scanned() {
     }
 }
 
-/// Every write path must have a recorded decision about waiting for a lock.
+/// Every write path, with `true` where a contended write is retried.
 ///
 /// The rule this encodes: retry a write a running attempt depends on, do not
 /// retry a write the caller can simply reissue, and never retry inside the
 /// repository admission lock — #28 measured that turning one failure into two.
 ///
-/// Retry coverage was claimed once and was wrong, so it is bound here rather
-/// than described. Adding a write path without classifying it fails this test.
+/// Retry coverage was claimed once and was wrong, so it is bound by
+/// `every_write_path_has_a_recorded_retry_decision` rather than described.
+/// Adding a write path without classifying it fails that test.
+const RETRY_DECISIONS: &[(&str, bool)] = &[
+    // A running attempt depends on these: losing one leaves a paid run
+    // unfinished, which recovery can only settle as `Lost`.
+    ("claim_attempt_once", true),
+    ("commit_terminal_result_once", true),
+    ("record_decision_once", true),
+    ("record_decision_and_ack_once", true),
+    ("record_launch_intent_once", true),
+    ("record_runner_identity_once", true),
+    ("compare_and_set_attempt_state_once", true),
+    ("grant_pre_spawn_retry_once", true),
+    ("record_event_once", true),
+    // Runs inside the repository admission lock. Waiting here blocks every
+    // other admission on that repository; it must fail fast instead.
+    ("record_task_with_parent", false),
+    ("record_task_checkout", false),
+    // Reissuable by the caller. Waiting would hold a runtime worker for a
+    // command the user can simply run again.
+    ("acknowledge", false),
+    ("acknowledge_bound", false),
+    ("acknowledge_message", false),
+    ("acknowledge_message_bound", false),
+    ("bind_owner", false),
+    ("rebind_owner", false),
+    // The guarded variants share one body with their unguarded sibling, so the
+    // decision is recorded once under the body that holds the transaction.
+    ("record_cancellation_intents_with_proof", false),
+    ("post_message_with_proof", false),
+    // Pane mode withdraws its question; losing that fails a finished run.
+    ("withdraw_question_once", true),
+    // Notification delivery carries its own claim and lease protocol, which
+    // already re-drives a lost step. Left alone deliberately.
+    ("register_owner_surface", false),
+    ("claim_notification", false),
+    ("mark_notification_delivered", false),
+    ("release_notification_claim", false),
+    // The dispatcher re-reads pending questions every poll, so a lost
+    // notice record costs one repeated notice, not a lost question.
+    ("record_question_notice", false),
+    // Debate commands are idempotent and reissuable. Native delivery
+    // retains uncertain claims and releases confirmed unattempted ones.
+    // The bound variants share these bodies, so each write is classified once
+    // under the function that holds its transaction.
+    ("create_debate_with_proof", false),
+    ("stop_debate_with_proof", false),
+    ("post_peer_message_with_proof", false),
+    ("acknowledge_peer_with_proof", false),
+    ("acknowledge_peer", false),
+    ("claim_native_delivery", false),
+    ("finish_native_delivery", false),
+    ("release_native_delivery", false),
+    // One owner command per handoff step, each its own transaction and
+    // reissuable: `request` and `prepare` are keyed, `commit` is idempotent
+    // because a lost response is answered by running it again, and the closing
+    // steps refuse to run twice. None of them is a write a running attempt
+    // depends on, so none of them waits for a lock.
+    ("request_takeover", false),
+    ("prepare_takeover", false),
+    ("commit_takeover", false),
+    ("retire_takeover", false),
+    ("fail_retirement", false),
+    ("abort_takeover", false),
+    ("close", false),
+];
+
+/// Every write path must have a recorded decision about waiting for a lock.
 #[test]
 fn every_write_path_has_a_recorded_retry_decision() {
-    /// `true` where a contended write is retried.
-    const CLASSIFIED: &[(&str, bool)] = &[
-        // A running attempt depends on these: losing one leaves a paid run
-        // unfinished, which recovery can only settle as `Lost`.
-        ("claim_attempt_once", true),
-        ("commit_terminal_result_once", true),
-        ("record_decision_once", true),
-        ("record_decision_and_ack_once", true),
-        ("record_launch_intent_once", true),
-        ("record_runner_identity_once", true),
-        ("compare_and_set_attempt_state_once", true),
-        ("grant_pre_spawn_retry_once", true),
-        ("record_event_once", true),
-        // Runs inside the repository admission lock. Waiting here blocks every
-        // other admission on that repository; it must fail fast instead.
-        ("record_task_with_parent", false),
-        ("record_task_checkout", false),
-        // Reissuable by the caller. Waiting would hold a runtime worker for a
-        // command the user can simply run again.
-        ("acknowledge", false),
-        ("acknowledge_bound", false),
-        ("bind_owner", false),
-        ("rebind_owner", false),
-        ("record_cancellation_intents", false),
-        ("post_message", false),
-        ("acknowledge_message", false),
-        // Pane mode withdraws its question; losing that fails a finished run.
-        ("withdraw_question_once", true),
-        // Notification delivery carries its own claim and lease protocol, which
-        // already re-drives a lost step. Left alone deliberately.
-        ("register_owner_surface", false),
-        ("claim_notification", false),
-        ("mark_notification_delivered", false),
-        ("release_notification_claim", false),
-        // The dispatcher re-reads pending questions every poll, so a lost
-        // notice record costs one repeated notice, not a lost question.
-        ("record_question_notice", false),
-        // Debate commands are idempotent and reissuable. Native delivery
-        // retains uncertain claims and releases confirmed unattempted ones.
-        ("create_debate", false),
-        ("stop_debate", false),
-        ("post_peer_message_from", false),
-        ("acknowledge_peer", false),
-        ("claim_native_delivery", false),
-        ("finish_native_delivery", false),
-        ("release_native_delivery", false),
-    ];
-
+    let classified = RETRY_DECISIONS;
     assert_every_module_is_scanned();
 
     let sources = SCANNED;
@@ -2050,7 +2071,7 @@ fn every_write_path_has_a_recorded_retry_decision() {
                     rest.split('(').next()
                 })
                 .unwrap_or("<unknown>");
-            if !CLASSIFIED.iter().any(|(known, _)| *known == enclosing) {
+            if !classified.iter().any(|(known, _)| *known == enclosing) {
                 unclassified.push(format!("{name}:{} in {enclosing}", index + 1));
             }
         }
@@ -2058,7 +2079,7 @@ fn every_write_path_has_a_recorded_retry_decision() {
     assert!(
         unclassified.is_empty(),
         "write paths with no recorded retry decision: {unclassified:?}\n\
-         add each to CLASSIFIED with the reason it does or does not wait"
+         add each to RETRY_DECISIONS with the reason it does or does not wait"
     );
 
     // And the declared decisions must match what the code does, in whichever
@@ -2075,7 +2096,7 @@ fn every_write_path_has_a_recorded_retry_decision() {
     // rustfmt happened to lay it out: a long argument list moves the call
     // into a block, which a literal match read as "not retried".
     let compact: String = all.chars().filter(|c| !c.is_whitespace()).collect();
-    for (name, retried) in CLASSIFIED {
+    for (name, retried) in classified {
         assert!(
             all.contains(&format!("fn {name}(")),
             "{name} is classified but defined in no scanned module"

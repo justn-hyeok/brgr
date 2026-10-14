@@ -11,6 +11,7 @@ mod error_memo;
 mod evidence;
 mod failure_banner;
 mod harness_commands;
+mod head;
 mod herdr_plugin;
 mod hook;
 mod invocation;
@@ -282,6 +283,7 @@ async fn execute(paths: &Paths, command: Command, json_output: bool) -> Result<(
         ),
         Command::Cancel { task, tree } => cancel(paths, task, tree, json_output),
         Command::Bind { task, session } => bind(paths, task, session, json_output).await,
+        Command::Head { command } => head::run(paths, command, json_output),
         command @ (Command::Accept { .. } | Command::Reject { .. }) => {
             decision_command(paths, &command, json_output)
         }
@@ -542,7 +544,7 @@ fn require_owner(store: &Store, expected: &OwnerId) -> Result<(String, u64)> {
     })?;
     if bound != session {
         bail!(
-            "owner {expected} is bound to another session; use `brgr bind TASK --session {session}` to transfer it"
+            "owner {expected} is bound to another session; a handoff goes through `brgr head request` first; `brgr bind` is for an unbound or abandoned owner (use `brgr bind TASK --session {session}`)"
         );
     }
     Ok((session, epoch))

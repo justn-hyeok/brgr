@@ -14,6 +14,7 @@ mod notification;
 mod owner;
 mod result;
 mod schema;
+mod takeover;
 mod task;
 mod tree;
 
@@ -33,12 +34,18 @@ pub use debate::{DebateGroup, PeerDraft, PeerMessage};
 pub use error::StoreError;
 pub use message::{MessageDirection, MessageDraft, MessageKind, TaskMessage};
 pub use notification::{NotificationTarget, PendingNotification, QuestionTarget};
+pub use owner::OwnerProof;
 use owner::assert_owner_binding;
 pub use result::{OpenReason, Settlement};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use schema::initialize_connection;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use takeover::note_owner_action;
+pub use takeover::{
+    HandoffManifest, HandoffReferences, ManifestTask, RetireOutcome, StoredHandoffManifest,
+    Takeover, TakeoverEvent, TakeoverId, TakeoverState,
+};
 pub use tree::SubtreeNode;
 
 /// The result of an idempotent store mutation.
@@ -228,6 +235,14 @@ fn record_decision_in_transaction(
         decision.session_id.as_deref(),
         decision.binding_epoch,
     )?;
+    // A decision is one of the owner-side actions a committed handoff waits to
+    // observe, so recording it is also what proves the incoming session is
+    // working. Recorded before the outcome is known: a replay that finds the
+    // decision already stored still proves the new head is acting.
+    if let (Some(session_id), Some(binding_epoch)) = (&decision.session_id, decision.binding_epoch)
+    {
+        note_owner_action(transaction, &decision.owner_id, session_id, binding_epoch)?;
+    }
     let decision_json = serde_json::to_string(decision)?;
     if let Some(stored_json) = transaction
         .query_row(

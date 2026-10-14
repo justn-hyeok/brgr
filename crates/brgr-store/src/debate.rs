@@ -1,5 +1,5 @@
 //! Explicit peer conversations and native message delivery receipts.
-use crate::{MessageKind, Store, StoreError};
+use crate::{MessageKind, OwnerProof, Store, StoreError, takeover::assert_owner_proof};
 use brgr_protocol::{AttemptId, TaskId};
 use rusqlite::{OptionalExtension as _, params};
 use serde::{Deserialize, Serialize};
@@ -42,8 +42,46 @@ impl Store {
     /// # Errors
     /// Rejects missing tasks, stale attempts, or conflicting group identities.
     pub fn create_debate(&self, id: &str, tasks: &[TaskId]) -> Result<DebateGroup, StoreError> {
+        self.create_debate_with_proof(id, tasks, None)
+    }
+
+    /// Creates a debate only while the caller's session and epoch are still the
+    /// owner's binding, and only for tasks that owner holds. A refused call
+    /// writes nothing.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::OwnerBindingConflict`] for a stale session,
+    /// [`StoreError::OwnerProofMismatch`] for tasks owned by somebody else, and
+    /// otherwise the same errors as [`Self::create_debate`].
+    pub fn create_debate_bound(
+        &self,
+        id: &str,
+        tasks: &[TaskId],
+        proof: &OwnerProof,
+    ) -> Result<DebateGroup, StoreError> {
+        self.create_debate_with_proof(id, tasks, Some(proof))
+    }
+
+    fn create_debate_with_proof(
+        &self,
+        id: &str,
+        tasks: &[TaskId],
+        proof: Option<&OwnerProof>,
+    ) -> Result<DebateGroup, StoreError> {
         if Uuid::parse_str(id).is_err() || tasks.len() < 2 || tasks.len() > 32 {
             return Err(StoreError::InvalidTaskMessage);
+        }
+        let transaction = self.write_transaction()?;
+        if let Some(proof) = proof {
+            assert_owner_proof(&transaction, proof)?;
+        }
+        if let Some(proof) = proof {
+            for task in tasks {
+                if self.task(*task)?.owner_id.as_str() != proof.owner_id.as_str() {
+                    return Err(StoreError::OwnerProofMismatch);
+                }
+            }
         }
         let first = self.task(tasks[0])?;
         let parent = self.delegation_parent(tasks[0])?;
@@ -58,7 +96,6 @@ impl Store {
             }
             attempts.push((*task, self.active_message_attempt(*task)?));
         }
-        let transaction = self.write_transaction()?;
         let existing: Option<String> = transaction
             .query_row(
                 "SELECT owner_id FROM debate_groups WHERE group_id=?1",
@@ -126,9 +163,38 @@ impl Store {
     /// # Errors
     /// Returns an error for missing groups or database failure.
     pub fn stop_debate(&self, id: &str) -> Result<(), StoreError> {
-        self.debate(id)?;
-        self.connection
-            .execute("UPDATE debate_groups SET active=0 WHERE group_id=?1", [id])?;
+        self.stop_debate_with_proof(id, None)
+    }
+
+    /// Stops a debate only while the caller's session and epoch are still the
+    /// owner's binding, and only for a group that owner holds.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::OwnerBindingConflict`] for a stale session,
+    /// [`StoreError::OwnerProofMismatch`] for a group owned by somebody else, and
+    /// otherwise the same errors as [`Self::stop_debate`].
+    pub fn stop_debate_bound(&self, id: &str, proof: &OwnerProof) -> Result<(), StoreError> {
+        self.stop_debate_with_proof(id, Some(proof))
+    }
+
+    fn stop_debate_with_proof(
+        &self,
+        id: &str,
+        proof: Option<&OwnerProof>,
+    ) -> Result<(), StoreError> {
+        let transaction = self.write_transaction()?;
+        if let Some(proof) = proof {
+            assert_owner_proof(&transaction, proof)?;
+        }
+        let group = self.debate(id)?;
+        if let Some(proof) = proof
+            && group.owner != proof.owner_id.as_str()
+        {
+            return Err(StoreError::OwnerProofMismatch);
+        }
+        transaction.execute("UPDATE debate_groups SET active=0 WHERE group_id=?1", [id])?;
+        transaction.commit()?;
         Ok(())
     }
 
@@ -189,6 +255,33 @@ impl Store {
         draft: &PeerDraft,
         from_attempt: AttemptId,
     ) -> Result<PeerMessage, StoreError> {
+        self.post_peer_message_with_proof(draft, from_attempt, None)
+    }
+
+    /// Sends a peer message from the caller's exact attempt, only while the
+    /// caller's session and epoch are still the owner's binding and the group
+    /// and both participants belong to that owner. A refused call writes nothing.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::OwnerBindingConflict`] for a stale session,
+    /// [`StoreError::OwnerProofMismatch`] for a group or task owned by somebody
+    /// else, and otherwise the same errors as [`Self::post_peer_message_from`].
+    pub fn post_peer_message_from_bound(
+        &self,
+        draft: &PeerDraft,
+        from_attempt: AttemptId,
+        proof: &OwnerProof,
+    ) -> Result<PeerMessage, StoreError> {
+        self.post_peer_message_with_proof(draft, from_attempt, Some(proof))
+    }
+
+    fn post_peer_message_with_proof(
+        &self,
+        draft: &PeerDraft,
+        from_attempt: AttemptId,
+        proof: Option<&OwnerProof>,
+    ) -> Result<PeerMessage, StoreError> {
         if Uuid::parse_str(&draft.id).is_err()
             || draft.body.trim().is_empty()
             || draft.body.len() > 8192
@@ -197,7 +290,20 @@ impl Store {
         {
             return Err(StoreError::InvalidTaskMessage);
         }
+        let transaction = self.write_transaction()?;
+        if let Some(proof) = proof {
+            assert_owner_proof(&transaction, proof)?;
+        }
         let group = self.debate(&draft.group)?;
+        if let Some(proof) = proof {
+            let owner = proof.owner_id.as_str();
+            if group.owner != owner
+                || self.task(draft.from)?.owner_id.as_str() != owner
+                || self.task(draft.to)?.owner_id.as_str() != owner
+            {
+                return Err(StoreError::OwnerProofMismatch);
+            }
+        }
         if !group.active
             || !group.members.contains(&draft.from)
             || !group.members.contains(&draft.to)
@@ -205,7 +311,6 @@ impl Store {
             return Err(StoreError::InvalidTaskMessage);
         }
         let to_attempt = self.active_message_attempt(draft.to)?;
-        let transaction = self.write_transaction()?;
         let active: bool = transaction.query_row(
             "SELECT active FROM debate_groups WHERE group_id=?1",
             [&draft.group],
@@ -320,7 +425,53 @@ impl Store {
         task: TaskId,
         attempt: AttemptId,
     ) -> Result<(), StoreError> {
-        if self.connection.execute("UPDATE peer_messages SET acknowledged=1 WHERE message_id=?1 AND to_task=?2 AND to_attempt=?3",params![id,task.to_string(),attempt.to_string()])? != 1 { return Err(StoreError::TaskMessageNotFound(id.to_owned())); }
+        self.acknowledge_peer_with_proof(id, task, attempt, None)
+    }
+
+    /// Mark a peer message as read only while the caller's session and epoch
+    /// are still the owner's binding, and only for a group and recipient task
+    /// owned by that owner. A refused call writes nothing.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::OwnerBindingConflict`] for a stale session,
+    /// [`StoreError::OwnerProofMismatch`] for a group or task owned by somebody
+    /// else, and otherwise the same errors as [`Self::acknowledge_peer`].
+    pub fn acknowledge_peer_bound(
+        &self,
+        id: &str,
+        task: TaskId,
+        attempt: AttemptId,
+        proof: &OwnerProof,
+    ) -> Result<(), StoreError> {
+        self.acknowledge_peer_with_proof(id, task, attempt, Some(proof))
+    }
+
+    fn acknowledge_peer_with_proof(
+        &self,
+        id: &str,
+        task: TaskId,
+        attempt: AttemptId,
+        proof: Option<&OwnerProof>,
+    ) -> Result<(), StoreError> {
+        let transaction = self.write_transaction()?;
+        if let Some(proof) = proof {
+            assert_owner_proof(&transaction, proof)?;
+            let group_owner: Option<String> = transaction
+                .query_row(
+                    "SELECT g.owner_id FROM peer_messages p JOIN debate_groups g ON g.group_id=p.group_id WHERE p.message_id=?1",
+                    [id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if group_owner.as_deref() != Some(proof.owner_id.as_str())
+                || self.task(task)?.owner_id.as_str() != proof.owner_id.as_str()
+            {
+                return Err(StoreError::OwnerProofMismatch);
+            }
+        }
+        if transaction.execute("UPDATE peer_messages SET acknowledged=1 WHERE message_id=?1 AND to_task=?2 AND to_attempt=?3",params![id,task.to_string(),attempt.to_string()])? != 1 { return Err(StoreError::TaskMessageNotFound(id.to_owned())); }
+        transaction.commit()?;
         Ok(())
     }
 

@@ -1,7 +1,7 @@
 use brgr_protocol::{AttemptId, TaskId, TaskSpec};
 use rusqlite::{Connection, OptionalExtension as _, params};
 
-use super::{Store, StoreError};
+use super::{OwnerProof, Store, StoreError, takeover::assert_task_owner};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SubtreeNode {
@@ -32,8 +32,40 @@ impl Store {
         root: TaskId,
         include_descendants: bool,
     ) -> Result<Vec<SubtreeNode>, StoreError> {
+        self.record_cancellation_intents_with_proof(root, include_descendants, None)
+    }
+
+    /// [`Self::record_cancellation_intents`] only while the caller's session and
+    /// epoch are still the owner's binding.
+    ///
+    /// Cancelling is how an owner stops work, so it is guarded like every other
+    /// owner-side mutation: a session that handed its head away cannot cancel the
+    /// tasks the new head now owns.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a stale session, a task owned by somebody else,
+    /// missing tasks, oversize trees, or database failure.
+    pub fn record_cancellation_intents_bound(
+        &self,
+        root: TaskId,
+        include_descendants: bool,
+        proof: &OwnerProof,
+    ) -> Result<Vec<SubtreeNode>, StoreError> {
+        self.record_cancellation_intents_with_proof(root, include_descendants, Some(proof))
+    }
+
+    fn record_cancellation_intents_with_proof(
+        &self,
+        root: TaskId,
+        include_descendants: bool,
+        proof: Option<&OwnerProof>,
+    ) -> Result<Vec<SubtreeNode>, StoreError> {
         self.task(root)?;
         let transaction = self.write_transaction()?;
+        if let Some(proof) = proof {
+            assert_task_owner(&transaction, proof, root)?;
+        }
         let nodes = if include_descendants {
             query_subtree(&transaction, root)?
         } else {

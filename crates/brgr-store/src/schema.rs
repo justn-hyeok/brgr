@@ -3,6 +3,13 @@
 //! Kept together because they are one decision: what this store is expected to
 //! contain, how an open recognises a store that already contains it, and what a
 //! connection must declare for itself every time.
+//!
+//! Every change here is additive: a new table or index, never an altered one.
+//! The batch is `CREATE ... IF NOT EXISTS`, so a statement that changes an
+//! object an existing store already has is skipped rather than applied, and an
+//! added column would silently be missing from every `$BRGR_HOME` written
+//! before the change. Widening an existing table needs a migration that
+//! rewrites the rows, not a new statement here.
 
 use rusqlite::Connection;
 
@@ -200,6 +207,43 @@ CREATE TABLE IF NOT EXISTS peer_messages (
     in_reply_to TEXT,
     acknowledged INTEGER NOT NULL DEFAULT 0,
     FOREIGN KEY (group_id) REFERENCES debate_groups(group_id)
+);
+CREATE TABLE IF NOT EXISTS head_takeovers (
+    takeover_id TEXT PRIMARY KEY,
+    owner_id TEXT NOT NULL,
+    from_session TEXT NOT NULL,
+    from_epoch INTEGER NOT NULL CHECK (from_epoch > 0),
+    to_session TEXT NOT NULL,
+    state TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    failure_reason TEXT,
+    UNIQUE (owner_id, idempotency_key),
+    FOREIGN KEY (owner_id) REFERENCES owner_bindings(owner_id)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS one_open_takeover_per_owner
+ON head_takeovers (owner_id)
+    WHERE state IN ('requested', 'prepared', 'committed', 'resumed');
+CREATE INDEX IF NOT EXISTS head_takeovers_owner
+ON head_takeovers (owner_id, created_at);
+CREATE TABLE IF NOT EXISTS takeover_events (
+    takeover_id TEXT NOT NULL,
+    seq INTEGER NOT NULL CHECK (seq > 0),
+    kind TEXT NOT NULL,
+    detail TEXT,
+    at INTEGER NOT NULL,
+    PRIMARY KEY (takeover_id, seq),
+    FOREIGN KEY (takeover_id) REFERENCES head_takeovers(takeover_id)
+);
+CREATE TABLE IF NOT EXISTS handoff_manifests (
+    manifest_id TEXT PRIMARY KEY,
+    owner_id TEXT NOT NULL,
+    takeover_id TEXT NOT NULL UNIQUE,
+    manifest_json TEXT NOT NULL,
+    digest TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    FOREIGN KEY (takeover_id) REFERENCES head_takeovers(takeover_id)
 );
 ";
 

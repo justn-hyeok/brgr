@@ -101,6 +101,11 @@ pub(crate) enum Command {
         #[arg(long)]
         session: Option<String>,
     },
+    /// Move an owner's head from one session to another.
+    Head {
+        #[command(subcommand)]
+        command: crate::head::HeadCommand,
+    },
     /// Record an explicit acceptance of a task's sealed candidate result.
     Accept {
         task: TaskId,
