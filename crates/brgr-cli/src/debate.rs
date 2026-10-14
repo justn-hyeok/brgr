@@ -62,7 +62,7 @@ fn worker_task(explicit: Option<TaskId>) -> Result<TaskId> {
         .context("provide a task or call from a managed worker")
 }
 
-fn authorize(store: &Store, task: TaskId) -> Result<AttemptId> {
+fn authorize(store: &Store, task: TaskId) -> Result<(AttemptId, Option<brgr_store::OwnerProof>)> {
     if env::var("BRGR_PARENT_TASK_ID").ok().as_deref() == Some(task.to_string().as_str()) {
         let attempt = env::var("BRGR_PARENT_ATTEMPT_ID")
             .context("worker attempt is missing")?
@@ -70,10 +70,12 @@ fn authorize(store: &Store, task: TaskId) -> Result<AttemptId> {
         if store.active_message_attempt(task)? != attempt {
             bail!("worker attempt differs from debate participant");
         }
-        return Ok(attempt);
+        return Ok((attempt, None));
     }
-    require_owner(store, &store.task(task)?.owner_id)?;
-    Ok(store.active_message_attempt(task)?)
+    let owner_id = store.task(task)?.owner_id;
+    let (session_id, binding_epoch) = require_owner(store, &owner_id)?;
+    let proof = brgr_store::OwnerProof::new(owner_id, session_id, binding_epoch)?;
+    Ok((store.active_message_attempt(task)?, Some(proof)))
 }
 
 fn start_debate(
@@ -81,10 +83,25 @@ fn start_debate(
     tasks: &[TaskId],
     request_id: &str,
 ) -> Result<brgr_store::DebateGroup> {
+    let mut owner_proof = None;
+    let mut owner_id = None;
     for task in tasks {
-        require_owner(store, &store.task(*task)?.owner_id)?;
+        let task_owner = store.task(*task)?.owner_id;
+        if owner_id.as_ref().is_some_and(|owner| owner != &task_owner) {
+            bail!("debate tasks must belong to one owner");
+        }
+        let (session_id, binding_epoch) = require_owner(store, &task_owner)?;
+        if owner_proof.is_none() {
+            owner_proof = Some(brgr_store::OwnerProof::new(
+                task_owner.clone(),
+                session_id,
+                binding_epoch,
+            )?);
+        }
+        owner_id = Some(task_owner);
     }
-    let group = store.create_debate(request_id, tasks)?;
+    let proof = owner_proof.context("debate requires at least one owner")?;
+    let group = store.create_debate_bound(request_id, tasks, &proof)?;
     if !group.active {
         return Ok(group);
     }
@@ -107,7 +124,7 @@ fn start_debate(
         let mut bytes = [0; 16];
         bytes.copy_from_slice(&digest[..16]);
         invitation.message_id = uuid::Uuid::from_bytes(bytes).to_string();
-        store.post_message(&invitation)?;
+        store.post_message_bound(&invitation, &proof)?;
     }
     Ok(group)
 }
@@ -126,9 +143,11 @@ pub(crate) async fn run(paths: &Paths, command: DebateCommand, json_output: bool
         }
         DebateCommand::Status { group } | DebateCommand::Stop { group } => {
             let record = store.debate(&group)?;
-            require_owner(&store, &OwnerId::new(record.owner.clone())?)?;
+            let owner_id = OwnerId::new(record.owner.clone())?;
+            let (session_id, binding_epoch) = require_owner(&store, &owner_id)?;
             if stopping {
-                store.stop_debate(&group)?;
+                let proof = brgr_store::OwnerProof::new(owner_id, session_id, binding_epoch)?;
+                store.stop_debate_bound(&group, &proof)?;
             }
             print_value(
                 &serde_json::json!({"group":store.debate(&group)?,"messages":store.debate_history(&group)?}),
@@ -145,24 +164,26 @@ pub(crate) async fn run(paths: &Paths, command: DebateCommand, json_output: bool
             request_id,
         } => {
             let from = worker_task(from)?;
-            let attempt = authorize(&store, from)?;
-            let message = store.post_peer_message_from(
-                &PeerDraft {
-                    id: request_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
-                    group,
-                    from,
-                    to,
-                    kind: kind.into(),
-                    body,
-                    reply_to,
-                },
-                attempt,
-            )?;
+            let (attempt, proof) = authorize(&store, from)?;
+            let draft = PeerDraft {
+                id: request_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+                group,
+                from,
+                to,
+                kind: kind.into(),
+                body,
+                reply_to,
+            };
+            let message = if let Some(proof) = proof {
+                store.post_peer_message_from_bound(&draft, attempt, &proof)?
+            } else {
+                store.post_peer_message_from(&draft, attempt)?
+            };
             print_value(&serde_json::to_value(message)?, json_output);
         }
         DebateCommand::List { task } | DebateCommand::Wait { task, .. } => {
             let task = worker_task(task)?;
-            let attempt = authorize(&store, task)?;
+            let (attempt, _) = authorize(&store, task)?;
             let seconds = if let DebateCommand::Wait {
                 timeout_seconds, ..
             } = command
@@ -189,7 +210,7 @@ pub(crate) async fn run(paths: &Paths, command: DebateCommand, json_output: bool
         }
         DebateCommand::Ack { message, task } => {
             let task = worker_task(task)?;
-            let attempt = authorize(&store, task)?;
+            let (attempt, _) = authorize(&store, task)?;
             store.acknowledge_peer(&message, task, attempt)?;
             print_value(
                 &serde_json::json!({"message_id":message,"acknowledged":true}),

@@ -7336,6 +7336,260 @@ fn retire_resumed_takeovers(home: &Path, owner_str: &str) {
     }
 }
 
+fn debate_home(owner: &str) -> (TempDir, PathBuf, Vec<String>) {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("brgr");
+    let mut store = brgr_store::Store::open(home.join("store")).unwrap();
+    let owner_id = brgr_protocol::OwnerId::new(owner.to_owned()).unwrap();
+    store.bind_owner(&owner_id, "fixture-session", 1).unwrap();
+    let mut tasks = Vec::new();
+    for _ in 0..2 {
+        let task_id = brgr_protocol::TaskId::new();
+        let task: brgr_protocol::TaskSpec = serde_json::from_value(json!({
+            "schema": "brgr/v1",
+            "task_id": task_id,
+            "revision": 1,
+            "create_request_id": format!("debate-{task_id}"),
+            "owner_id": owner,
+            "objective": "Debate contract fixture",
+            "workspace": temp.path().to_string_lossy(),
+            "route": {"harness_id": "local.fixture"},
+            "required_capabilities": [],
+            "artifact_contract": {"media_type": "text/plain", "max_bytes": 4096},
+            "acceptance_criteria": ["remain active for debate"],
+            "budget": {"deadline_seconds": 60, "max_attempts": 1}
+        }))
+        .unwrap();
+        store
+            .record_task(&task, &format!("digest-{task_id}"))
+            .unwrap();
+        let attempt = brgr_protocol::AttemptId::new();
+        store.claim_attempt(task_id, 1, attempt).unwrap();
+        store
+            .compare_and_set_attempt_state(
+                attempt,
+                brgr_protocol::AttemptState::Queued,
+                brgr_protocol::AttemptState::Starting,
+            )
+            .unwrap();
+        store
+            .compare_and_set_attempt_state(
+                attempt,
+                brgr_protocol::AttemptState::Starting,
+                brgr_protocol::AttemptState::Running,
+            )
+            .unwrap();
+        tasks.push(task_id.to_string());
+    }
+    (temp, home, tasks)
+}
+
+fn debate_takeover(home: &Path, owner: &str, key: &str) {
+    committed_takeover(home, owner, "fixture-session", "session-b", key);
+}
+
+fn owner_env<'a>(owner: &'a str, session: &'a str) -> [(&'a str, &'a str); 2] {
+    [("BRGR_OWNER_ID", owner), ("BRGR_SESSION_ID", session)]
+}
+
+#[test]
+fn debate_start_refuses_stale_owner_without_group_or_invitations() {
+    let owner = "codex:debate-start-takeover";
+    let (_temp, home, tasks) = debate_home(owner);
+    debate_takeover(&home, owner, "debate-start-handoff");
+    let stale = owner_env(owner, "fixture-session");
+    let started = run(
+        &home,
+        &[
+            "debate",
+            "start",
+            &tasks[0],
+            &tasks[1],
+            "--request-id",
+            "123e4567-e89b-12d3-a456-426614174000",
+        ],
+        &stale,
+    );
+    assert!(!started.status.success(), "stale start succeeded");
+    assert!(String::from_utf8_lossy(&started.stderr).contains("bound to another session"));
+    let store = brgr_store::Store::open(home.join("store")).unwrap();
+    assert!(
+        store
+            .debate("123e4567-e89b-12d3-a456-426614174000")
+            .is_err()
+    );
+    for task in &tasks {
+        let task_id = task.parse().unwrap();
+        let attempt = store.latest_message_attempt(task_id).unwrap();
+        assert!(
+            store
+                .task_messages(
+                    task_id,
+                    attempt,
+                    brgr_store::MessageDirection::OwnerToWorker,
+                    true
+                )
+                .unwrap()
+                .is_empty()
+        );
+    }
+    let head = owner_env(owner, "session-b");
+    assert!(
+        run(
+            &home,
+            &[
+                "debate",
+                "start",
+                &tasks[0],
+                &tasks[1],
+                "--request-id",
+                "123e4567-e89b-12d3-a456-426614174000"
+            ],
+            &head,
+        )
+        .status
+        .success()
+    );
+}
+
+#[test]
+fn debate_stop_refuses_stale_owner_and_keeps_group_active() {
+    let owner = "codex:debate-stop-takeover";
+    let (_temp, home, tasks) = debate_home(owner);
+    let started = json_output(&run(
+        &home,
+        &[
+            "debate",
+            "start",
+            &tasks[0],
+            &tasks[1],
+            "--request-id",
+            "223e4567-e89b-12d3-a456-426614174000",
+        ],
+        &[("BRGR_OWNER_ID", owner)],
+    ));
+    let group = started["id"].as_str().unwrap().to_owned();
+    debate_takeover(&home, owner, "debate-stop-handoff");
+    let stale = run(
+        &home,
+        &["debate", "stop", &group],
+        &owner_env(owner, "fixture-session"),
+    );
+    assert!(!stale.status.success());
+    assert!(String::from_utf8_lossy(&stale.stderr).contains("bound to another session"));
+    let store = brgr_store::Store::open(home.join("store")).unwrap();
+    assert!(store.debate(&group).unwrap().active);
+    assert!(
+        run(
+            &home,
+            &["debate", "stop", &group],
+            &owner_env(owner, "session-b")
+        )
+        .status
+        .success()
+    );
+    assert!(!store.debate(&group).unwrap().active);
+}
+
+#[test]
+fn debate_owner_send_refuses_stale_owner_without_peer_message() {
+    let owner = "codex:debate-send-takeover";
+    let (_temp, home, tasks) = debate_home(owner);
+    let started = json_output(&run(
+        &home,
+        &[
+            "debate",
+            "start",
+            &tasks[0],
+            &tasks[1],
+            "--request-id",
+            "323e4567-e89b-12d3-a456-426614174000",
+        ],
+        &[("BRGR_OWNER_ID", owner)],
+    ));
+    let group = started["id"].as_str().unwrap().to_owned();
+    debate_takeover(&home, owner, "debate-send-handoff");
+    let args = [
+        "debate",
+        "send",
+        &group,
+        "--from",
+        &tasks[0],
+        "--to",
+        &tasks[1],
+        "--kind",
+        "note",
+        "--body",
+        "owner note",
+        "--request-id",
+        "523e4567-e89b-12d3-a456-426614174000",
+    ];
+    let stale = run(&home, &args, &owner_env(owner, "fixture-session"));
+    assert!(!stale.status.success());
+    assert!(String::from_utf8_lossy(&stale.stderr).contains("bound to another session"));
+    let store = brgr_store::Store::open(home.join("store")).unwrap();
+    assert!(store.debate_history(&group).unwrap().is_empty());
+    assert!(
+        run(&home, &args, &owner_env(owner, "session-b"))
+            .status
+            .success()
+    );
+    assert_eq!(store.debate_history(&group).unwrap().len(), 1);
+}
+
+#[test]
+fn debate_worker_send_remains_available_after_owner_takeover() {
+    let owner = "codex:debate-worker-takeover";
+    let (_temp, home, tasks) = debate_home(owner);
+    let started = json_output(&run(
+        &home,
+        &[
+            "debate",
+            "start",
+            &tasks[0],
+            &tasks[1],
+            "--request-id",
+            "423e4567-e89b-12d3-a456-426614174000",
+        ],
+        &[("BRGR_OWNER_ID", owner)],
+    ));
+    let group = started["id"].as_str().unwrap().to_owned();
+    debate_takeover(&home, owner, "debate-worker-handoff");
+    let worker_task = tasks[0].clone();
+    let worker_attempt = brgr_store::Store::open(home.join("store"))
+        .unwrap()
+        .latest_message_attempt(worker_task.parse().unwrap())
+        .unwrap()
+        .to_string();
+    let output = run(
+        &home,
+        &[
+            "debate",
+            "send",
+            &group,
+            "--to",
+            &tasks[1],
+            "--kind",
+            "note",
+            "--body",
+            "worker note",
+            "--request-id",
+            "623e4567-e89b-12d3-a456-426614174000",
+        ],
+        &[
+            ("BRGR_PARENT_TASK_ID", &worker_task),
+            ("BRGR_PARENT_ATTEMPT_ID", &worker_attempt),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let store = brgr_store::Store::open(home.join("store")).unwrap();
+    assert_eq!(store.debate_history(&group).unwrap().len(), 1);
+}
+
 fn manual(home: &Path, args: &[&str], envs: &[(&str, &str)]) -> std::process::Output {
     let mut command = brgr_command();
     command.arg("--home").arg(home).arg("--json").args(args);
