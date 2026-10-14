@@ -1,5 +1,21 @@
 # Changelog
 
+## 2.14.1 — 2026-10-14
+
+- A run started from a repository root with an OpenCode model
+  (`--harness local.opencode --model provider/model`) no longer fails at once as
+  `lost` with "OpenCode returned a catalog for a different task location". The
+  task workspace path carried a trailing separator, and OpenCode compares the
+  location exactly. Runs from a subdirectory were not affected.
+- A handled worker report whose content changed after the owner decided is kept
+  in place and reported once, naming the task, revision and path. It used to
+  print "brgr cleanup pending: handled report changed before archival" with no
+  task on every later command, and retry the same archive each time.
+- The test suite no longer depends on the shell it runs in. Integration tests
+  clear the worker identity a brgr worker inherits (`BRGR_PARENT_*`), and the
+  `caller_pane` fixture accepts the `--session` flag Herdr adds when
+  `HERDR_SESSION` is set. No product behaviour changed.
+
 ## 2.14.0 — 2026-10-14
 
 - OpenCode 2's native TUI now honours `--model provider/model#variant` through
