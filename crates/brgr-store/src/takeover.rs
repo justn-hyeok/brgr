@@ -838,13 +838,25 @@ fn validate_request(
     Ok(())
 }
 
+/// Bounds a reason to the byte limit the constant names.
+///
+/// The limit is bytes, so a multibyte reason is cut on the nearest character
+/// boundary at or below it: the stored reason is always whole characters and
+/// never longer than the limit the rest of the store writes against.
 fn bounded_reason(reason: &str) -> Result<String, StoreError> {
     if reason.trim().is_empty() {
         return Err(StoreError::InvalidTakeoverRequest(
             "a reason must not be empty".to_owned(),
         ));
     }
-    Ok(reason.chars().take(MAX_REASON_BYTES).collect())
+    if reason.len() <= MAX_REASON_BYTES {
+        return Ok(reason.to_owned());
+    }
+    let mut end = MAX_REASON_BYTES;
+    while !reason.is_char_boundary(end) {
+        end -= 1;
+    }
+    Ok(reason[..end].to_owned())
 }
 
 /// Checks that a manifest is bounded, does not repeat itself, and names rows
@@ -1117,8 +1129,9 @@ const TAKEOVER_COLUMNS: &str = "SELECT t.takeover_id, t.owner_id, t.from_session
      LEFT JOIN handoff_manifests m ON m.takeover_id = t.takeover_id
      WHERE t.takeover_id = ?1";
 
-fn load_takeover(connection: &impl TakeoverRow, takeover_id: &str) -> Result<Takeover, StoreError> {
-    let raw: RawTakeover = connection.takeover_row(takeover_id)?;
+fn load_takeover(connection: &Connection, takeover_id: &str) -> Result<Takeover, StoreError> {
+    let mut statement = connection.prepare(TAKEOVER_COLUMNS)?;
+    let raw: RawTakeover = statement.query_row([takeover_id], read_raw_takeover)?;
     Ok(Takeover {
         takeover_id: parse_takeover_id(&raw.takeover_id)?,
         owner_id: OwnerId::new(raw.owner_id)?,
@@ -1132,27 +1145,6 @@ fn load_takeover(connection: &impl TakeoverRow, takeover_id: &str) -> Result<Tak
         updated_at: raw.updated_at,
         failure_reason: raw.failure_reason,
     })
-}
-
-/// Reads one handoff row. `Connection` and `Transaction` differ only in their
-/// lifetimes, so one reader serves both without a generic lifetime in every
-/// signature.
-trait TakeoverRow {
-    fn takeover_row(&self, takeover_id: &str) -> Result<RawTakeover, StoreError>;
-}
-
-impl TakeoverRow for Connection {
-    fn takeover_row(&self, takeover_id: &str) -> Result<RawTakeover, StoreError> {
-        let mut statement = self.prepare(TAKEOVER_COLUMNS)?;
-        Ok(statement.query_row([takeover_id], read_raw_takeover)?)
-    }
-}
-
-impl TakeoverRow for Transaction<'_> {
-    fn takeover_row(&self, takeover_id: &str) -> Result<RawTakeover, StoreError> {
-        let mut statement = self.prepare(TAKEOVER_COLUMNS)?;
-        Ok(statement.query_row([takeover_id], read_raw_takeover)?)
-    }
 }
 
 fn read_raw_takeover(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawTakeover> {
@@ -1466,5 +1458,37 @@ mod tests {
         assert_eq!(bounded_reason("why").unwrap(), "why");
         let long = "x".repeat(MAX_REASON_BYTES * 2);
         assert_eq!(bounded_reason(&long).unwrap().len(), MAX_REASON_BYTES);
+    }
+
+    #[test]
+    fn a_multibyte_reason_is_cut_at_the_byte_limit_on_a_character_boundary() {
+        // Three bytes per character, so the limit lands inside one: the kept
+        // prefix must be whole characters and at most MAX_REASON_BYTES long.
+        let reason = "가".repeat(MAX_REASON_BYTES);
+        let cut = bounded_reason(&reason).unwrap();
+        assert!(
+            cut.len() <= MAX_REASON_BYTES,
+            "the cut is {} bytes, over the {MAX_REASON_BYTES} limit",
+            cut.len()
+        );
+        assert!(
+            reason.starts_with(&cut),
+            "the cut is not a prefix of the reason"
+        );
+        assert_eq!(
+            cut.chars().count(),
+            MAX_REASON_BYTES / 3,
+            "the cut dropped or kept part of a character"
+        );
+
+        // A four-byte character right at the limit loses its whole self rather
+        // than half of it.
+        let prefix = "x".repeat(MAX_REASON_BYTES - 1);
+        let mixed = format!("{prefix}é");
+        assert_eq!(bounded_reason(&mixed).unwrap(), prefix);
+        assert_eq!(bounded_reason(&mixed).unwrap().len(), MAX_REASON_BYTES - 1);
+
+        // A short multibyte reason is untouched, byte for byte.
+        assert_eq!(bounded_reason("가나다").unwrap(), "가나다");
     }
 }
