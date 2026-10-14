@@ -8,9 +8,17 @@ fn command(home: &Path) -> Command {
     command.args(["--json", "--home"]).arg(home);
     for key in [
         "CODEX_THREAD_ID",
+        "CLAUDE_CODE_SESSION_ID",
         "HERDR_ENV",
         "HERDR_PANE_ID",
         "BRGR_PLUGIN_BRIDGE_DIR",
+        "BRGR_HOME",
+        "BRGR_BIN",
+        "BRGR_OWNER_ID",
+        "BRGR_SESSION_ID",
+        "BRGR_PARENT_TASK_ID",
+        "BRGR_PARENT_ATTEMPT_ID",
+        "BRGR_WORKER_HERDR_CONTEXT",
     ] {
         command.env_remove(key);
     }

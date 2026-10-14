@@ -1292,7 +1292,14 @@ impl Fixture {
             .arg(&self.home)
             .arg("--json")
             .env_remove("CODEX_THREAD_ID")
+            .env_remove("CLAUDE_CODE_SESSION_ID")
             .env_remove("BRGR_HOME")
+            .env_remove("BRGR_BIN")
+            .env_remove("BRGR_OWNER_ID")
+            .env_remove("BRGR_SESSION_ID")
+            .env_remove("BRGR_PARENT_TASK_ID")
+            .env_remove("BRGR_PARENT_ATTEMPT_ID")
+            .env_remove("BRGR_WORKER_HERDR_CONTEXT")
             .env("BRGR_OWNER_ID", "codex:prune-owner")
             .env("BRGR_SESSION_ID", "prune-session");
         command
