@@ -123,6 +123,12 @@ saves that repository as trusted in `~/.codex/config.toml`. The registered execu
 an owned pane without taking focus. brgr connects parent/worker messages to
 that session, seals its final report, and closes the pane after the owner
 handles the result. A momentarily idle TUI can continue the conversation.
+Worker panes are named from `pane_name_template` in `[herdr]` (by default
+`{harness}/{provider}/{model}: {objective}`); the name carries the first words
+of the task objective and is local display text only. Change it with
+`brgr config set pane-name-template TEMPLATE`, restore the default with
+`brgr config clear-pane-name-template`, or set an empty template to stop naming
+panes.
 Owned-workspace trust, "press Enter to continue" notices, update offers (skipped) and an applied self-update are answered automatically; any other screen is reported and fails the run after three minutes. Other native
 input uses `brgr input TASK --key KEY` or `--text TEXT`; conversation messages
 stay queued while the TUI is busy or displaying a native dialog.
@@ -203,7 +209,10 @@ and counts as the owner's acknowledgement of it. A lost run whose worker may sti
 be running is refused, with the worker's process named: a second run would share
 the task's pid record and hide the first worker from `prune`. `brgr status TASK --tree` shows time and question/approval waits;
 `brgr cancel TASK --tree` records cancellation for the subtree before stopping
-its active processes. See [the completion loop plan](completion-loop-plan.md)
+its active processes. `brgr cancel TASK --force` does the same when this session
+is not the bound owner: reaching the control home is the access check. It does
+not accept or reject a sealed result; an already-terminal task only closes a
+leftover pane brgr recorded as its own. See [the completion loop plan](completion-loop-plan.md)
 for the current scope and limits.
 
 Install the local binary and Codex integration, then start a new Codex session:
@@ -429,6 +438,40 @@ cost about 9 KiB per task, while a worktree costs the size of the checkout.
 Pruning is not owner-scoped, because cross-owner isolation is outside v1 scope;
 each row reports its owner. `brgr prune` is rejected through the Herdr host
 bridge; run it explicitly outside the plugin Codex pane.
+
+## Claude Code mod
+
+`mods/brgr` is a Claude Code mod: a thin shell over the brgr CLI. It does not
+read the brgr store, and it does not accept, reject, apply, revise, or
+acknowledge a result. Those decisions stay with the owner, through the CLI or
+the brgr skill.
+
+In an interactive session the mod pins a status line computed from
+`brgr --json status` (and each task's tree) about every five seconds:
+`brgr: 2 running · 1 asking · 3 done`. With no tasks the line is cleared. A new
+worker question toasts once, and a newly sealed result toasts once. The same
+question or result is not toasted again on a later poll or after the mod
+reloads. `/brgr` prints a read-only list of active tasks (an eight-character id
+prefix, the attempt state, and the harness). The model tool `brgr_run` starts
+a run and returns the CLI's JSON. It always passes `--mode auto`, and it has
+no way to decide a result. If the `brgr` executable is missing, or
+`brgr --json status` exits non-zero, the status line is cleared and one toast
+says so.
+
+The mod needs Claude Code v2.1.287 or later on the terminal, the release that
+added mods. It is not sandboxed: it runs with your user permissions, and it
+only draws inside a running interactive session. A `claude -p` session does not
+draw it.
+
+Install it from a terminal:
+
+```bash
+claude plugin marketplace add justn-hyeok/brgr
+claude plugin install brgr@brgr
+```
+
+Inside a running terminal session the same install is
+`/plugin install brgr --marketplace justn-hyeok/brgr`.
 
 ## Development
 

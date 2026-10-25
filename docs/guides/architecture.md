@@ -7,8 +7,9 @@ bounded fresh run -> sealed result -> durable inbox -> owner decision
 ```
 
 This guide describes the existing execution contract. The
-[execution model roadmap](roadmap.md) records the planned continuity foundation,
-Head Migration, and Dynamic Workflows that build on it.
+[execution model roadmap](roadmap.md) records Head Migration, Dynamic Workflows,
+and their integration. Continuity store/CLI shipped in v2.14.2; the live Head
+path is still planned. Minors are only those large features.
 
 The protocol crate defines immutable task revisions, attempt identity, terminal
 outcomes, artifact references, and decisions. The core crate validates state

@@ -1,0 +1,13 @@
+{
+  "name": "brgr",
+  "owner": {
+    "name": "justn-hyeok"
+  },
+  "plugins": [
+    {
+      "name": "brgr",
+      "source": "./mods/brgr",
+      "description": "Status line, question and result toasts, /brgr, and a read-only brgr_run tool."
+    }
+  ]
+}

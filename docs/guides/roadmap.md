@@ -1,18 +1,22 @@
 # Execution Model Roadmap
 
-상태: 제품 방향 확정, 단계별 구현 예정 · 작성 2026-10-14
-
-이해한 요청: 기능 목록보다 실행 모델의 진화 순서로 로드맵을 잡는다.
-현행 품질 개선을 계속하면서 Head Migration과 Dynamic Workflows의 공통 기반을
-먼저 만들고, Head Migration을 첫 번째 대형 기능으로 출시한다. 위성 UI는 이번
-로드맵에서 제외한다.
+상태: Phase 1 store/CLI는 v2.14.2에 출시, Head Migration 라이브 경로는 미완 · 작성 2026-10-14 · 버전 정책 2026-10-26
 
 > 에이전트 세션이 아니라 brgr이 작업의 생명주기를 소유한다.
 
 현재 동작의 기준은 [Architecture](architecture.md)와
-[Reference](reference.md)다. 이 문서의 Head, Handoff Manifest, Takeover Protocol,
-Workflow Runtime은 향후 계획이며, 현재 제공되는 API나 CLI라는 뜻이 아니다.
-버전 번호는 출시 방향을 설명하는 예시이며 일정이나 호환성 변경의 확정 약속이 아니다.
+[Reference](reference.md)다.
+
+`brgr head request|prepare|show|commit|abort|retire|status`는 v2.14.2에 있다.
+아직 없는 것은 새 Head pane 준비, 두 live pane 사이 알림, 이전 Head 종료,
+나가는 Head가 명령을 못 칠 때의 인계 시작이다. Workflow Runtime은 향후 계획이다.
+
+모든 단계는 v2.x로 낸다. 메이저 버전은 올리지 않는다.
+
+**마이너는 Head Migration, Dynamic Workflows, Unified Continuity처럼 대형 기능이
+실제로 출시될 때만 올린다. 그 밖의 수정·호환·작은 명령·소유자 면 구멍은 전부
+패치다.** 여러 작은 일이 같이 쌓였다고 마이너를 올리지 않는다. 문서만 바뀌면
+릴리스를 만들지 않는다. 같은 날 추가 릴리스는 방금 낸 버전이 깨졌을 때만 한다.
 
 ## 방향과 유지할 계약
 
@@ -43,42 +47,46 @@ accept/reject를 결정한다. 프로세스 종료, pane 상태, 메시지 수�
 - 명시적인 `brgr bind TASK`를 통한 owner의 세션 이전과 stale-session 명령 차단.
 - owner의 세션 binding 변경 후에도 유지되는 기존 결과·결정과 미처리 완료 알림의
   재전달 경로.
+- v2.14.2의 기록된 Head 인계: `request` → `prepare` → `commit` → 새 세션의
+  owner write로 `resumed` → `retire`. 매니페스트는 참조만 담는다. 인계가 열려
+  있으면 `bind`는 거부된다.
 
-`bind TASK`는 task를 통해 owner를 찾는 진입점이다. 저장된 binding은 task별이
-아니라 owner별이므로 같은 owner의 작업들은 이미 이 binding을 공유한다.
-이를 Head 단위의 인수인계·복구 절차로 확장하며, 기존 binding과 epoch를 새로
-중복 구현하지 않는다. 근거는 [owner store](../../crates/brgr-store/src/owner.rs)와
-[CLI binding](../../crates/brgr-cli/src/task_commands.rs)에 있다.
+`bind TASK`는 task를 통해 owner를 찾는 진입점이다. 세션이 같으면 epoch를 올리지
+않고(멱등), 다르면 epoch를 1 올려 저장하며, 미처리 완료 알림의 전달 표시를
+초기화해 새 세션에 재전달한다. 저장된 binding은 task별이 아니라 owner별이므로
+같은 owner의 작업들은 이 binding을 공유한다. `bind`는 묶이지 않았거나 버려진
+owner용이다. 지휘권을 다른 세션으로 넘기는 것은 `brgr head`다. 근거는
+[owner store](../../crates/brgr-store/src/owner.rs),
+[CLI binding](../../crates/brgr-cli/src/task_commands.rs),
+[Reference의 head 절](reference.md)에 있다.
 
 ## Phase 0. 현재 경험 완성
 
-릴리스 방향: v2.x · 상태: 지속 진행
+릴리스 방향: v2.x 패치 · 상태: 지속 진행
 
 현재 사용자가 잘 쓰는 `brgr run`의 동작과 경험을 유지한다. 대형 기능을 개발하는
-동안에도 하네스 호환성 문제와 실제 사용자 제보를 계속 해결한다.
+동안에도 하네스 호환성 문제와 실제 사용자 제보를 계속 해결한다. 이 단계의
+산출물은 패치로 낸다.
 
 - OpenCode 모델 지정처럼 하네스별 실행·모델·옵션의 불편함을 제거한다.
 - 실제 TUI, 메시지 전달, 결과 검증, worktree와 pane 수명 관리의 품질을 유지한다.
 - 등록 성공, 빌드 성공과 실제 하네스 실행 성공을 구분해 검증한다.
 - 새로운 실행 엔진 때문에 기존 사용자에게 새 workflow 사용법을 강제하지 않는다.
 
-이 단계는 별도의 대형 프로젝트나 이후 단계의 개발을 중단시키는 일괄 게이트가
-아니다. 호환되는 개선을 v2.x에서 계속 배포한다.
+이 단계는 이후 단계의 개발을 중단시키는 일괄 게이트가 아니다.
 
 ## Phase 1. Continuity Foundation
 
-릴리스 방향: v2.x 내부 기반 작업 · 상태: 예정
+릴리스 방향: 내부 기반. store/CLI는 v2.14.2 패치로 출시 · 상태: 부분 출시
 
 Head Migration과 Dynamic Workflows가 공통으로 사용할 상태 소유권과 인수인계
-기반을 만든다. 첫 산출물은 세 가지로 제한한다.
+기반이다. 세 산출물 중 store에 기록되는 부분과 CLI는 v2.14.2에 있다.
 
-| 산출물 | 기록할 내용 | 완료 조건 |
+| 산출물 | 기록할 내용 | 상태 |
 | --- | --- | --- |
-| Handoff Manifest | 목표, 결정 사항, 원본 세션 참조, 미완료 작업, worker 식별자, 대기 메시지·결과 참조 | 새 Head가 필요한 맥락과 정확한 작업·결과를 다시 읽을 수 있다 |
-| Head Binding | 논리적인 Head ID, 안정적인 owner와 작업 집합의 관계, 현재 세션과 binding epoch | 현재 지휘권이 하나로 정해지고 이전 epoch의 명령이 거부된다 |
-| Takeover Protocol | 인계 요청, 새 Head 준비, 지휘권 승계, 실제 작업 재개 확인, 이전 Head 종료 확인 | 각 단계가 영속 기록으로 구분되고 중단 후에도 어디까지 완료됐는지 알 수 있다 |
-
-개념적인 상태 예시다. 실제 schema를 확정한 것은 아니다.
+| Handoff Manifest | 목표, 결정 사항, 원본 세션 참조, 미완료 작업, worker 식별자, 대기 메시지·결과 참조 | v2.14.2. 참조만 담는다. attempt가 없는 revision은 매니페스트에 없고 `brgr status`로 본다 |
+| Head Binding | 논리적인 Head ID, 안정적인 owner와 작업 집합의 관계, 현재 세션과 binding epoch | 기존 owner binding과 epoch를 재사용. 인계 `commit`이 epoch를 1 올린다 |
+| Takeover Protocol | 인계 요청, 새 Head 준비, 지휘권 승계, 실제 작업 재개 확인, 이전 Head 종료 확인 | store 단계(`request`/`prepare`/`commit`/`resumed`/`retire`)는 v2.14.2. 새 Head pane 준비, 두 live pane 알림, 이전 Head 종료, 죽은 Head에서의 시작은 없음 |
 
 ```text
 Logical Head
@@ -91,13 +99,15 @@ Logical Head
   └── handoff: [manifest reference + takeover progress]
 ```
 
-이 단계의 검증 기준:
+이 단계의 검증 기준. 앞의 네 줄은 v2.14.2에서 격리 홈과 store로 확인했다.
+뒤의 두 줄은 Head Migration 라이브 경로의 남은 조건이다.
 
 - 새 Head 준비와 지휘권 승계를 구분한다. 새 pane이 열렸다는 사실만으로 승계를
   완료 처리하지 않는다.
 - 같은 owner의 작업은 기존 owner binding을 재사용한다. 여러 owner를 함께
   인계해야 한다면 대상 집합과 부분 실패 시 복구 동작을 먼저 명시한다.
 - 인계 중 도착한 결과·질문·완료 알림이 사라지지 않고 현재 Head에 도달한다.
+  (store 재큐는 v2.14.2. 두 live pane 배달은 아직 확인하지 않았다.)
 - 중복 요청과 프로세스 재시작이 이중 승계·중복 결정·worker 재실행을 만들지 않는다.
 - 인계 기록이 원본 세션과 sealed artifact를 참조한다. 요약문이 원본 결과나
   이미 기록된 결정을 덮어쓰지 않는다.
@@ -108,10 +118,10 @@ Logical Head
 
 ## Phase 2. Head Migration
 
-릴리스 방향: 첫 번째 대형 릴리스, 예시 v3.0 · 상태: Phase 1 이후
+릴리스 방향: 다음 마이너 · 상태: Phase 1 라이브 경로가 남은 뒤
 
 지휘권을 다른 세션으로 옮기고 기존 worker와 미처리 결과를 승계한다. 인계 성공은
-새 Head가 실제 작업을 이어서 수행했을 때 입증한다.
+새 Head가 실제 작업을 이어서 수행했을 때 입증한다. 특정 하네스 전용이 아니다.
 
 | 순서 | 기능 | 완료 조건 |
 | --- | --- | --- |
@@ -122,11 +132,14 @@ Logical Head
 | 2.5 | 자율 퇴장 | 인계와 작업 재개 확인 후 기존 Head만 종료되고 worker는 유지된다 |
 | 2.6 | 조건부 migration | 사용자가 정한 usage 등의 조건에 따라 같은 검증된 인계 절차를 실행한다 |
 
-첫 출시에서는 2.1~2.5를 검증한다. usage 자동 감지나 조건부 이전을 처음부터
-완성하려 하지 않는다. 먼저 아래 요청이 끝까지 동작해야 한다.
+첫 마이너에서는 2.1~2.5를 검증한다. 2.6은 그 마이너 다음의 패치다. 먼저 아래
+요청이 끝까지 동작해야 한다.
 
-> 지금 진행 중인 작업과 worker를 모두 Codex로 넘겨.
-> 정상 인계가 끝나면 현재 Claude 세션을 종료해.
+> 지금 진행 중인 작업과 worker를 모두 다른 세션으로 넘겨.
+> 정상 인계가 끝나면 현재 세션을 종료해.
+
+나가는 Head가 한도·중단으로 명령을 못 쳐도 들어오는 세션이 인계를 시작할 수
+있어야 한다. 지금 `request`/`prepare`는 현재 Head만 할 수 있다.
 
 여기서 옮기는 것은 Head의 지휘권이다. 기존 worker를 다른 하네스로 재실행하거나
 worker의 모델을 바꾸라는 뜻이 아니다. 기존 Head의 종료도 이 요청처럼 승인된
@@ -134,24 +147,29 @@ worker의 모델을 바꾸라는 뜻이 아니다. 기존 Head의 종료도 이 
 
 ### 첫 데모와 출시 게이트
 
-1. Claude Code Head A가 세 worker를 지휘하며 작업을 진행한다.
+1. Head A가 세 worker를 지휘하며 작업을 진행한다.
 2. 목표·결정·세션 참조·worker·미처리 결과를 Handoff Manifest에 기록한다.
-3. Codex Head B가 준비된 뒤 같은 owner의 지휘권을 승계한다.
+3. Head B가 준비된 뒤 같은 owner의 지휘권을 승계한다.
 4. B가 기존 worker의 `FROM BRGR` 결과 또는 질문을 받고, 결과 판단이나 후속
    작업을 실제로 수행한다. pane 표시나 단순 수신 확인만으로 통과하지 않는다.
 5. 작업 재개가 인계 기록에 확인된 뒤 A가 종료된다. worker와 실행 상태는 유지된다.
 
+2.5의 "작업 재개 확인"은 새 Head의 자기 보고가 아니라 brgr이 기록한 사건, 예를
+들어 새 Head 세션이 epoch로 낸 accept/reject나 후속 작업 생성이어야 한다. 기존
+Head 종료는 되돌릴 수 없으므로 이 기록이 있기 전에는 실행하지 않는다.
+
 성공 경로와 함께 새 Head 시작 실패, 인계 도중 Head 소실, 지연·중복 메시지,
-stale Head의 결정 시도, 기존 Head 종료 실패를 재현한다. 종료 실패는 인계 성공과
-별도로 보고하며, worker까지 종료하거나 승인되지 않은 새 실행으로 숨기지 않는다.
+stale Head의 결정 시도, 기존 Head 종료 실패, 나가는 Head가 침묵하는 경우를
+재현한다. 종료 실패는 인계 성공과 별도로 보고하며, worker까지 종료하거나
+승인되지 않은 새 실행으로 숨기지 않는다.
 
 **가장 중요한 이정표는 Head Migration의 첫 실제 성공이다.**
-새 Codex Head가 기존 Claude worker의 결과를 판단하고, 이전 Claude Head가
-검증된 인계 후 스스로 퇴장하는 장면을 첫 출시의 기준으로 삼는다.
+새 Head가 기존 worker의 결과를 판단하고, 이전 Head가 검증된 인계 후 스스로
+퇴장하는 장면을 첫 마이너의 기준으로 삼는다.
 
 ## Phase 3. Dynamic Workflows
 
-릴리스 방향: 별도 대형 릴리스, 예시 v4.0 · 상태: Phase 1 기반 재사용
+릴리스 방향: Head Migration 다음의 별도 마이너 · 상태: Phase 1 기반 재사용
 
 작은 Workflow Runtime을 추가하고 기존 brgr 위임 계약을 실행 백엔드로 사용한다.
 `six-ddc/codex-dynamic-workflows`는 참고 후보이며 그대로 이식하기로 결정한
@@ -198,12 +216,12 @@ if (reviews.some(r => r.hasCriticalIssue)) {
 
 ## Phase 4. Unified Continuity
 
-릴리스 방향: 예시 v4.x · 상태: Phase 2와 3 각각의 실사용 검증 이후
+릴리스 방향: Phase 2와 3 다음의 별도 마이너 · 상태: 각각을 실사용한 뒤
 
 실행 중인 동적 workflow의 Head를 교체해도 작업이 계속되게 한다.
 
 > 이 저장소를 조사해서 필요한 작업을 알아서 구성하고 실행해.
-> Claude 사용량이 부족해지면 Codex로 Head를 옮겨서 계속 진행해.
+> 지휘자의 사용량이 부족해지면 다른 세션으로 Head를 옮겨서 계속 진행해.
 
 | 상태 | 관리 주체 |
 | --- | --- |
@@ -220,33 +238,30 @@ if (reviews.some(r => r.hasCriticalIssue)) {
 ## 투자 우선순위
 
 점수는 현재 구조를 바탕으로 한 상대적 제품 판단이다. 검증된 공수나 일정을 뜻하지 않는다.
-구현 순서는 Phase 0의 지속 개선과 Phase 1 -> 2 -> 3 -> 4다.
+구현 순서는 Phase 0의 지속 개선과 Phase 1 남은 라이브 경로 -> 2 -> 3 -> 4다.
 
 | 투자 대상 | 효과 / 5 | 공수 / 5 | 판단 |
 | --- | --- | --- | --- |
-| 공통 Continuity 기반 | 5 | 3 | 두 핵심 기능의 중복 구현을 줄이고 결합 가능성을 만든다 |
-| Head Migration | 5 | 4 | 첫 데모와 성공 조건이 명확한 대형 기능이다 |
-| Dynamic Workflows | 5 | 5 | 실행 모델을 확장하므로 별도 릴리스로 검증한다 |
-| 하네스 호환성 | 4 | 2 | 매일의 실행 경험을 개선하며 전 단계에서 계속 진행한다 |
+| 공통 Continuity 기반 | 5 | 3 | store/CLI는 v2.14.2. 라이브 경로는 Head Migration에 남음 |
+| Head Migration | 5 | 4 | 다음 마이너. 첫 데모와 성공 조건이 명확하다 |
+| Dynamic Workflows | 5 | 5 | 그다음 마이너. 실행 모델을 확장하므로 따로 낸다 |
+| 하네스 호환성 | 4 | 2 | 매일의 경험이며 전부 패치다 |
 | 계층 탭·위성 UI | 2 | 3 | 현재 로드맵에서 제외한다 |
 
 ## 릴리스 전략과 제품 범위
 
-| 릴리스 계열 예시 | 성격 |
+| 릴리스 | 내는 때 |
 | --- | --- |
-| v2.x | 현행 경험과 호환성 유지, 공통 기반 준비 |
-| v3.0 | Head Migration 정식 출시 |
-| v3.x | 인수인계 자동화와 실패 복구 UX 확장 |
-| v4.0 | Dynamic Workflows 정식 출시 |
-| v4.x | Head Migration과 Workflow Continuity 통합 |
+| v2.x 패치 | 대형 기능이 아닌 모든 것. 현행 경험, 호환, 버그, 작은 명령, 소유자 알림 구멍 |
+| v2.x 마이너 | Head Migration, Dynamic Workflows, Unified Continuity가 각각의 출시 게이트를 통과했을 때뿐 |
 
-대형 기능은 실제 사용과 복구 게이트를 충족했을 때 출시한다. 작은 수정은 기존
-정책대로 묶어서 배포하고, 문서만 바뀌면 별도 릴리스를 만들지 않는다.
+대형 기능은 실제 사용과 복구 게이트를 충족했을 때 마이너로 낸다. 그 전에 쌓인
+작은 수정은 패치로 먼저 낸다.
 
-제품의 중심은 Herdr에서 사용 중인 Claude Code와 Codex 등의 실제 CLI 에이전트가
-작업을 위임하고, 결과를 주고받고, 지휘권까지 이전하는 경험이다. Herdr와 CLI의
-통합을 깊게 만들되, core·store와 generic process 실행에 Herdr 의존성을 강제하지
-않는다. Herdr는 작업 정체성이나 완료 여부를 대신 판단하지 않는다.
+제품의 중심은 Herdr에서 사용 중인 실제 CLI 에이전트가 작업을 위임하고, 결과를
+주고받고, 지휘권까지 이전하는 경험이다. Herdr와 CLI의 통합을 깊게 만들되,
+core·store와 generic process 실행에 Herdr 의존성을 강제하지 않는다. Herdr는
+작업 정체성이나 완료 여부를 대신 판단하지 않는다.
 
 자체 IDE, 자체 채팅 UI, 범용 모델 게이트웨이, 계층 탭·위성 UI는 이번 로드맵의
 범위에 넣지 않는다. 현재 자동 pane 배치를 활용하고 핵심 실행 모델에 투자한다.

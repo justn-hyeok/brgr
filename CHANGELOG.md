@@ -1,5 +1,25 @@
 # Changelog
 
+## 2.14.4 — 2026-10-26
+
+- `brgr run --mode auto` chooses pane mode inside a Herdr pane and headless
+  outside it, and reports which it picked. `--headless` and pane mode stay
+  explicit overrides.
+- `brgr cancel TASK --force` stops a worker when this session is not the bound
+  owner. Reaching the control home is the access check. It does not accept or
+  reject a sealed result; an already-terminal task only closes a leftover pane
+  brgr recorded as its own.
+- Worker pane labels use `[herdr].pane_name_template` and are applied again
+  after the agent starts, so Herdr's later `cmd` overwrite is replaced.
+- A Cursor Herdr pane is a `cursor:` owner and receives `FROM BRGR`. Other
+  Herdr agent kinds that are not an owner inbox are told to use `brgr watch`.
+- A Claude Code mod lists brgr status, toasts questions and sealed results, and
+  starts runs with `--mode auto`. It never decides a result. Type paths are
+  repo-local stubs, not a machine `/private/tmp` Claude Code bundle.
+- The execution-model roadmap records that minors are only Head Migration,
+  Dynamic Workflows, and Unified Continuity; everything else is a patch. The
+  Phase 1 store/CLI shipped in 2.14.2.
+
 ## 2.14.3 — 2026-10-26
 
 - `brgr watch TASK [TASK...]` waits for workers without blocking the agent that

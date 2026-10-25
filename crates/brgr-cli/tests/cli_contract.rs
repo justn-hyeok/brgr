@@ -891,6 +891,12 @@ PY
         printf '%s\n' 'Claude Code fixture' '› Ask anything'
       fi
     fi;;
+  'pane rename')
+    if [ -e "$d/rename-fails" ]; then
+      echo '{"error":{"code":"invalid_label","message":"the pane label is invalid"}}' >&2
+      exit 1
+    fi
+    echo '{"result":{"type":"ok"}}';;
   'pane close') echo closed > "$d/closed"; echo '{"result":{"type":"ok"}}';;
   *) exit 2;;
 esac
@@ -978,6 +984,148 @@ impl PaneFixture {
     fn state(&self, name: &str) -> String {
         fs::read_to_string(self.state.join(name)).unwrap_or_default()
     }
+}
+
+/// The rendered name follows the split, before anything is sent to the agent.
+#[test]
+fn pane_mode_names_the_worker_pane_after_it_opens() {
+    let fixture = pane_fixture();
+    let ran = fixture.run(&[]);
+    assert_eq!(ran["outcome"], "candidate", "{ran}");
+    let calls = fixture.state("calls.log");
+    let split = calls
+        .find("pane split --pane w9:p1 --direction right")
+        .unwrap_or_else(|| panic!("{calls}"));
+    let rename = calls
+        .find("pane rename w9:p2 claude-code/anthropic: Explain the build")
+        .unwrap_or_else(|| panic!("the pane was not named: {calls}"));
+    assert!(split < rename, "{calls}");
+}
+
+/// Herdr gives a pane the agent's own name when `agent start` finishes, which
+/// replaces a label set before it, and may then overwrite that with `cmd` when
+/// the agent registers. The name that stays is applied again after start.
+#[test]
+fn the_pane_name_is_set_again_after_the_agent_has_started() {
+    let fixture = pane_fixture();
+    let ran = fixture.run(&[]);
+    assert_eq!(ran["outcome"], "candidate", "{ran}");
+    let calls = fixture.state("calls.log");
+    // The agent is started by `agent start`, or for a native TUI by `pane run`.
+    let start = calls
+        .find("agent start")
+        .or_else(|| calls.find("pane run w9:p2"))
+        .unwrap_or_else(|| panic!("the agent was never started: {calls}"));
+    let after_start = &calls[start..];
+    let rename = "pane rename w9:p2 claude-code/anthropic: Explain the build";
+    let last_rename = calls
+        .rfind(rename)
+        .unwrap_or_else(|| panic!("the pane was not named: {calls}"));
+    assert!(
+        last_rename > start,
+        "the last rename came before agent start and Herdr overwrites it: {calls}"
+    );
+    assert!(
+        after_start.matches(rename).count() >= 2,
+        "the name was not applied again after Herdr could overwrite it: {calls}"
+    );
+}
+
+/// An empty template is the off switch: no rename, and the creation arguments
+/// are the ones brgr used before naming existed.
+#[test]
+fn an_empty_pane_name_template_leaves_pane_creation_unchanged() {
+    let fixture = pane_fixture();
+    json_output(&run(
+        &fixture.home,
+        &["config", "set", "pane-name-template", ""],
+        &[],
+    ));
+    let ran = fixture.run(&[]);
+    assert_eq!(ran["outcome"], "candidate", "{ran}");
+    let calls = fixture.state("calls.log");
+    assert!(!calls.contains("pane rename"), "{calls}");
+    assert!(
+        calls.contains("pane split --pane w9:p1 --direction right"),
+        "{calls}"
+    );
+    assert!(calls.contains("--no-focus"), "{calls}");
+}
+
+/// A new tab carries the name as its label instead of the fixed `brgr-work`.
+#[test]
+fn a_worker_tab_uses_the_rendered_pane_name_as_its_label() {
+    let fixture = pane_fixture();
+    json_output(&run(
+        &fixture.home,
+        &["config", "set-worker-placement", "tab"],
+        &[],
+    ));
+    let ran = fixture.run(&[]);
+    assert_eq!(ran["outcome"], "candidate", "{ran}");
+    let calls = fixture.state("calls.log");
+    assert!(
+        calls
+            .contains("tab create --workspace w9 --label claude-code/anthropic: Explain the build"),
+        "{calls}"
+    );
+    assert!(!calls.contains("--label brgr-work"), "{calls}");
+    assert!(
+        calls.contains("pane rename w9:p2 claude-code/anthropic: Explain the build"),
+        "{calls}"
+    );
+}
+
+/// Naming is display only: a Herdr that refuses the label does not cost the run.
+#[test]
+fn a_failed_pane_rename_does_not_fail_the_run() {
+    let fixture = pane_fixture();
+    fs::create_dir_all(&fixture.state).unwrap();
+    fs::write(fixture.state.join("rename-fails"), "").unwrap();
+    let ran = fixture.run(&[]);
+    assert_eq!(ran["outcome"], "candidate", "{ran}");
+    let task = ran["task_id"].as_str().unwrap();
+    let result = json_output(&run(
+        &fixture.home,
+        &["result", task],
+        &[("BRGR_OWNER_ID", "codex:pane-test")],
+    ));
+    assert_eq!(result["artifacts"][0]["text"], "PANE_REPORT_OK", "{result}");
+}
+
+#[test]
+fn the_pane_name_template_round_trips_through_config_set_and_show() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("brgr");
+    json_output(&run(
+        &home,
+        &[
+            "config",
+            "set",
+            "pane-name-template",
+            "{harness}: {objective}",
+        ],
+        &[],
+    ));
+    let shown = json_output(&run(&home, &["config", "show"], &[]));
+    assert_eq!(
+        shown["herdr"]["pane_name_template"], "{harness}: {objective}",
+        "{shown}"
+    );
+    json_output(&run(&home, &["config", "clear-pane-name-template"], &[]));
+    let shown = json_output(&run(&home, &["config", "show"], &[]));
+    assert_eq!(
+        shown["herdr"]["pane_name_template"], "{harness}/{provider}/{model}: {objective}",
+        "{shown}"
+    );
+    let bad = run(
+        &home,
+        &["config", "set", "pane-name-template", "{nope}"],
+        &[],
+    );
+    assert!(!bad.status.success());
+    let stderr = String::from_utf8_lossy(&bad.stderr);
+    assert!(stderr.contains("{objective}"), "{stderr}");
 }
 
 /// Inside Herdr, a harness with an interactive launch runs as its own TUI in a
@@ -7959,6 +8107,135 @@ fn an_old_session_stops_nothing_after_a_handoff() {
         }
         thread::sleep(Duration::from_millis(200));
     }
+}
+
+/// A foreign owner cannot cancel; `--force` stops the worker without taking
+/// the head or deciding the sealed result.
+#[test]
+fn a_foreign_owner_force_cancels_a_running_worker() {
+    let (_temp, home, workspace) = asking_home();
+    let owner = [("BRGR_OWNER_ID", "codex:force-owner")];
+    let launched = json_output(&run(
+        &home,
+        &["run", "ASK", "--workspace", workspace.to_str().unwrap()],
+        &owner,
+    ));
+    let task = launched["task_id"].as_str().unwrap();
+    let foreign = [("BRGR_OWNER_ID", "codex:someone-else")];
+    let refused = run(&home, &["cancel", task], &foreign);
+    assert!(
+        !refused.status.success(),
+        "a different owner cancelled without --force: {}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("BRGR_OWNER_ID differs"),
+        "{}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    let forced = json_output(&run(&home, &["cancel", task, "--force"], &foreign));
+    assert_eq!(forced["state"], "cancel_requested", "{forced}");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        assert!(
+            Instant::now() <= deadline,
+            "the task did not stop after --force"
+        );
+        let result = run_with_error(&home, task, &owner);
+        if result.ok {
+            assert_eq!(result.outcome, "cancelled", "{result:?}");
+            break;
+        }
+        thread::sleep(Duration::from_millis(200));
+    }
+}
+
+/// After a handoff the outgoing session still cannot cancel, but `--force`
+/// stops the worker for whoever can reach the control home.
+#[test]
+fn a_stale_session_force_cancels_after_a_handoff() {
+    let (_temp, home, workspace) = asking_home();
+    let owner = [("BRGR_OWNER_ID", "codex:handoff-force-cancel")];
+    let launched = json_output(&run(
+        &home,
+        &["run", "ASK", "--workspace", workspace.to_str().unwrap()],
+        &owner,
+    ));
+    let task = launched["task_id"].as_str().unwrap();
+    committed_takeover(
+        &home,
+        "codex:handoff-force-cancel",
+        "fixture-session",
+        "session-b",
+        "handoff-force-cancel-1",
+    );
+    let stale = [
+        ("BRGR_OWNER_ID", "codex:handoff-force-cancel"),
+        ("BRGR_SESSION_ID", "fixture-session"),
+    ];
+    let refused = run(&home, &["cancel", task], &stale);
+    assert!(
+        !refused.status.success(),
+        "a session that handed its head away cancelled without --force: {}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    let forced = json_output(&run(&home, &["cancel", task, "--force"], &stale));
+    assert_eq!(forced["state"], "cancel_requested", "{forced}");
+    let head = [
+        ("BRGR_OWNER_ID", "codex:handoff-force-cancel"),
+        ("BRGR_SESSION_ID", "session-b"),
+    ];
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        assert!(
+            Instant::now() <= deadline,
+            "the task did not stop after the stale session force-cancelled it"
+        );
+        let result = run_with_error(&home, task, &head);
+        if result.ok {
+            assert_eq!(result.outcome, "cancelled", "{result:?}");
+            break;
+        }
+        thread::sleep(Duration::from_millis(200));
+    }
+}
+
+/// `--force` on an already sealed candidate closes nothing about the result:
+/// reject and revise still work, and a cancellation intent is not recorded.
+#[test]
+fn force_cancel_of_a_candidate_does_not_block_revise() {
+    let (_temp, home, workspace) = gjc_home();
+    let owner = [("BRGR_OWNER_ID", "codex:force-terminal")];
+    let first = json_output(&run(
+        &home,
+        &[
+            "run",
+            "BRGR_FIXTURE_OK",
+            "--workspace",
+            workspace.to_str().unwrap(),
+            "--foreground",
+        ],
+        &owner,
+    ));
+    assert_eq!(first["outcome"], "candidate");
+    let task = first["task_id"].as_str().unwrap();
+    let foreign = [("BRGR_OWNER_ID", "codex:someone-else")];
+    let forced = json_output(&run(&home, &["cancel", task, "--force"], &foreign));
+    assert_eq!(forced["state"], "force_stopped", "{forced}");
+    let result = json_output(&run(&home, &["result", task], &owner));
+    assert_eq!(result["result"]["outcome"], "candidate", "{result}");
+    json_output(&run(
+        &home,
+        &["reject", task, "--reason", "revise after force-stop"],
+        &owner,
+    ));
+    let revised = json_output(&run(
+        &home,
+        &["revise", task, "BRGR_FIXTURE_OK", "--foreground"],
+        &owner,
+    ));
+    assert_eq!(revised["outcome"], "candidate");
+    assert_eq!(revised["revision"], 2);
 }
 
 #[derive(Debug)]

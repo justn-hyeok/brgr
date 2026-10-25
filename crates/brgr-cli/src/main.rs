@@ -287,7 +287,7 @@ async fn execute(paths: &Paths, command: Command, json_output: bool) -> Result<(
             key.as_deref(),
             json_output,
         ),
-        Command::Cancel { task, tree } => cancel(paths, task, tree, json_output),
+        Command::Cancel { task, tree, force } => cancel(paths, task, tree, force, json_output),
         Command::Bind { task, session } => bind(paths, task, session, json_output).await,
         Command::Head { command } => head::run(paths, command, json_output),
         command @ (Command::Accept { .. } | Command::Reject { .. }) => {
@@ -389,6 +389,10 @@ async fn config_command(paths: &Paths, command: &ConfigCommand, json_output: boo
             config.herdr.worker_placement = *placement;
             config.save(&paths.config)?;
         }
+        ConfigCommand::ClearPaneNameTemplate => {
+            config.reset_pane_name_template();
+            config.save(&paths.config)?;
+        }
         ConfigCommand::SetAutoWorkerPane { enabled } => {
             config.herdr.auto_worker_pane = *enabled;
             config.save(&paths.config)?;
@@ -452,13 +456,16 @@ fn delegation_parent_from_environment() -> Result<Option<(TaskId, AttemptId)>> {
     }
 }
 
-/// Which kind of harness owns this shell. A Codex or explicit brgr session keeps
-/// the `codex` owner prefix; a Claude Code session, which has neither, is a
-/// `claude` owner.
+/// Which kind of harness owns this shell. A Claude Code session without a Codex
+/// or explicit brgr session is a `claude` owner. A process that runs inside a
+/// Cursor Herdr pane is a `cursor` owner even when `--as` set a session. Other
+/// shells keep the `codex` owner prefix.
 fn owner_kind() -> &'static str {
     let set = |name: &str| env::var(name).is_ok_and(|value| !value.trim().is_empty());
     if !set("CODEX_THREAD_ID") && !set("BRGR_SESSION_ID") && set("CLAUDE_CODE_SESSION_ID") {
         "claude"
+    } else if caller_pane::inherited_agent_kind().as_deref() == Some("cursor") {
+        "cursor"
     } else {
         "codex"
     }
