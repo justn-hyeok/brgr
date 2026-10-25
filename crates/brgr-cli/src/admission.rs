@@ -8,10 +8,11 @@ use std::{
 };
 
 use crate::cli::{DelegationArgs, ReviseArgs, RunArgs};
+use crate::execution_mode::{self, ModeRequest, Resolution, ResolvedMode};
 use crate::harness_commands::{
     default_harness, recertify_action_fallback, require_healthy_harness,
 };
-use crate::supervision::{record_unstarted_terminal, spawn_supervisor, supervise};
+use crate::supervision::{record_unstarted_terminal, spawn_supervisor};
 use crate::{
     Claimant, LaunchEnvelope, Paths, config, current_session, delegation_parent_from_environment,
     notification, owner_from_environment, print_value, require_owner, workspace, write_json_atomic,
@@ -48,7 +49,7 @@ pub(crate) struct StartOptions<'a> {
     pub(crate) worktree: WorktreeDisposition,
     pub(crate) execution: ExecutionDisposition,
     pub(crate) json_output: bool,
-    pub(crate) headless: bool,
+    pub(crate) mode: Resolution,
     pub(crate) calling_options: config::CallingOptions,
     pub(crate) instructions_digest: Option<String>,
 }
@@ -91,7 +92,12 @@ pub(crate) enum ExecutionDisposition {
     Foreground,
 }
 
+// Keep the admission stages visible in order; mode resolution belongs between
+// route preflight and start, so this orchestration function intentionally
+// exceeds the local line-count heuristic.
+#[allow(clippy::too_many_lines)]
 pub(crate) async fn run_task(paths: &Paths, mut args: RunArgs, json_output: bool) -> Result<()> {
+    let requested_mode = requested_mode(args.mode, crate::invocation::current().headless)?;
     let _awake = crate::sleep_guard::keep_awake();
     let config = Config::load(&paths.config)?;
     let registry = Registry::open_with_control_home(&paths.registry, &paths.home)?;
@@ -158,6 +164,7 @@ pub(crate) async fn run_task(paths: &Paths, mut args: RunArgs, json_output: bool
     spec.validate()?;
     activated.validate_task_route(&spec)?;
     preflight_with_notice(&registry, &activated, &spec).await?;
+    let mode = resolve_execution_mode(requested_mode, &activated, &spec)?;
     with_slow_notice(
         "preparing the worktree and starting the worker",
         Box::pin(start_task(
@@ -183,7 +190,7 @@ pub(crate) async fn run_task(paths: &Paths, mut args: RunArgs, json_output: bool
                     ExecutionDisposition::Detached
                 },
                 json_output,
-                headless: crate::invocation::current().headless,
+                mode,
                 calling_options: calling,
                 instructions_digest,
             },
@@ -295,7 +302,10 @@ fn revise_source(
     }
 }
 
+// Revision admission follows the same ordered stages as a fresh run.
+#[allow(clippy::too_many_lines)]
 pub(crate) async fn revise_task(paths: &Paths, args: ReviseArgs, json_output: bool) -> Result<()> {
+    let explicit_mode = requested_mode(args.mode, crate::invocation::current().headless)?;
     let _awake = crate::sleep_guard::keep_awake();
     let store = Store::open(&paths.store)?;
     let previous = store.task(args.task)?;
@@ -358,6 +368,14 @@ pub(crate) async fn revise_task(paths: &Paths, args: ReviseArgs, json_output: bo
     registry
         .preflight_model(&activated, replacement.route.requested_model.as_deref())
         .await?;
+    let requested_mode = if args.mode.is_some() || crate::invocation::current().headless {
+        explicit_mode
+    } else if ran_headless(&previous_launch) {
+        ModeRequest::Headless
+    } else {
+        explicit_mode
+    };
+    let mode = resolve_execution_mode(requested_mode, &activated, &replacement)?;
     let mut calling = previous_launch.calling_options.clone().unwrap_or_default();
     calling.harness = Some(replacement.route.harness_id.clone());
     calling.model.clone_from(&replacement.route.requested_model);
@@ -391,7 +409,7 @@ pub(crate) async fn revise_task(paths: &Paths, args: ReviseArgs, json_output: bo
                 ExecutionDisposition::Detached
             },
             json_output,
-            headless: crate::invocation::current().headless || ran_headless(&previous_launch),
+            mode,
             calling_options: calling,
             instructions_digest,
         },
@@ -403,6 +421,32 @@ pub(crate) async fn revise_task(paths: &Paths, args: ReviseArgs, json_output: bo
 /// over: its model or effort may be one the harness's TUI cannot honour.
 fn ran_headless(previous: &LaunchEnvelope) -> bool {
     !previous.pane_mode && previous.source_pane.is_none()
+}
+
+fn requested_mode(mode: Option<ModeRequest>, headless_flag: bool) -> Result<ModeRequest> {
+    if headless_flag && mode.is_some_and(|mode| mode != ModeRequest::Headless) {
+        let name = match mode.unwrap() {
+            ModeRequest::Pane => "pane",
+            ModeRequest::Headless => "headless",
+            ModeRequest::Auto => "auto",
+        };
+        bail!("--headless conflicts with --mode {name}");
+    }
+    Ok(if headless_flag {
+        ModeRequest::Headless
+    } else {
+        mode.unwrap_or_default()
+    })
+}
+
+fn resolve_execution_mode(
+    requested: ModeRequest,
+    activated: &HarnessManifest,
+    spec: &TaskSpec,
+) -> Result<Resolution> {
+    let pane_available = caller_source_pane(spec).is_some();
+    let headless_available = activated.adapter == brgr_runner::PROCESS_ADAPTER_V1;
+    execution_mode::resolve(requested, pane_available, headless_available)
 }
 
 /// What `revise` found about the result it replaces.
@@ -707,21 +751,26 @@ fn source_pane(
     }
     // A Codex call cannot be placed while it runs, so its pane is looked up
     // once the call has finished; the worker pane opens then, beside it.
-    crate::caller_pane::verified()
-        .or_else(|| {
-            (spec.owner_id.as_str().starts_with("codex:")
-                && std::env::var("HERDR_ENV").as_deref() == Ok("1")
-                && crate::caller_pane::binary().is_some())
-            .then(|| crate::current_session().ok().flatten())
-            .flatten()
-            .map(|session| crate::caller_pane::pending_marker(&session))
-        })
+    caller_source_pane(spec)
         .context(
             "default TUI execution needs an exact Herdr source; run it from a Herdr pane, or from a Codex session start the command with `--as SESSION` (the session in your calling context) so brgr can find your pane",
         )
         .map(Some)
 }
 
+fn caller_source_pane(spec: &TaskSpec) -> Option<String> {
+    crate::caller_pane::verified().or_else(|| {
+        (spec.owner_id.as_str().starts_with("codex:")
+            && std::env::var("HERDR_ENV").as_deref() == Ok("1")
+            && crate::caller_pane::binary().is_some())
+        .then(|| crate::current_session().ok().flatten())
+        .flatten()
+        .map(|session| crate::caller_pane::pending_marker(&session))
+    })
+}
+
+// Admission ordering is security-sensitive and remains explicit here.
+#[allow(clippy::too_many_lines)]
 pub(crate) async fn start_task(
     paths: &Paths,
     mut spec: TaskSpec,
@@ -736,7 +785,11 @@ pub(crate) async fn start_task(
     let home = paths.home.canonicalize()?;
     validate_source_home(paths, &source, &home, options.parent, &spec.owner_id)?;
     check_admissible(activated, &spec, &source)?;
-    let source_pane = source_pane(activated, &spec, options.headless)?;
+    let source_pane = source_pane(
+        activated,
+        &spec,
+        options.mode.mode == ResolvedMode::Headless,
+    )?;
     let pane_mode = source_pane.is_some() && activated.adapter != brgr_runner::OMP_ROLE_ADAPTER_V1;
     let admission = workspace::acquire_admission_lock(&paths.worktrees, options.source_workspace)?;
     let store = Store::open(&paths.store)?;
@@ -814,7 +867,14 @@ pub(crate) async fn start_task(
     notification::spawn_registration_and_delivery(paths, &launch.spec, session.as_deref());
 
     if matches!(options.execution, ExecutionDisposition::Foreground) {
-        return supervise(paths, &launch_path, options.json_output).await;
+        return crate::supervision::supervise_with_mode(
+            paths,
+            &launch_path,
+            options.json_output,
+            options.mode.mode,
+            options.mode.reason,
+        )
+        .await;
     }
     if let Err(error) = spawn_supervisor(paths, &launch_path) {
         record_unstarted_terminal(
@@ -826,11 +886,23 @@ pub(crate) async fn start_task(
         )?;
         return Err(error);
     }
-    print_launch_receipt(&launch, &workspace, options.json_output);
+    print_launch_receipt(
+        &launch,
+        &workspace,
+        options.json_output,
+        options.mode.mode,
+        options.mode.reason,
+    );
     Ok(())
 }
 
-fn print_launch_receipt(launch: &LaunchEnvelope, workspace: &Path, json_output: bool) {
+fn print_launch_receipt(
+    launch: &LaunchEnvelope,
+    workspace: &Path,
+    json_output: bool,
+    mode: ResolvedMode,
+    mode_reason: &str,
+) {
     let receipt = json!({
         "task_id": launch.spec.task_id,
         "state": "starting",
@@ -840,6 +912,8 @@ fn print_launch_receipt(launch: &LaunchEnvelope, workspace: &Path, json_output: 
         "requested_model": launch.spec.route.requested_model,
         "requested_effort": launch.spec.route.requested_effort,
         "presentation": if launch.pane_mode { "tui" } else { "headless" },
+        "mode": if mode == ResolvedMode::Pane { "pane" } else { "headless" },
+        "mode_reason": mode_reason,
         "permission": launch.spec.permission.unwrap_or(PermissionLevel::Full),
         "source_pane": launch.source_pane,
         "instructions_digest": launch.instructions_digest,

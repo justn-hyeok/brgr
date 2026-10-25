@@ -2,6 +2,7 @@
 
 use std::{collections::BTreeSet, path::PathBuf};
 
+use crate::execution_mode::ModeRequest;
 use crate::{config, message};
 use anyhow::{Result, bail};
 use brgr_protocol::{AttemptId, EvidenceSpec, TaskId, TaskSpec};
@@ -391,6 +392,9 @@ pub(crate) enum ArtifactCommand {
 #[derive(Args)]
 pub(crate) struct RunArgs {
     pub(crate) objective: String,
+    /// Select the native pane or one-shot headless route explicitly.
+    #[arg(long, value_enum)]
+    pub(crate) mode: Option<ModeRequest>,
     #[command(flatten)]
     pub(crate) delegation: DelegationArgs,
     #[arg(long)]
@@ -460,6 +464,9 @@ pub(crate) struct DelegationArgs {
 #[derive(Args)]
 pub(crate) struct ReviseArgs {
     pub(crate) task: TaskId,
+    /// Select the native pane or one-shot headless route explicitly.
+    #[arg(long, value_enum)]
+    pub(crate) mode: Option<ModeRequest>,
     /// Ignored: workers always run with full permissions.
     #[arg(long, value_enum, hide = true)]
     pub(crate) permission: Option<PermissionArg>,

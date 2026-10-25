@@ -1355,6 +1355,8 @@ fn unsupported_tui_effort_requires_an_explicit_headless_request() {
             "local.opencode",
             "--effort",
             "high",
+            "--mode",
+            "auto",
             "--workspace",
             fixture.workspace.to_str().unwrap(),
             "--foreground",
@@ -1367,13 +1369,62 @@ fn unsupported_tui_effort_requires_an_explicit_headless_request() {
         ],
     );
     assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("--headless"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("cannot honour --effort"));
+    assert!(!fixture.state("calls.log").contains("pane split"));
     let headless = fixture.run_on("local.opencode", &["--effort", "high", "--headless"]);
     assert_eq!(headless["outcome"], "candidate");
     assert!(!fixture.state("calls.log").contains("pane split"));
     let paned = fixture.run_on("local.opencode", &[]);
     assert_eq!(paned["outcome"], "candidate");
     assert!(fixture.state("calls.log").contains("pane split"));
+}
+
+#[test]
+fn auto_mode_with_a_herdr_pane_selects_pane_and_reports_why() {
+    let fixture = pane_fixture();
+    let receipt = fixture.run(&["--mode", "auto"]);
+    assert_eq!(receipt["outcome"], "candidate");
+    assert_eq!(receipt["mode"], "pane");
+    assert_eq!(receipt["mode_reason"], "herdr pane available");
+    assert!(fixture.state("calls.log").contains("pane split"));
+}
+
+#[test]
+fn revise_accepts_an_explicit_mode() {
+    let fixture = pane_fixture();
+    let initial = fixture.run_on("local.opencode", &["--headless"]);
+    let task = initial["task_id"].as_str().unwrap();
+    let herdr = [
+        ("HERDR_ENV", "1"),
+        ("HERDR_PANE_ID", "w9:p1"),
+        ("HERDR_BIN_PATH", fixture.herdr.to_str().unwrap()),
+        ("BRGR_OWNER_ID", "codex:pane-test"),
+    ];
+    json_output(&run(
+        &fixture.home,
+        &["reject", task, "--reason", "revise"],
+        &herdr,
+    ));
+    let revised = brgr_command()
+        .arg("--home")
+        .arg(&fixture.home)
+        .args([
+            "--json",
+            "revise",
+            task,
+            "Explain again",
+            "--mode",
+            "headless",
+            "--foreground",
+        ])
+        .env("BRGR_SESSION_ID", "fixture-session")
+        .envs(herdr)
+        .output()
+        .unwrap();
+    let revised = json_output(&revised);
+    assert_eq!(revised["revision"], 2);
+    assert_eq!(revised["mode"], "headless");
+    assert_eq!(revised["mode_reason"], "requested");
 }
 
 #[test]
