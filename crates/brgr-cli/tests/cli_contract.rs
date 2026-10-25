@@ -7161,7 +7161,7 @@ fn add_slow_prompt_file_harness(home: &Path, root: &Path) {
     let executable = root.join("slow-agent");
     fs::write(
         &executable,
-        "#!/bin/sh\ncase \"$1\" in\n  --version) echo 'slow 1';;\n  --help) echo '  --prompt-file <path>  fresh run';;\n  --prompt-file)\n    if /usr/bin/grep -q SLOW_RUN \"$2\"; then /bin/sleep 4; fi\n    /bin/cat \"$2\";;\n  *) exit 2;;\nesac\n",
+        "#!/bin/sh\ncase \"$1\" in\n  --version) echo 'slow 1';;\n  --help) echo '  --prompt-file <path>  fresh run';;\n  --prompt-file)\n    if /usr/bin/grep -q SLOW_RUN \"$2\"; then /bin/sleep 4; fi\n    if /usr/bin/grep -q HOLD_RUN \"$2\"; then n=0; while [ ! -e \"${0%/*}/release\" ] && [ $n -lt 600 ]; do /bin/sleep 0.1; n=$((n+1)); done; fi\n    /bin/cat \"$2\";;\n  *) exit 2;;\nesac\n",
     )
     .unwrap();
     fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
@@ -7253,7 +7253,7 @@ fn a_lost_run_whose_worker_still_runs_cannot_be_revised_until_it_stops() {
         &home,
         &[
             "run",
-            "SLOW_RUN",
+            "HOLD_RUN",
             "--harness",
             "local.slow-agent",
             "--workspace",
@@ -7299,7 +7299,10 @@ fn a_lost_run_whose_worker_still_runs_cannot_be_revised_until_it_stops() {
     assert!(stderr.contains("may still be running"), "{stderr}");
     assert!(stderr.contains("wait for it to exit"), "{stderr}");
 
-    // Once the worker has stopped the same revision goes ahead.
+    // Once the worker has stopped the same revision goes ahead. The worker held
+    // on a file, not a timer, so it was alive for the refusal however slow the
+    // machine; releasing it is what stops it.
+    fs::write(temp.path().join("slow").join("release"), "").unwrap();
     let began = Instant::now();
     loop {
         let retried = run(
