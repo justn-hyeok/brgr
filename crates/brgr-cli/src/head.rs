@@ -588,13 +588,10 @@ fn handoff(
     let brgr = std::env::var("BRGR_BIN")
         .ok()
         .filter(|path| !path.is_empty())
-        .map_or_else(
-            || {
-                std::env::current_exe()
-                    .map_or_else(|_| "brgr".to_owned(), |exe| exe.display().to_string())
-            },
-            |path| path,
-        );
+        .unwrap_or_else(|| {
+            std::env::current_exe()
+                .map_or_else(|_| "brgr".to_owned(), |exe| exe.display().to_string())
+        });
     let prompt = format!(
         "You are the incoming brgr head for owner {owner_id}. The outgoing head offered you its command. \
          Use this brgr for every command below: {brgr}. \
