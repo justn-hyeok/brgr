@@ -261,10 +261,11 @@ fn handoff_opens_a_pane_prompts_it_and_leaves_the_binding_with_the_outgoing_head
     let log = calls(&dir);
     assert!(log.contains("pane split"), "{log}");
     assert!(log.contains("BRGR_SESSION_ID="), "{log}");
+    assert!(log.contains("--env BRGR_HOME="), "{log}");
     assert!(log.contains("agent start head-"), "{log}");
     let key = offer_key(&handoff);
     assert!(
-        log.contains(&format!("brgr head take {task_id} --offer {key}")),
+        log.contains(&format!("head take {task_id} --offer {key}")),
         "{log}"
     );
     // Opening a pane moves nothing: the outgoing head still holds command.

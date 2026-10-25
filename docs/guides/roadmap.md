@@ -9,9 +9,11 @@
 
 `brgr head request|prepare|show|commit|abort|retire|status`는 v2.14.2에 있다.
 `brgr head claim TASK --abandoned --goal TEXT`는 v2.15.0에 있다: 나가는 Head가
-brgr을 못 칠 때 들어오는 세션이 인계를 시작하고 지휘권을 가져간다. 아직 없는
-것은 새 Head pane 준비, 두 live pane 사이 알림, 이전 Head의 자동 종료다.
-Workflow Runtime은 향후 계획이다. 2.6 조건부 migration은 이 마이너에 없다.
+brgr을 못 칠 때 들어오는 세션이 인계를 시작하고 지휘권을 가져간다.
+`brgr head handoff|take|exit`는 v2.15.2에 있다: 현재 Head가 새 Herdr pane을 열어
+새 Head를 시작하고, 새 Head가 `take`로 승계하며, `--exit-old`를 승인한 경우
+검증된 `retire` 뒤에 이전 Head의 pane만 닫는다. 아직 없는 것은 2.6 조건부
+migration(usage 등의 조건으로 자동 실행)이다. Workflow Runtime은 향후 계획이다.
 
 모든 단계는 v2.x로 낸다. 메이저 버전은 올리지 않는다.
 

@@ -583,13 +583,26 @@ fn handoff(
     };
     let path = offer_path(paths, &key)?;
     write_json_atomic(&path, &offer)?;
+    // The incoming pane may not have this brgr on its PATH, and the control home
+    // may have come from `--home`, which a child's environment does not carry.
+    let brgr = std::env::var("BRGR_BIN")
+        .ok()
+        .filter(|path| !path.is_empty())
+        .map_or_else(
+            || {
+                std::env::current_exe()
+                    .map_or_else(|_| "brgr".to_owned(), |exe| exe.display().to_string())
+            },
+            |path| path,
+        );
     let prompt = format!(
         "You are the incoming brgr head for owner {owner_id}. The outgoing head offered you its command. \
-         1) Run `brgr head take {task} --offer {key}`; it prints the handoff manifest. \
-         2) Read the open tasks with `brgr status {task} --tree`. \
-         3) Goal to finish: {goal}. Resume it: decide pending results with `brgr result` (accept or reject), \
+         Use this brgr for every command below: {brgr}. \
+         1) Run `{brgr} head take {task} --offer {key}`; it prints the handoff manifest. \
+         2) Read the open tasks with `{brgr} status {task} --tree`. \
+         3) Goal to finish: {goal}. Resume it: decide pending results with `{brgr} result` (accept or reject), \
          answer worker questions, or take the next action on the open tasks. Do not restart workers. \
-         4) Once you have done that, run `brgr head retire TAKEOVER` with the takeover id from step 1.",
+         4) Once you have done that, run `{brgr} head retire TAKEOVER` with the takeover id from step 1.",
         goal = args.goal,
     );
     let workspace = std::env::current_dir()?;
@@ -606,6 +619,7 @@ fn handoff(
             env: &[
                 ("BRGR_SESSION_ID", String::new()),
                 ("BRGR_OWNER_ID", owner_id.as_str().to_owned()),
+                ("BRGR_HOME", paths.home.display().to_string()),
             ],
             label: "head",
             prompt: &prompt,
