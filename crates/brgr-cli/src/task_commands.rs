@@ -299,7 +299,7 @@ pub(crate) fn cancel(
     }
     if force && tree {
         for node in &nodes {
-            if !requested.iter().any(|id| *id == node.task_id) {
+            if !requested.contains(&node.task_id) {
                 let child = store.task(node.task_id)?;
                 pane_adapter::close_leftover_pane(paths, node.task_id, child.revision, false);
             }

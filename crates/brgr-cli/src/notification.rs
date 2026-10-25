@@ -97,18 +97,38 @@ pub async fn register_current_surface(
         )?;
         return Ok(true);
     }
+    ensure_codex_session_reported(binary, herdr_session.as_deref(), &pane, session_id, &agent)
+        .await?;
+    store.register_owner_surface(
+        owner_id,
+        session_id,
+        epoch,
+        &pane,
+        herdr_session.as_deref(),
+        binary,
+    )?;
+    Ok(true)
+}
+
+async fn ensure_codex_session_reported(
+    binary: &str,
+    herdr_session: Option<&str>,
+    pane: &str,
+    session_id: &str,
+    agent: &Value,
+) -> Result<()> {
     match agent
         .pointer("/agent_session/value")
         .and_then(Value::as_str)
     {
-        Some(observed) if observed == session_id => {}
+        Some(observed) if observed == session_id => Ok(()),
         Some(_) => bail!("recorded Herdr Codex session differs from the owner binding"),
         None => {
-            let mut report = surface_command(binary, herdr_session.as_deref());
+            let mut report = surface_command(binary, herdr_session);
             report.args([
                 "pane",
                 "report-agent-session",
-                &pane,
+                pane,
                 "--source",
                 "herdr:codex",
                 "--agent",
@@ -122,9 +142,9 @@ pub async fn register_current_surface(
             if !output.status.success() {
                 bail!("Herdr did not accept the Codex session report");
             }
-            let reported = recorded_agent(binary, herdr_session.as_deref(), &pane).await?;
+            let reported = recorded_agent(binary, herdr_session, pane).await?;
             if reported.get("agent").and_then(Value::as_str) != Some("codex")
-                || reported.get("pane_id").and_then(Value::as_str) != Some(pane.as_ref())
+                || reported.get("pane_id").and_then(Value::as_str) != Some(pane)
                 || reported
                     .pointer("/agent_session/value")
                     .and_then(Value::as_str)
@@ -132,17 +152,9 @@ pub async fn register_current_surface(
             {
                 bail!("Herdr did not bind the exact Codex session to the pane");
             }
+            Ok(())
         }
     }
-    store.register_owner_surface(
-        owner_id,
-        session_id,
-        epoch,
-        &pane,
-        herdr_session.as_deref(),
-        binary,
-    )?;
-    Ok(true)
 }
 
 fn register_worker_surface(
