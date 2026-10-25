@@ -318,6 +318,8 @@ pub(crate) enum ConfigCommand {
     SetWorkerPlacement {
         placement: WorkerPlacement,
     },
+    /// Restore the default template used to name worker panes.
+    ClearPaneNameTemplate,
     SetAutoWorkerPane {
         #[arg(action = clap::ArgAction::Set)]
         enabled: bool,

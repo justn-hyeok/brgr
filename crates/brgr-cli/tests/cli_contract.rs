@@ -891,6 +891,12 @@ PY
         printf '%s\n' 'Claude Code fixture' '› Ask anything'
       fi
     fi;;
+  'pane rename')
+    if [ -e "$d/rename-fails" ]; then
+      echo '{"error":{"code":"invalid_label","message":"the pane label is invalid"}}' >&2
+      exit 1
+    fi
+    echo '{"result":{"type":"ok"}}';;
   'pane close') echo closed > "$d/closed"; echo '{"result":{"type":"ok"}}';;
   *) exit 2;;
 esac
@@ -978,6 +984,119 @@ impl PaneFixture {
     fn state(&self, name: &str) -> String {
         fs::read_to_string(self.state.join(name)).unwrap_or_default()
     }
+}
+
+/// The rendered name follows the split, before anything is sent to the agent.
+#[test]
+fn pane_mode_names_the_worker_pane_after_it_opens() {
+    let fixture = pane_fixture();
+    let ran = fixture.run(&[]);
+    assert_eq!(ran["outcome"], "candidate", "{ran}");
+    let calls = fixture.state("calls.log");
+    let split = calls
+        .find("pane split --pane w9:p1 --direction right")
+        .unwrap_or_else(|| panic!("{calls}"));
+    let rename = calls
+        .find("pane rename w9:p2 claude-code/anthropic: Explain the build")
+        .unwrap_or_else(|| panic!("the pane was not named: {calls}"));
+    assert!(split < rename, "{calls}");
+}
+
+/// An empty template is the off switch: no rename, and the creation arguments
+/// are the ones brgr used before naming existed.
+#[test]
+fn an_empty_pane_name_template_leaves_pane_creation_unchanged() {
+    let fixture = pane_fixture();
+    json_output(&run(
+        &fixture.home,
+        &["config", "set", "pane-name-template", ""],
+        &[],
+    ));
+    let ran = fixture.run(&[]);
+    assert_eq!(ran["outcome"], "candidate", "{ran}");
+    let calls = fixture.state("calls.log");
+    assert!(!calls.contains("pane rename"), "{calls}");
+    assert!(
+        calls.contains("pane split --pane w9:p1 --direction right"),
+        "{calls}"
+    );
+    assert!(calls.contains("--no-focus"), "{calls}");
+}
+
+/// A new tab carries the name as its label instead of the fixed `brgr-work`.
+#[test]
+fn a_worker_tab_uses_the_rendered_pane_name_as_its_label() {
+    let fixture = pane_fixture();
+    json_output(&run(
+        &fixture.home,
+        &["config", "set-worker-placement", "tab"],
+        &[],
+    ));
+    let ran = fixture.run(&[]);
+    assert_eq!(ran["outcome"], "candidate", "{ran}");
+    let calls = fixture.state("calls.log");
+    assert!(
+        calls
+            .contains("tab create --workspace w9 --label claude-code/anthropic: Explain the build"),
+        "{calls}"
+    );
+    assert!(!calls.contains("--label brgr-work"), "{calls}");
+    assert!(
+        calls.contains("pane rename w9:p2 claude-code/anthropic: Explain the build"),
+        "{calls}"
+    );
+}
+
+/// Naming is display only: a Herdr that refuses the label does not cost the run.
+#[test]
+fn a_failed_pane_rename_does_not_fail_the_run() {
+    let fixture = pane_fixture();
+    fs::create_dir_all(&fixture.state).unwrap();
+    fs::write(fixture.state.join("rename-fails"), "").unwrap();
+    let ran = fixture.run(&[]);
+    assert_eq!(ran["outcome"], "candidate", "{ran}");
+    let task = ran["task_id"].as_str().unwrap();
+    let result = json_output(&run(
+        &fixture.home,
+        &["result", task],
+        &[("BRGR_OWNER_ID", "codex:pane-test")],
+    ));
+    assert_eq!(result["artifacts"][0]["text"], "PANE_REPORT_OK", "{result}");
+}
+
+#[test]
+fn the_pane_name_template_round_trips_through_config_set_and_show() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("brgr");
+    json_output(&run(
+        &home,
+        &[
+            "config",
+            "set",
+            "pane-name-template",
+            "{harness}: {objective}",
+        ],
+        &[],
+    ));
+    let shown = json_output(&run(&home, &["config", "show"], &[]));
+    assert_eq!(
+        shown["herdr"]["pane_name_template"], "{harness}: {objective}",
+        "{shown}"
+    );
+    json_output(&run(&home, &["config", "clear-pane-name-template"], &[]));
+    let shown = json_output(&run(&home, &["config", "show"], &[]));
+    assert_eq!(
+        shown["herdr"]["pane_name_template"], "{harness}/{provider}/{model}: {objective}",
+        "{shown}"
+    );
+    let bad = run(
+        &home,
+        &["config", "set", "pane-name-template", "{nope}"],
+        &[],
+    );
+    assert!(!bad.status.success());
+    let stderr = String::from_utf8_lossy(&bad.stderr);
+    assert!(stderr.contains("{objective}"), "{stderr}");
 }
 
 /// Inside Herdr, a harness with an interactive launch runs as its own TUI in a

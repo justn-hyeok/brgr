@@ -35,6 +35,7 @@ use serde_json::Value;
 use crate::{LaunchEnvelope, Paths, cli::PaneRunArgs, write_json_atomic};
 mod layout;
 pub(crate) mod lifecycle;
+pub(crate) mod name;
 mod native;
 mod screens;
 pub(crate) use lifecycle::seal_native_report;
@@ -300,6 +301,7 @@ pub(crate) fn run_pane_adapter(paths: &Paths, run: &PaneRunArgs) -> Result<()> {
         bail!("pane runner revision differs from the admitted task revision");
     }
     let herdr = Herdr::locate();
+    let label = pane_label(paths, &spec, run.task)?;
     let short = &run.task.to_string()[..8];
     let name = if run.revision == 1 {
         format!("brgr-{short}")
@@ -326,7 +328,7 @@ pub(crate) fn run_pane_adapter(paths: &Paths, run: &PaneRunArgs) -> Result<()> {
                 .join(format!("layout-{}.lock", caller.replace(':', "_"))),
         )?;
     layout_lock.lock()?;
-    let pane = herdr.open_pane(paths, &caller, &run.workspace)?;
+    let pane = herdr.open_pane(paths, &caller, &run.workspace, label.as_deref())?;
     let receipt = paths.pane_receipt(run.task, run.revision);
     write_json_atomic(
         &receipt,
@@ -345,6 +347,7 @@ pub(crate) fn run_pane_adapter(paths: &Paths, run: &PaneRunArgs) -> Result<()> {
             } else {
                 name.clone()
             }),
+            label: label.clone(),
             phase: "starting".to_owned(),
             report: Some(report.clone()),
             terminal: herdr.call(&["pane", "get", &pane]).ok().and_then(|v| {
@@ -890,6 +893,35 @@ fn tell_owner(kind: &str, pane: &str, body: &str) -> Option<String> {
     id
 }
 
+/// The display name for this task's pane, or `None` when naming is off.
+fn pane_label(paths: &Paths, spec: &TaskSpec, task: TaskId) -> Result<Option<String>> {
+    let template = crate::config::Config::load(&paths.config)?
+        .herdr
+        .pane_name_template;
+    let rendered = name::render(
+        &template,
+        &name::Input {
+            harness: &spec.route.harness_id,
+            model: spec.route.requested_model.as_deref(),
+            effort: spec.route.requested_effort.as_deref(),
+            objective: &spec.objective,
+            task: &task.to_string(),
+        },
+    );
+    Ok((!rendered.is_empty()).then_some(rendered))
+}
+
+/// The display name a run gave its pane, for redaction before an error is
+/// recorded. Absent when naming was off or the pane was never opened.
+pub(crate) fn recorded_label(paths: &Paths, task: TaskId, revision: u32) -> Option<String> {
+    let bytes = fs::read(paths.pane_receipt(task, revision)).ok()?;
+    serde_json::from_slice::<Value>(&bytes)
+        .ok()?
+        .get("label")?
+        .as_str()
+        .map(str::to_owned)
+}
+
 fn read_report(report: &Path, max_bytes: u64) -> Result<Vec<u8>> {
     let file = fs::OpenOptions::new()
         .read(true)
@@ -1034,7 +1066,13 @@ impl Herdr {
     /// A new shell pane beside the caller, in the task workspace, without
     /// taking focus. The worker identity goes with it, so the agent can message
     /// its owner like any other worker.
-    fn open_pane(&self, paths: &Paths, caller: &str, workspace: &Path) -> Result<String> {
+    fn open_pane(
+        &self,
+        paths: &Paths,
+        caller: &str,
+        workspace: &Path,
+        label: Option<&str>,
+    ) -> Result<String> {
         let placement = crate::config::Config::load(&paths.config)?
             .herdr
             .worker_placement;
@@ -1065,7 +1103,7 @@ impl Herdr {
                     .context("caller workspace missing")?
                     .into(),
                 "--label".into(),
-                "brgr-work".into(),
+                label.unwrap_or("brgr-work").into(),
                 "--cwd".into(),
                 workspace.to_string_lossy().into_owned(),
                 "--no-focus".into(),
@@ -1098,12 +1136,20 @@ impl Herdr {
         let opened = self
             .call_owned(&args)
             .map_err(|failure| anyhow::anyhow!("Herdr could not open a pane: {failure}"))?;
-        opened
+        let pane = opened
             .pointer("/result/pane/pane_id")
             .or_else(|| opened.pointer("/result/root_pane/pane_id"))
             .and_then(Value::as_str)
             .map(str::to_owned)
-            .context("Herdr did not report the new pane")
+            .context("Herdr did not report the new pane")?;
+        if let Some(label) = label
+            && let Err(failure) = self.call(&["pane", "rename", &pane, label])
+        {
+            // Display only: an older Herdr or a rejected label must not cost
+            // the run its pane.
+            eprintln!("brgr pane mode · could not name pane {pane}: {failure}");
+        }
+        Ok(pane)
     }
 
     /// Makes the caller's workers equal in size. Best effort: a layout Herdr

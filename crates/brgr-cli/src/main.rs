@@ -389,6 +389,10 @@ async fn config_command(paths: &Paths, command: &ConfigCommand, json_output: boo
             config.herdr.worker_placement = *placement;
             config.save(&paths.config)?;
         }
+        ConfigCommand::ClearPaneNameTemplate => {
+            config.reset_pane_name_template();
+            config.save(&paths.config)?;
+        }
         ConfigCommand::SetAutoWorkerPane { enabled } => {
             config.herdr.auto_worker_pane = *enabled;
             config.save(&paths.config)?;

@@ -19,6 +19,10 @@ pub(crate) struct PaneReceipt {
     pub(crate) attempt: Option<AttemptId>,
     #[serde(default)]
     pub(super) name: Option<String>,
+    /// The display name of the pane, which begins with the task's words. It is
+    /// never part of a result, but a Herdr error can quote it.
+    #[serde(default)]
+    pub(crate) label: Option<String>,
     #[serde(default)]
     pub(super) terminal: Option<String>,
     #[serde(default)]
