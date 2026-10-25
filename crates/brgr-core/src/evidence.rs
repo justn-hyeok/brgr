@@ -36,9 +36,9 @@ pub(crate) fn seal_requested_evidence(
     store: &Store,
     spec: &TaskSpec,
     output: &ExecutionOutput,
-) -> Result<Vec<ArtifactRef>, String> {
+) -> Result<(Vec<ArtifactRef>, Vec<String>), String> {
     if spec.evidence.is_empty() {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), Vec::new()));
     }
     let limit = spec.artifact_contract.max_bytes.min(8 * 1024 * 1024);
     let remaining =
@@ -47,13 +47,19 @@ pub(crate) fn seal_requested_evidence(
         return Err("evidence collection exceeded the attempt deadline".to_owned());
     }
     let mut artifacts = Vec::new();
+    let mut unresolved_effects = Vec::new();
     let mut total = 0_u64;
     if spec.evidence.capture_diff {
+        let started = std::time::Instant::now();
         let patch = task_patch(spec, limit, remaining)?;
         let reference = store
             .seal_artifact_reader(Cursor::new(patch), "text/x-diff", limit)
             .map_err(|error| error.to_string())?;
         push_evidence(&mut artifacts, &mut total, reference)?;
+        unresolved_effects.extend(crate::git_stash::stash_notes(
+            Path::new(&spec.workspace),
+            remaining.saturating_sub(started.elapsed()),
+        ));
     }
     for reference in seal_requested_logs(store, spec, output)? {
         push_evidence(&mut artifacts, &mut total, reference)?;
@@ -75,7 +81,7 @@ pub(crate) fn seal_requested_evidence(
             .map_err(|error| error.to_string())?;
         push_evidence(&mut artifacts, &mut total, reference)?;
     }
-    Ok(artifacts)
+    Ok((artifacts, unresolved_effects))
 }
 
 pub(crate) fn seal_requested_logs(

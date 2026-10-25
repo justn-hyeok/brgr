@@ -1,6 +1,11 @@
 //! Running one attempt and turning its outcome into a sealed result.
 
-use std::{fmt::Write as _, io::Cursor, path::Path, time::Duration};
+use std::{
+    fmt::Write as _,
+    io::Cursor,
+    path::Path,
+    time::{Duration, Instant},
+};
 
 use brgr_protocol::{
     ArtifactRef, AttemptId, AttemptState, Event, EventId, EventKind, ObservationSource,
@@ -283,8 +288,8 @@ pub(crate) fn finish_execution(
                 ));
             }
             let observed_model = output.observed_model.clone();
-            let extra = match seal_requested_evidence(store, spec, &output) {
-                Ok(extra) => extra,
+            let (extra, unresolved_effects) = match seal_requested_evidence(store, spec, &output) {
+                Ok(evidence) => evidence,
                 Err(reason) => {
                     return Ok(terminal_with_requested_logs(
                         store,
@@ -310,6 +315,7 @@ pub(crate) fn finish_execution(
                 artifacts,
                 None,
             );
+            result.unresolved_effects.extend(unresolved_effects);
             if let Some(observation) = route_observation(manifest, observed_model) {
                 result.route_observation = Some(observation);
             }
@@ -408,9 +414,11 @@ pub(crate) fn terminal_with_requested_logs(
     // A worker that changed files and then failed to report still leaves its
     // work in the worktree. Seal it, so the owner can review or export it; the
     // outcome stays failed or lost, so it cannot be accepted.
+    let mut unresolved_effects = Vec::new();
     if matches!(outcome, TerminalOutcome::Failed | TerminalOutcome::Lost)
         && spec.evidence.capture_diff
     {
+        let started = Instant::now();
         match seal_unreported_diff(store, spec) {
             Ok(Some(reference)) => artifacts.push(reference),
             Ok(None) => {}
@@ -418,8 +426,14 @@ pub(crate) fn terminal_with_requested_logs(
                 error = format!("{error}; the worktree diff could not be sealed: {diff_error}");
             }
         }
+        unresolved_effects.extend(crate::git_stash::stash_notes(
+            Path::new(&spec.workspace),
+            UNREPORTED_DIFF_DEADLINE.saturating_sub(started.elapsed()),
+        ));
     }
-    result_for(spec, attempt_id, outcome, artifacts, Some(error))
+    let mut result = result_for(spec, attempt_id, outcome, artifacts, Some(error));
+    result.unresolved_effects = unresolved_effects;
+    result
 }
 
 /// How long collecting the diff of a run that already failed may take.

@@ -38,6 +38,25 @@ pub(crate) fn bounded_git_diff(
     )
 }
 
+/// Runs one Git command in `workspace` with the worker's own index, bounding
+/// its output and its time, and returns its stdout.
+pub(crate) fn bounded_git_output_with_executable(
+    executable: &Path,
+    workspace: &Path,
+    argv: &[&str],
+    max_bytes: u64,
+    deadline: Duration,
+    label: &str,
+) -> Result<Vec<u8>, String> {
+    Git {
+        executable,
+        workspace,
+        index: None,
+        remaining: deadline,
+    }
+    .run(argv, None, max_bytes, label)
+}
+
 pub(crate) fn bounded_git_diff_with_executable(
     executable: &Path,
     workspace: &Path,
