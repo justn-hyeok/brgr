@@ -1,3 +1,4 @@
+// @ts-nocheck — engine types live in Claude Code, not this repo.
 import type { On } from "claude-code"
 import { expect, mock, test, type Engine } from "claude-code/testing"
 

@@ -1,3 +1,4 @@
+// @ts-nocheck — engine types live in Claude Code, not this repo.
 import type { EngineInterface, Register } from "claude-code"
 
 import {

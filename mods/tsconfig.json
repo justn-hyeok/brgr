@@ -15,13 +15,9 @@
     "jsxFragmentFactory": "Fragment",
     "baseUrl": ".",
     "paths": {
-      "claude-code": [
-        "/private/tmp/claude-501/bundled-skills/2.1.293/6a56415014f8b22f79efa0e5c652aeb0/plugin-authoring/types/claude-code.d.ts"
-      ],
-      "claude-code/testing": [
-        "/private/tmp/claude-501/bundled-skills/2.1.293/6a56415014f8b22f79efa0e5c652aeb0/plugin-authoring/types/claude-code.d.ts"
-      ]
+      "claude-code": ["./types/claude-code.d.ts"],
+      "claude-code/testing": ["./types/claude-code.d.ts"]
     }
   },
-  "include": ["brgr/hooks", "brgr/tests"]
+  "include": ["brgr/hooks/status.ts", "types/claude-code.d.ts"]
 }
