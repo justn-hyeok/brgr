@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.15.1 — 2026-10-26
+
+- A Cursor Herdr pane's `CURSOR_CONVERSATION_ID` is the owner session. `brgr
+  head claim` and other owner commands no longer require `--as` from Cursor.
+  Codex still needs `--as`.
+
 ## 2.15.0 — 2026-10-26
 
 - An incoming session takes an abandoned head with

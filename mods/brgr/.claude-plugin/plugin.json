@@ -1,6 +1,6 @@
 {
   "name": "brgr",
-  "version": "2.15.0",
+  "version": "2.15.1",
   "description": "Status line, question and result toasts, and a read-only brgr_run tool. The mod never accepts, rejects, applies, revises, or acknowledges a result.",
   "author": {
     "name": "justn-hyeok"
