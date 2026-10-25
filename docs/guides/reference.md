@@ -272,6 +272,32 @@ runs request, prepare, and commit as the incoming session.
 | close | `brgr head retire TAKEOVER` | only the incoming session, after it has resumed |
 | claim | `brgr head claim TASK --abandoned --goal TEXT` | a different session, when the current head cannot run brgr |
 
+### Opening the incoming head from the current head
+
+`brgr head handoff TASK --kind claude|codex|... --goal TEXT [--exit-old]
+[--agent-arg ARG]` is the live path, run by the current head inside Herdr. It
+records an offer under `$BRGR_HOME/handoffs/`, opens a new pane beside the head,
+starts the agent there (answering the screens the rule table covers), and submits
+one prompt telling it to run `brgr head take TASK --offer KEY`. The incoming pane
+does not inherit this session's `BRGR_SESSION_ID`. Opening the pane moves
+nothing: this head stays the head until the incoming session runs `take`.
+
+`take` is `claim` for a cooperating head. It refuses the outgoing session, an
+unknown offer, and an offer for another owner, and refuses when the binding has
+moved since the offer was made. Otherwise it requests, prepares and commits in
+one step from the stored offer and the store-built manifest, then tells the
+outgoing pane (only while its agent is idle) that it is stale. A repeat returns
+the same record without raising the epoch again.
+
+`--exit-old` is approval, given at handoff time, to close the outgoing head's
+pane. It happens only in `retire`, so only after the store has recorded
+`resumed` and the retire was clean (not `--failed`). The pane is closed only if it
+is still the terminal that was recorded, is not the incoming head's own pane, and
+its agent is `idle` or `done`. Workers are never touched. A close that is
+refused does not undo the retire: the output carries `outgoing_head.closed:
+false` with the reason, and `brgr head exit TAKEOVER` (incoming session, after a
+clean retire) tries again. Without `--exit-old` no pane is ever closed.
+
 `request` takes an optional `--key` idempotency key (default: a fresh one),
 `prepare` an optional `--notes`, and `retire` an optional `--failed` with a reason
 that records a failed close instead of a clean one.
