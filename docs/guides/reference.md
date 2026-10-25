@@ -430,6 +430,40 @@ Pruning is not owner-scoped, because cross-owner isolation is outside v1 scope;
 each row reports its owner. `brgr prune` is rejected through the Herdr host
 bridge; run it explicitly outside the plugin Codex pane.
 
+## Claude Code mod
+
+`mods/brgr` is a Claude Code mod: a thin shell over the brgr CLI. It does not
+read the brgr store, and it does not accept, reject, apply, revise, or
+acknowledge a result. Those decisions stay with the owner, through the CLI or
+the brgr skill.
+
+In an interactive session the mod pins a status line computed from
+`brgr --json status` (and each task's tree) about every five seconds:
+`brgr: 2 running · 1 asking · 3 done`. With no tasks the line is cleared. A new
+worker question toasts once, and a newly sealed result toasts once. The same
+question or result is not toasted again on a later poll or after the mod
+reloads. `/brgr` prints a read-only list of active tasks (an eight-character id
+prefix, the attempt state, and the harness). The model tool `brgr_run` starts
+a run and returns the CLI's JSON. It always passes `--mode auto`, and it has
+no way to decide a result. If the `brgr` executable is missing, or
+`brgr --json status` exits non-zero, the status line is cleared and one toast
+says so.
+
+The mod needs Claude Code v2.1.287 or later on the terminal, the release that
+added mods. It is not sandboxed: it runs with your user permissions, and it
+only draws inside a running interactive session. A `claude -p` session does not
+draw it.
+
+Install it from a terminal:
+
+```bash
+claude plugin marketplace add justn-hyeok/brgr
+claude plugin install brgr@brgr
+```
+
+Inside a running terminal session the same install is
+`/plugin install brgr --marketplace justn-hyeok/brgr`.
+
 ## Development
 
 ```bash
