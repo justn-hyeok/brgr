@@ -452,13 +452,16 @@ fn delegation_parent_from_environment() -> Result<Option<(TaskId, AttemptId)>> {
     }
 }
 
-/// Which kind of harness owns this shell. A Codex or explicit brgr session keeps
-/// the `codex` owner prefix; a Claude Code session, which has neither, is a
-/// `claude` owner.
+/// Which kind of harness owns this shell. A Claude Code session without a Codex
+/// or explicit brgr session is a `claude` owner. A process that runs inside a
+/// Cursor Herdr pane is a `cursor` owner even when `--as` set a session. Other
+/// shells keep the `codex` owner prefix.
 fn owner_kind() -> &'static str {
     let set = |name: &str| env::var(name).is_ok_and(|value| !value.trim().is_empty());
     if !set("CODEX_THREAD_ID") && !set("BRGR_SESSION_ID") && set("CLAUDE_CODE_SESSION_ID") {
         "claude"
+    } else if caller_pane::inherited_agent_kind().as_deref() == Some("cursor") {
+        "cursor"
     } else {
         "codex"
     }
