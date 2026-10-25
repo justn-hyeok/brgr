@@ -91,6 +91,9 @@ pub(crate) struct Failure<'a> {
     pub(crate) outcome: &'a str,
     pub(crate) harness: &'a str,
     pub(crate) error: &'a str,
+    /// The pane's display name, which begins with the task's own words. It is
+    /// masked before any part of the error is recorded.
+    pub(crate) label: Option<&'a str>,
 }
 
 /// Records a sealed failed or lost result; other outcomes are not failures.
@@ -101,12 +104,14 @@ pub(crate) fn record_result(paths: &Paths, harness: &str, result: &brgr_protocol
         TerminalOutcome::Failed => "failed",
         TerminalOutcome::Candidate | TerminalOutcome::Cancelled => return,
     };
+    let label = crate::pane_adapter::recorded_label(paths, result.task_id, result.revision);
     record(
         paths,
         &Failure {
             outcome,
             harness,
             error: result.error.as_deref().unwrap_or("no error text"),
+            label: label.as_deref(),
         },
     );
 }
@@ -120,7 +125,13 @@ pub(crate) fn record(paths: &Paths, failure: &Failure<'_>) {
 }
 
 fn record_inner(paths: &Paths, failure: &Failure<'_>) -> Result<()> {
-    let class = classify(failure.error);
+    // The pane's label starts with the task's own words. A Herdr error may
+    // quote it, so it is masked before any part of the error is kept.
+    let error = match failure.label.filter(|label| !label.is_empty()) {
+        Some(label) => failure.error.replace(label, "<pane-name>"),
+        None => failure.error.to_owned(),
+    };
+    let class = classify(&error);
     let fingerprint = fingerprint(&class);
     let now = now();
     let version = env!("CARGO_PKG_VERSION").to_owned();
@@ -138,7 +149,7 @@ fn record_inner(paths: &Paths, failure: &Failure<'_>) -> Result<()> {
                 fingerprint,
                 class,
                 first_seen: now,
-                sample: redact(failure.error, SAMPLE_LIMIT),
+                sample: redact(&error, SAMPLE_LIMIT),
                 ..Entry::default()
             });
             ledger.entries.last_mut().context("ledger is empty")?
@@ -741,6 +752,34 @@ mod tests {
     }
 
     #[test]
+    fn a_pane_name_never_reaches_a_class_a_sample_or_an_issue() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = Paths::new(Some(temp.path().join("home"))).unwrap();
+        let label = "claude-code/anthropic: Rotate the production key";
+        let error = format!("Herdr could not rename pane to {label}: invalid label");
+        record(
+            &paths,
+            &Failure {
+                outcome: "lost",
+                harness: "local.claude-code",
+                error: &error,
+                label: Some(label),
+            },
+        );
+        let ledger = load(&paths);
+        let entry = &ledger.entries[0];
+        for text in [&entry.class, &entry.sample] {
+            assert!(!text.contains("Rotate"), "{text}");
+            assert!(!text.contains("production key"), "{text}");
+        }
+        let (title, body) = issue_text(entry);
+        assert!(
+            !title.contains("Rotate") && !body.contains("production key"),
+            "{title}\n{body}"
+        );
+    }
+
+    #[test]
     fn a_quoted_pane_screen_never_reaches_a_class_a_sample_or_an_issue() {
         let error = "the claude agent stayed on a screen no brgr rule answers for 180s: Rotate the production key | export TOKEN=abc | more";
         let class = classify(error);
@@ -859,6 +898,7 @@ mod tests {
             outcome: "lost",
             harness: "local.opencode",
             error: "the agent finished without writing its report to /Users/alice/x/report.md",
+            label: None,
         };
         record(&paths, &failure);
         file_issues(&paths).unwrap();
@@ -908,6 +948,7 @@ mod tests {
                     outcome: "failed",
                     harness: "local.x",
                     error,
+                    label: None,
                 },
             );
         }
@@ -931,6 +972,7 @@ mod tests {
                     outcome: "lost",
                     harness: "local.claude-code",
                     error: "pane w1:p2 not found",
+                    label: None,
                 },
             );
         }

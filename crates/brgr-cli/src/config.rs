@@ -12,6 +12,18 @@ use tempfile::NamedTempFile;
 
 const MAX_CONFIG_BYTES: u64 = 16 * 1024;
 
+/// The pane name brgr gives a worker unless the user changes it.
+pub(crate) const DEFAULT_PANE_NAME_TEMPLATE: &str = "{harness}/{provider}/{model}: {objective}";
+/// Every placeholder a pane name template may use.
+pub(crate) const PANE_NAME_PLACEHOLDERS: [&str; 6] = [
+    "harness",
+    "provider",
+    "model",
+    "effort",
+    "objective",
+    "task",
+];
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize, clap::ValueEnum)]
 #[serde(rename_all = "snake_case")]
 #[value(rename_all = "snake_case")]
@@ -103,7 +115,7 @@ impl Default for IssuesConfig {
     }
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct HerdrConfig {
     pub worker_placement: WorkerPlacement,
@@ -112,6 +124,21 @@ pub struct HerdrConfig {
     /// Keep harnesses in print mode even inside Herdr, instead of running them
     /// as their own TUI in a pane.
     pub prefer_print_mode: bool,
+    /// The display name of each worker pane. An empty template leaves panes
+    /// unnamed, exactly as before this setting existed.
+    pub pane_name_template: String,
+}
+
+impl Default for HerdrConfig {
+    fn default() -> Self {
+        Self {
+            worker_placement: WorkerPlacement::default(),
+            auto_worker_pane: false,
+            codex_executable: None,
+            prefer_print_mode: false,
+            pane_name_template: DEFAULT_PANE_NAME_TEMPLATE.to_owned(),
+        }
+    }
 }
 
 pub fn validate_codex_executable(path: &Path) -> Result<()> {
@@ -132,6 +159,11 @@ impl CallingOptions {
 }
 
 impl Config {
+    /// Restores the default pane name template.
+    pub(crate) fn reset_pane_name_template(&mut self) {
+        DEFAULT_PANE_NAME_TEMPLATE.clone_into(&mut self.herdr.pane_name_template);
+    }
+
     pub(crate) fn calling(&self, harness: &str) -> CallingOptions {
         let global = &self.defaults;
         let local = self.harnesses.get(harness).cloned().unwrap_or_default();
@@ -184,6 +216,10 @@ impl Config {
                     serde_json::from_str(value).context("argv must be a JSON string array")?;
                 validate_argv(&options.argv)?;
             }
+            "pane-name-template" if harness.is_none() => {
+                validate_pane_name_template(value)?;
+                value.clone_into(&mut self.herdr.pane_name_template);
+            }
             "worker-placement" if harness.is_none() => {
                 self.herdr.worker_placement = match value {
                     "adjacent" => WorkerPlacement::Adjacent,
@@ -214,7 +250,11 @@ impl Config {
         if source.len() as u64 > MAX_CONFIG_BYTES {
             bail!("brgr config exceeds {MAX_CONFIG_BYTES} bytes");
         }
-        toml::from_str(&source).context("brgr config is invalid")
+        let config: Self = toml::from_str(&source).context("brgr config is invalid")?;
+        // The validation error names every valid placeholder, so it is more
+        // useful than a generic wrapper.
+        validate_pane_name_template(&config.herdr.pane_name_template)?;
+        Ok(config)
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
@@ -231,6 +271,47 @@ impl Config {
         temporary.persist(path)?;
         Ok(())
     }
+}
+
+/// A template may name only the supported placeholders, must close every
+/// brace and stay within the size Herdr accepts for a label.
+pub(crate) fn validate_pane_name_template(template: &str) -> Result<()> {
+    if template.len() > 200 {
+        bail!(
+            "pane name template must be at most 200 bytes; {}",
+            pane_name_placeholders()
+        );
+    }
+    let mut rest = 0;
+    while let Some(offset) = template[rest..].find('{') {
+        let open = rest + offset;
+        let Some(close) = template[open + 1..].find('}').map(|at| open + 1 + at) else {
+            bail!(
+                "pane name template has an unclosed brace; {}",
+                pane_name_placeholders()
+            );
+        };
+        let name = &template[open + 1..close];
+        if !PANE_NAME_PLACEHOLDERS.contains(&name) {
+            bail!(
+                "unknown pane name placeholder {{{name}}}; {}",
+                pane_name_placeholders()
+            );
+        }
+        rest = close + 1;
+    }
+    Ok(())
+}
+
+fn pane_name_placeholders() -> String {
+    format!(
+        "valid placeholders: {}",
+        PANE_NAME_PLACEHOLDERS
+            .iter()
+            .map(|name| format!("{{{name}}}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
 }
 
 fn nonempty(value: &str) -> Result<&str> {
@@ -431,6 +512,93 @@ mod tests {
         let linked = root.path().join("linked.toml");
         std::os::unix::fs::symlink(&path, &linked).unwrap();
         assert!(Config::load(&linked).is_err());
+    }
+
+    #[test]
+    fn the_pane_name_template_defaults_to_the_readable_form_and_empty_turns_it_off() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("config.toml");
+        assert_eq!(
+            Config::load(&path).unwrap().herdr.pane_name_template,
+            DEFAULT_PANE_NAME_TEMPLATE
+        );
+        fs::write(&path, "[herdr]\npane_name_template = ''\n").unwrap();
+        assert_eq!(Config::load(&path).unwrap().herdr.pane_name_template, "");
+    }
+
+    #[test]
+    fn valid_pane_name_templates_load() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("config.toml");
+        for template in [
+            "{harness}/{provider}/{model}: {objective}",
+            "{effort} {task}",
+            "plain label",
+            "",
+        ] {
+            fs::write(
+                &path,
+                format!("[herdr]\npane_name_template = {template:?}\n"),
+            )
+            .unwrap();
+            assert_eq!(
+                Config::load(&path).unwrap().herdr.pane_name_template,
+                template
+            );
+        }
+    }
+
+    #[test]
+    fn an_invalid_pane_name_template_is_refused_with_the_placeholder_list() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("config.toml");
+        let overlong = "x".repeat(201);
+        for template in ["{unknown}", "{harness", overlong.as_str()] {
+            fs::write(
+                &path,
+                format!("[herdr]\npane_name_template = {template:?}\n"),
+            )
+            .unwrap();
+            let error = Config::load(&path).unwrap_err().to_string();
+            for placeholder in PANE_NAME_PLACEHOLDERS {
+                assert!(
+                    error.contains(&format!("{{{placeholder}}}")),
+                    "{template}: {error}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_pane_name_template_setter_validates_and_keeps_the_value() {
+        let mut config = Config::default();
+        config
+            .set("pane-name-template", "{harness}: {objective}", None)
+            .unwrap();
+        assert_eq!(config.herdr.pane_name_template, "{harness}: {objective}");
+        let overlong = "x".repeat(201);
+        for template in ["{unknown}", "{harness", overlong.as_str()] {
+            let error = config
+                .set("pane-name-template", template, None)
+                .unwrap_err()
+                .to_string();
+            for placeholder in PANE_NAME_PLACEHOLDERS {
+                assert!(
+                    error.contains(&format!("{{{placeholder}}}")),
+                    "{template}: {error}"
+                );
+            }
+        }
+        config.set("pane-name-template", "", None).unwrap();
+        assert_eq!(config.herdr.pane_name_template, "");
+    }
+
+    #[test]
+    fn the_pane_name_template_reset_restores_the_default() {
+        let mut config = Config::default();
+        config.set("pane-name-template", "", None).unwrap();
+        config.reset_pane_name_template();
+        assert_eq!(config.herdr.pane_name_template, DEFAULT_PANE_NAME_TEMPLATE);
     }
 }
 
