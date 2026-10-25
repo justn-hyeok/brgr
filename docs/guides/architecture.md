@@ -54,10 +54,13 @@ CLI. A SessionStart hook may establish a first binding but cannot replace a
 different session. A handoff to another session goes through `brgr head`
 (request, prepare, commit by the incoming session, then retire): the store
 records each step, moves the binding in a single transaction and raises the
-epoch, which invalidates stale-session commands; explicit `brgr bind TASK` is for
-an unbound or abandoned owner and is refused while a handoff is open. This is
-cooperative identity checking, not authentication against another process
-running as the same OS user.
+epoch, which invalidates stale-session commands. When the current head cannot
+run brgr, the incoming session takes it with `brgr head claim TASK --abandoned
+--goal TEXT` (request, prepare, and commit in one step). The bound session is
+the head even if `BRGR_OWNER_ID` still names the previous harness prefix.
+Explicit `brgr bind TASK` is for an unbound owner and is refused while a
+handoff is open. This is cooperative identity checking, not authentication
+against another process running as the same OS user.
 
 The v1 trust model assumes installed same-user harnesses are cooperative. File
 permissions, digest locks, size limits, typed events, and environment allowlists
