@@ -29,7 +29,7 @@ Put unit tests beside the code and black-box tests in each crate's `tests/` dire
 
 The history uses Conventional Commit subjects such as `feat(store): seal result artifacts` and `fix(cli): preserve Codex hooks`. Keep commits narrowly scoped. Pull requests must explain the contract affected, include test evidence, identify migration or compatibility risk, and confirm that no harness/model fallback or acceptance decision occurs implicitly.
 
-Batch releases. Collect fixes on `main` and cut one release for a coherent set of changes, not one per fix; a same-day follow-up release is only for a release that is broken (failed build, wrong binary, data loss). Docs-only changes ship without a release.
+Batch releases. Collect fixes on `main` and cut one release for a coherent set of changes, not one per fix; a same-day follow-up release is only for a release that is broken (failed build, wrong binary, data loss). Docs-only changes ship without a release. A minor (`x.Y.0`) is only for a large feature that actually ships: Head Migration, Dynamic Workflows, or Unified Continuity. Everything else is a patch, including new small commands, harness fixes, owner-surface holes, and quality work. Do not bump the minor because unrelated fixes landed together.
 
 ## Releasing
 
