@@ -33,6 +33,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{LaunchEnvelope, Paths, cli::PaneRunArgs, write_json_atomic};
+pub(crate) mod head_pane;
 mod layout;
 pub(crate) mod lifecycle;
 pub(crate) mod name;
@@ -328,7 +329,7 @@ pub(crate) fn run_pane_adapter(paths: &Paths, run: &PaneRunArgs) -> Result<()> {
                 .join(format!("layout-{}.lock", caller.replace(':', "_"))),
         )?;
     layout_lock.lock()?;
-    let pane = herdr.open_pane(paths, &caller, &run.workspace, label.as_deref())?;
+    let pane = herdr.open_pane(paths, &caller, &run.workspace, label.as_deref(), &[])?;
     let receipt = paths.pane_receipt(run.task, run.revision);
     write_json_atomic(
         &receipt,
@@ -1090,6 +1091,7 @@ impl Herdr {
         caller: &str,
         workspace: &Path,
         label: Option<&str>,
+        extra_env: &[(&str, String)],
     ) -> Result<String> {
         let placement = crate::config::Config::load(&paths.config)?
             .herdr
@@ -1146,10 +1148,17 @@ impl Herdr {
             "BRGR_OWNER_ID",
             "BRGR_SESSION_ID",
         ] {
+            if extra_env.iter().any(|(key, _)| *key == name) {
+                continue;
+            }
             if let Ok(value) = env::var(name) {
                 args.push("--env".into());
                 args.push(format!("{name}={value}"));
             }
+        }
+        for (name, value) in extra_env {
+            args.push("--env".into());
+            args.push(format!("{name}={value}"));
         }
         let opened = self
             .call_owned(&args)
