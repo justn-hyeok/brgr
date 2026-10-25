@@ -25,6 +25,25 @@ use brgr_store::{RunnerIdentity, Store, StoreError, UnfinishedAttempt};
 use serde::Deserialize;
 
 pub(crate) async fn supervise(paths: &Paths, launch_path: &Path, json_output: bool) -> Result<()> {
+    supervise_inner(paths, launch_path, json_output, None).await
+}
+
+pub(crate) async fn supervise_with_mode(
+    paths: &Paths,
+    launch_path: &Path,
+    json_output: bool,
+    mode: crate::execution_mode::ResolvedMode,
+    reason: &str,
+) -> Result<()> {
+    supervise_inner(paths, launch_path, json_output, Some((mode, reason))).await
+}
+
+async fn supervise_inner(
+    paths: &Paths,
+    launch_path: &Path,
+    json_output: bool,
+    mode: Option<(crate::execution_mode::ResolvedMode, &str)>,
+) -> Result<()> {
     let launch: LaunchEnvelope = serde_json::from_slice(&fs::read(launch_path)?)?;
     if launch.protocol_generation != "brgr-v1" {
         bail!("unsupported task protocol generation");
@@ -96,7 +115,27 @@ pub(crate) async fn supervise(paths: &Paths, launch_path: &Path, json_output: bo
     crate::error_memo::record_result(paths, &harness, &result);
     let _ = fs::remove_file(cancel_path);
     let _ = fs::remove_file(paths.supervisor(result.task_id));
-    print_value(&serde_json::to_value(result)?, json_output);
+    let mut receipt = serde_json::to_value(result)?;
+    if let Some((mode, reason)) = mode {
+        let object = receipt
+            .as_object_mut()
+            .context("result receipt is not an object")?;
+        object.insert(
+            "mode".to_owned(),
+            serde_json::Value::String(
+                match mode {
+                    crate::execution_mode::ResolvedMode::Pane => "pane",
+                    crate::execution_mode::ResolvedMode::Headless => "headless",
+                }
+                .to_owned(),
+            ),
+        );
+        object.insert(
+            "mode_reason".to_owned(),
+            serde_json::Value::String(reason.to_owned()),
+        );
+    }
+    print_value(&receipt, json_output);
     Ok(())
 }
 

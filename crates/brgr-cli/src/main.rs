@@ -9,6 +9,7 @@ mod config;
 mod debate;
 mod error_memo;
 mod evidence;
+mod execution_mode;
 mod failure_banner;
 mod harness_commands;
 mod head;

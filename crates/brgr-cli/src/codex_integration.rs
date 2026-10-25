@@ -26,7 +26,7 @@ brgr hands bounded work to registered coding agents and seals what they return f
 
 ## Rules
 
-1. Every worker opens as a Herdr pane split beside your pane, running the harness's own TUI: the first to the right of a wide pane or below a narrow one, later ones stacked under it in equal sizes while you keep your half, and in a new tab once that column is full or after `brgr config set worker-placement tab`. Do not use `--headless`.
+1. Every worker opens as a Herdr pane split beside your pane, running the harness's own TUI: the first to the right of a wide pane or below a narrow one, later ones stacked under it in equal sizes while you keep your half, and in a new tab once that column is full or after `brgr config set worker-placement tab`. Do not choose headless yourself; pass `--mode auto` when you cannot tell whether a Herdr pane is available.
 2. When the work should be done by Claude, use `--harness local.claude-code`. Do not run Claude through another harness.
 3. Workers always run with full permissions (yolo). Nothing lowers it; `--permission` is ignored.
 4. Close what you open. Decide every result (`accept`, `reject`, or `result TASK --ack`) so brgr closes the worker's pane and removes its worktree once nothing in it would be lost. Use `--keep-pane` or `--keep-worktree` only when the user asks to keep one.
@@ -609,7 +609,7 @@ mod tests {
 
     #[test]
     fn skill_states_the_operating_rules() {
-        for rule in ["--headless", "local.claude-code", "--keep-pane", "yolo"] {
+        for rule in ["--mode auto", "local.claude-code", "--keep-pane", "yolo"] {
             assert!(SKILL_TEXT.contains(rule), "skill no longer mentions {rule}");
         }
         assert!(!SKILL_TEXT.contains("without a pane"));

@@ -49,8 +49,11 @@ See [the v2 plugin contract](v2-herdr-plugin.md) for ownership, context,
 recovery, and verification boundaries.
 
 Default execution uses the registered harness's native TUI in an owned Herdr
-pane, with its full/YOLO recipe. Use `--headless` explicitly for a bounded
-one-shot process without Herdr. brgr preserves the requested harness, model,
+pane, with its full/YOLO recipe. Headless execution is only ever an explicit
+per-call choice: `--headless`, `--mode headless`, or `--mode auto`. Auto chooses
+headless only when no Herdr pane is available and reports the selected mode and
+reason. After a pane is selected, launch failures and unsupported TUI options
+fail without switching routes. brgr preserves the requested harness, model,
 and effort; workers always run with full permissions, and `--permission` is
 ignored. Unsupported TUI options fail before admission instead of selecting
 headless. The separate `local.omp-herdr` route retains its legacy
@@ -124,8 +127,10 @@ Owned-workspace trust, "press Enter to continue" notices, update offers (skipped
 input uses `brgr input TASK --key KEY` or `--text TEXT`; conversation messages
 stay queued while the TUI is busy or displaying a native dialog.
 
-`--headless` is a per-call choice. Read-only scope, an unsupported effort,
-and legacy `prefer_print_mode` settings never silently select it. Use
+Headless is only ever an explicit per-call choice through `--headless`,
+`--mode headless`, or `--mode auto`; auto chooses it only when no Herdr pane is
+available and reports that choice. Read-only scope, an unsupported effort,
+and legacy `prefer_print_mode` settings never select it. Use
 `--owner-session SESSION --source-pane PANE` for a positively verified source
 when the caller is a shared daemon. See the [orchestration guide](orchestration.md)
 for config, instructions, debate, and the current verification limits.

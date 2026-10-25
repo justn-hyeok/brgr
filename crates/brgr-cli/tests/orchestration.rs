@@ -58,6 +58,21 @@ fn default_call_does_not_silently_run_headless_without_a_tui_source() {
         "default call unexpectedly ran headless"
     );
     assert!(String::from_utf8_lossy(&output.stderr).contains("exact Herdr source"));
+    let default_error = output.stderr;
+    let pane_mode = command(&home)
+        .args([
+            "run",
+            "BRGR_FIXTURE_OK",
+            "--mode",
+            "pane",
+            "--foreground",
+            "--workspace",
+        ])
+        .arg(&workspace)
+        .output()
+        .unwrap();
+    assert!(!pane_mode.status.success());
+    assert_eq!(pane_mode.stderr, default_error);
     let output = command(&home)
         .args([
             "run",
@@ -76,6 +91,56 @@ fn default_call_does_not_silently_run_headless_without_a_tui_source() {
     );
     let result: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(result["outcome"], "candidate");
+}
+
+#[test]
+fn auto_mode_without_a_herdr_pane_runs_headless_and_reports_why() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("home");
+    let workspace = temp.path().join("work");
+    let scratch = temp.path().join("scratch");
+    fs::create_dir_all(&workspace).unwrap();
+    fs::create_dir_all(&scratch).unwrap();
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata/fixtures/gjc");
+    let added = command(&home)
+        .args(["harness", "add"])
+        .arg(fixture)
+        .arg("--workspace")
+        .arg(&scratch)
+        .args(["--prompt", "BRGR_FIXTURE_OK"])
+        .output()
+        .unwrap();
+    assert!(
+        added.status.success(),
+        "{}",
+        String::from_utf8_lossy(&added.stderr)
+    );
+
+    let output = command(&home)
+        .args(["run", "BRGR_FIXTURE_OK", "--mode", "auto", "--workspace"])
+        .arg(&workspace)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let receipt: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(receipt["mode"], "headless");
+    assert_eq!(receipt["mode_reason"], "no herdr pane in this environment");
+    assert_eq!(receipt["presentation"], "headless");
+}
+
+#[test]
+fn explicit_headless_flag_conflicts_with_a_different_mode() {
+    let temp = TempDir::new().unwrap();
+    let output = command(&temp.path().join("home"))
+        .args(["--headless", "run", "x", "--mode", "pane"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("conflicts with --mode pane"));
 }
 
 #[test]
