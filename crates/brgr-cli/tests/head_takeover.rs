@@ -19,6 +19,7 @@ const INHERITED_WORKER_ENV: &[&str] = &[
     "BRGR_WORKER_HERDR_CONTEXT",
     "CODEX_THREAD_ID",
     "CLAUDE_CODE_SESSION_ID",
+    "CURSOR_CONVERSATION_ID",
 ];
 
 fn brgr_command() -> Command {
@@ -38,6 +39,7 @@ fn run(home: &Path, args: &[&str], envs: &[(&str, &str)]) -> std::process::Outpu
     }
     command.env_remove("CODEX_THREAD_ID");
     command.env_remove("CLAUDE_CODE_SESSION_ID");
+    command.env_remove("CURSOR_CONVERSATION_ID");
     for name in [
         "HERDR_ENV",
         "HERDR_PANE_ID",
@@ -50,7 +52,12 @@ fn run(home: &Path, args: &[&str], envs: &[(&str, &str)]) -> std::process::Outpu
     ] {
         command.env_remove(name);
     }
-    if !envs.iter().any(|(name, _)| *name == "BRGR_SESSION_ID") {
+    if !envs.iter().any(|(name, _)| {
+        matches!(
+            *name,
+            "BRGR_SESSION_ID" | "CLAUDE_CODE_SESSION_ID" | "CURSOR_CONVERSATION_ID"
+        )
+    }) {
         command.env("BRGR_SESSION_ID", "fixture-session");
     }
     for (name, value) in envs {
@@ -910,5 +917,32 @@ fn an_abandoned_head_is_claimed_by_a_foreign_session() {
         &home,
         &["reject", &task_id, "--reason", "claimed"],
         &foreign,
+    ));
+}
+
+/// A Cursor pane's `CURSOR_CONVERSATION_ID` is the session. `--as` is not
+/// required.
+#[test]
+fn a_cursor_conversation_claims_an_abandoned_head_without_as() {
+    let (_temp, home, workspace) = gjc_home();
+    let task_id = start_task(&home, &workspace);
+    let cursor = [("CURSOR_CONVERSATION_ID", "cursor-conversation-1")];
+    let claimed = json_output(&run(
+        &home,
+        &[
+            "head",
+            "claim",
+            &task_id,
+            "--abandoned",
+            "--goal",
+            "keep going",
+        ],
+        &cursor,
+    ));
+    assert_eq!(claimed["takeover"]["state"], "committed", "{claimed}");
+    json_output(&run(
+        &home,
+        &["reject", &task_id, "--reason", "claimed from cursor"],
+        &cursor,
     ));
 }

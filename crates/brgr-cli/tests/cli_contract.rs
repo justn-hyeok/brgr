@@ -28,6 +28,7 @@ const INHERITED_WORKER_ENV: &[&str] = &[
     "BRGR_WORKER_HERDR_CONTEXT",
     "CODEX_THREAD_ID",
     "CLAUDE_CODE_SESSION_ID",
+    "CURSOR_CONVERSATION_ID",
 ];
 
 fn clear_inherited_worker_env(command: &mut Command) {
@@ -59,6 +60,7 @@ fn run(home: &Path, args: &[&str], envs: &[(&str, &str)]) -> std::process::Outpu
     }
     command.env_remove("CODEX_THREAD_ID");
     command.env_remove("CLAUDE_CODE_SESSION_ID");
+    command.env_remove("CURSOR_CONVERSATION_ID");
     for name in [
         "HERDR_ENV",
         "HERDR_PANE_ID",
@@ -71,10 +73,10 @@ fn run(home: &Path, args: &[&str], envs: &[(&str, &str)]) -> std::process::Outpu
     ] {
         command.env_remove(name);
     }
-    // A Claude Code owner is identified by its own session variable instead.
+    // A Claude Code or Cursor owner is identified by its own session variable.
     if !envs
         .iter()
-        .any(|(name, _)| *name == "CLAUDE_CODE_SESSION_ID")
+        .any(|(name, _)| matches!(*name, "CLAUDE_CODE_SESSION_ID" | "CURSOR_CONVERSATION_ID"))
     {
         command.env("BRGR_SESSION_ID", "fixture-session");
     }

@@ -464,7 +464,12 @@ fn owner_kind() -> &'static str {
     let set = |name: &str| env::var(name).is_ok_and(|value| !value.trim().is_empty());
     if !set("CODEX_THREAD_ID") && !set("BRGR_SESSION_ID") && set("CLAUDE_CODE_SESSION_ID") {
         "claude"
-    } else if caller_pane::inherited_agent_kind().as_deref() == Some("cursor") {
+    } else if caller_pane::inherited_agent_kind().as_deref() == Some("cursor")
+        || (!set("CODEX_THREAD_ID")
+            && !set("BRGR_SESSION_ID")
+            && !set("CLAUDE_CODE_SESSION_ID")
+            && set("CURSOR_CONVERSATION_ID"))
+    {
         "cursor"
     } else {
         "codex"
@@ -535,7 +540,10 @@ fn current_session() -> Result<Option<String>> {
     let claude = env::var("CLAUDE_CODE_SESSION_ID")
         .ok()
         .filter(|value| !value.trim().is_empty());
-    Ok(codex.or(explicit).or(claude))
+    let cursor = env::var("CURSOR_CONVERSATION_ID")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+    Ok(codex.or(explicit).or(claude).or(cursor))
 }
 
 /// `--observe`: a read by someone who does not own the task. The store is in the
