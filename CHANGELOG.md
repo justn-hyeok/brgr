@@ -1,5 +1,20 @@
 # Changelog
 
+## 2.15.2 — 2026-10-26
+
+- `brgr head handoff TASK --kind claude|codex|... --goal TEXT` opens a new head
+  in a Herdr pane beside the current head, starts the agent, and prompts it to
+  take command. Opening the pane moves nothing; the current head stays head.
+- `brgr head take TASK --offer KEY` is `claim` for a cooperating head: it
+  refuses the outgoing session, an unknown or other-owner offer, and a head that
+  moved since the offer, and a repeat returns the same record.
+- `--exit-old` approves closing the outgoing head's pane. It happens only in
+  `retire`, after the store recorded `resumed` and the retire was clean, and only
+  when the pane is still the recorded terminal and its agent is idle. A refused
+  close is reported apart from the handoff; `brgr head exit TAKEOVER` retries.
+  Workers are never closed.
+- No store migration.
+
 ## 2.15.1 — 2026-10-26
 
 - A Cursor Herdr pane's `CURSOR_CONVERSATION_ID` is the owner session. `brgr
