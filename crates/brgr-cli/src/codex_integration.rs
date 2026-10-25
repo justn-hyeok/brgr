@@ -30,7 +30,7 @@ brgr hands bounded work to registered coding agents and seals what they return f
 2. When the work should be done by Claude, use `--harness local.claude-code`. Do not run Claude through another harness.
 3. Workers always run with full permissions (yolo). Nothing lowers it; `--permission` is ignored.
 4. Close what you open. Decide every result (`accept`, `reject`, or `result TASK --ack`) so brgr closes the worker's pane and removes its worktree once nothing in it would be lost. Use `--keep-pane` or `--keep-worktree` only when the user asks to keep one.
-5. From Codex, start every brgr command with `--as SESSION`, the session in your calling context, and never add `--source-pane`. brgr finds your pane from what the Codex panes show; if it cannot, the run fails instead of opening beside someone else.
+5. From Codex, start every brgr command with `--as SESSION`, the session in your calling context, and never add `--source-pane`. brgr finds your pane from what the Codex panes show; if it cannot, the run fails instead of opening beside someone else. From Cursor, `CURSOR_CONVERSATION_ID` is the session; `--as` is optional.
 6. Leave a worker's screens to brgr. It accepts the workspace trust prompt, continue notices, Claude Code's bypass warning and new-MCP-server prompt, and skips update offers.
 
 ## The loop
@@ -72,7 +72,7 @@ Siblings talk directly only when the user asks for a **debate**: `brgr debate st
 - Housekeeping: `brgr errors` lists recorded failures. A worktree a decision kept (it holds work found nowhere else) stays until `brgr prune --apply`; `brgr prune` first reports what would go and why the rest stays.
 - Head: `brgr head claim TASK --abandoned --goal TEXT` takes an abandoned head. A live head uses `brgr head request TASK --to SESSION`.
 - Registration: `brgr harness draft <executable>`, `brgr harness add <executable> --workspace <scratch> --prompt "<probe>"`, `brgr harness status <id>`, `brgr doctor`. Each harness keeps its own login and configuration.
-- Owners: Codex sessions, Claude Code sessions (`claude:<CLAUDE_CODE_SESSION_ID>`), and Cursor sessions (`cursor:<conversation-id>` in a Cursor Herdr pane) receive notices. Other Herdr owner kinds are told that `FROM BRGR` will not arrive; use `brgr watch TASK`.
+- Owners: Codex sessions, Claude Code sessions (`claude:<CLAUDE_CODE_SESSION_ID>`), and Cursor sessions (`cursor:<CURSOR_CONVERSATION_ID>` in a Cursor Herdr pane) receive notices. Other Herdr owner kinds are told that `FROM BRGR` will not arrive; use `brgr watch TASK`.
 "#;
 
 #[derive(Debug, Serialize, Deserialize)]
