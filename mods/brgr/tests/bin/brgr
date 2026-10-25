@@ -1,0 +1,22 @@
+#!/bin/sh
+# Canned brgr for the mod's tests and a live PATH check.
+# BRGR_MOD_SCENARIO selects the stdout (empty, running, asking, done, mixed, run).
+# BRGR_MOD_ARGV_LOG, when set, receives one argv line per invocation.
+# A non-empty BRGR_MOD_FAIL of "missing" exits 127; "exit" exits 1.
+set -u
+if [ -n "${BRGR_MOD_ARGV_LOG:-}" ]; then
+  printf '%s\n' "$*" >> "$BRGR_MOD_ARGV_LOG"
+fi
+case "${BRGR_MOD_FAIL:-}" in
+  missing) exit 127 ;;
+  exit) echo 'brgr: status failed' >&2; exit 1 ;;
+esac
+case "${BRGR_MOD_SCENARIO:-empty}" in
+  run)
+    printf '%s\n' '{"task_id":"aaaaaaaa-0000-4000-8000-000000000009","mode":"auto","mode_reason":"the owner decides"}'
+    ;;
+  *)
+    printf '%s\n' '[]'
+    ;;
+esac
+exit 0
