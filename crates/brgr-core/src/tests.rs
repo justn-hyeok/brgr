@@ -771,3 +771,181 @@ fn revision_cannot_change_task_identity() {
         }) if actual == replacement_id
     ));
 }
+
+fn git(workspace: &std::path::Path, argv: &[&str]) {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(workspace)
+        .args([
+            "-c",
+            "user.name=brgr",
+            "-c",
+            "user.email=brgr@example.invalid",
+        ])
+        .args(argv)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git {argv:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn git_workspace() -> tempfile::TempDir {
+    let root = tempfile::tempdir().unwrap();
+    git(root.path(), &["init", "-q", "-b", "brgr/task-ab12cd34"]);
+    std::fs::write(root.path().join("tracked.txt"), "base\n").unwrap();
+    git(root.path(), &["add", "tracked.txt"]);
+    git(root.path(), &["commit", "-qm", "base"]);
+    root
+}
+
+fn stash(workspace: &std::path::Path, message: &str) {
+    std::fs::write(workspace.join("tracked.txt"), format!("{message}\n")).unwrap();
+    git(workspace, &["stash", "push", "-m", message]);
+}
+
+fn one_shot_manifest() -> HarnessManifest {
+    HarnessManifest {
+        schema: MANIFEST_SCHEMA_V1.to_owned(),
+        id: "internal.fixture-one-shot".to_owned(),
+        adapter: PROCESS_ADAPTER_V1.to_owned(),
+        executable: PathBuf::from("/bin/echo"),
+        probe: ProbeSpec {
+            version_argv: vec![],
+            help_argv: vec![],
+            model_catalog: None,
+        },
+        launch: LaunchSpec {
+            argv: vec![],
+            model_argv: vec![],
+            effort_argv: vec![],
+            env_allow: vec![],
+            mode: ExecutionMode::OneShot,
+            permission_argv: brgr_runner::PermissionArgv::default(),
+            interactive: None,
+        },
+        result: ResultSpec {
+            source: ResultSource::Stdout,
+            media_type: "text/plain".to_owned(),
+            max_bytes: 1_024,
+            success_exit_codes: vec![0],
+        },
+        capabilities: BTreeMap::new(),
+    }
+}
+
+fn running_attempt(store: &Store, spec: &TaskSpec) -> (Attempt, u64) {
+    let attempt_id = AttemptId::new();
+    let mut attempt =
+        Attempt::new(TaskRevision::new(spec.clone()).unwrap(), attempt_id, 1).unwrap();
+    store
+        .claim_attempt(spec.task_id, spec.revision, attempt_id)
+        .unwrap();
+    let mut sequence = 0;
+    transition(store, &mut attempt, AttemptState::Starting, &mut sequence).unwrap();
+    transition(store, &mut attempt, AttemptState::Running, &mut sequence).unwrap();
+    (attempt, sequence)
+}
+
+fn successful_output(result: &[u8]) -> ExecutionOutput {
+    ExecutionOutput {
+        exit_code: Some(0),
+        stdout: vec![],
+        stderr: vec![],
+        result: result.to_vec(),
+        observed_model: None,
+        timed_out: false,
+        cancelled: false,
+        output_truncated: false,
+        elapsed: Duration::from_millis(1),
+    }
+}
+
+#[test]
+fn a_candidate_result_notes_a_stash_left_on_the_task_branch() {
+    let root = tempfile::tempdir().unwrap();
+    let mut store = Store::open(root.path()).unwrap();
+    let workspace = git_workspace();
+    let mut spec = task_spec(TaskId::new(), 1);
+    spec.workspace = workspace.path().to_string_lossy().into_owned();
+    spec.evidence.capture_diff = true;
+    store.record_task(&spec, "stash-candidate").unwrap();
+    let (mut attempt, mut sequence) = running_attempt(&store, &spec);
+    stash(workspace.path(), "takeover-baseline-count");
+
+    let result = finish_execution(
+        &store,
+        &spec,
+        &one_shot_manifest(),
+        &mut attempt,
+        &mut sequence,
+        Ok(successful_output(b"report")),
+    )
+    .unwrap();
+
+    assert_eq!(result.outcome, TerminalOutcome::Candidate);
+    assert_eq!(result.unresolved_effects.len(), 1);
+    let note = &result.unresolved_effects[0];
+    assert!(note.contains("1 entry"), "{note}");
+    assert!(note.contains("brgr/task-ab12cd34"), "{note}");
+    assert!(!note.contains("takeover-baseline-count"), "{note}");
+}
+
+#[test]
+fn a_failed_result_notes_a_stash_left_on_the_task_branch() {
+    let root = tempfile::tempdir().unwrap();
+    let mut store = Store::open(root.path()).unwrap();
+    let workspace = git_workspace();
+    let mut spec = task_spec(TaskId::new(), 1);
+    spec.workspace = workspace.path().to_string_lossy().into_owned();
+    spec.evidence.capture_diff = true;
+    store.record_task(&spec, "stash-failed").unwrap();
+    let (mut attempt, mut sequence) = running_attempt(&store, &spec);
+    stash(workspace.path(), "takeover-baseline-count");
+
+    let result = finish_execution(
+        &store,
+        &spec,
+        &one_shot_manifest(),
+        &mut attempt,
+        &mut sequence,
+        Ok(ExecutionOutput {
+            exit_code: Some(1),
+            ..successful_output(b"")
+        }),
+    )
+    .unwrap();
+
+    assert_eq!(result.outcome, TerminalOutcome::Failed);
+    assert_eq!(result.unresolved_effects.len(), 1);
+    let note = &result.unresolved_effects[0];
+    assert!(note.contains("1 entry"), "{note}");
+    assert!(!note.contains("takeover-baseline-count"), "{note}");
+}
+
+#[test]
+fn a_result_without_capture_diff_has_no_stash_note() {
+    let root = tempfile::tempdir().unwrap();
+    let mut store = Store::open(root.path()).unwrap();
+    let workspace = git_workspace();
+    let mut spec = task_spec(TaskId::new(), 1);
+    spec.workspace = workspace.path().to_string_lossy().into_owned();
+    store.record_task(&spec, "stash-not-requested").unwrap();
+    let (mut attempt, mut sequence) = running_attempt(&store, &spec);
+    stash(workspace.path(), "takeover-baseline-count");
+
+    let result = finish_execution(
+        &store,
+        &spec,
+        &one_shot_manifest(),
+        &mut attempt,
+        &mut sequence,
+        Ok(successful_output(b"report")),
+    )
+    .unwrap();
+
+    assert_eq!(result.outcome, TerminalOutcome::Candidate);
+    assert!(result.unresolved_effects.is_empty());
+}

@@ -63,6 +63,7 @@
 mod evidence;
 mod execution;
 mod git_diff;
+mod git_stash;
 mod state;
 
 pub use evidence::task_patch;
@@ -313,13 +314,14 @@ impl Supervisor {
             )?;
         }
         let settlement = execution::unsettled_worker_reason(&self.store, task, attempt)?;
-        let (artifacts, error) = if report.is_empty() {
+        let (artifacts, error, unresolved_effects) = if report.is_empty() {
             (
                 Vec::new(),
                 Some("external session returned an empty report".to_owned()),
+                Vec::new(),
             )
         } else if let Some(reason) = settlement {
-            (Vec::new(), Some(reason))
+            (Vec::new(), Some(reason), Vec::new())
         } else {
             let reference = self.store.seal_artifact_reader(
                 std::io::Cursor::new(report),
@@ -338,11 +340,11 @@ impl Supervisor {
                 elapsed: std::time::Duration::ZERO,
             };
             match evidence::seal_requested_evidence(&self.store, &spec, &output) {
-                Ok(mut evidence) => {
+                Ok((mut evidence, unresolved_effects)) => {
                     evidence.insert(0, reference);
-                    (evidence, None)
+                    (evidence, None, unresolved_effects)
                 }
-                Err(error) => (vec![reference], Some(error)),
+                Err(error) => (vec![reference], Some(error), Vec::new()),
             }
         };
         let outcome = if error.is_none() {
@@ -350,7 +352,8 @@ impl Supervisor {
         } else {
             brgr_protocol::TerminalOutcome::Failed
         };
-        let result = execution::result_for(&spec, attempt, outcome, artifacts, error);
+        let mut result = execution::result_for(&spec, attempt, outcome, artifacts, error);
+        result.unresolved_effects = unresolved_effects;
         self.store
             .commit_terminal_result_final(&spec.owner_id, &result)?;
         Ok(result)
