@@ -70,6 +70,16 @@ pub(crate) enum Command {
         #[arg(long, default_value_t = 3_600)]
         timeout_seconds: u64,
     },
+    /// Print one JSON line per state change, question, or result, then exit.
+    ///
+    /// Reads only. It does not decide, acknowledge, or answer.
+    Watch {
+        /// Tasks to follow. A repeated id is watched once.
+        #[arg(required = true, num_args = 1.., value_name = "TASK")]
+        tasks: Vec<TaskId>,
+        #[arg(long, default_value_t = 3_600)]
+        timeout_seconds: u64,
+    },
     /// Send or list messages between an owner and a managed task.
     Message {
         #[command(subcommand)]

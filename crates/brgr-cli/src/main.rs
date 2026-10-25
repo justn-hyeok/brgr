@@ -27,6 +27,7 @@ mod supervision;
 mod task_commands;
 mod tree_status;
 mod tui_host;
+mod watch;
 mod workspace;
 mod worktree_prune;
 
@@ -272,6 +273,10 @@ async fn execute(paths: &Paths, command: Command, json_output: bool) -> Result<(
             task,
             timeout_seconds,
         } => wait_for_result(paths, task, timeout_seconds, json_output).await,
+        Command::Watch {
+            tasks,
+            timeout_seconds,
+        } => watch::watch(paths, tasks, timeout_seconds).await,
         Command::Message { command } => message::run(paths, command, json_output).await,
         Command::Debate { command } => debate::run(paths, command, json_output).await,
         Command::Input { task, text, key } => pane_adapter::send_native_input(
