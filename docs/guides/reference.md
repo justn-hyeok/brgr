@@ -203,7 +203,10 @@ and counts as the owner's acknowledgement of it. A lost run whose worker may sti
 be running is refused, with the worker's process named: a second run would share
 the task's pid record and hide the first worker from `prune`. `brgr status TASK --tree` shows time and question/approval waits;
 `brgr cancel TASK --tree` records cancellation for the subtree before stopping
-its active processes. See [the completion loop plan](completion-loop-plan.md)
+its active processes. `brgr cancel TASK --force` does the same when this session
+is not the bound owner: reaching the control home is the access check. It does
+not accept or reject a sealed result; an already-terminal task only closes a
+leftover pane brgr recorded as its own. See [the completion loop plan](completion-loop-plan.md)
 for the current scope and limits.
 
 Install the local binary and Codex integration, then start a new Codex session:

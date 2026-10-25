@@ -7961,6 +7961,135 @@ fn an_old_session_stops_nothing_after_a_handoff() {
     }
 }
 
+/// A foreign owner cannot cancel; `--force` stops the worker without taking
+/// the head or deciding the sealed result.
+#[test]
+fn a_foreign_owner_force_cancels_a_running_worker() {
+    let (_temp, home, workspace) = asking_home();
+    let owner = [("BRGR_OWNER_ID", "codex:force-owner")];
+    let launched = json_output(&run(
+        &home,
+        &["run", "ASK", "--workspace", workspace.to_str().unwrap()],
+        &owner,
+    ));
+    let task = launched["task_id"].as_str().unwrap();
+    let foreign = [("BRGR_OWNER_ID", "codex:someone-else")];
+    let refused = run(&home, &["cancel", task], &foreign);
+    assert!(
+        !refused.status.success(),
+        "a different owner cancelled without --force: {}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("BRGR_OWNER_ID differs"),
+        "{}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    let forced = json_output(&run(&home, &["cancel", task, "--force"], &foreign));
+    assert_eq!(forced["state"], "cancel_requested", "{forced}");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        assert!(
+            Instant::now() <= deadline,
+            "the task did not stop after --force"
+        );
+        let result = run_with_error(&home, task, &owner);
+        if result.ok {
+            assert_eq!(result.outcome, "cancelled", "{result:?}");
+            break;
+        }
+        thread::sleep(Duration::from_millis(200));
+    }
+}
+
+/// After a handoff the outgoing session still cannot cancel, but `--force`
+/// stops the worker for whoever can reach the control home.
+#[test]
+fn a_stale_session_force_cancels_after_a_handoff() {
+    let (_temp, home, workspace) = asking_home();
+    let owner = [("BRGR_OWNER_ID", "codex:handoff-force-cancel")];
+    let launched = json_output(&run(
+        &home,
+        &["run", "ASK", "--workspace", workspace.to_str().unwrap()],
+        &owner,
+    ));
+    let task = launched["task_id"].as_str().unwrap();
+    committed_takeover(
+        &home,
+        "codex:handoff-force-cancel",
+        "fixture-session",
+        "session-b",
+        "handoff-force-cancel-1",
+    );
+    let stale = [
+        ("BRGR_OWNER_ID", "codex:handoff-force-cancel"),
+        ("BRGR_SESSION_ID", "fixture-session"),
+    ];
+    let refused = run(&home, &["cancel", task], &stale);
+    assert!(
+        !refused.status.success(),
+        "a session that handed its head away cancelled without --force: {}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    let forced = json_output(&run(&home, &["cancel", task, "--force"], &stale));
+    assert_eq!(forced["state"], "cancel_requested", "{forced}");
+    let head = [
+        ("BRGR_OWNER_ID", "codex:handoff-force-cancel"),
+        ("BRGR_SESSION_ID", "session-b"),
+    ];
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        assert!(
+            Instant::now() <= deadline,
+            "the task did not stop after the stale session force-cancelled it"
+        );
+        let result = run_with_error(&home, task, &head);
+        if result.ok {
+            assert_eq!(result.outcome, "cancelled", "{result:?}");
+            break;
+        }
+        thread::sleep(Duration::from_millis(200));
+    }
+}
+
+/// `--force` on an already sealed candidate closes nothing about the result:
+/// reject and revise still work, and a cancellation intent is not recorded.
+#[test]
+fn force_cancel_of_a_candidate_does_not_block_revise() {
+    let (_temp, home, workspace) = gjc_home();
+    let owner = [("BRGR_OWNER_ID", "codex:force-terminal")];
+    let first = json_output(&run(
+        &home,
+        &[
+            "run",
+            "BRGR_FIXTURE_OK",
+            "--workspace",
+            workspace.to_str().unwrap(),
+            "--foreground",
+        ],
+        &owner,
+    ));
+    assert_eq!(first["outcome"], "candidate");
+    let task = first["task_id"].as_str().unwrap();
+    let foreign = [("BRGR_OWNER_ID", "codex:someone-else")];
+    let forced = json_output(&run(&home, &["cancel", task, "--force"], &foreign));
+    assert_eq!(forced["state"], "force_stopped", "{forced}");
+    let result = json_output(&run(&home, &["result", task], &owner));
+    assert_eq!(result["result"]["outcome"], "candidate", "{result}");
+    json_output(&run(
+        &home,
+        &["reject", task, "--reason", "revise after force-stop"],
+        &owner,
+    ));
+    let revised = json_output(&run(
+        &home,
+        &["revise", task, "BRGR_FIXTURE_OK", "--foreground"],
+        &owner,
+    ));
+    assert_eq!(revised["outcome"], "candidate");
+    assert_eq!(revised["revision"], 2);
+}
+
 #[derive(Debug)]
 struct Poll {
     ok: bool,

@@ -8,8 +8,8 @@ use std::{
 
 use crate::supervision::reconcile_pending;
 use crate::{
-    LaunchEnvelope, Paths, current_session, notification, pane_cleanup, plugin_bridge, print_value,
-    require_owner, tree_status, workspace,
+    LaunchEnvelope, Paths, current_session, notification, pane_adapter, pane_cleanup,
+    plugin_bridge, print_value, require_owner, tree_status, workspace,
 };
 use anyhow::{Context, Result, bail};
 use brgr_protocol::{
@@ -203,11 +203,29 @@ pub(crate) async fn wait_for_result(
     }
 }
 
-pub(crate) fn cancel(paths: &Paths, task: TaskId, tree: bool, json_output: bool) -> Result<()> {
+pub(crate) fn cancel(
+    paths: &Paths,
+    task: TaskId,
+    tree: bool,
+    force: bool,
+    json_output: bool,
+) -> Result<()> {
     let store = Store::open(&paths.store)?;
     let spec = store.task(task)?;
-    let (session_id, binding_epoch) = require_owner(&store, &spec.owner_id)?;
-    let proof = brgr_store::OwnerProof::new(spec.owner_id.clone(), &session_id, binding_epoch)?;
+    let proof = if force {
+        eprintln!(
+            "brgr: force-cancelling a task owned by {}; session check skipped",
+            spec.owner_id
+        );
+        None
+    } else {
+        let (session_id, binding_epoch) = require_owner(&store, &spec.owner_id)?;
+        Some(brgr_store::OwnerProof::new(
+            spec.owner_id.clone(),
+            &session_id,
+            binding_epoch,
+        )?)
+    };
     let nodes = if tree {
         store.subtree(task)?
     } else {
@@ -237,17 +255,54 @@ pub(crate) fn cancel(paths: &Paths, task: TaskId, tree: bool, json_output: bool)
         active.push(node.task_id);
     }
     if active.is_empty() && !tree {
+        if force {
+            let had_pane = paths.pane_receipt(task, spec.revision).is_file();
+            pane_adapter::close_leftover_pane(paths, task, spec.revision, false);
+            let pane_closed = had_pane
+                && fs::read(paths.pane_receipt(task, spec.revision))
+                    .ok()
+                    .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                    .and_then(|value| {
+                        value
+                            .get("cleanup")
+                            .and_then(|cleanup| cleanup.as_str())
+                            .map(|cleanup| cleanup == "closed")
+                    })
+                    .unwrap_or(false);
+            print_value(
+                &json!({
+                    "task_id": task,
+                    "state": "force_stopped",
+                    "tree": tree,
+                    "pane_closed": pane_closed,
+                }),
+                json_output,
+            );
+            return Ok(());
+        }
         bail!("task {task} is already terminal");
     }
     // The intent records live inside the same transaction that checks the
     // session is still the head: work handed away is stopped by the new head,
-    // not by a session that lost it while this command ran.
-    let recorded = store.record_cancellation_intents_bound(task, tree, &proof)?;
+    // not by a session that lost it while this command ran. `--force` skips
+    // that check: the control home is the access check.
+    let recorded = match proof.as_ref() {
+        Some(proof) => store.record_cancellation_intents_bound(task, tree, proof)?,
+        None => store.record_cancellation_intents(task, tree)?,
+    };
     let mut requested = Vec::new();
     for node in &recorded {
         if task_needs_cancel(&store, node.task_id)? {
             fs::write(paths.cancel(node.task_id), b"cancel\n")?;
             requested.push(node.task_id);
+        }
+    }
+    if force && tree {
+        for node in &nodes {
+            if !requested.iter().any(|id| *id == node.task_id) {
+                let child = store.task(node.task_id)?;
+                pane_adapter::close_leftover_pane(paths, node.task_id, child.revision, false);
+            }
         }
     }
     print_value(

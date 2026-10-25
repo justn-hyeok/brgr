@@ -105,6 +105,11 @@ pub(crate) enum Command {
         /// Also cancel the delegated children beneath the task.
         #[arg(long)]
         tree: bool,
+        /// Stop the worker even if this session is not the bound owner.
+        /// Reaching the control home is the access check; it does not decide
+        /// the sealed result.
+        #[arg(long)]
+        force: bool,
     },
     /// Claim a task for the current owner session before reading or deciding.
     Bind {

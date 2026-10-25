@@ -287,7 +287,7 @@ async fn execute(paths: &Paths, command: Command, json_output: bool) -> Result<(
             key.as_deref(),
             json_output,
         ),
-        Command::Cancel { task, tree } => cancel(paths, task, tree, json_output),
+        Command::Cancel { task, tree, force } => cancel(paths, task, tree, force, json_output),
         Command::Bind { task, session } => bind(paths, task, session, json_output).await,
         Command::Head { command } => head::run(paths, command, json_output),
         command @ (Command::Accept { .. } | Command::Reject { .. }) => {
