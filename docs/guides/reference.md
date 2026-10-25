@@ -142,7 +142,7 @@ owner session. It may call `brgr run OBJECTIVE` again to create a child; brgr re
 parent edge and delivers the child result to that worker's inbox. The parent
 must read and accept/reject a candidate (or acknowledge another outcome)
 before its own successful result can become a candidate. `brgr wait TASK`
-waits for a child result without approving it. The `message` subcommands (`send`, `list`, `wait`, `ack`)
+waits for a child result without approving it. `brgr watch TASK` prints one JSON line per event until every watched task has a result. The `message` subcommands (`send`, `list`, `wait`, `ack`)
 let each side ask and answer questions on the active attempt; unanswered
 questions block a successful candidate. Standalone runs opt in with
 `--enable-delegation`; plugin workers enable it automatically. See

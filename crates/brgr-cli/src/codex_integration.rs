@@ -36,7 +36,7 @@ brgr hands bounded work to registered coding agents and seals what they return f
 ## The loop
 
 1. Start: `brgr run "<objective>" --harness <id> --criterion "<observable check>"`. Add `--capture-diff` when you will keep code changes. It returns a task id at once.
-2. Wait: do not poll. A `FROM BRGR` notice arrives in your pane when you are idle. If you must block, `brgr wait TASK` returns early with `state: awaiting_input` while the worker has a question for you.
+2. Wait: do not poll and do not block. Run `brgr watch TASK` as a background command (in Claude Code, in Monitor) and keep talking to the user: it prints one JSON line per event (`question`, `result`) and `done`. A `FROM BRGR` notice also arrives when you are idle. `brgr wait TASK` blocks; avoid it.
 3. Read: `brgr result TASK`, and for code `brgr diff TASK --stat` then `brgr diff TASK`.
 4. Decide: `brgr accept TASK --reason "<why>"` or `brgr reject TASK --reason "<why>"`. To try again, `brgr revise TASK "<corrected objective>"`.
 5. Integrate: `brgr apply TASK --workspace <repo>` checks the sealed diff; add `--execute` after accepting, and `--3way` to merge with the repository's own changes. Or `brgr land TASK --workspace <repo> --reason "<why>"` to check, accept and apply in one step. Use the brgr-diff-review skill for code you keep.

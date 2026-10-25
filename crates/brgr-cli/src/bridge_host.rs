@@ -23,6 +23,9 @@ pub(crate) fn bridge_budget_seconds(command: &Command) -> u64 {
         Command::Wait {
             timeout_seconds, ..
         }
+        | Command::Watch {
+            timeout_seconds, ..
+        }
         | Command::Message {
             command:
                 message::MessageCommand::Wait {
@@ -92,6 +95,7 @@ pub(crate) fn validate_bridge_host_command(
         | Command::Result { .. }
         | Command::Diff { .. }
         | Command::Wait { .. }
+        | Command::Watch { .. }
         | Command::Message { .. }
         | Command::Debate { .. }
         | Command::Input { .. }
