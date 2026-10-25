@@ -533,7 +533,9 @@ fn poll_unclassified(
 
 /// Starts the agent in its pane, then names the pane. Herdr names a pane after
 /// the agent once it has started, which replaces the label set when the pane
-/// opened, so the name that stays is the one set here.
+/// opened. It can also overwrite that second name with `cmd` when the agent
+/// finishes registering, so the name that stays is applied again for a short
+/// window after start returns.
 fn start_worker(
     herdr: &Herdr,
     name: &str,
@@ -547,7 +549,7 @@ fn start_worker(
         start_agent(herdr, name, pane, run, notices)?;
     }
     let label = recorded_label(notices.paths, run.task, run.revision);
-    herdr.name_pane(pane, label.as_deref());
+    herdr.keep_pane_name(pane, label.as_deref());
     Ok(())
 }
 
@@ -1169,6 +1171,21 @@ impl Herdr {
             && let Err(failure) = self.call(&["pane", "rename", pane, label])
         {
             eprintln!("brgr pane mode · could not name pane {pane}: {failure}");
+        }
+    }
+
+    /// Herdr overwrites the label when the agent registers, after `agent start`
+    /// has already returned. Put the template back for a short bounded window.
+    fn keep_pane_name(&self, pane: &str, label: Option<&str>) {
+        self.name_pane(pane, label);
+        let (attempts, delay) = if cfg!(debug_assertions) {
+            (3, Duration::from_millis(1))
+        } else {
+            (12, Duration::from_millis(150))
+        };
+        for _ in 0..attempts {
+            thread::sleep(delay);
+            self.name_pane(pane, label);
         }
     }
 

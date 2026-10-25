@@ -1003,8 +1003,8 @@ fn pane_mode_names_the_worker_pane_after_it_opens() {
 }
 
 /// Herdr gives a pane the agent's own name when `agent start` finishes, which
-/// replaces a label set before it. The name that stays must be set after the
-/// agent has started.
+/// replaces a label set before it, and may then overwrite that with `cmd` when
+/// the agent registers. The name that stays is applied again after start.
 #[test]
 fn the_pane_name_is_set_again_after_the_agent_has_started() {
     let fixture = pane_fixture();
@@ -1016,12 +1016,18 @@ fn the_pane_name_is_set_again_after_the_agent_has_started() {
         .find("agent start")
         .or_else(|| calls.find("pane run w9:p2"))
         .unwrap_or_else(|| panic!("the agent was never started: {calls}"));
+    let after_start = &calls[start..];
+    let rename = "pane rename w9:p2 claude-code/anthropic: Explain the build";
     let last_rename = calls
-        .rfind("pane rename w9:p2 claude-code/anthropic: Explain the build")
+        .rfind(rename)
         .unwrap_or_else(|| panic!("the pane was not named: {calls}"));
     assert!(
         last_rename > start,
         "the last rename came before agent start and Herdr overwrites it: {calls}"
+    );
+    assert!(
+        after_start.matches(rename).count() >= 2,
+        "the name was not applied again after Herdr could overwrite it: {calls}"
     );
 }
 
