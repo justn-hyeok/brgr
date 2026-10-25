@@ -1,0 +1,27 @@
+{
+  "compilerOptions": {
+    "target": "es2023",
+    "lib": ["es2023"],
+    "types": [],
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "allowImportingTsExtensions": true,
+    "jsx": "react",
+    "jsxFactory": "h",
+    "jsxFragmentFactory": "Fragment",
+    "baseUrl": ".",
+    "paths": {
+      "claude-code": [
+        "/private/tmp/claude-501/bundled-skills/2.1.293/6a56415014f8b22f79efa0e5c652aeb0/plugin-authoring/types/claude-code.d.ts"
+      ],
+      "claude-code/testing": [
+        "/private/tmp/claude-501/bundled-skills/2.1.293/6a56415014f8b22f79efa0e5c652aeb0/plugin-authoring/types/claude-code.d.ts"
+      ]
+    }
+  },
+  "include": ["brgr/hooks", "brgr/tests"]
+}
