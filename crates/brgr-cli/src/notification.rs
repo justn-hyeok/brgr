@@ -33,10 +33,9 @@ pub async fn register_current_surface(
     if owner_id.as_str().starts_with("worker:") {
         return register_worker_surface(paths, store, owner_id, session_id);
     }
-    let claude = owner_id.as_str().starts_with("claude:");
-    if !claude && !owner_id.as_str().starts_with("codex:") {
+    let Some(kind) = owner_agent(owner_id.as_str()) else {
         return Ok(false);
-    }
+    };
     // A hook Codex runs from its shared app-server daemon carries the Herdr
     // environment of whichever pane started that daemon. Registering that pane
     // would push this session's notices into another session.
@@ -66,17 +65,26 @@ pub async fn register_current_surface(
         .context("Herdr executable path is not UTF-8")?;
     let herdr_session = env::var("HERDR_SESSION").ok();
     let agent = recorded_agent(binary, herdr_session.as_deref(), &pane).await?;
-    if agent.get("agent").and_then(Value::as_str) != Some(owner_agent(claude))
+    let recorded_kind = agent.get("agent").and_then(Value::as_str);
+    if recorded_kind.is_some_and(|found| !crate::caller_pane::owner_inbox_kind(found)) {
+        eprintln!(
+            "brgr: Herdr agent {} is not an owner inbox; FROM BRGR will not arrive. Use `brgr watch`.",
+            recorded_kind.unwrap_or("unknown")
+        );
+        return Ok(false);
+    }
+    if recorded_kind != Some(kind)
         || agent.get("pane_id").and_then(Value::as_str) != Some(pane.as_ref())
     {
         bail!("recorded Herdr pane is not the current owner agent");
     }
-    // Herdr keeps no session id for a Claude Code agent. The Claude Code
-    // process this command runs under is recorded instead, so a different
-    // Claude Code started later in the same pane is not taken for the owner.
-    // Codex is bound to its exact session below.
-    if claude {
-        if let Some(owner) = claude_ancestor(&pane) {
+    // Herdr keeps no session id for a Claude Code or Cursor agent. The Claude
+    // Code process this command runs under is recorded instead; Cursor runs in
+    // the pane. Codex is bound to its exact session below.
+    if kind != "codex" {
+        if kind == "claude"
+            && let Some(owner) = claude_ancestor(&pane)
+        {
             record_claude_owner(paths, session_id, &owner)?;
         }
         store.register_owner_surface(
@@ -466,7 +474,7 @@ struct OwnerPane<'a> {
     herdr_session: Option<&'a str>,
     pane_id: &'a str,
     session_id: &'a str,
-    owner_is_claude: bool,
+    owner_kind: &'a str,
 }
 
 /// The Claude Code process that registered an owner session's pane.
@@ -538,8 +546,16 @@ fn claude_owner_present(paths: &Paths, session_id: &str, pane: &str) -> Result<(
 }
 
 /// The Herdr agent kind an owner runs as.
-fn owner_agent(claude: bool) -> &'static str {
-    if claude { "claude" } else { "codex" }
+fn owner_agent(owner_id: &str) -> Option<&'static str> {
+    if owner_id.starts_with("claude:") {
+        Some("claude")
+    } else if owner_id.starts_with("cursor:") {
+        Some("cursor")
+    } else if owner_id.starts_with("codex:") {
+        Some("codex")
+    } else {
+        None
+    }
 }
 
 async fn try_deliver(paths: &Paths, target: &NotificationTarget) -> Result<()> {
@@ -586,7 +602,7 @@ async fn try_deliver(paths: &Paths, target: &NotificationTarget) -> Result<()> {
             herdr_session: target.herdr_session.as_deref(),
             pane_id: &target.pane_id,
             session_id: &target.session_id,
-            owner_is_claude: target.owner_id.as_str().starts_with("claude:"),
+            owner_kind: owner_agent(target.owner_id.as_str()).unwrap_or("codex"),
         },
         &body,
     )
@@ -632,7 +648,7 @@ async fn deliver_question(paths: &Paths, target: &QuestionTarget) -> Result<()> 
             herdr_session: target.herdr_session.as_deref(),
             pane_id: &target.pane_id,
             session_id: &target.session_id,
-            owner_is_claude: target.owner_id.starts_with("claude:"),
+            owner_kind: owner_agent(&target.owner_id).unwrap_or("codex"),
         },
         &body,
     )
@@ -671,10 +687,9 @@ async fn prompt_owner(paths: &Paths, pane: &OwnerPane<'_>, body: &str) -> Result
     let agent = state
         .pointer("/result/agent")
         .context("Herdr did not return an agent")?;
-    let claude = pane.owner_is_claude;
-    if agent.get("agent").and_then(Value::as_str) != Some(owner_agent(claude))
+    if agent.get("agent").and_then(Value::as_str) != Some(pane.owner_kind)
         || agent.get("pane_id").and_then(Value::as_str) != Some(pane.pane_id)
-        || (!claude
+        || (pane.owner_kind == "codex"
             && agent
                 .pointer("/agent_session/value")
                 .and_then(Value::as_str)
@@ -682,7 +697,7 @@ async fn prompt_owner(paths: &Paths, pane: &OwnerPane<'_>, body: &str) -> Result
     {
         bail!("recorded parent agent identity changed");
     }
-    if claude {
+    if pane.owner_kind == "claude" {
         claude_owner_present(paths, pane.session_id, pane.pane_id)?;
     }
     if !matches!(
@@ -743,5 +758,13 @@ mod claude_owner_tests {
         .unwrap();
         assert!(claude_owner_present(&paths, session, "w1:p1").is_err());
         assert!(claude_owner_path(&paths, "../escape").is_none());
+    }
+
+    #[test]
+    fn owner_agent_kind_matches_the_owner_prefix() {
+        assert_eq!(owner_agent("claude:abc"), Some("claude"));
+        assert_eq!(owner_agent("cursor:abc"), Some("cursor"));
+        assert_eq!(owner_agent("codex:abc"), Some("codex"));
+        assert_eq!(owner_agent("worker:1"), None);
     }
 }

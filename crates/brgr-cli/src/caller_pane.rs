@@ -69,14 +69,26 @@ pub(crate) fn for_session(session: &str, explicit: Option<&str>) -> Option<Strin
             .is_none_or(|expected| expected == pane)
             .then_some(pane);
     }
-    // A pane this process provably runs inside needs no screen.
+    // A pane this process provably runs inside needs no screen. Codex, Claude,
+    // and Cursor owners all run in that pane; Codex's shared daemon is the
+    // case that still needs a screen trace above.
     if let Some(pane) = explicit
         && inherited().as_deref() == Some(pane)
-        && live_agent_is(pane, "codex")
+        && live_kind(pane).as_deref().is_some_and(owner_inbox_kind)
     {
         return Some(pane.to_owned());
     }
     bridge_receipt(session, explicit)
+}
+
+/// Herdr agent kinds that can receive `FROM BRGR` via `herdr agent prompt`.
+pub(crate) fn owner_inbox_kind(kind: &str) -> bool {
+    matches!(kind, "codex" | "claude" | "cursor")
+}
+
+/// The Herdr agent kind of the pane this process runs in, when that is known.
+pub(crate) fn inherited_agent_kind() -> Option<String> {
+    live_kind(&inherited()?)
 }
 
 /// Marks a launch whose caller pane is not known yet: Codex prints a command
@@ -207,16 +219,18 @@ pub(crate) fn codex_trace_status() -> Value {
     })
 }
 
-fn live_agent_is(pane: &str, kind: &str) -> bool {
-    herdr_json(&["agent", "get", pane])
-        .and_then(|live| {
-            let agent = live.pointer("/result/agent")?.clone();
-            Some(
-                agent.get("agent").and_then(Value::as_str) == Some(kind)
-                    && agent.get("pane_id").and_then(Value::as_str) == Some(pane),
-            )
-        })
-        .unwrap_or(false)
+fn live_kind(pane: &str) -> Option<String> {
+    herdr_json(&["agent", "get", pane]).and_then(|live| {
+        let agent = live.pointer("/result/agent")?;
+        (agent.get("pane_id").and_then(Value::as_str) == Some(pane))
+            .then(|| {
+                agent
+                    .get("agent")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+            })
+            .flatten()
+    })
 }
 
 fn bridge_receipt(session: &str, explicit: Option<&str>) -> Option<String> {
