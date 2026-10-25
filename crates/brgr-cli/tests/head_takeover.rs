@@ -1,4 +1,4 @@
-//! `brgr head` request, prepare, show, and status.
+//! `brgr head` request, prepare, claim, show, and status.
 
 use std::{fs, path::Path, process::Command};
 
@@ -822,4 +822,93 @@ fn head_status_reports_the_epoch_after_commit() {
     assert_eq!(takeover["from_epoch"], from_epoch);
     assert_eq!(takeover["committed_epoch"], from_epoch + 1);
     assert!(takeover.get("epoch").is_none());
+}
+
+/// Incoming session takes an abandoned head without the outgoing session
+/// typing `request`. A different `BRGR_OWNER_ID` still works: the control home
+/// is the access check.
+#[test]
+fn an_abandoned_head_is_claimed_by_a_foreign_session() {
+    let (_temp, home, workspace) = gjc_home();
+    let task_id = start_task(&home, &workspace);
+    let refused = run(
+        &home,
+        &["head", "claim", &task_id, "--goal", "keep going"],
+        &incoming_env(),
+    );
+    assert!(
+        !refused.status.success(),
+        "claim without --abandoned was accepted: {}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    let same = run(
+        &home,
+        &[
+            "head",
+            "claim",
+            &task_id,
+            "--abandoned",
+            "--goal",
+            "keep going",
+        ],
+        &head_env(),
+    );
+    assert!(
+        !same.status.success(),
+        "the current head claimed itself as abandoned: {}",
+        String::from_utf8_lossy(&same.stderr)
+    );
+    let foreign = [
+        ("BRGR_OWNER_ID", "codex:someone-else"),
+        ("BRGR_SESSION_ID", "session-incoming"),
+    ];
+    let claimed = json_output(&run(
+        &home,
+        &[
+            "head",
+            "claim",
+            &task_id,
+            "--abandoned",
+            "--goal",
+            "keep going",
+            "--key",
+            "claim-1",
+        ],
+        &foreign,
+    ));
+    assert_eq!(claimed["takeover"]["state"], "committed", "{claimed}");
+    assert_eq!(claimed["previous_session_stale"], true);
+    let replay = json_output(&run(
+        &home,
+        &[
+            "head",
+            "claim",
+            &task_id,
+            "--abandoned",
+            "--goal",
+            "keep going",
+            "--key",
+            "claim-1",
+        ],
+        &foreign,
+    ));
+    assert_eq!(
+        replay["takeover"]["takeover_id"], claimed["takeover"]["takeover_id"],
+        "{replay}"
+    );
+    let stale = run(
+        &home,
+        &["reject", &task_id, "--reason", "stale"],
+        &head_env(),
+    );
+    assert!(
+        !stale.status.success(),
+        "the abandoned session still decided: {}",
+        String::from_utf8_lossy(&stale.stderr)
+    );
+    json_output(&run(
+        &home,
+        &["reject", &task_id, "--reason", "claimed"],
+        &foreign,
+    ));
 }

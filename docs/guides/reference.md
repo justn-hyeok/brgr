@@ -249,8 +249,9 @@ Codex sessions bind their owner automatically at first task or SessionStart.
 A bare CLI run without a session can finish but cannot expose, acknowledge, or
 decide its result until `brgr bind TASK --session SESSION` explicitly claims it.
 When the owning session changes, hand the head over with the `head` commands
-(below) rather than `bind`: `bind` is for an unbound or abandoned owner, and it
-is refused while the owner has an open handoff. For a CLI fixture, set both
+(below) rather than `bind`: `bind` is for an unbound owner, and it is refused
+while the owner has an open handoff. If the current head cannot run brgr, the
+incoming session uses `brgr head claim TASK --abandoned --goal TEXT`. For a CLI fixture, set both
 `BRGR_OWNER_ID=codex:example` and `BRGR_SESSION_ID=example-session` on run and
 follow-up commands.
 
@@ -259,7 +260,8 @@ follow-up commands.
 A handoff moves the owner's binding from the session that holds the head to
 another session without losing the owner's tasks, results or decisions. It is a
 record in the store with five steps, each its own command. Every command takes a
-TASK of that owner, like `bind`.
+TASK of that owner, like `bind`. When the outgoing session cannot type, `claim`
+runs request, prepare, and commit as the incoming session.
 
 | Step | Command | Who may run it |
 | --- | --- | --- |
@@ -268,6 +270,7 @@ TASK of that owner, like `bind`.
 | read | `brgr head show TAKEOVER` | anyone with the store (read only) |
 | commit | `brgr head commit TAKEOVER` | only the incoming session |
 | close | `brgr head retire TAKEOVER` | only the incoming session, after it has resumed |
+| claim | `brgr head claim TASK --abandoned --goal TEXT` | a different session, when the current head cannot run brgr |
 
 `request` takes an optional `--key` idempotency key (default: a fresh one),
 `prepare` an optional `--notes`, and `retire` an optional `--failed` with a reason

@@ -5226,13 +5226,19 @@ fn real_cli_run_binds_candidate_to_its_owner() {
     let unreadable = run(
         &home,
         &["result", task],
-        &[("BRGR_OWNER_ID", "codex:owner-b")],
+        &[
+            ("BRGR_OWNER_ID", "codex:owner-b"),
+            ("BRGR_SESSION_ID", "other-session"),
+        ],
     );
     assert!(!unreadable.status.success());
     let denied = run(
         &home,
         &["accept", task],
-        &[("BRGR_OWNER_ID", "codex:owner-b")],
+        &[
+            ("BRGR_OWNER_ID", "codex:owner-b"),
+            ("BRGR_SESSION_ID", "other-session"),
+        ],
     );
     assert!(!denied.status.success());
     let accepted = json_output(&run(
@@ -8121,7 +8127,10 @@ fn a_foreign_owner_force_cancels_a_running_worker() {
         &owner,
     ));
     let task = launched["task_id"].as_str().unwrap();
-    let foreign = [("BRGR_OWNER_ID", "codex:someone-else")];
+    let foreign = [
+        ("BRGR_OWNER_ID", "codex:someone-else"),
+        ("BRGR_SESSION_ID", "other-session"),
+    ];
     let refused = run(&home, &["cancel", task], &foreign);
     assert!(
         !refused.status.success(),

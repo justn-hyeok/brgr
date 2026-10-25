@@ -1,5 +1,18 @@
 # Changelog
 
+## 2.15.0 — 2026-10-26
+
+- An incoming session takes an abandoned head with
+  `brgr head claim TASK --abandoned --goal TEXT`. It records request, prepare
+  and commit without the outgoing session typing. Reaching the control home is
+  the access check. `--abandoned` is required so this is not a silent steal
+  while the current head can still run `brgr head request`.
+- After the claim, the bound session is the head even if `BRGR_OWNER_ID` still
+  names the previous harness prefix (`claude:` vs `cursor:`). The previous
+  session is stale. Workers are not closed.
+- A live cooperative handoff is unchanged: `request` / `prepare` / `commit` /
+  `retire` from v2.14.2. Usage-triggered migration is not in this release.
+
 ## 2.14.4 — 2026-10-26
 
 - `brgr run --mode auto` chooses pane mode inside a Herdr pane and headless

@@ -407,7 +407,10 @@ fn watch_refuses_another_owners_task_without_printing_events() {
     let output = run(
         &home,
         &["watch", &task],
-        &[("BRGR_OWNER_ID", "codex:someone-else")],
+        &[
+            ("BRGR_OWNER_ID", "codex:someone-else"),
+            ("BRGR_SESSION_ID", "other-session"),
+        ],
     );
     assert!(!output.status.success());
     assert!(

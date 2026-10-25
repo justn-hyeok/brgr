@@ -1,6 +1,6 @@
 # Execution Model Roadmap
 
-상태: Phase 1 store/CLI는 v2.14.2에 출시, Head Migration 라이브 경로는 미완 · 작성 2026-10-14 · 버전 정책 2026-10-26
+상태: Phase 1 store/CLI는 v2.14.2, 버려진 Head 인계는 v2.15.0 · 작성 2026-10-14 · 버전 정책 2026-10-26
 
 > 에이전트 세션이 아니라 brgr이 작업의 생명주기를 소유한다.
 
@@ -8,8 +8,10 @@
 [Reference](reference.md)다.
 
 `brgr head request|prepare|show|commit|abort|retire|status`는 v2.14.2에 있다.
-아직 없는 것은 새 Head pane 준비, 두 live pane 사이 알림, 이전 Head 종료,
-나가는 Head가 명령을 못 칠 때의 인계 시작이다. Workflow Runtime은 향후 계획이다.
+`brgr head claim TASK --abandoned --goal TEXT`는 v2.15.0에 있다: 나가는 Head가
+brgr을 못 칠 때 들어오는 세션이 인계를 시작하고 지휘권을 가져간다. 아직 없는
+것은 새 Head pane 준비, 두 live pane 사이 알림, 이전 Head의 자동 종료다.
+Workflow Runtime은 향후 계획이다. 2.6 조건부 migration은 이 마이너에 없다.
 
 모든 단계는 v2.x로 낸다. 메이저 버전은 올리지 않는다.
 
@@ -86,7 +88,7 @@ Head Migration과 Dynamic Workflows가 공통으로 사용할 상태 소유권�
 | --- | --- | --- |
 | Handoff Manifest | 목표, 결정 사항, 원본 세션 참조, 미완료 작업, worker 식별자, 대기 메시지·결과 참조 | v2.14.2. 참조만 담는다. attempt가 없는 revision은 매니페스트에 없고 `brgr status`로 본다 |
 | Head Binding | 논리적인 Head ID, 안정적인 owner와 작업 집합의 관계, 현재 세션과 binding epoch | 기존 owner binding과 epoch를 재사용. 인계 `commit`이 epoch를 1 올린다 |
-| Takeover Protocol | 인계 요청, 새 Head 준비, 지휘권 승계, 실제 작업 재개 확인, 이전 Head 종료 확인 | store 단계(`request`/`prepare`/`commit`/`resumed`/`retire`)는 v2.14.2. 새 Head pane 준비, 두 live pane 알림, 이전 Head 종료, 죽은 Head에서의 시작은 없음 |
+| Takeover Protocol | 인계 요청, 새 Head 준비, 지휘권 승계, 실제 작업 재개 확인, 이전 Head 종료 확인 | store 단계(`request`/`prepare`/`commit`/`resumed`/`retire`)는 v2.14.2. 죽은 Head 시작은 v2.15.0 `claim`. 새 Head pane 준비, 두 live pane 알림, 이전 Head 자동 종료는 없음 |
 
 ```text
 Logical Head
@@ -100,7 +102,8 @@ Logical Head
 ```
 
 이 단계의 검증 기준. 앞의 네 줄은 v2.14.2에서 격리 홈과 store로 확인했다.
-뒤의 두 줄은 Head Migration 라이브 경로의 남은 조건이다.
+뒤의 두 줄 중 죽은 Head 시작은 v2.15.0 `claim`이다. 두 live pane 배달과 이전
+Head 자동 종료는 남아 있다.
 
 - 새 Head 준비와 지휘권 승계를 구분한다. 새 pane이 열렸다는 사실만으로 승계를
   완료 처리하지 않는다.
@@ -118,7 +121,7 @@ Logical Head
 
 ## Phase 2. Head Migration
 
-릴리스 방향: 다음 마이너 · 상태: Phase 1 라이브 경로가 남은 뒤
+릴리스 방향: v2.15.0 · 상태: 버려진 Head 인계 출시. 2.5 자동 퇴장과 2.6은 남음
 
 지휘권을 다른 세션으로 옮기고 기존 worker와 미처리 결과를 승계한다. 인계 성공은
 새 Head가 실제 작업을 이어서 수행했을 때 입증한다. 특정 하네스 전용이 아니다.
@@ -238,12 +241,12 @@ if (reviews.some(r => r.hasCriticalIssue)) {
 ## 투자 우선순위
 
 점수는 현재 구조를 바탕으로 한 상대적 제품 판단이다. 검증된 공수나 일정을 뜻하지 않는다.
-구현 순서는 Phase 0의 지속 개선과 Phase 1 남은 라이브 경로 -> 2 -> 3 -> 4다.
+구현 순서는 Phase 0의 지속 개선 -> 2.5/2.6 -> 3 -> 4다.
 
 | 투자 대상 | 효과 / 5 | 공수 / 5 | 판단 |
 | --- | --- | --- | --- |
-| 공통 Continuity 기반 | 5 | 3 | store/CLI는 v2.14.2. 라이브 경로는 Head Migration에 남음 |
-| Head Migration | 5 | 4 | 다음 마이너. 첫 데모와 성공 조건이 명확하다 |
+| 공통 Continuity 기반 | 5 | 3 | store/CLI는 v2.14.2. `claim`은 v2.15.0 |
+| Head Migration | 5 | 4 | v2.15.0에 버려진 Head 인계. 2.5 자동 퇴장과 2.6은 남음 |
 | Dynamic Workflows | 5 | 5 | 그다음 마이너. 실행 모델을 확장하므로 따로 낸다 |
 | 하네스 호환성 | 4 | 2 | 매일의 경험이며 전부 패치다 |
 | 계층 탭·위성 UI | 2 | 3 | 현재 로드맵에서 제외한다 |

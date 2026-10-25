@@ -546,18 +546,24 @@ fn observe_owner(expected: &OwnerId) {
 }
 
 fn require_owner(store: &Store, expected: &OwnerId) -> Result<(String, u64)> {
-    if let Ok(explicit_owner) = env::var("BRGR_OWNER_ID")
-        && explicit_owner != expected.as_str()
-    {
-        bail!("task belongs to {expected}; BRGR_OWNER_ID differs");
-    }
     let session = current_session()?.context("a Codex session is required; use `brgr bind TASK --session SESSION` to claim an unbound task")?;
     let (bound, epoch) = store.owner_binding(expected)?.with_context(|| {
         format!("owner {expected} is unbound; run `brgr bind TASK --session {session}`")
     })?;
+    if let Ok(explicit_owner) = env::var("BRGR_OWNER_ID")
+        && explicit_owner != expected.as_str()
+    {
+        if bound != session {
+            bail!("task belongs to {expected}; BRGR_OWNER_ID differs");
+        }
+        eprintln!(
+            "brgr: acting as {expected} from {session}; BRGR_OWNER_ID {explicit_owner} differs"
+        );
+        return Ok((session, epoch));
+    }
     if bound != session {
         bail!(
-            "owner {expected} is bound to another session; a handoff goes through `brgr head request` first; `brgr bind` is for an unbound or abandoned owner (use `brgr bind TASK --session {session}`)"
+            "owner {expected} is bound to another session; a live handoff goes through `brgr head request` first; an abandoned head is taken with `brgr head claim TASK --abandoned --goal TEXT`; `brgr bind` is for an unbound owner (use `brgr bind TASK --session {session}`)"
         );
     }
     Ok((session, epoch))

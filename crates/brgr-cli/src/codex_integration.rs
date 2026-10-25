@@ -70,6 +70,7 @@ Siblings talk directly only when the user asks for a **debate**: `brgr debate st
 - Status: `brgr status`, `brgr status TASK --tree`, `brgr cancel TASK --tree`. A different session stops a worker with `brgr cancel TASK --force` without deciding the result.
 - Config: `brgr config init`, `brgr config show`, `brgr config set model <name> --harness <id>`, `brgr config set worker-placement tab`, `brgr config check`. User instructions live in `$BRGR_HOME/BRGR.md`.
 - Housekeeping: `brgr errors` lists recorded failures. A worktree a decision kept (it holds work found nowhere else) stays until `brgr prune --apply`; `brgr prune` first reports what would go and why the rest stays.
+- Head: `brgr head claim TASK --abandoned --goal TEXT` takes an abandoned head. A live head uses `brgr head request TASK --to SESSION`.
 - Registration: `brgr harness draft <executable>`, `brgr harness add <executable> --workspace <scratch> --prompt "<probe>"`, `brgr harness status <id>`, `brgr doctor`. Each harness keeps its own login and configuration.
 - Owners: Codex sessions, Claude Code sessions (`claude:<CLAUDE_CODE_SESSION_ID>`), and Cursor sessions (`cursor:<conversation-id>` in a Cursor Herdr pane) receive notices. Other Herdr owner kinds are told that `FROM BRGR` will not arrive; use `brgr watch TASK`.
 "#;
