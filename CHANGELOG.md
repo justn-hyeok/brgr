@@ -1,5 +1,26 @@
 # Changelog
 
+## 2.14.3 — 2026-10-26
+
+- `brgr watch TASK [TASK...]` waits for workers without blocking the agent that
+  runs it. It prints one JSON line per event and flushes after each: `state` when a
+  task's state changes, `question` once per new worker question, `result` once per
+  task, then `done`, or `timeout` and a non-zero exit after `--timeout-seconds`. It
+  only reads and prints ids, states and outcomes; it never decides, acknowledges or
+  writes, and it checks that every task belongs to the caller. Run it as a
+  background command (in Claude Code, in Monitor) and the agent stays free to talk to
+  its user. The embedded skill's wait step now says so; run `brgr integrate` to
+  refresh an installed skill.
+- A sealed result for a task with `capture_diff` says when the worker left entries in
+  the git stash on its own task branch ("changes held in a stash are not part of this
+  diff") in `unresolved_effects`. `git stash` is shared by every worktree of a
+  repository, so a worker that stashes and does not pop ended with a clean tree and a
+  diff that silently missed its work. The note covers the normal candidate, the
+  failed or lost result and the native report path; stash messages are never quoted,
+  and if the stash cannot be read the seal still succeeds with a "could not check"
+  note.
+- tokio is updated to 1.54.1 for RUSTSEC-2026-0386.
+
 ## 2.14.2 — 2026-10-14
 
 - A session can hand the owner's head to another session without losing the
