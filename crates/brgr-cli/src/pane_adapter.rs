@@ -531,6 +531,26 @@ fn poll_unclassified(
     Ok(())
 }
 
+/// Starts the agent in its pane, then names the pane. Herdr names a pane after
+/// the agent once it has started, which replaces the label set when the pane
+/// opened, so the name that stays is the one set here.
+fn start_worker(
+    herdr: &Herdr,
+    name: &str,
+    pane: &str,
+    run: &PaneRunArgs,
+    notices: &mut Notices<'_>,
+) -> Result<()> {
+    if run.native_executable.is_some() {
+        start_native(herdr, pane, run, notices)?;
+    } else {
+        start_agent(herdr, name, pane, run, notices)?;
+    }
+    let label = recorded_label(notices.paths, run.task, run.revision);
+    herdr.name_pane(pane, label.as_deref());
+    Ok(())
+}
+
 fn drive(
     herdr: &Herdr,
     name: &str,
@@ -539,11 +559,7 @@ fn drive(
     report: &Path,
     notices: &mut Notices<'_>,
 ) -> Result<()> {
-    if run.native_executable.is_some() {
-        start_native(herdr, pane, run, notices)?;
-    } else {
-        start_agent(herdr, name, pane, run, notices)?;
-    }
+    start_worker(herdr, name, pane, run, notices)?;
 
     let prompt = fs::read_to_string(&run.prompt_file)?;
     let instruction = result_instruction(notices.paths, run, &prompt, report)?;
@@ -1142,14 +1158,18 @@ impl Herdr {
             .and_then(Value::as_str)
             .map(str::to_owned)
             .context("Herdr did not report the new pane")?;
+        self.name_pane(&pane, label);
+        Ok(pane)
+    }
+
+    /// Display only: an older Herdr or a rejected label must not cost the run
+    /// its pane, so a failure is one stderr line.
+    fn name_pane(&self, pane: &str, label: Option<&str>) {
         if let Some(label) = label
-            && let Err(failure) = self.call(&["pane", "rename", &pane, label])
+            && let Err(failure) = self.call(&["pane", "rename", pane, label])
         {
-            // Display only: an older Herdr or a rejected label must not cost
-            // the run its pane.
             eprintln!("brgr pane mode · could not name pane {pane}: {failure}");
         }
-        Ok(pane)
     }
 
     /// Makes the caller's workers equal in size. Best effort: a layout Herdr

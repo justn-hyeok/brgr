@@ -1002,6 +1002,29 @@ fn pane_mode_names_the_worker_pane_after_it_opens() {
     assert!(split < rename, "{calls}");
 }
 
+/// Herdr gives a pane the agent's own name when `agent start` finishes, which
+/// replaces a label set before it. The name that stays must be set after the
+/// agent has started.
+#[test]
+fn the_pane_name_is_set_again_after_the_agent_has_started() {
+    let fixture = pane_fixture();
+    let ran = fixture.run(&[]);
+    assert_eq!(ran["outcome"], "candidate", "{ran}");
+    let calls = fixture.state("calls.log");
+    // The agent is started by `agent start`, or for a native TUI by `pane run`.
+    let start = calls
+        .find("agent start")
+        .or_else(|| calls.find("pane run w9:p2"))
+        .unwrap_or_else(|| panic!("the agent was never started: {calls}"));
+    let last_rename = calls
+        .rfind("pane rename w9:p2 claude-code/anthropic: Explain the build")
+        .unwrap_or_else(|| panic!("the pane was not named: {calls}"));
+    assert!(
+        last_rename > start,
+        "the last rename came before agent start and Herdr overwrites it: {calls}"
+    );
+}
+
 /// An empty template is the off switch: no rename, and the creation arguments
 /// are the ones brgr used before naming existed.
 #[test]
