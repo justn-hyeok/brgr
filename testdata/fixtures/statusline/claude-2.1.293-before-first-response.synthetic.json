@@ -1,0 +1,14 @@
+{
+  "session_id": "0a91ffd2-1a5e-4c75-b65a-54cc4b3b1fa0",
+  "version": "2.1.293",
+  "model": { "id": "claude-sonnet-5-5", "display_name": "Sonnet 5.5" },
+  "context_window": {
+    "total_input_tokens": 0,
+    "total_output_tokens": 0,
+    "context_window_size": 1000000,
+    "current_usage": null,
+    "used_percentage": null,
+    "remaining_percentage": null
+  },
+  "rate_limits": null
+}

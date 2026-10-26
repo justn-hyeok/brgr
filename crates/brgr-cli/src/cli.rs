@@ -239,6 +239,13 @@ pub(crate) enum Command {
     Supervise { launch: PathBuf },
     #[command(name = "__hook", hide = true)]
     Hook { event: HookEvent },
+    /// A harness status line command: records the session's context and plan
+    /// usage, then runs the status line it replaced, if any.
+    #[command(name = "__context", hide = true)]
+    Context {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        chain: Vec<String>,
+    },
     #[command(name = "__notify", hide = true)]
     Notify { task: TaskId },
     #[command(name = "__pane-run", hide = true)]
@@ -353,6 +360,28 @@ pub(crate) enum ConfigCommand {
     },
     /// Stop filing issues; the memo keeps recording.
     ClearIssueReporting,
+    /// Tell a head, on its next brgr command, to hand its command to another
+    /// harness once its context or plan usage passes a threshold. brgr only
+    /// tells; the head runs `brgr head handoff` itself.
+    SetHandoffCondition {
+        /// Herdr agent kind that takes over, for example `codex`.
+        #[arg(long)]
+        kind: String,
+        /// Close this head's pane after the handoff.
+        #[arg(long)]
+        exit_old: bool,
+        /// Context window fullness, in percent, that triggers the note.
+        #[arg(long)]
+        context_percent: Option<u8>,
+        /// Plan usage, in percent, of either window that triggers the note.
+        #[arg(long)]
+        quota_percent: Option<u8>,
+        /// Extra argument for the incoming agent, for example `--yolo`.
+        #[arg(long = "agent-arg", allow_hyphen_values = true)]
+        agent_args: Vec<String>,
+    },
+    /// Stop telling heads to hand off.
+    ClearHandoffCondition,
 }
 
 #[derive(Subcommand)]
@@ -670,11 +699,24 @@ pub(crate) enum IntegrateCommand {
         #[command(subcommand)]
         command: CodexCommand,
     },
-    /// Manage the brgr-owned Claude Code skill.
+    /// Manage the brgr-owned Claude Code skill and, on request, its status line recorder.
     Claude {
         #[command(subcommand)]
-        command: CodexCommand,
+        command: ClaudeCommand,
     },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum ClaudeCommand {
+    Install {
+        /// Also put brgr's usage recorder in front of Claude Code's status
+        /// line, keeping the one you have. This edits `settings.json`, or the
+        /// file it links to, after saving a copy. Needed for handoff conditions.
+        #[arg(long)]
+        context: bool,
+    },
+    Status,
+    Uninstall,
 }
 
 #[derive(Subcommand)]

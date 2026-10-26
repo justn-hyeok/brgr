@@ -6,9 +6,13 @@ use std::{
     path::PathBuf,
 };
 
-use crate::cli::{AddHarnessArgs, CleanupCommand, CodexCommand, HarnessCommand, IntegrateCommand};
+use crate::cli::{
+    AddHarnessArgs, ClaudeCommand, CleanupCommand, CodexCommand, HarnessCommand, IntegrateCommand,
+};
 use crate::supervision::reconcile_pending;
-use crate::{Paths, codex_integration, pane_cleanup, print_value, require_owner};
+use crate::{
+    Paths, claude_statusline, codex_integration, pane_cleanup, print_value, require_owner,
+};
 use anyhow::{Context, Result, bail};
 use brgr_registry::{ActivationReceipt, Health, Registry};
 use brgr_runner::HarnessManifest;
@@ -249,11 +253,23 @@ pub(crate) fn integrate(paths: &Paths, command: IntegrateCommand, json_output: b
             print_value(&outcome, json_output);
         }
         IntegrateCommand::Claude { command } => {
-            let outcome = match command {
-                CodexCommand::Install => codex_integration::claude_install(&paths.home)?,
-                CodexCommand::Status => codex_integration::claude_status(&paths.home)?,
-                CodexCommand::Uninstall => codex_integration::claude_uninstall(&paths.home)?,
+            let mut outcome = match command {
+                ClaudeCommand::Install { .. } => codex_integration::claude_install(&paths.home)?,
+                ClaudeCommand::Status => codex_integration::claude_status(&paths.home)?,
+                ClaudeCommand::Uninstall => codex_integration::claude_uninstall(&paths.home)?,
             };
+            let status_line = match command {
+                ClaudeCommand::Install { context: true } => Some(claude_statusline::install(
+                    &paths.home,
+                    &std::env::current_exe()?,
+                )?),
+                ClaudeCommand::Install { context: false } => None,
+                ClaudeCommand::Status => Some(claude_statusline::status(&paths.home)?),
+                ClaudeCommand::Uninstall => Some(claude_statusline::uninstall(&paths.home)?),
+            };
+            if let (Some(status_line), Some(object)) = (status_line, outcome.as_object_mut()) {
+                object.insert("status_line".to_owned(), status_line);
+            }
             print_value(&outcome, json_output);
         }
     }
