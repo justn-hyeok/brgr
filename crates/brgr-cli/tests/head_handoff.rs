@@ -487,3 +487,32 @@ fn a_handoff_without_exit_old_never_closes_a_pane() {
     assert!(retired.get("outgoing_head").is_none());
     assert!(closed_panes(&dir).is_empty(), "{}", calls(&dir));
 }
+
+#[test]
+fn the_incoming_prompt_states_the_owner_and_home_on_every_command() {
+    // A shared Codex daemon runs tool calls with its own environment, which can
+    // hold another worker's `BRGR_OWNER_ID` and not this control home. The pane
+    // env cannot be relied on, so each command carries both.
+    let (temp, home, workspace) = gjc_home();
+    let task_id = start_task(&home, &workspace);
+    let dir = temp.path().join("fake");
+    fs::create_dir_all(&dir).unwrap();
+    let fake = fake_herdr(&dir);
+    start_handoff(&home, &task_id, &fake, &dir, false);
+    let log = calls(&dir);
+    let prefix = "env BRGR_OWNER_ID='codex:head-takeover' BRGR_HOME='";
+    for command in ["head take", "status", "result", "head retire"] {
+        let at = log
+            .find(&format!("{command} "))
+            .or_else(|| log.find(&format!("{command}`")))
+            .unwrap_or_else(|| panic!("no `{command}` in {log}"));
+        assert!(
+            log[..at]
+                .trim_end()
+                .rsplit('`')
+                .next()
+                .is_some_and(|run| run.contains(prefix)),
+            "`{command}` lacks the owner and home prefix: {log}"
+        );
+    }
+}

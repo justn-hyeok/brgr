@@ -592,9 +592,18 @@ fn handoff(
             std::env::current_exe()
                 .map_or_else(|_| "brgr".to_owned(), |exe| exe.display().to_string())
         });
+    // The pane env is not enough: a shared Codex daemon runs tool calls with its
+    // own environment, which can carry another worker's `BRGR_OWNER_ID` and not
+    // this control home. Each command states both itself.
+    let brgr = format!(
+        "env BRGR_OWNER_ID={} BRGR_HOME={} {brgr}",
+        shell_quote(owner_id.as_str()),
+        shell_quote(&paths.home.display().to_string()),
+    );
     let prompt = format!(
         "You are the incoming brgr head for owner {owner_id}. The outgoing head offered you its command. \
-         Use this brgr for every command below: {brgr}. \
+         Start every brgr command with exactly the prefix shown, `{brgr}`; do not drop the `env` part, \
+         because your shell may carry another identity or control home. \
          1) Run `{brgr} head take {task} --offer {key}`; it prints the handoff manifest. \
          2) Read the open tasks with `{brgr} status {task} --tree`. \
          3) Goal to finish: {goal}. Resume it: decide pending results with `{brgr} result` (accept or reject), \
@@ -640,6 +649,11 @@ fn handoff(
         json_output,
     );
     Ok(())
+}
+
+/// Single-quotes a value for the shell command the incoming head is told to run.
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 fn take(paths: &Paths, store: &Store, task: TaskId, key: &str, json_output: bool) -> Result<()> {
@@ -756,4 +770,18 @@ fn exit_outgoing(
         .context("this handoff did not ask for the outgoing head to be closed")?;
     print_value(&json!({ "outgoing_head": outgoing }), json_output);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::shell_quote;
+
+    #[test]
+    fn a_home_with_spaces_and_quotes_is_one_shell_word() {
+        assert_eq!(
+            shell_quote("/Users/me/Library/Application Support/brgr"),
+            "'/Users/me/Library/Application Support/brgr'"
+        );
+        assert_eq!(shell_quote("it's"), r"'it'\''s'");
+    }
 }
