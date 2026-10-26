@@ -2015,6 +2015,7 @@ const RETRY_DECISIONS: &[(&str, bool)] = &[
     ("request_takeover", false),
     ("prepare_takeover", false),
     ("commit_takeover", false),
+    ("resume_idle_takeover", false),
     ("retire_takeover", false),
     ("fail_retirement", false),
     ("abort_takeover", false),

@@ -13,10 +13,11 @@ brgr을 못 칠 때 들어오는 세션이 인계를 시작하고 지휘권을 �
 `brgr head handoff|take|exit`는 v2.15.2에 있다: 현재 Head가 새 Herdr pane을 열어
 새 Head를 시작하고, 새 Head가 `take`로 승계하며, `--exit-old`를 승인한 경우
 검증된 `retire` 뒤에 이전 Head의 pane만 닫는다.
-`config set-handoff-condition`은 v2.15.5에 있다: Claude Code Head의 컨텍스트나 플랜
-사용량이 한도를 넘으면 brgr이 Head에게 `head handoff` 명령을 알린다(실행은 Head가
-한다). 아직 없는 것은 Codex·Cursor의 사용량 신호와 알림 없이 자동 실행하는 2.6
-전체다. Workflow Runtime은 향후 계획이다.
+`config set-handoff-condition`은 v2.15.5에 있다: Head의 컨텍스트나 플랜 사용량이
+한도를 넘으면 brgr이 Head에게 `head handoff` 명령을 알리고, `--auto`를 켜면 Head의
+다음 brgr 명령 끝에서 같은 인계를 직접 실행한다. Claude Code, Codex, Cursor가
+신호를 낸다(Cursor는 컨텍스트만). 이것으로 2.6까지 갖췄다. Workflow Runtime은
+향후 계획이다.
 
 모든 단계는 v2.x로 낸다. 메이저 버전은 올리지 않는다.
 
@@ -126,7 +127,7 @@ Head 자동 종료는 남아 있다.
 
 ## Phase 2. Head Migration
 
-릴리스 방향: v2.15.0 · 상태: 버려진 Head 인계와 Claude의 사용량 알림 출시. Codex·Cursor 신호와 자동 실행은 남음
+릴리스 방향: v2.15.0 · 상태: 2.1~2.6 출시. 실사용 검증은 Claude·Codex·Cursor 각각이 Head인 경우
 
 지휘권을 다른 세션으로 옮기고 기존 worker와 미처리 결과를 승계한다. 인계 성공은
 새 Head가 실제 작업을 이어서 수행했을 때 입증한다. 특정 하네스 전용이 아니다.
@@ -251,7 +252,7 @@ if (reviews.some(r => r.hasCriticalIssue)) {
 | 투자 대상 | 효과 / 5 | 공수 / 5 | 판단 |
 | --- | --- | --- | --- |
 | 공통 Continuity 기반 | 5 | 3 | store/CLI는 v2.14.2. `claim`은 v2.15.0 |
-| Head Migration | 5 | 4 | v2.15.5까지 수동 인계와 Claude 사용량 알림. Codex·Cursor 신호와 자동 실행은 남음 |
+| Head Migration | 5 | 4 | 수동 인계, 자동 퇴장, 사용량 조건부 인계(알림과 `--auto`)까지 출시 |
 | Dynamic Workflows | 5 | 5 | 그다음 마이너. 실행 모델을 확장하므로 따로 낸다 |
 | 하네스 호환성 | 4 | 2 | 매일의 경험이며 전부 패치다 |
 | 계층 탭·위성 UI | 2 | 3 | 현재 로드맵에서 제외한다 |

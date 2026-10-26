@@ -394,37 +394,71 @@ an atomic compare-and-close guarantee; use `--keep-pane` for shared sessions.
 ### Telling a head when to hand off
 
 `brgr config set-handoff-condition --kind codex [--exit-old] [--context-percent N]
-[--quota-percent N] [--agent-arg ARG]` makes brgr tell a head, at the end of its
-next brgr command, that it is over a limit you set. It is off until a target
-`--kind` and at least one threshold are named, and it never chooses a harness for
-you. brgr only tells: the note carries the exact handoff command (the one in the
-previous section) and the head runs it, because that command needs a verified pane. `config
-clear-handoff-condition` turns it off. The Herdr host bridge refuses to set it.
+[--quota-percent N] [--agent-arg ARG] [--auto]` makes brgr act when a head is over
+a limit you set. It is off until a target `--kind` and at least one threshold are
+named, and it never chooses a harness for you. `config clear-handoff-condition`
+turns it off. The Herdr host bridge refuses to set it.
 
-The figures come from the harness's own status line. `brgr integrate claude
-install --context` puts `brgr __context` in front of Claude Code's status line:
-it records the session's context-window fullness and both plan windows under
-`$BRGR_HOME/context/<session>.json`, then runs the status line you had with the
-same input, so it looks the same. With none, it draws `ctx 6% · 5h 7% · 7d 43%`.
-Nothing else in `settings.json` changes. The file is edited as text, only the
-`statusLine` member, after a copy under `$BRGR_HOME/backups/`; a symlinked
-`settings.json` is edited at its target. A status line that uses shell operators
-(pipes, redirections) is refused, because wrapping it would change its meaning.
-`integrate claude uninstall` restores the previous member byte for byte, and
-leaves a status line you changed since.
+By default brgr tells: at the end of the head's next brgr command, one note on
+stderr carries the exact handoff command (the one in the previous section), and
+the head runs it. With `--auto`, that same process runs the handoff itself. It is
+the head's own command, so it runs in the head's verified pane and goes through
+the same `head handoff`; it waits for the incoming agent to start, so that one
+command is slower. If the handoff cannot start, the note and the reason are
+printed instead. brgr never accepts a result, closes a pane without `--exit-old`,
+or falls back to another harness.
 
-The note is given once per crossing, and again after 30 minutes if the head is
-still over, or after it has dropped 15 points below the limit and come back. It is
-not given when:
+The figures come from the harness itself, and a harness reports them only after
+its own step:
 
-- the figure is unmeasured (Claude Code reports nothing before the first response),
+| Harness | Source | Reports |
+| --- | --- | --- |
+| Claude Code | status line, after `brgr integrate claude install --context` | context window, five-hour and seven-day plan |
+| Cursor Agent | status line, after `brgr integrate cursor install` | context window |
+| Codex | the brgr hooks (`brgr integrate codex install`) read the end of the session's rollout file | context window, five-hour and seven-day plan |
+
+For the two status lines, `brgr __context` goes in front of the status line you
+have, records the figures under `$BRGR_HOME/context/<session>.json`, and runs your
+status line with the same input, so it looks the same (with none, it draws
+`ctx 6% · 5h 7% · 7d 43%`). Only the `statusLine` member of the config file is
+edited, as text, after a copy under `$BRGR_HOME/backups/`; a symlinked file is
+edited at its target. A status line that uses shell operators is refused, because
+wrapping it would change its meaning. `uninstall` restores the previous member
+byte for byte, and leaves a status line you changed since. A leading `~/` in a
+chained command is expanded by brgr, since Cursor only promises it for the
+command path. Codex needs no change to its config beyond the hooks it already has.
+
+The note, or the handoff with `--auto`, happens once per crossing, and again after
+30 minutes if the head is still over, or after it has dropped 15 points below the
+limit and come back. It does not happen when:
+
+- the figure is unmeasured (a harness reports nothing before its first response),
   or older than 30 minutes; unmeasured is never over a limit;
 - the head already runs in the target harness, which would only be told again;
-- the caller is not the owner's bound session, or a handoff is already open.
+- the caller is not the owner's bound session, or a handoff is already open;
+- with a plan limit set, the target harness's own plan is already at it, judged by
+  the newest fresh report from that harness on this machine. The note then says so
+  and gives no command. A target that has not reported lately says nothing, and
+  Cursor reports no plan.
 
-Quota is the higher of the five-hour and seven-day windows. Only Claude Code
-reports figures so far; Codex and Cursor are not covered yet, and the usage of the
-incoming harness is not checked.
+Quota is the higher of the five-hour and seven-day windows.
+
+### After a handoff
+
+Completion notices go to the pane recorded for the owner's bound session. When
+the incoming head takes command, brgr records its pane: for a head started by
+`head handoff` that is the pane brgr opened, whose terminal and agent are checked
+and, for Codex, whose session is reported to Herdr; otherwise the pane is proven
+the way it is for `bind`. A head that took command by a takeover may run in a
+different harness than the one the owner id names (a Claude owner handed to a
+Codex head), so delivery follows what the pane actually runs. A worker that
+finished before the takeover has already told the old head; the result is in the
+new head's manifest as an undecided result.
+
+`head retire` normally needs the incoming head to have done an owner-side write.
+If the old head had decided everything and no worker is running, there is nothing
+to do, so `retire` records the handoff as resumed itself, but only when the owner
+has no open task, no undecided result and no unanswered worker message.
 
 ## Reclaiming task worktrees
 

@@ -267,8 +267,8 @@ async fn main() -> Result<()> {
 
 /// `brgr head ...`, then records the pane of a head that just took command.
 async fn head_command(paths: &Paths, command: head::HeadCommand, json_output: bool) -> Result<()> {
-    if let Some((owner, session)) = head::run(paths, command, json_output)? {
-        notification::register_incoming_head(paths, &owner, &session).await;
+    if let Some(incoming) = head::run(paths, command, json_output)? {
+        notification::register_incoming_head(paths, &incoming).await;
     }
     Ok(())
 }

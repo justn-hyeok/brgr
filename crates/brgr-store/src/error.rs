@@ -145,6 +145,8 @@ pub enum StoreError {
         from: TakeoverState,
         to: TakeoverState,
     },
+    #[error("takeover {0} still has open work: the incoming head resumes it by doing that work")]
+    TakeoverHasOpenWork(TakeoverId),
     #[error("takeover {0} is stale: the owner binding moved after it was requested")]
     TakeoverBindingConflict(TakeoverId),
     #[error("takeover idempotency key {0} was replayed for a different handoff")]

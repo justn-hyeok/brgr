@@ -355,7 +355,7 @@ case "$1 $2" in
   "agent get")
     s=idle
     [ -f "$FAKE_HERDR_DIR/status-$3" ] && s=$(cat "$FAKE_HERDR_DIR/status-$3")
-    echo "{\"result\":{\"agent\":{\"agent\":\"claude\",\"agent_status\":\"$s\"}}}" ;;
+    echo "{\"result\":{\"agent\":{\"agent\":\"claude\",\"pane_id\":\"$3\",\"agent_status\":\"$s\"}}}" ;;
   "pane layout") exit 1 ;;
   "pane read") ;;
   *) ;;
