@@ -1,5 +1,17 @@
 # Changelog
 
+## 2.15.3 — 2026-10-26
+
+- A Cursor owner (`cursor:<CURSOR_CONVERSATION_ID>`) is now told in its pane when
+  a task completes. Two places listed only `claude:` owners: registering the
+  owner pane from the caller's shell, and starting the notification dispatcher.
+  Before, the notice stayed pending forever (#162).
+- Tag releases no longer re-run `cargo fmt` and `cargo clippy`; the release pull
+  request already gates them (#167). This saves about 30 seconds of a tag job.
+- The lost-run revise test holds its worker on a file instead of a fixed sleep,
+  so it no longer fails on a slow runner (#159). Test only.
+- No store migration.
+
 ## 2.15.2 — 2026-10-26
 
 - `brgr head handoff TASK --kind claude|codex|... --goal TEXT` opens a new head
