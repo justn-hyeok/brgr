@@ -1,5 +1,18 @@
 # Changelog
 
+## 2.15.5 — 2026-10-26
+
+- `brgr config set-handoff-condition --kind codex [--exit-old] [--context-percent N]
+  [--quota-percent N] [--agent-arg ARG]` makes brgr tell a head, at the end of its
+  next brgr command, that its context window or plan usage passed a limit you set.
+  The note carries the exact `brgr head handoff` command; the head runs it. Off
+  until a target and a threshold are set; `clear-handoff-condition` turns it off.
+- `brgr integrate claude install --context` (opt-in) puts brgr's usage recorder in
+  front of Claude Code's status line and chains to the one you have. Only the
+  `statusLine` member of `settings.json` is edited, after a backup, and
+  `uninstall` restores it byte for byte. Only Claude Code reports figures so far.
+- No store migration. A config with a `[handoff]` table is refused by older brgr.
+
 ## 2.15.4 — 2026-10-26
 
 - `brgr head handoff` with Codex as the incoming head: the prompt now starts each
