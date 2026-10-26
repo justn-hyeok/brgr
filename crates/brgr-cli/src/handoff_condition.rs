@@ -1,7 +1,7 @@
 //! Telling a head that it is time to hand its command to another harness.
 //!
 //! Every brgr command a head runs may end with one note on stderr, like the
-//! failure banner, when the head's own context window or plan usage has passed
+//! failure banner, when the head's own plan usage has passed
 //! the user's threshold. The note carries the exact `brgr head handoff` command;
 //! the head runs it, because that command needs a verified pane and brgr never
 //! chooses a harness or closes a pane on its own.
@@ -68,11 +68,6 @@ fn measure(config: &HandoffConfig, signal: &Signal) -> Over {
             None => rearmed = false,
         }
     };
-    check(
-        "context window".to_owned(),
-        signal.context_percent,
-        config.context_percent,
-    );
     let quota = signal.quota();
     check(
         format!("{} plan window", quota.map_or("plan", |(name, _)| name)),
@@ -284,19 +279,18 @@ mod tests {
         HandoffConfig {
             kind: Some("codex".to_owned()),
             exit_old: true,
-            context_percent: Some(70),
             quota_percent: Some(85),
             agent_args: vec!["--yolo".to_owned()],
-            auto: false,
+            ..HandoffConfig::default()
         }
     }
 
-    fn signal(context: Option<f64>, quota: Option<f64>, at: u64) -> Signal {
+    fn signal(quota: Option<f64>, at: u64) -> Signal {
         Signal {
             session: "s".to_owned(),
             source: "claude".to_owned(),
             at,
-            context_percent: context,
+            context_percent: Some(99.0),
             context_window: Some(1_000_000),
             five_hour_percent: quota,
             five_hour_resets_at: None,
@@ -305,75 +299,76 @@ mod tests {
         }
     }
 
-    fn step(
-        state: State,
-        context: Option<f64>,
-        quota: Option<f64>,
-        now: u64,
-    ) -> (Option<String>, State) {
-        decide(
-            &config(),
-            &signal(context, quota, now),
-            state,
-            now,
-            "claude",
-            None,
-        )
+    fn step(state: State, quota: Option<f64>, now: u64) -> (Option<String>, State) {
+        decide(&config(), &signal(quota, now), state, now, "claude", None)
     }
 
     #[test]
     fn crossing_a_limit_gives_the_exact_command_once() {
-        let (text, state) = step(State::default(), Some(72.0), Some(10.0), 1_000);
+        let (text, state) = step(State::default(), Some(90.0), 1_000);
         let text = text.unwrap();
-        assert!(text.contains("context window 72% (limit 70%)"), "{text}");
+        assert!(
+            text.contains("five-hour plan window 90% (limit 85%)"),
+            "{text}"
+        );
         assert!(
             text.contains("brgr head handoff TASK --kind codex --exit-old --agent-arg=--yolo"),
             "{text}"
         );
         // The next command, a minute later, is not told again.
-        assert_eq!(step(state, Some(73.0), Some(10.0), 1_060).0, None);
+        assert_eq!(step(state, Some(91.0), 1_060).0, None);
+    }
+
+    #[test]
+    fn a_full_context_window_alone_says_nothing() {
+        // The signal carries a 99% context window; only the plan counts.
+        assert_eq!(step(State::default(), Some(10.0), 1_000).0, None);
+        assert_eq!(step(State::default(), None, 1_000).0, None);
+    }
+
+    #[test]
+    fn the_higher_plan_window_is_the_one_named() {
+        let mut seven = signal(Some(10.0), 1_000);
+        seven.seven_day_percent = Some(92.0);
+        let (text, _) = decide(&config(), &seven, State::default(), 1_000, "claude", None);
+        assert!(
+            text.unwrap().contains("seven-day plan window 92%"),
+            "the seven-day window is the higher one"
+        );
     }
 
     #[test]
     fn staying_over_is_told_again_after_the_repeat_interval() {
-        let (_, state) = step(State::default(), Some(72.0), None, 1_000);
-        assert_eq!(
-            step(state, Some(75.0), None, 1_000 + REPEAT_AFTER - 1).0,
-            None
-        );
-        assert!(
-            step(state, Some(75.0), None, 1_000 + REPEAT_AFTER)
-                .0
-                .is_some()
-        );
+        let (_, state) = step(State::default(), Some(90.0), 1_000);
+        assert_eq!(step(state, Some(92.0), 1_000 + REPEAT_AFTER - 1).0, None);
+        assert!(step(state, Some(92.0), 1_000 + REPEAT_AFTER).0.is_some());
     }
 
     #[test]
     fn dropping_well_below_the_limit_rearms_the_next_crossing() {
-        let (_, state) = step(State::default(), Some(72.0), None, 1_000);
-        // Near the limit is not "below": 60% is within the gap of 70%.
-        let (none, state) = step(state, Some(60.0), None, 1_100);
+        let (_, state) = step(State::default(), Some(90.0), 1_000);
+        // Near the limit is not "below": 75% is within the gap of 85%.
+        let (none, state) = step(state, Some(75.0), 1_100);
         assert_eq!(none, None);
-        assert_eq!(step(state, Some(72.0), None, 1_200).0, None);
-        // 40% is below limit minus the gap, and the quota is measured and low.
-        let (none, state) = step(state, Some(40.0), Some(10.0), 1_300);
+        assert_eq!(step(state, Some(90.0), 1_200).0, None);
+        // 50% is below limit minus the gap.
+        let (none, state) = step(state, Some(50.0), 1_300);
         assert_eq!(none, None);
-        assert!(step(state, Some(71.0), Some(10.0), 1_400).0.is_some());
+        assert!(step(state, Some(86.0), 1_400).0.is_some());
     }
 
     #[test]
     fn an_unmeasured_figure_is_never_over_and_never_rearms() {
-        assert_eq!(step(State::default(), None, None, 1_000).0, None);
-        let (_, state) = step(State::default(), Some(72.0), None, 1_000);
-        // Context vanished (for example just after a compaction): not rearmed.
-        let (none, state) = step(state, None, None, 1_100);
+        let (_, state) = step(State::default(), Some(90.0), 1_000);
+        // The plan figure vanished: not rearmed.
+        let (none, state) = step(state, None, 1_100);
         assert_eq!(none, None);
-        assert_eq!(step(state, Some(72.0), None, 1_200).0, None);
+        assert_eq!(step(state, Some(90.0), 1_200).0, None);
     }
 
     #[test]
     fn a_stale_signal_says_nothing() {
-        let stale = signal(Some(99.0), Some(99.0), 1_000);
+        let stale = signal(Some(99.0), 1_000);
         let (text, _) = decide(
             &config(),
             &stale,
@@ -389,7 +384,7 @@ mod tests {
     fn a_head_already_running_in_the_target_harness_is_not_told() {
         let (text, _) = decide(
             &config(),
-            &signal(Some(99.0), None, 1_000),
+            &signal(Some(99.0), 1_000),
             State::default(),
             1_000,
             "codex",
@@ -402,13 +397,12 @@ mod tests {
     fn nothing_is_said_until_a_target_and_a_threshold_are_set() {
         let mut off = config();
         off.kind = None;
-        let signal = signal(Some(99.0), Some(99.0), 1_000);
+        let signal = signal(Some(99.0), 1_000);
         assert_eq!(
             decide(&off, &signal, State::default(), 1_000, "claude", None).0,
             None
         );
         let mut no_limit = config();
-        no_limit.context_percent = None;
         no_limit.quota_percent = None;
         assert_eq!(
             decide(&no_limit, &signal, State::default(), 1_000, "claude", None).0,
@@ -417,18 +411,10 @@ mod tests {
     }
 
     #[test]
-    fn both_limits_are_named_when_both_are_over() {
-        let (text, _) = step(State::default(), Some(80.0), Some(90.0), 1_000);
-        let text = text.unwrap();
-        assert!(text.contains("context window 80%"), "{text}");
-        assert!(text.contains("five-hour plan window 90%"), "{text}");
-    }
-
-    #[test]
     fn a_target_already_at_its_plan_limit_is_named_instead_of_handed_to() {
         let (text, state) = decide(
             &config(),
-            &signal(Some(80.0), Some(10.0), 1_000),
+            &signal(Some(90.0), 1_000),
             State::default(),
             1_000,
             "claude",
@@ -441,7 +427,7 @@ mod tests {
         // Said once per crossing, like the command would have been.
         let (again, _) = decide(
             &config(),
-            &signal(Some(81.0), Some(10.0), 1_060),
+            &signal(Some(91.0), 1_060),
             state,
             1_060,
             "claude",
@@ -455,7 +441,7 @@ mod tests {
         for target in [None, Some(40.0), Some(84.9)] {
             let (text, _) = decide(
                 &config(),
-                &signal(Some(80.0), Some(10.0), 1_000),
+                &signal(Some(90.0), 1_000),
                 State::default(),
                 1_000,
                 "claude",
@@ -467,20 +453,5 @@ mod tests {
                 "{target:?}"
             );
         }
-    }
-
-    #[test]
-    fn the_target_is_not_checked_without_a_plan_limit() {
-        let mut context_only = config();
-        context_only.quota_percent = None;
-        let (text, _) = decide(
-            &context_only,
-            &signal(Some(80.0), Some(10.0), 1_000),
-            State::default(),
-            1_000,
-            "claude",
-            Some(99.0),
-        );
-        assert!(text.unwrap().contains("brgr head handoff TASK"));
     }
 }

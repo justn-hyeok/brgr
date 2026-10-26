@@ -364,7 +364,7 @@ pub(crate) enum ConfigCommand {
     /// Stop filing issues; the memo keeps recording.
     ClearIssueReporting,
     /// Tell a head, on its next brgr command, to hand its command to another
-    /// harness once its context or plan usage passes a threshold. brgr only
+    /// harness once its plan usage passes a threshold. brgr only
     /// tells; the head runs `brgr head handoff` itself.
     SetHandoffCondition {
         /// Herdr agent kind that takes over, for example `codex`.
@@ -373,12 +373,9 @@ pub(crate) enum ConfigCommand {
         /// Close this head's pane after the handoff.
         #[arg(long)]
         exit_old: bool,
-        /// Context window fullness, in percent, that triggers the note.
-        #[arg(long)]
-        context_percent: Option<u8>,
         /// Plan usage, in percent, of either window that triggers the note.
         #[arg(long)]
-        quota_percent: Option<u8>,
+        quota_percent: u8,
         /// Extra argument for the incoming agent, for example `--yolo`.
         #[arg(long = "agent-arg", allow_hyphen_values = true)]
         agent_args: Vec<String>,

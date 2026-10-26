@@ -393,10 +393,12 @@ an atomic compare-and-close guarantee; use `--keep-pane` for shared sessions.
 
 ### Telling a head when to hand off
 
-`brgr config set-handoff-condition --kind codex [--exit-old] [--context-percent N]
-[--quota-percent N] [--agent-arg ARG] [--auto]` makes brgr act when a head is over
-a limit you set. It is off until a target `--kind` and at least one threshold are
-named, and it never chooses a harness for you. `config clear-handoff-condition`
+`brgr config set-handoff-condition --kind codex --quota-percent N [--exit-old]
+[--agent-arg ARG] [--auto]` makes brgr act when a head's plan usage is over a limit
+you set. It is off until a target `--kind` and a plan threshold are named, and it
+never chooses a harness for you. A full context window is not a reason to hand
+off, so it is not a condition; a config written by 2.15.5 or 2.15.6 that names one
+still loads, and the threshold is ignored. `config clear-handoff-condition`
 turns it off. The Herdr host bridge refuses to set it.
 
 By default brgr tells: at the end of the head's next brgr command, one note on
@@ -413,9 +415,9 @@ its own step:
 
 | Harness | Source | Reports |
 | --- | --- | --- |
-| Claude Code | status line, after `brgr integrate claude install --context` | context window, five-hour and seven-day plan |
-| Cursor Agent | status line, after `brgr integrate cursor install` | context window |
-| Codex | the brgr hooks (`brgr integrate codex install`) read the end of the session's rollout file | context window, five-hour and seven-day plan |
+| Claude Code | status line, after `brgr integrate claude install --context` | five-hour and seven-day plan |
+| Cursor Agent | status line, after `brgr integrate cursor install` | no plan figure, so a Cursor head is never told |
+| Codex | the brgr hooks (`brgr integrate codex install`) read the end of the session's rollout file | five-hour and seven-day plan |
 
 For the two status lines, `brgr __context` goes in front of the status line you
 have, records the figures under `$BRGR_HOME/context/<session>.json`, and runs your
