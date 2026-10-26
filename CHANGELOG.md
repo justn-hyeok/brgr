@@ -1,5 +1,16 @@
 # Changelog
 
+## 2.15.4 — 2026-10-26
+
+- `brgr head handoff` with Codex as the incoming head: the prompt now starts each
+  command with `env BRGR_OWNER_ID=… BRGR_HOME=…`. A shared Codex daemon runs tool
+  calls in its own environment, which can hold another worker's owner id and not
+  the control home, so `head retire` failed with `BRGR_OWNER_ID differs`.
+- `brgr head handoff --kind cursor`: Cursor's "Workspace Trust Required" box is
+  answered for the task's own workspace. Before, the incoming head's first prompt
+  was typed into the box and lost while the handoff reported success.
+- No store migration.
+
 ## 2.15.3 — 2026-10-26
 
 - A Cursor owner (`cursor:<CURSOR_CONVERSATION_ID>`) is now told in its pane when
