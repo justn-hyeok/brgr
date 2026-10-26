@@ -262,6 +262,14 @@ async fn main() -> Result<()> {
     outcome
 }
 
+/// `brgr head ...`, then records the pane of a head that just took command.
+async fn head_command(paths: &Paths, command: head::HeadCommand, json_output: bool) -> Result<()> {
+    if let Some((owner, session)) = head::run(paths, command, json_output)? {
+        notification::register_incoming_head(paths, &owner, &session).await;
+    }
+    Ok(())
+}
+
 async fn plugin_command(paths: &Paths, command: PluginCommand) -> Result<()> {
     match command {
         PluginCommand::Open { no_focus, codex } => herdr_plugin::open(no_focus, codex).await,
@@ -295,7 +303,7 @@ async fn execute(paths: &Paths, command: Command, json_output: bool) -> Result<(
         ),
         Command::Cancel { task, tree, force } => cancel(paths, task, tree, force, json_output),
         Command::Bind { task, session } => bind(paths, task, session, json_output).await,
-        Command::Head { command } => head::run(paths, command, json_output),
+        Command::Head { command } => head_command(paths, command, json_output).await,
         command @ (Command::Accept { .. } | Command::Reject { .. }) => {
             decision_command(paths, &command, json_output)
         }

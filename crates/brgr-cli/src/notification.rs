@@ -24,6 +24,34 @@ const MAX_BACKOFF: Duration = Duration::from_secs(3);
 const MAX_LIFETIME: Duration = Duration::from_hours(24);
 const HERDR_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Records the pane of a head that has just taken command, and starts delivery
+/// of the notices a takeover requeued for it.
+///
+/// Notices go to the pane recorded for the owner's bound session, and a takeover
+/// binds a session nothing had recorded, so a worker that finished after the
+/// handoff still reached the old head's pane. The detached dispatcher cannot
+/// prove which pane the new head runs in; this command can. Best effort: a notice
+/// that cannot be delivered stays queued.
+pub async fn register_incoming_head(paths: &Paths, owner_id: &OwnerId, session_id: &str) {
+    let Ok(store) = Store::open(&paths.store) else {
+        return;
+    };
+    match register_current_surface(paths, &store, owner_id, session_id).await {
+        Ok(true) => {
+            for task in store
+                .pending_notification_tasks_for_session(session_id)
+                .unwrap_or_default()
+            {
+                if let Err(error) = spawn_for_task(paths, task) {
+                    eprintln!("brgr completion notification remains queued: {error}");
+                }
+            }
+        }
+        Ok(false) => {}
+        Err(error) => eprintln!("brgr completion notification remains queued: {error}"),
+    }
+}
+
 pub async fn register_current_surface(
     paths: &Paths,
     store: &Store,

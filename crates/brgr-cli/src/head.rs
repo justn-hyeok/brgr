@@ -98,8 +98,24 @@ pub(crate) enum HeadCommand {
     Exit { takeover: TakeoverId },
 }
 
-pub(crate) fn run(paths: &Paths, command: HeadCommand, json_output: bool) -> Result<()> {
+/// Runs a head command. Returns the owner and session that just took command,
+/// for `commit`, `claim` and `take`, so the caller can record the new head's pane.
+pub(crate) fn run(
+    paths: &Paths,
+    command: HeadCommand,
+    json_output: bool,
+) -> Result<Option<(OwnerId, String)>> {
     let store = Store::open(&paths.store)?;
+    let incoming = match &command {
+        HeadCommand::Commit { takeover } => store
+            .takeover(*takeover)?
+            .map(|record| (record.owner_id, record.to_session)),
+        HeadCommand::Claim { task, .. } | HeadCommand::Take { task, .. } => {
+            let owner = store.task(*task)?.owner_id;
+            crate::current_session()?.map(|session| (owner, session))
+        }
+        _ => None,
+    };
     match command {
         HeadCommand::Request { task, to, key } => {
             request(&store, task, &to, key, json_output)?;
@@ -166,7 +182,7 @@ pub(crate) fn run(paths: &Paths, command: HeadCommand, json_output: bool) -> Res
         HeadCommand::Take { task, offer } => take(paths, &store, task, &offer, json_output)?,
         HeadCommand::Exit { takeover } => exit_outgoing(paths, &store, takeover, json_output)?,
     }
-    Ok(())
+    Ok(incoming)
 }
 
 fn request(

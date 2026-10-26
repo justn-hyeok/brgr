@@ -3150,6 +3150,83 @@ fn idle_cursor_owner_is_told_when_its_task_completes() {
     assert!(delivered.contains("brgr_completion"), "{delivered}");
 }
 
+/// After a handoff the owner's completion notices follow the new head.
+///
+/// Notices go to the pane recorded for the owner's bound session. A takeover
+/// binds a new session, and nothing recorded its pane, so a worker that finished
+/// after the handoff, or a notice requeued by it, still went to the old head's
+/// pane. The incoming head's own commit now records its pane.
+#[test]
+fn a_new_head_receives_the_owners_completion_notices_after_a_handoff() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("brgr");
+    let workspace = temp.path().join("work");
+    let herdr = temp.path().join("herdr");
+    let agent_state = temp.path().join("agent-state");
+    let prompts = temp.path().join("prompts");
+    fs::create_dir_all(&workspace).unwrap();
+    fs::write(&agent_state, "idle").unwrap();
+    fs::write(
+        &herdr,
+        "#!/bin/sh\nif [ \"$1\" = --session ]; then shift 2; fi\ncase \"$1 $2\" in\n 'agent get') state=$(/bin/cat \"$BRGR_TEST_AGENT_STATE\"); printf '{\"result\":{\"agent\":{\"agent\":\"cursor\",\"pane_id\":\"%s\",\"agent_status\":\"%s\"}}}\\n' \"$3\" \"$state\";;\n 'agent prompt') printf '%s %s\\n' \"$3\" \"$(printf '%s' \"$4\" | /usr/bin/tr '\\n' ' ')\" >> \"$BRGR_TEST_PROMPTS\"; printf '{}\\n';;\n *) exit 2;;\nesac\n",
+    )
+    .unwrap();
+    fs::set_permissions(&herdr, fs::Permissions::from_mode(0o700)).unwrap();
+    add_fixture(&home, &gjc_fixture(), &temp.path().join("scratch"));
+    let head = |session: &'static str, pane: &'static str| {
+        vec![
+            ("CURSOR_CONVERSATION_ID", session),
+            ("HERDR_ENV", "1"),
+            ("HERDR_PANE_ID", pane),
+            ("HERDR_WORKSPACE_ID", "w1"),
+            ("HERDR_BIN_PATH", herdr.to_str().unwrap()),
+            ("HERDR_SESSION", "fixture-herdr"),
+            ("BRGR_TEST_AGENT_STATE", agent_state.to_str().unwrap()),
+            ("BRGR_TEST_PROMPTS", prompts.to_str().unwrap()),
+        ]
+    };
+    let outgoing = head("cursor-a", "w1:p1");
+    let incoming = head("cursor-b", "w1:p2");
+    let launch = json_output(&run(
+        &home,
+        &[
+            "run",
+            "BRGR_FIXTURE_OK",
+            "--workspace",
+            workspace.to_str().unwrap(),
+        ],
+        &outgoing,
+    ));
+    let task = launch["task_id"].as_str().unwrap();
+    let delivered_to = |pane: &str| {
+        (0..200).find_map(|_| {
+            let text = fs::read_to_string(&prompts).unwrap_or_default();
+            if text
+                .lines()
+                .any(|line| line.starts_with(pane) && line.contains(task))
+            {
+                return Some(text);
+            }
+            thread::sleep(Duration::from_millis(50));
+            None
+        })
+    };
+    delivered_to("w1:p1").expect("the completion did not reach the first head");
+    let requested = json_output(&run(
+        &home,
+        &["head", "request", task, "--to", "cursor-b"],
+        &outgoing,
+    ));
+    let takeover = requested["takeover_id"].as_str().unwrap();
+    json_output(&run(
+        &home,
+        &["head", "prepare", takeover, "--goal", "Carry on"],
+        &outgoing,
+    ));
+    json_output(&run(&home, &["head", "commit", takeover], &incoming));
+    delivered_to("w1:p2").expect("the requeued completion did not reach the new head's pane");
+}
+
 /// A worker's question reaches an idle Codex owner without another user turn.
 ///
 /// Only completions used to be pushed, so a question waited until the worker's
