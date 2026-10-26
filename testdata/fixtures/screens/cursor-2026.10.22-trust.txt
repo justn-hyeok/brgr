@@ -1,0 +1,40 @@
+cursor-agent --force
+  ╭─────────────────╮
+  │                 │
+  │  ⚠ Workspace    │
+  │  Trust          │
+  │  Required       │
+  │                 │
+  │  Cursor Agent   │
+  │  can execute    │
+  │  code and       │
+  │  access files   │
+  │  in this        │
+  │  directory.     │
+  │                 │
+  │  Do you trust   │
+  │  the contents   │
+  │  of this        │
+  │  directory?     │
+  │                 │
+  │    /private/tm  │
+  │    p/claude-50  │
+  │    1/-Users-ju  │
+  │    stn-dev-brg  │
+  │    r/2c6e674e-  │
+  │    b811-4b53-8  │
+  │    577-a4d60a8  │
+  │    cc2ab/scrat  │
+  │    chpad/curso  │
+  │    r-work       │
+  │                 │
+  │                 │
+  │    [a] Trust    │
+  │  this           │
+  │  workspace      │
+  │    [q] Quit     │
+  │                 │
+  │  ⏳ Trusting    │
+  │  workspace...   │
+  │                 │
+  ╰─────────────────╯

@@ -90,6 +90,9 @@ pub(super) fn classify(screen: &str, workspace: &Path) -> Screen {
     if let Some(resolution) = copilot_trust(screen, workspace) {
         return resolution;
     }
+    if let Some(resolution) = cursor_trust(screen, workspace) {
+        return resolution;
+    }
     let lower = screen.to_lowercase();
     // A trust prompt for some other folder is not the task's to accept.
     if squash(&lower).contains("trustthisfolder") {
@@ -272,6 +275,45 @@ fn copilot_trust(screen: &str, workspace: &Path) -> Option<Screen> {
     Some(trust_choice(screen, shown, "copilot-trust", |text| {
         text == "Yes"
     }))
+}
+
+/// Cursor Agent's "Workspace Trust Required" box. It has no menu: it names the
+/// key, `[a] Trust this workspace`, and `[q] Quit`. Accepted only for the task's
+/// workspace; the path is wrapped inside the box, so it is compared with the
+/// borders removed and must be exactly the workspace. Any other directory is a
+/// screen no rule answers, never a `Clear` one.
+fn cursor_trust(screen: &str, workspace: &Path) -> Option<Screen> {
+    let flat: String = screen
+        .chars()
+        .filter(|character| {
+            !character.is_whitespace() && !matches!(character, '│' | '╭' | '╮' | '╰' | '╯' | '─')
+        })
+        .collect();
+    if !flat.contains("WorkspaceTrustRequired") || !flat.contains("[a]Trustthisworkspace") {
+        return None;
+    }
+    // Once answered, the box stays drawn above the agent's own screen with this
+    // line in place of the key hint; pressing again would type into its input.
+    if flat.contains("Trustingworkspace") {
+        return None;
+    }
+    let workspace = squash(&workspace.to_string_lossy());
+    let shown = flat
+        .split_once("Doyoutrustthecontentsofthisdirectory?")
+        .and_then(|(_, after)| after.split_once("[a]Trustthisworkspace"))
+        .is_some_and(|(path, _)| {
+            // A wide pane draws a selection marker before `[a]`, after the path.
+            let path = path.trim_end_matches(['▶', '▸', '❯', '›', '>']);
+            path.trim_end_matches('/') == workspace.trim_end_matches('/')
+        });
+    Some(if shown {
+        Screen::Resolve {
+            rule: "cursor-trust",
+            keys: vec!["a"],
+        }
+    } else {
+        Screen::Unknown(head(screen))
+    })
 }
 
 /// Answers a harness's folder-trust menu: the option `accept` names when the
@@ -702,6 +744,50 @@ mod tests {
                 "{primary:?}"
             );
         }
+    }
+
+    /// Captured from Cursor Agent 2026.10.22 in a wide Herdr pane while it waits
+    /// for an answer; Cursor draws a `▶` before the selected `[a]` option.
+    const CURSOR_TRUST: &str =
+        include_str!("../../../../testdata/fixtures/screens/cursor-2026.10.22-trust-wide.txt");
+    const CURSOR_WORKSPACE: &str = "/private/tmp/claude-501/-Users-justn-dev-brgr/2c6e674e-b811-4b53-8577-a4d60a8cc2ab/scratchpad/cur3-work";
+    /// Captured from the same agent in a narrow pane after the prompt was
+    /// answered: the box is still on screen and says it is trusting.
+    const CURSOR_TRUST_ANSWERED: &str =
+        include_str!("../../../../testdata/fixtures/screens/cursor-2026.10.22-trust.txt");
+    const CURSOR_ANSWERED_WORKSPACE: &str = "/private/tmp/claude-501/-Users-justn-dev-brgr/2c6e674e-b811-4b53-8577-a4d60a8cc2ab/scratchpad/cursor-work";
+
+    #[test]
+    fn cursors_trust_prompt_for_the_task_workspace_is_accepted_with_its_key() {
+        assert_eq!(
+            classify(CURSOR_TRUST, Path::new(CURSOR_WORKSPACE)),
+            Screen::Resolve {
+                rule: "cursor-trust",
+                keys: vec!["a"],
+            }
+        );
+    }
+
+    #[test]
+    fn cursors_trust_prompt_for_another_folder_is_not_accepted() {
+        for other in [
+            "/private/tmp/claude-501/-Users-justn-dev-brgr/2c6e674e-b811-4b53-8577-a4d60a8cc2ab/scratchpad/cur3-wor",
+            "/private/tmp/claude-501",
+            "/somewhere/else",
+        ] {
+            assert!(
+                matches!(classify(CURSOR_TRUST, Path::new(other)), Screen::Unknown(_)),
+                "{other}"
+            );
+        }
+    }
+
+    #[test]
+    fn cursors_answered_trust_box_still_on_screen_is_not_answered_again() {
+        assert_eq!(
+            classify(CURSOR_TRUST_ANSWERED, Path::new(CURSOR_ANSWERED_WORKSPACE)),
+            Screen::Clear
+        );
     }
 
     #[test]
