@@ -1,0 +1,36 @@
+{
+  "session_id": "0a91ffd2-1a5e-4c75-b65a-54cc4b3b1fa0",
+  "prompt_id": "f28281a9-7b07-4394-b317-da16115e384f",
+  "effort": { "level": "medium" },
+  "session_name": "greeting",
+  "model": { "id": "claude-sonnet-5-5", "display_name": "Sonnet 5.5" },
+  "version": "2.1.293",
+  "output_style": { "name": "default" },
+  "cost": {
+    "total_cost_usd": 0.1582077,
+    "total_duration_ms": 19906,
+    "total_api_duration_ms": 2953,
+    "total_lines_added": 0,
+    "total_lines_removed": 0
+  },
+  "context_window": {
+    "total_input_tokens": 62144,
+    "total_output_tokens": 9,
+    "context_window_size": 1000000,
+    "current_usage": {
+      "input_tokens": 2,
+      "output_tokens": 9,
+      "cache_creation_input_tokens": 38306,
+      "cache_read_input_tokens": 23836
+    },
+    "used_percentage": 6,
+    "remaining_percentage": 94
+  },
+  "exceeds_200k_tokens": false,
+  "fast_mode": false,
+  "thinking": { "enabled": true },
+  "rate_limits": {
+    "five_hour": { "used_percentage": 7, "resets_at": 1793005200 },
+    "seven_day": { "used_percentage": 43, "resets_at": 1793131200 }
+  }
+}

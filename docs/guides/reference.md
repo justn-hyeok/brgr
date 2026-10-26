@@ -391,6 +391,41 @@ before closing. Another actor could still change the pane between that check
 and Herdr's close call. This is a best-effort cooperative-local guarantee, not
 an atomic compare-and-close guarantee; use `--keep-pane` for shared sessions.
 
+### Telling a head when to hand off
+
+`brgr config set-handoff-condition --kind codex [--exit-old] [--context-percent N]
+[--quota-percent N] [--agent-arg ARG]` makes brgr tell a head, at the end of its
+next brgr command, that it is over a limit you set. It is off until a target
+`--kind` and at least one threshold are named, and it never chooses a harness for
+you. brgr only tells: the note carries the exact handoff command (the one in the
+previous section) and the head runs it, because that command needs a verified pane. `config
+clear-handoff-condition` turns it off. The Herdr host bridge refuses to set it.
+
+The figures come from the harness's own status line. `brgr integrate claude
+install --context` puts `brgr __context` in front of Claude Code's status line:
+it records the session's context-window fullness and both plan windows under
+`$BRGR_HOME/context/<session>.json`, then runs the status line you had with the
+same input, so it looks the same. With none, it draws `ctx 6% · 5h 7% · 7d 43%`.
+Nothing else in `settings.json` changes. The file is edited as text, only the
+`statusLine` member, after a copy under `$BRGR_HOME/backups/`; a symlinked
+`settings.json` is edited at its target. A status line that uses shell operators
+(pipes, redirections) is refused, because wrapping it would change its meaning.
+`integrate claude uninstall` restores the previous member byte for byte, and
+leaves a status line you changed since.
+
+The note is given once per crossing, and again after 30 minutes if the head is
+still over, or after it has dropped 15 points below the limit and come back. It is
+not given when:
+
+- the figure is unmeasured (Claude Code reports nothing before the first response),
+  or older than 30 minutes; unmeasured is never over a limit;
+- the head already runs in the target harness, which would only be told again;
+- the caller is not the owner's bound session, or a handoff is already open.
+
+Quota is the higher of the five-hour and seven-day windows. Only Claude Code
+reports figures so far; Codex and Cursor are not covered yet, and the usage of the
+incoming harness is not checked.
+
 ## Reclaiming task worktrees
 
 Every Git-backed task gets its own worktree, which costs a full copy of the

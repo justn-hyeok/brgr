@@ -3,14 +3,17 @@ mod admission;
 mod adversary;
 mod bridge_host;
 mod caller_pane;
+mod claude_statusline;
 mod cli;
 mod codex_integration;
 mod config;
+mod context_signal;
 mod debate;
 mod error_memo;
 mod evidence;
 mod execution_mode;
 mod failure_banner;
+mod handoff_condition;
 mod harness_commands;
 mod head;
 mod herdr_plugin;
@@ -223,6 +226,7 @@ async fn main() -> Result<()> {
         Command::Plugin { .. }
             | Command::Supervise { .. }
             | Command::Hook { .. }
+            | Command::Context { .. }
             | Command::Notify { .. }
             | Command::TuiHost { .. }
             | Command::Session { .. }
@@ -240,6 +244,7 @@ async fn main() -> Result<()> {
         Command::Plugin { .. }
             | Command::Supervise { .. }
             | Command::Hook { .. }
+            | Command::Context { .. }
             | Command::Notify { .. }
             | Command::PaneRun(_)
             | Command::TuiHost { .. }
@@ -251,6 +256,7 @@ async fn main() -> Result<()> {
     let outcome = Box::pin(execute(&paths, cli.command, cli.json)).await;
     if !internal {
         failure_banner::print(&paths);
+        handoff_condition::print(&paths);
         pane_adapter::balance_all(&paths);
     }
     outcome
@@ -318,6 +324,7 @@ async fn execute(paths: &Paths, command: Command, json_output: bool) -> Result<(
             }
             Ok(())
         }
+        Command::Context { chain } => context_signal::run(paths, &chain),
         Command::Notify { task } => notification::deliver_pending(paths, task).await,
         Command::PaneRun(args) => pane_adapter::run_pane_adapter(paths, &args),
         Command::TuiHost { config } => tui_host::run(&config),
@@ -419,6 +426,37 @@ async fn config_command(paths: &Paths, command: &ConfigCommand, json_output: boo
         }
         ConfigCommand::ClearIssueReporting => {
             config.issues.auto_file = false;
+            config.save(&paths.config)?;
+        }
+        ConfigCommand::SetHandoffCondition {
+            kind,
+            exit_old,
+            context_percent,
+            quota_percent,
+            agent_args,
+        } => {
+            if kind.is_empty() || kind.contains(char::is_whitespace) {
+                bail!("--kind must be a Herdr agent kind such as codex");
+            }
+            if context_percent.is_none() && quota_percent.is_none() {
+                bail!("name at least one of --context-percent and --quota-percent");
+            }
+            for percent in [context_percent, quota_percent].into_iter().flatten() {
+                if !(1..=99).contains(percent) {
+                    bail!("a threshold is a percentage from 1 to 99");
+                }
+            }
+            config.handoff = config::HandoffConfig {
+                kind: Some(kind.clone()),
+                exit_old: *exit_old,
+                context_percent: *context_percent,
+                quota_percent: *quota_percent,
+                agent_args: agent_args.clone(),
+            };
+            config.save(&paths.config)?;
+        }
+        ConfigCommand::ClearHandoffCondition => {
+            config.handoff = config::HandoffConfig::default();
             config.save(&paths.config)?;
         }
     }

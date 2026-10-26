@@ -44,6 +44,8 @@ pub struct Config {
     pub issues: IssuesConfig,
     #[serde(skip_serializing_if = "RecertifyConfig::is_default")]
     pub recertify: RecertifyConfig,
+    #[serde(skip_serializing_if = "HandoffConfig::is_default")]
+    pub handoff: HandoffConfig,
     #[serde(skip_serializing_if = "CallingOptions::is_unset")]
     pub defaults: CallingOptions,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
@@ -112,6 +114,34 @@ impl Default for IssuesConfig {
             repo: None,
             min_count: 2,
         }
+    }
+}
+
+/// When a head is told to hand its command to another harness. Off until a
+/// target `kind` is named; brgr never picks a harness for the owner.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct HandoffConfig {
+    /// Herdr agent kind of the incoming head, for example `codex`.
+    pub kind: Option<String>,
+    /// Approve closing the outgoing head's pane after the handoff.
+    pub exit_old: bool,
+    /// Tell the head when its context window is this full, in percent.
+    pub context_percent: Option<u8>,
+    /// Tell the head when either plan window is this used, in percent.
+    pub quota_percent: Option<u8>,
+    /// Extra arguments for the incoming agent, for example a permission flag.
+    pub agent_args: Vec<String>,
+}
+
+impl HandoffConfig {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// The target and at least one threshold are set.
+    pub(crate) fn is_armed(&self) -> bool {
+        self.kind.is_some() && (self.context_percent.is_some() || self.quota_percent.is_some())
     }
 }
 

@@ -292,7 +292,7 @@ fn read_skill_receipt(path: &Path) -> Result<Option<SkillReceipt>> {
     Ok(Some(serde_json::from_slice(&fs::read(path)?)?))
 }
 
-fn claude_home() -> Result<PathBuf> {
+pub(crate) fn claude_home() -> Result<PathBuf> {
     if let Some(path) = env::var_os("CLAUDE_CONFIG_DIR") {
         return Ok(PathBuf::from(path));
     }
