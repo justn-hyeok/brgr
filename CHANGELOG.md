@@ -1,5 +1,25 @@
 # Changelog
 
+## 2.15.6 — 2026-10-27
+
+Completes roadmap 2.6: a head hands its command to another harness when its usage
+passes a limit you set.
+
+- Codex and Cursor report usage like Claude Code. Codex's brgr hooks read the end
+  of the session's rollout file; `brgr integrate cursor install` puts the usage
+  recorder in front of Cursor's status line, keeping yours.
+- `brgr config set-handoff-condition --auto` runs the handoff itself, at the end
+  of the head's next brgr command, instead of only telling the head. The target
+  harness is still named by you, and a target whose own plan is already at the
+  limit is named instead of handed to.
+- Fix: completion notices after a handoff never reached a head in another harness
+  (a Claude owner handed to Codex, and the reverse). The new head's pane was not
+  recorded, a Codex head's session was not reported to Herdr, and delivery
+  required the pane to run the harness the owner id names.
+- Fix: a handoff whose old head had already decided everything stayed committed
+  for ever. `head retire` now resumes it when the owner has no open work.
+- No store migration. A config with a `[handoff]` table is refused by older brgr.
+
 ## 2.15.5 — 2026-10-26
 
 - `brgr config set-handoff-condition --kind codex [--exit-old] [--context-percent N]
