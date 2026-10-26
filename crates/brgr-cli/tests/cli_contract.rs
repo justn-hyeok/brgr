@@ -3095,6 +3095,61 @@ fn idle_codex_parent_is_told_a_run_failed_with_its_reason() {
     assert!(prompt.contains("brgr result"), "{prompt}");
 }
 
+/// A Cursor owner gets the completion pushed into its pane like Codex and
+/// Claude Code do. Cursor runs in the Herdr pane and has no hook, so its own
+/// shell has to record the pane and a dispatcher has to be started for it.
+#[test]
+fn idle_cursor_owner_is_told_when_its_task_completes() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("brgr");
+    let workspace = temp.path().join("work");
+    let herdr = temp.path().join("herdr");
+    let agent_state = temp.path().join("agent-state");
+    let prompts = temp.path().join("prompts");
+    fs::create_dir_all(&workspace).unwrap();
+    fs::write(&agent_state, "idle").unwrap();
+    fs::write(
+        &herdr,
+        "#!/bin/sh\nif [ \"$1\" = --session ]; then shift 2; fi\ncase \"$1 $2\" in\n 'agent get') state=$(/bin/cat \"$BRGR_TEST_AGENT_STATE\"); printf '{\"result\":{\"agent\":{\"agent\":\"cursor\",\"pane_id\":\"w1:p1\",\"agent_status\":\"%s\"}}}\\n' \"$state\";;\n 'agent prompt') printf '%s\\n' \"$4\" >> \"$BRGR_TEST_PROMPTS\"; printf '{}\\n';;\n *) exit 2;;\nesac\n",
+    )
+    .unwrap();
+    fs::set_permissions(&herdr, fs::Permissions::from_mode(0o700)).unwrap();
+    add_fixture(&home, &gjc_fixture(), &temp.path().join("scratch"));
+    let owner = [
+        ("CURSOR_CONVERSATION_ID", "cursor-session"),
+        ("HERDR_ENV", "1"),
+        ("HERDR_PANE_ID", "w1:p1"),
+        ("HERDR_WORKSPACE_ID", "w1"),
+        ("HERDR_BIN_PATH", herdr.to_str().unwrap()),
+        ("HERDR_SESSION", "fixture-herdr"),
+        ("BRGR_TEST_AGENT_STATE", agent_state.to_str().unwrap()),
+        ("BRGR_TEST_PROMPTS", prompts.to_str().unwrap()),
+    ];
+    let launch = json_output(&run(
+        &home,
+        &[
+            "run",
+            "BRGR_FIXTURE_OK",
+            "--workspace",
+            workspace.to_str().unwrap(),
+        ],
+        &owner,
+    ));
+    let task = launch["task_id"].as_str().unwrap();
+    let delivered = (0..200)
+        .find_map(|_| {
+            let text = fs::read_to_string(&prompts).unwrap_or_default();
+            if text.contains(task) {
+                return Some(text);
+            }
+            thread::sleep(Duration::from_millis(50));
+            None
+        })
+        .expect("the completion was not delivered to the Cursor owner");
+    assert!(delivered.contains("FROM BRGR"), "{delivered}");
+    assert!(delivered.contains("brgr_completion"), "{delivered}");
+}
+
 /// A worker's question reaches an idle Codex owner without another user turn.
 ///
 /// Only completions used to be pushed, so a question waited until the worker's

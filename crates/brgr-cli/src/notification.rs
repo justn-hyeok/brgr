@@ -209,6 +209,7 @@ pub fn spawn_registration_and_delivery(paths: &Paths, task: &TaskSpec, session: 
                 || env::var_os("HERDR_PANE_ID").is_none()))
         || !(task.owner_id.as_str().starts_with("codex:")
             || task.owner_id.as_str().starts_with("claude:")
+            || task.owner_id.as_str().starts_with("cursor:")
             || task.owner_id.as_str().starts_with("worker:"))
         || crate::caller_pane::binary().is_none()
     {
