@@ -2255,3 +2255,65 @@ fn failed_result(store: &mut Store, owner_id: &OwnerId) -> (TaskSpec, ResultEnve
     store.commit_terminal_result(owner_id, &envelope).unwrap();
     (task, envelope)
 }
+
+/// What the incoming head does when there is nothing left to do.
+///
+/// `resumed` is recorded when the incoming head performs an owner-side write.
+/// If the old head decided everything and no worker is running, there is no such
+/// write to make, and the handoff would stay committed for ever.
+#[test]
+fn a_handoff_with_no_open_work_can_be_resumed_by_the_incoming_session_alone() {
+    let root = TempDir::new().unwrap();
+    let mut store = Store::open(root.path()).unwrap();
+    let owner_id = owner();
+    let epoch = head(&store, &owner_id);
+    let (task, envelope) = candidate(&mut store, &owner_id);
+    let takeover_id = prepared(&store, &owner_id, "idle-1", &bare_manifest(FROM));
+    // The old head decided the result before the new one took command.
+    store
+        .record_decision(&decision(&owner_id, &task, &envelope, FROM, epoch))
+        .unwrap();
+    store.commit_takeover(takeover_id).unwrap();
+
+    // Not the outgoing session, and not before the commit moved the binding.
+    assert!(store.resume_idle_takeover(takeover_id, FROM).is_err());
+    assert_eq!(state(&store, takeover_id), TakeoverState::Committed);
+
+    let resumed = store.resume_idle_takeover(takeover_id, TO).unwrap();
+    assert_eq!(resumed.state, TakeoverState::Resumed);
+    // A repeat changes nothing and appends no second event.
+    store.resume_idle_takeover(takeover_id, TO).unwrap();
+    assert_eq!(
+        kinds(&store, takeover_id),
+        [
+            TakeoverState::Requested,
+            TakeoverState::Prepared,
+            TakeoverState::Committed,
+            TakeoverState::Resumed
+        ]
+    );
+    store
+        .retire_takeover(takeover_id, RetireOutcome::Completed)
+        .unwrap();
+}
+
+#[test]
+fn an_incoming_session_with_open_work_cannot_resume_without_doing_it() {
+    let root = TempDir::new().unwrap();
+    let mut store = Store::open(root.path()).unwrap();
+    let owner_id = owner();
+    head(&store, &owner_id);
+    let (task, envelope) = candidate(&mut store, &owner_id);
+    let takeover_id = prepared(
+        &store,
+        &owner_id,
+        "busy-1",
+        &manifest(FROM, &task, &envelope),
+    );
+    store.commit_takeover(takeover_id).unwrap();
+    assert!(matches!(
+        store.resume_idle_takeover(takeover_id, TO),
+        Err(StoreError::TakeoverHasOpenWork(_))
+    ));
+    assert_eq!(state(&store, takeover_id), TakeoverState::Committed);
+}

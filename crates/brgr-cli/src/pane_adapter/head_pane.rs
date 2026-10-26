@@ -35,6 +35,10 @@ pub(crate) struct IncomingSpec<'a> {
     pub(crate) env: &'a [(&'a str, String)],
     pub(crate) label: &'a str,
     pub(crate) prompt: &'a str,
+    /// Called with the new pane and its terminal after it opens and before the
+    /// prompt is submitted, so what the prompt's reader will look up is already
+    /// recorded when it runs.
+    pub(crate) on_open: &'a dyn Fn(&str, Option<&str>),
 }
 
 /// Opens a pane beside the outgoing head, starts the agent in it, answers the
@@ -48,6 +52,8 @@ pub(crate) fn open_incoming(paths: &Paths, spec: &IncomingSpec<'_>) -> Result<In
         Some(spec.label),
         spec.env,
     )?;
+    let terminal = terminal_of(&pane);
+    (spec.on_open)(&pane, terminal.as_deref());
     let run = PaneRunArgs {
         caller: Some(spec.caller.to_owned()),
         native_executable: None,
@@ -87,12 +93,6 @@ pub(crate) fn open_incoming(paths: &Paths, spec: &IncomingSpec<'_>) -> Result<In
         let _ = herdr.call(&["pane", "close", &pane]);
         return Err(error);
     }
-    let terminal = herdr.call(&["pane", "get", &pane]).ok().and_then(|value| {
-        value
-            .pointer("/result/pane/terminal_id")
-            .and_then(Value::as_str)
-            .map(str::to_owned)
-    });
     Ok(IncomingHead { pane, terminal })
 }
 

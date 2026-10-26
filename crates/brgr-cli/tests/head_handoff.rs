@@ -168,7 +168,7 @@ case "$1 $2" in
   "agent get")
     s=idle
     [ -f "$FAKE_HERDR_DIR/status-$3" ] && s=$(cat "$FAKE_HERDR_DIR/status-$3")
-    echo "{\"result\":{\"agent\":{\"agent\":\"claude\",\"agent_status\":\"$s\"}}}" ;;
+    echo "{\"result\":{\"agent\":{\"agent\":\"claude\",\"pane_id\":\"$3\",\"agent_status\":\"$s\"}}}" ;;
   "pane layout") exit 1 ;;
   "pane read") ;;
   *) ;;
@@ -501,7 +501,7 @@ fn the_incoming_prompt_states_the_owner_and_home_on_every_command() {
     start_handoff(&home, &task_id, &fake, &dir, false);
     let log = calls(&dir);
     let prefix = "env BRGR_OWNER_ID='codex:head-takeover' BRGR_HOME='";
-    for command in ["head take", "status", "result", "head retire"] {
+    for command in ["head take", "status", "result", "head retire", "head exit"] {
         let at = log
             .find(&format!("{command} "))
             .or_else(|| log.find(&format!("{command}`")))
@@ -515,4 +515,79 @@ fn the_incoming_prompt_states_the_owner_and_home_on_every_command() {
             "`{command}` lacks the owner and home prefix: {log}"
         );
     }
+}
+
+fn surface_pane(home: &Path, owner: &str) -> Option<(String, String)> {
+    let database = home.join("store").join("brgr.sqlite3");
+    let connection = rusqlite::Connection::open(database).unwrap();
+    connection
+        .query_row(
+            "SELECT session_id, pane_id FROM owner_surfaces WHERE owner_id = ?1",
+            [owner],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .ok()
+}
+
+#[test]
+fn take_records_the_pane_the_handoff_opened_as_the_new_head_s_notification_pane() {
+    // A Codex head runs commands in its daemon's environment, which names
+    // another pane, and its screen may not show its own call yet. The pane that
+    // received the offer is the one brgr opened for it.
+    let (temp, home, workspace) = gjc_home();
+    let task_id = start_task(&home, &workspace);
+    let dir = temp.path().join("fake");
+    fs::create_dir_all(&dir).unwrap();
+    let fake = fake_herdr(&dir);
+    let key = offer_key(&start_handoff(&home, &task_id, &fake, &dir, false));
+    assert_eq!(surface_pane(&home, "codex:head-takeover"), None);
+    let wrong = herdr_env(&fake, &dir, "p-someone-else");
+    json_output(&run_with(
+        &home,
+        &["head", "take", &task_id, "--offer", &key],
+        &incoming_session(),
+        &wrong,
+    ));
+    assert_eq!(
+        surface_pane(&home, "codex:head-takeover"),
+        Some(("session-incoming".to_owned(), "p-new".to_owned()))
+    );
+}
+
+#[test]
+fn a_new_head_with_nothing_left_to_do_can_still_retire_the_handoff() {
+    // The old head decided the only result before the new one took command, as
+    // happens when the worker finishes while the incoming agent is starting.
+    // There is then no owner-side write for the incoming head to make.
+    let (temp, home, workspace) = gjc_home();
+    let task_id = start_task(&home, &workspace);
+    let dir = temp.path().join("fake");
+    fs::create_dir_all(&dir).unwrap();
+    let fake = fake_herdr(&dir);
+    let key = offer_key(&start_handoff(&home, &task_id, &fake, &dir, true));
+    json_output(&run(
+        &home,
+        &["accept", &task_id, "--reason", "decided before the handoff"],
+        &head_env(),
+    ));
+    let herdr = herdr_env(&fake, &dir, "p-new");
+    let taken = json_output(&run_with(
+        &home,
+        &["head", "take", &task_id, "--offer", &key],
+        &incoming_session(),
+        &herdr,
+    ));
+    let takeover_id = taken["takeover"]["takeover_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let retired = json_output(&run_with(
+        &home,
+        &["head", "retire", &takeover_id],
+        &incoming_session(),
+        &herdr,
+    ));
+    assert_eq!(retired["state"], "retired");
+    assert_eq!(retired["outgoing_head"]["closed"], true);
+    assert_eq!(closed_panes(&dir), ["p-old"], "{}", calls(&dir));
 }

@@ -12,7 +12,7 @@
 
 use std::{
     fs,
-    io::{Read as _, Write as _},
+    io::{Read as _, Seek as _, SeekFrom, Write as _},
     os::unix::fs::PermissionsExt as _,
     path::PathBuf,
     process::{Command, Stdio},
@@ -85,7 +85,7 @@ fn percent(value: &Value) -> Option<f64> {
 
 /// Reads Claude Code's status line input (also the shape Cursor Agent uses).
 /// `None` when it names no session.
-pub(crate) fn parse_status_line(input: &Value, at: u64) -> Option<Signal> {
+pub(crate) fn parse_status_line(input: &Value, at: u64, source: &str) -> Option<Signal> {
     let session = input.get("session_id")?.as_str()?.to_owned();
     if !valid_session(&session) {
         return None;
@@ -94,7 +94,7 @@ pub(crate) fn parse_status_line(input: &Value, at: u64) -> Option<Signal> {
     let limits = &input["rate_limits"];
     Some(Signal {
         session,
-        source: "status-line".to_owned(),
+        source: source.to_owned(),
         at,
         context_percent: percent(&window["used_percentage"]),
         context_window: window["context_window_size"].as_u64(),
@@ -121,6 +121,28 @@ pub(crate) fn read(paths: &Paths, session: &str, max_age: u64) -> Option<Signal>
     (signal.session == session && now().saturating_sub(signal.at) <= max_age).then_some(signal)
 }
 
+/// The plan usage, in percent, that the newest fresh report from `provider`
+/// carries. A plan is the account's, so any session of that harness will do;
+/// `None` when no session of it has reported lately, which says nothing.
+pub(crate) fn latest_quota(paths: &Paths, provider: &str, max_age: u64) -> Option<f64> {
+    let now = now();
+    fs::read_dir(paths.home.join("context"))
+        .ok()?
+        .filter_map(|entry| {
+            let path = entry.ok()?.path();
+            let name = path.file_name()?.to_str()?;
+            // `<session>.json` is a report; `<session>.note.json` is the note state.
+            if path.extension().is_none_or(|ext| ext != "json") || name.contains(".note.") {
+                return None;
+            }
+            serde_json::from_slice::<Signal>(&fs::read(&path).ok()?).ok()
+        })
+        .filter(|signal| signal.source == provider && now.saturating_sub(signal.at) <= max_age)
+        .filter_map(|signal| Some((signal.at, signal.quota()?.1)))
+        .max_by_key(|(at, _)| *at)
+        .map(|(_, quota)| quota)
+}
+
 /// The text a plain status line shows when there is none to chain to.
 fn summary(signal: &Signal) -> String {
     let mut parts = Vec::new();
@@ -136,18 +158,106 @@ fn summary(signal: &Signal) -> String {
     parts.join(" · ")
 }
 
+/// How much of a Codex rollout's end is read to find its last token report.
+const ROLLOUT_TAIL: u64 = 256 * 1024;
+
+/// Reads the last token report in the end of a Codex rollout file.
+///
+/// Codex writes an `event_msg` / `token_count` line after every model response.
+/// The context in use is the last request's total over the model's window; the
+/// cumulative total is not the context. The first line of a tail may be cut
+/// and is skipped like any line that is not JSON.
+pub(crate) fn parse_codex_rollout(session: &str, tail: &[u8], at: u64) -> Option<Signal> {
+    if !valid_session(session) {
+        return None;
+    }
+    let text = String::from_utf8_lossy(tail);
+    let report = text.lines().rev().find_map(|line| {
+        let value: Value = serde_json::from_str(line).ok()?;
+        (value["type"] == "event_msg"
+            && value["payload"]["type"] == "token_count"
+            && value["payload"]["info"].is_object())
+        .then(|| value["payload"].clone())
+    })?;
+    let window = report["info"]["model_context_window"]
+        .as_u64()
+        .filter(|window| *window > 0);
+    let used = report["info"]["last_token_usage"]["total_tokens"].as_u64();
+    // Basis points keep the arithmetic in integers; a context cannot be over full.
+    let context_percent = used.zip(window).and_then(|(used, window)| {
+        let basis_points = (u128::from(used) * 10_000 / u128::from(window)).min(10_000);
+        Some(f64::from(u32::try_from(basis_points).ok()?) / 100.0)
+    });
+    let mut signal = Signal {
+        session: session.to_owned(),
+        source: "codex".to_owned(),
+        at,
+        context_percent,
+        context_window: window,
+        five_hour_percent: None,
+        five_hour_resets_at: None,
+        seven_day_percent: None,
+        seven_day_resets_at: None,
+    };
+    for name in ["primary", "secondary"] {
+        let limit = &report["rate_limits"][name];
+        let percent = percent(&limit["used_percent"]);
+        let resets_at = limit["resets_at"].as_u64();
+        // The long window is the weekly one; anything up to a day is the short one.
+        if limit["window_minutes"]
+            .as_u64()
+            .is_some_and(|minutes| minutes > 1_440)
+        {
+            signal.seven_day_percent = percent;
+            signal.seven_day_resets_at = resets_at;
+        } else {
+            signal.five_hour_percent = percent;
+            signal.five_hour_resets_at = resets_at;
+        }
+    }
+    Some(signal)
+}
+
+/// Records a Codex session's figures from its rollout file. Never fails the hook.
+pub(crate) fn record_codex(paths: &Paths, session: &str, rollout: &std::path::Path) {
+    let read = || -> Result<Vec<u8>> {
+        let mut file = fs::File::open(rollout)?;
+        let length = file.metadata()?.len();
+        file.seek(SeekFrom::Start(length.saturating_sub(ROLLOUT_TAIL)))?;
+        let mut tail = Vec::new();
+        file.take(ROLLOUT_TAIL).read_to_end(&mut tail)?;
+        Ok(tail)
+    };
+    if let Some(signal) = read()
+        .ok()
+        .and_then(|tail| parse_codex_rollout(session, &tail, now()))
+    {
+        let _ = record(paths, &signal);
+    }
+}
+
+/// Cursor splits its status line command into words itself and promises `~`
+/// only for the command path, so a chained `~/script.sh` is expanded here.
+fn expand_home(word: &str) -> String {
+    match (word.strip_prefix("~/"), std::env::var_os("HOME")) {
+        (Some(rest), Some(home)) => PathBuf::from(home).join(rest).display().to_string(),
+        _ => word.to_owned(),
+    }
+}
+
 /// `brgr __context`: runs as a status line command. It records what it was
 /// given, then runs `chain` with the same input so the user's own status line
 /// still draws. Recording never fails the status line.
-pub(crate) fn run(paths: &Paths, chain: &[String]) -> Result<()> {
+pub(crate) fn run(paths: &Paths, source: &str, chain: &[String]) -> Result<()> {
     let mut input = Vec::new();
     std::io::stdin().take(INPUT_LIMIT).read_to_end(&mut input)?;
     let signal = serde_json::from_slice::<Value>(&input)
         .ok()
-        .and_then(|value| parse_status_line(&value, now()));
+        .and_then(|value| parse_status_line(&value, now(), source));
     if let Some(signal) = &signal {
         let _ = record(paths, signal);
     }
+    let chain: Vec<String> = chain.iter().map(|word| expand_home(word)).collect();
     let Some((program, arguments)) = chain.split_first() else {
         if let Some(signal) = &signal {
             println!("{}", summary(signal));
@@ -179,7 +289,7 @@ mod tests {
     );
 
     fn parse(text: &str) -> Option<Signal> {
-        parse_status_line(&serde_json::from_str(text).unwrap(), 1_000)
+        parse_status_line(&serde_json::from_str(text).unwrap(), 1_000, "claude")
     }
 
     #[test]
@@ -220,9 +330,56 @@ mod tests {
     }
 
     #[test]
+    fn only_a_leading_tilde_slash_is_a_home_directory() {
+        let home = std::env::var("HOME").unwrap();
+        assert_eq!(expand_home("~/bin/s.sh"), format!("{home}/bin/s.sh"));
+        assert_eq!(expand_home("~other/s.sh"), "~other/s.sh");
+        assert_eq!(expand_home("a/~/b"), "a/~/b");
+        assert_eq!(expand_home("--flag"), "--flag");
+    }
+
+    #[test]
     fn a_plain_status_line_shows_what_was_measured() {
         let line = summary(&parse(CLAUDE).unwrap());
         assert_eq!(line, "ctx 6% · 5h 7% · 7d 43%");
         assert_eq!(summary(&parse(BEFORE_RESPONSE).unwrap()), "");
+    }
+}
+
+#[cfg(test)]
+mod codex_tests {
+    use super::*;
+
+    /// Two real `token_count` reports from Codex 0.162.1, cut down to the fields
+    /// brgr reads.
+    const ROLLOUT: &str =
+        include_str!("../../../testdata/fixtures/codex-rollout/token-counts-0.162.1.jsonl");
+
+    #[test]
+    fn the_last_token_report_gives_the_context_in_use_and_both_plan_windows() {
+        let mut tail = String::from("{\"type\":\"event_msg\",\"payload\":{\"type\":\"agent_mes");
+        tail.push('\n');
+        tail.push_str(ROLLOUT);
+        tail.push_str("{\"type\":\"event_msg\",\"payload\":{\"type\":\"agent_message\"}}\n");
+        let signal = parse_codex_rollout("01a15cac-c100", tail.as_bytes(), 5).unwrap();
+        assert_eq!(signal.source, "codex");
+        assert_eq!(signal.context_window, Some(828_400));
+        // The second report, not the first: 94224 / 828400.
+        let percent = signal.context_percent.unwrap();
+        assert!((percent - 11.37).abs() < 0.01, "{percent}");
+        assert_eq!(signal.five_hour_percent, Some(24.0));
+        assert_eq!(signal.seven_day_percent, Some(4.0));
+        assert_eq!(signal.seven_day_resets_at, Some(1_793_084_253));
+    }
+
+    #[test]
+    fn a_rollout_without_a_token_report_gives_nothing() {
+        let tail = "{\"type\":\"event_msg\",\"payload\":{\"type\":\"agent_message\"}}\n";
+        assert!(parse_codex_rollout("s", tail.as_bytes(), 5).is_none());
+        // The first report of a session carries no usage yet.
+        let empty =
+            "{\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":null}}\n";
+        assert!(parse_codex_rollout("s", empty.as_bytes(), 5).is_none());
+        assert!(parse_codex_rollout("../x", ROLLOUT.as_bytes(), 5).is_none());
     }
 }

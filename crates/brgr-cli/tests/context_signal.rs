@@ -104,3 +104,75 @@ fn a_status_line_that_cannot_be_recorded_still_draws() {
     assert!(output.status.success());
     assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "drawn");
 }
+
+const ROLLOUT: &str =
+    include_str!("../../../testdata/fixtures/codex-rollout/token-counts-0.162.1.jsonl");
+
+fn codex_hook(home: &Path, event: &str, input: &Value) -> std::process::Output {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_brgr"))
+        .arg("--home")
+        .arg(home)
+        .args(["__hook", event])
+        .env_remove("HERDR_ENV")
+        .env_remove("HERDR_PANE_ID")
+        .env_remove("BRGR_OWNER_ID")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(input.to_string().as_bytes())
+        .unwrap();
+    child.wait_with_output().unwrap()
+}
+
+#[test]
+fn a_codex_hook_records_the_session_from_its_rollout_file() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("home");
+    let rollout = temp.path().join("rollout.jsonl");
+    fs::write(&rollout, ROLLOUT).unwrap();
+    for event in ["session-start", "user-prompt-submit", "stop"] {
+        let output = codex_hook(
+            &home,
+            event,
+            &serde_json::json!({
+                "session_id": "codex-session-1",
+                "cwd": temp.path(),
+                "transcript_path": rollout,
+            }),
+        );
+        assert!(
+            output.status.success(),
+            "{event}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let path = home.join("context/codex-session-1.json");
+        let signal: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+        assert_eq!(signal["source"], "codex", "{event}");
+        assert_eq!(signal["context_window"], 828_400, "{event}");
+        assert_eq!(signal["five_hour_percent"], 24.0, "{event}");
+        fs::remove_dir_all(home.join("context")).unwrap();
+    }
+}
+
+#[test]
+fn a_codex_hook_with_an_unreadable_rollout_still_answers() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("home");
+    let output = codex_hook(
+        &home,
+        "stop",
+        &serde_json::json!({
+            "session_id": "codex-session-2",
+            "cwd": temp.path(),
+            "transcript_path": temp.path().join("missing.jsonl"),
+        }),
+    );
+    assert!(output.status.success());
+    assert!(!home.join("context").exists());
+}

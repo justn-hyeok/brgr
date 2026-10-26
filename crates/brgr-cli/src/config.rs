@@ -132,6 +132,9 @@ pub struct HandoffConfig {
     pub quota_percent: Option<u8>,
     /// Extra arguments for the incoming agent, for example a permission flag.
     pub agent_args: Vec<String>,
+    /// Run the handoff itself, at the end of the head's next brgr command,
+    /// instead of only telling the head to.
+    pub auto: bool,
 }
 
 impl HandoffConfig {

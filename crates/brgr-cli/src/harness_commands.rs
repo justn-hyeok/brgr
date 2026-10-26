@@ -7,11 +7,12 @@ use std::{
 };
 
 use crate::cli::{
-    AddHarnessArgs, ClaudeCommand, CleanupCommand, CodexCommand, HarnessCommand, IntegrateCommand,
+    AddHarnessArgs, ClaudeCommand, CleanupCommand, CodexCommand, CursorCommand, HarnessCommand,
+    IntegrateCommand,
 };
 use crate::supervision::reconcile_pending;
 use crate::{
-    Paths, claude_statusline, codex_integration, pane_cleanup, print_value, require_owner,
+    Paths, codex_integration, pane_cleanup, print_value, require_owner, statusline_install,
 };
 use anyhow::{Context, Result, bail};
 use brgr_registry::{ActivationReceipt, Health, Registry};
@@ -259,17 +260,35 @@ pub(crate) fn integrate(paths: &Paths, command: IntegrateCommand, json_output: b
                 ClaudeCommand::Uninstall => codex_integration::claude_uninstall(&paths.home)?,
             };
             let status_line = match command {
-                ClaudeCommand::Install { context: true } => Some(claude_statusline::install(
+                ClaudeCommand::Install { context: true } => Some(statusline_install::install(
                     &paths.home,
+                    statusline_install::Harness::Claude,
                     &std::env::current_exe()?,
                 )?),
                 ClaudeCommand::Install { context: false } => None,
-                ClaudeCommand::Status => Some(claude_statusline::status(&paths.home)?),
-                ClaudeCommand::Uninstall => Some(claude_statusline::uninstall(&paths.home)?),
+                ClaudeCommand::Status => Some(statusline_install::status(
+                    &paths.home,
+                    statusline_install::Harness::Claude,
+                )?),
+                ClaudeCommand::Uninstall => Some(statusline_install::uninstall(
+                    &paths.home,
+                    statusline_install::Harness::Claude,
+                )?),
             };
             if let (Some(status_line), Some(object)) = (status_line, outcome.as_object_mut()) {
                 object.insert("status_line".to_owned(), status_line);
             }
+            print_value(&outcome, json_output);
+        }
+        IntegrateCommand::Cursor { command } => {
+            let harness = statusline_install::Harness::Cursor;
+            let outcome = match command {
+                CursorCommand::Install => {
+                    statusline_install::install(&paths.home, harness, &std::env::current_exe()?)?
+                }
+                CursorCommand::Status => statusline_install::status(&paths.home, harness)?,
+                CursorCommand::Uninstall => statusline_install::uninstall(&paths.home, harness)?,
+            };
             print_value(&outcome, json_output);
         }
     }

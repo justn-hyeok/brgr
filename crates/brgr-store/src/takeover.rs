@@ -511,6 +511,74 @@ impl Store {
         Ok(takeover)
     }
 
+    /// Resumes a committed handoff whose incoming head has nothing to do.
+    ///
+    /// `resumed` is recorded when the incoming head performs an owner-side
+    /// write, which proves it took the work over. When the outgoing head had
+    /// already decided everything and no worker is running, there is no such
+    /// write to make and the handoff would stay committed for ever. This records
+    /// `resumed` for that case only: the caller must be the incoming session, the
+    /// binding must still be its, and the owner must have no open task, no
+    /// undecided result and no unanswered worker message.
+    ///
+    /// Repeating it, or calling it for a handoff that already resumed, returns
+    /// the record as it stands.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::TakeoverNotFound`], a binding or state conflict
+    /// when the caller is not the incoming session of a committed handoff, or
+    /// [`StoreError::TakeoverHasOpenWork`].
+    pub fn resume_idle_takeover(
+        &self,
+        takeover_id: TakeoverId,
+        session_id: &str,
+    ) -> Result<Takeover, StoreError> {
+        let record = self
+            .takeover(takeover_id)?
+            .ok_or(StoreError::TakeoverNotFound(takeover_id))?;
+        if matches!(
+            record.state,
+            TakeoverState::Resumed | TakeoverState::Retired | TakeoverState::RetireFailed
+        ) && record.to_session == session_id
+        {
+            return Ok(record);
+        }
+        if record.state != TakeoverState::Committed {
+            return Err(takeover_state_conflict(
+                takeover_id,
+                record.state,
+                TakeoverState::Resumed,
+            ));
+        }
+        if record.to_session != session_id {
+            return Err(StoreError::TakeoverBindingConflict(takeover_id));
+        }
+        let references = self.handoff_references(&record.owner_id)?;
+        if !references.tasks.is_empty()
+            || !references.pending_result_ids.is_empty()
+            || !references.pending_message_ids.is_empty()
+        {
+            return Err(StoreError::TakeoverHasOpenWork(takeover_id));
+        }
+        let transaction = self.write_transaction()?;
+        assert_owner_binding(
+            &transaction,
+            &record.owner_id,
+            Some(session_id),
+            Some(record.committed_epoch()),
+        )?;
+        note_owner_action(
+            &transaction,
+            &record.owner_id,
+            session_id,
+            record.committed_epoch(),
+        )?;
+        let resumed = load_takeover(&transaction, &takeover_id.to_string())?;
+        transaction.commit()?;
+        Ok(resumed)
+    }
+
     /// Closes a resumed handoff.
     ///
     /// Only a handoff that resumed may be retired, so a record cannot present a

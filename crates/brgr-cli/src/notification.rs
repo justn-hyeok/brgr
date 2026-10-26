@@ -10,7 +10,7 @@ use std::{
 
 use anyhow::{Context as _, Result, bail};
 use brgr_protocol::{OwnerId, TaskId, TaskSpec, TerminalOutcome};
-use brgr_store::{NotificationTarget, QuestionTarget, Store, StoreError};
+use brgr_store::{NotificationTarget, QuestionTarget, Store, StoreError, TakeoverState};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::time::{sleep, timeout};
@@ -30,26 +30,124 @@ const HERDR_TIMEOUT: Duration = Duration::from_secs(5);
 /// Notices go to the pane recorded for the owner's bound session, and a takeover
 /// binds a session nothing had recorded, so a worker that finished after the
 /// handoff still reached the old head's pane. The detached dispatcher cannot
-/// prove which pane the new head runs in; this command can. Best effort: a notice
+/// prove which pane the new head runs in; this command can, and a head started by
+/// `head handoff` names its own pane, which brgr opened. Best effort: a notice
 /// that cannot be delivered stays queued.
-pub async fn register_incoming_head(paths: &Paths, owner_id: &OwnerId, session_id: &str) {
+pub async fn register_incoming_head(paths: &Paths, incoming: &crate::head::IncomingHead) {
     let Ok(store) = Store::open(&paths.store) else {
         return;
     };
-    match register_current_surface(paths, &store, owner_id, session_id).await {
-        Ok(true) => {
-            for task in store
-                .pending_notification_tasks_for_session(session_id)
-                .unwrap_or_default()
-            {
-                if let Err(error) = spawn_for_task(paths, task) {
-                    eprintln!("brgr completion notification remains queued: {error}");
-                }
+    let (owner_id, session_id) = (&incoming.owner, incoming.session.as_str());
+    let mut ready = false;
+    if let Some(offered) = &incoming.offered {
+        match register_offered_pane(paths, &store, owner_id, session_id, offered).await {
+            Ok(done) => ready = done,
+            Err(error) => eprintln!("brgr completion notification remains queued: {error}"),
+        }
+    }
+    if !ready {
+        match register_current_surface(paths, &store, owner_id, session_id).await {
+            Ok(done) => ready = done,
+            Err(error) => eprintln!("brgr completion notification remains queued: {error}"),
+        }
+    }
+    if ready {
+        for task in store
+            .pending_notification_tasks_for_session(session_id)
+            .unwrap_or_default()
+        {
+            if let Err(error) = spawn_for_task(paths, task) {
+                eprintln!("brgr completion notification remains queued: {error}");
             }
         }
-        Ok(false) => {}
-        Err(error) => eprintln!("brgr completion notification remains queued: {error}"),
     }
+}
+
+/// Whether `session` took command of `owner` by a takeover. Such a head may run
+/// in a different harness than the one the owner id names.
+fn is_taken_head(store: &Store, owner_id: &OwnerId, session: &str) -> bool {
+    store.owner_takeovers(owner_id).is_ok_and(|takeovers| {
+        takeovers.iter().any(|takeover| {
+            takeover.to_session == session
+                && matches!(
+                    takeover.state,
+                    TakeoverState::Committed
+                        | TakeoverState::Resumed
+                        | TakeoverState::Retired
+                        | TakeoverState::RetireFailed
+                )
+        })
+    })
+}
+
+/// The owner-inbox kind a Herdr agent reports, if it is one.
+fn inbox_kind(live: &str) -> Option<&'static str> {
+    match live {
+        "claude" => Some("claude"),
+        "cursor" => Some("cursor"),
+        "codex" => Some("codex"),
+        _ => None,
+    }
+}
+
+/// Records the pane `head handoff` opened, proven by what Herdr says about it
+/// now: it is still the recorded terminal and runs an owner-inbox agent. A Codex
+/// head's session is reported to Herdr, as it is for any Codex owner.
+async fn register_offered_pane(
+    paths: &Paths,
+    store: &Store,
+    owner_id: &OwnerId,
+    session_id: &str,
+    offered: &crate::head::OfferedPane,
+) -> Result<bool> {
+    let binary = PathBuf::from(&offered.herdr_bin);
+    if !binary.is_absolute() || !binary.is_file() {
+        return Ok(false);
+    }
+    if offered.terminal.is_some()
+        && crate::pane_adapter::head_pane::terminal_of(&offered.pane) != offered.terminal
+    {
+        return Ok(false);
+    }
+    let Some((bound, epoch)) = store.owner_binding(owner_id)? else {
+        return Ok(false);
+    };
+    if bound != session_id {
+        return Ok(false);
+    }
+    let binary = binary
+        .to_str()
+        .context("Herdr executable path is not UTF-8")?;
+    let herdr_session = offered.herdr_session.as_deref();
+    let agent = recorded_agent(binary, herdr_session, &offered.pane).await?;
+    let Some(kind) = agent
+        .get("agent")
+        .and_then(Value::as_str)
+        .and_then(inbox_kind)
+    else {
+        return Ok(false);
+    };
+    if agent.get("pane_id").and_then(Value::as_str) != Some(offered.pane.as_str()) {
+        bail!("recorded Herdr pane is not the incoming head's pane");
+    }
+    if kind == "codex" {
+        ensure_codex_session_reported(binary, herdr_session, &offered.pane, session_id, &agent)
+            .await?;
+    }
+    if kind == "claude"
+        && let Some(process) = claude_ancestor(&offered.pane)
+    {
+        record_claude_owner(paths, session_id, &process)?;
+    }
+    store.register_owner_surface(
+        owner_id,
+        session_id,
+        epoch,
+        &offered.pane,
+        herdr_session,
+        binary,
+    )?;
+    Ok(true)
 }
 
 pub async fn register_current_surface(
@@ -94,6 +192,12 @@ pub async fn register_current_surface(
     let herdr_session = env::var("HERDR_SESSION").ok();
     let agent = recorded_agent(binary, herdr_session.as_deref(), &pane).await?;
     let recorded_kind = agent.get("agent").and_then(Value::as_str);
+    // A head that took command by a takeover runs whatever harness it runs.
+    let kind = if is_taken_head(store, owner_id, session_id) {
+        recorded_kind.and_then(inbox_kind).unwrap_or(kind)
+    } else {
+        kind
+    };
     if recorded_kind.is_some_and(|found| !crate::caller_pane::owner_inbox_kind(found)) {
         eprintln!(
             "brgr: Herdr agent {} is not an owner inbox; FROM BRGR will not arrive. Use `brgr watch`.",
@@ -516,6 +620,9 @@ struct OwnerPane<'a> {
     pane_id: &'a str,
     session_id: &'a str,
     owner_kind: &'a str,
+    /// A head that took command by a takeover: its pane runs whatever harness it
+    /// runs, not necessarily the one the owner id names.
+    any_kind: bool,
 }
 
 /// The Claude Code process that registered an owner session's pane.
@@ -644,6 +751,8 @@ async fn try_deliver(paths: &Paths, target: &NotificationTarget) -> Result<()> {
             pane_id: &target.pane_id,
             session_id: &target.session_id,
             owner_kind: owner_agent(target.owner_id.as_str()).unwrap_or("codex"),
+            any_kind: Store::open(&paths.store)
+                .is_ok_and(|store| is_taken_head(&store, &target.owner_id, &target.session_id)),
         },
         &body,
     )
@@ -690,6 +799,10 @@ async fn deliver_question(paths: &Paths, target: &QuestionTarget) -> Result<()> 
             pane_id: &target.pane_id,
             session_id: &target.session_id,
             owner_kind: owner_agent(&target.owner_id).unwrap_or("codex"),
+            any_kind: OwnerId::new(target.owner_id.clone()).is_ok_and(|owner| {
+                Store::open(&paths.store)
+                    .is_ok_and(|store| is_taken_head(&store, &owner, &target.session_id))
+            }),
         },
         &body,
     )
@@ -728,9 +841,16 @@ async fn prompt_owner(paths: &Paths, pane: &OwnerPane<'_>, body: &str) -> Result
     let agent = state
         .pointer("/result/agent")
         .context("Herdr did not return an agent")?;
-    if agent.get("agent").and_then(Value::as_str) != Some(pane.owner_kind)
+    let live = agent.get("agent").and_then(Value::as_str);
+    let kind = if pane.any_kind {
+        live.and_then(inbox_kind)
+    } else {
+        Some(pane.owner_kind)
+    };
+    if kind.is_none()
+        || live != kind
         || agent.get("pane_id").and_then(Value::as_str) != Some(pane.pane_id)
-        || (pane.owner_kind == "codex"
+        || (kind == Some("codex")
             && agent
                 .pointer("/agent_session/value")
                 .and_then(Value::as_str)
@@ -738,7 +858,7 @@ async fn prompt_owner(paths: &Paths, pane: &OwnerPane<'_>, body: &str) -> Result
     {
         bail!("recorded parent agent identity changed");
     }
-    if pane.owner_kind == "claude" {
+    if kind == Some("claude") {
         claude_owner_present(paths, pane.session_id, pane.pane_id)?;
     }
     if !matches!(

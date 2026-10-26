@@ -1,4 +1,5 @@
-//! `brgr integrate claude install --context`, against a scratch Claude config.
+//! `brgr integrate claude install --context` and `integrate cursor install`,
+//! against scratch configs.
 
 use std::{
     fs,
@@ -208,4 +209,90 @@ fn a_plain_install_does_not_touch_the_status_line() {
     let installed = json(&brgr(&setup, &["install"]));
     assert!(installed.get("status_line").is_none());
     assert_eq!(fs::read_to_string(settings(&setup)).unwrap(), original);
+}
+
+fn cursor(setup: &Setup, args: &[&str]) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_brgr"))
+        .arg("--home")
+        .arg(&setup.home)
+        .arg("--json")
+        .args(["integrate", "cursor"])
+        .args(args)
+        .env("CURSOR_CONFIG_DIR", &setup.config)
+        .output()
+        .unwrap()
+}
+
+const CURSOR_CONFIG: &str = "{\n  \"permissions\": {\n    \"allow\": [\"Shell(ls)\"],\n    \"deny\": []\n  },\n  \"version\": 1\n}\n";
+
+#[test]
+fn cursor_install_adds_a_recorder_tagged_as_cursor_and_uninstall_restores_the_file() {
+    let setup = setup();
+    let path = setup.config.join("cli-config.json");
+    fs::write(&path, CURSOR_CONFIG).unwrap();
+    let installed = json(&cursor(&setup, &["install"]));
+    assert_eq!(installed["status"], "installed");
+    let command = status_line_command(&path);
+    assert!(command.ends_with(" __context --source cursor"), "{command}");
+    // The other settings are untouched.
+    let value: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert_eq!(value["permissions"]["allow"][0], "Shell(ls)");
+    assert_eq!(json(&cursor(&setup, &["status"]))["status"], "installed");
+    json(&cursor(&setup, &["uninstall"]));
+    assert_eq!(fs::read_to_string(&path).unwrap(), CURSOR_CONFIG);
+}
+
+#[test]
+fn cursor_keeps_the_status_line_it_had_and_its_other_fields() {
+    let setup = setup();
+    let path = setup.config.join("cli-config.json");
+    let original = "{\n  \"statusLine\": {\n    \"type\": \"command\",\n    \"command\": \"~/.cursor/statusline.sh\",\n    \"padding\": 2\n  },\n  \"version\": 1\n}\n";
+    fs::write(&path, original).unwrap();
+    json(&cursor(&setup, &["install"]));
+    let value: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert_eq!(value["statusLine"]["padding"], 2);
+    assert!(
+        value["statusLine"]["command"]
+            .as_str()
+            .unwrap()
+            .ends_with(" __context --source cursor -- ~/.cursor/statusline.sh")
+    );
+    json(&cursor(&setup, &["uninstall"]));
+    assert_eq!(fs::read_to_string(&path).unwrap(), original);
+}
+
+#[test]
+fn a_chained_tilde_path_is_expanded_by_brgr_when_the_harness_does_not() {
+    let setup = setup();
+    let script = setup.config.join("bin/status.sh");
+    fs::create_dir_all(script.parent().unwrap()).unwrap();
+    fs::write(&script, "#!/bin/bash\ncat >/dev/null\necho from-home\n").unwrap();
+    fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_brgr"))
+        .arg("--home")
+        .arg(&setup.home)
+        .args(["__context", "--source", "cursor", "--", "~/bin/status.sh"])
+        .env("HOME", &setup.config)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(CLAUDE.as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "from-home");
+    let signal: Value = serde_json::from_slice(
+        &fs::read(
+            setup
+                .home
+                .join("context/0a91ffd2-1a5e-4c75-b65a-54cc4b3b1fa0.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(signal["source"], "cursor");
 }

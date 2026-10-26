@@ -19,6 +19,7 @@ pub(crate) async fn hook(paths: &Paths, event: HookEvent) -> Result<()> {
     let input: HookInput = serde_json::from_str(&input).unwrap_or(HookInput {
         session_id: None,
         cwd: None,
+        transcript_path: None,
     });
     // A Codex worker runs in a brgr task worktree, and Codex runs every
     // installed hook for it too. This hook is for owners: binding the worker's
@@ -35,6 +36,9 @@ pub(crate) async fn hook(paths: &Paths, event: HookEvent) -> Result<()> {
         println!("{{}}");
         return Ok(());
     };
+    if let Some(rollout) = &input.transcript_path {
+        crate::context_signal::record_codex(paths, &session_id, rollout);
+    }
     let owner = OwnerId::new(format!("codex:{session_id}"))?;
     let source = crate::caller_pane::for_session(&session_id, None);
     crate::invocation::capture_hook(session_id.clone(), source.clone());
@@ -72,6 +76,12 @@ pub(crate) async fn hook(paths: &Paths, event: HookEvent) -> Result<()> {
         }
     }
     let pending = store.pending_for_session(&session_id)?;
+    emit(event, &session_id, &pending);
+    Ok(())
+}
+
+/// Prints the hook's answer for the session's pending results.
+fn emit(event: HookEvent, session_id: &str, pending: &[brgr_protocol::InboxItem]) {
     if pending.is_empty() {
         if event == HookEvent::Stop {
             println!("{{}}");
@@ -84,7 +94,7 @@ pub(crate) async fn hook(paths: &Paths, event: HookEvent) -> Result<()> {
                 json!({"hookSpecificOutput":{"hookEventName":format!("{event:?}"),"additionalContext":format!("brgr calling context for this session: brgr --as {session_id}. Put exactly these options right after `brgr` in every brgr command, and do not add --source-pane.")}})
             );
         }
-        return Ok(());
+        return;
     }
     let handles = pending
         .iter()
@@ -117,7 +127,6 @@ pub(crate) async fn hook(paths: &Paths, event: HookEvent) -> Result<()> {
             })
         ),
     }
-    Ok(())
 }
 
 /// Whether a working directory lies in one of this control home's task
