@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.15.7 — 2026-10-27
 
 - A handoff condition is plan usage only. `set-handoff-condition` no longer takes
   `--context-percent`, and `--quota-percent` is required: a full context window is
