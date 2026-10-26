@@ -397,8 +397,8 @@ an atomic compare-and-close guarantee; use `--keep-pane` for shared sessions.
 [--quota-percent N] [--agent-arg ARG]` makes brgr tell a head, at the end of its
 next brgr command, that it is over a limit you set. It is off until a target
 `--kind` and at least one threshold are named, and it never chooses a harness for
-you. brgr only tells: the note carries the exact `brgr head handoff` command and
-the head runs it, because that command needs a verified pane. `config
+you. brgr only tells: the note carries the exact handoff command (the one in the
+previous section) and the head runs it, because that command needs a verified pane. `config
 clear-handoff-condition` turns it off. The Herdr host bridge refuses to set it.
 
 The figures come from the harness's own status line. `brgr integrate claude
