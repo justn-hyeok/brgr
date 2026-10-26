@@ -853,10 +853,11 @@ pub(crate) async fn start_task(
         )?;
     }
     drop(admission);
-    // Claude Code has no hook that binds its pane, and the detached dispatcher
-    // cannot prove it runs inside that pane. This shell can, so record the
-    // owner's pane now.
-    if launch.spec.owner_id.as_str().starts_with("claude:")
+    // Claude Code and Cursor have no hook that binds their pane, and the
+    // detached dispatcher cannot prove it runs inside that pane. This shell
+    // can, so record the owner's pane now.
+    if (launch.spec.owner_id.as_str().starts_with("claude:")
+        || launch.spec.owner_id.as_str().starts_with("cursor:"))
         && let Some(session) = session.as_deref()
         && let Err(error) =
             notification::register_current_surface(paths, &store, &launch.spec.owner_id, session)
