@@ -3,7 +3,6 @@ mod admission;
 mod adversary;
 mod bridge_host;
 mod caller_pane;
-mod claude_statusline;
 mod cli;
 mod codex_integration;
 mod config;
@@ -27,6 +26,7 @@ mod pane_adapter;
 mod pane_cleanup;
 mod plugin_bridge;
 mod sleep_guard;
+mod statusline_install;
 mod supervision;
 mod task_commands;
 mod tree_status;
@@ -194,6 +194,9 @@ struct HookInput {
     /// The session's working directory, which Codex sends with every hook.
     #[serde(default)]
     cwd: Option<PathBuf>,
+    /// Codex's rollout file for the session, which holds its token reports.
+    #[serde(default)]
+    transcript_path: Option<PathBuf>,
 }
 
 fn calling_cli() -> Cli {
@@ -332,7 +335,7 @@ async fn execute(paths: &Paths, command: Command, json_output: bool) -> Result<(
             }
             Ok(())
         }
-        Command::Context { chain } => context_signal::run(paths, &chain),
+        Command::Context { source, chain } => context_signal::run(paths, source.as_str(), &chain),
         Command::Notify { task } => notification::deliver_pending(paths, task).await,
         Command::PaneRun(args) => pane_adapter::run_pane_adapter(paths, &args),
         Command::TuiHost { config } => tui_host::run(&config),
@@ -442,6 +445,7 @@ async fn config_command(paths: &Paths, command: &ConfigCommand, json_output: boo
             context_percent,
             quota_percent,
             agent_args,
+            auto,
         } => {
             if kind.is_empty() || kind.contains(char::is_whitespace) {
                 bail!("--kind must be a Herdr agent kind such as codex");
@@ -460,6 +464,7 @@ async fn config_command(paths: &Paths, command: &ConfigCommand, json_output: boo
                 context_percent: *context_percent,
                 quota_percent: *quota_percent,
                 agent_args: agent_args.clone(),
+                auto: *auto,
             };
             config.save(&paths.config)?;
         }

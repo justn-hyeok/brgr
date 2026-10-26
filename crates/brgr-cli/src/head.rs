@@ -572,6 +572,13 @@ fn handoff(
     args: &HandoffArgs,
     json_output: bool,
 ) -> Result<()> {
+    let receipt = open_handoff(paths, store, task, args)?;
+    print_value(&receipt, json_output);
+    Ok(())
+}
+
+/// Records the offer and opens the incoming head's pane; returns the receipt.
+fn open_handoff(paths: &Paths, store: &Store, task: TaskId, args: &HandoffArgs) -> Result<Value> {
     let spec = store.task(task)?;
     let owner_id = spec.owner_id;
     let (session, epoch) = require_owner(store, &owner_id)?;
@@ -624,7 +631,9 @@ fn handoff(
          2) Read the open tasks with `{brgr} status {task} --tree`. \
          3) Goal to finish: {goal}. Resume it: decide pending results with `{brgr} result` (accept or reject), \
          answer worker questions, or take the next action on the open tasks. Do not restart workers. \
-         4) Once you have done that, run `{brgr} head retire TAKEOVER` with the takeover id from step 1.",
+         4) Once you have done that, run `{brgr} head retire TAKEOVER` with the takeover id from step 1. \
+         5) If the retire output says `outgoing_head.closed` is false, the previous head was still \
+         working: when it is idle, run `{brgr} head exit TAKEOVER` once; never close its pane by hand.",
         goal = args.goal,
     );
     let workspace = std::env::current_dir()?;
@@ -654,17 +663,52 @@ fn handoff(
             return Err(error);
         }
     };
-    print_value(
-        &json!({
-            "offer": key,
-            "incoming_pane": opened.pane,
-            "incoming_terminal": opened.terminal,
-            "exit_old": args.exit_old,
-            "next": "the incoming head runs `brgr head take` itself; this head stays the head until it does",
-        }),
-        json_output,
-    );
-    Ok(())
+    Ok(json!({
+        "offer": key,
+        "incoming_pane": opened.pane,
+        "incoming_terminal": opened.terminal,
+        "exit_old": args.exit_old,
+        "next": "the incoming head runs `brgr head take` itself; this head stays the head until it does",
+    }))
+}
+
+/// What the head's own brgr command does once a handoff condition holds and the
+/// owner allowed it: the same `head handoff`, from the head's verified pane.
+pub(crate) fn auto_handoff(
+    paths: &Paths,
+    store: &Store,
+    owner: &brgr_protocol::OwnerId,
+    config: &crate::config::HandoffConfig,
+    reasons: &[String],
+) -> Result<Value> {
+    let kind = config
+        .kind
+        .clone()
+        .context("no handoff target is configured")?;
+    // Any task the owner has names the owner's binding; the newest is the least
+    // likely to be gone.
+    let task = store
+        .tasks(100)?
+        .into_iter()
+        .find(|spec| &spec.owner_id == owner)
+        .context("the owner has no recent task to hand off from; run `brgr head handoff` yourself")?
+        .task_id;
+    open_handoff(
+        paths,
+        store,
+        task,
+        &HandoffArgs {
+            kind,
+            goal: format!(
+                "Continue this owner's open work. The handoff started automatically because \
+                 the previous head's {}.",
+                reasons.join(" and ")
+            ),
+            notes: None,
+            exit_old: config.exit_old,
+            agent_args: config.agent_args.clone(),
+        },
+    )
 }
 
 /// Single-quotes a value for the shell command the incoming head is told to run.

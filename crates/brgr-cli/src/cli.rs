@@ -243,6 +243,9 @@ pub(crate) enum Command {
     /// usage, then runs the status line it replaced, if any.
     #[command(name = "__context", hide = true)]
     Context {
+        /// Which harness's status line this is; both give the same input shape.
+        #[arg(long, value_enum, default_value_t = ContextSource::Claude)]
+        source: ContextSource,
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         chain: Vec<String>,
     },
@@ -379,6 +382,11 @@ pub(crate) enum ConfigCommand {
         /// Extra argument for the incoming agent, for example `--yolo`.
         #[arg(long = "agent-arg", allow_hyphen_values = true)]
         agent_args: Vec<String>,
+        /// Run the handoff itself, at the end of the head's next brgr command,
+        /// instead of only telling the head. It opens the incoming head's pane
+        /// from the head's own verified pane, and waits for that agent to start.
+        #[arg(long)]
+        auto: bool,
     },
     /// Stop telling heads to hand off.
     ClearHandoffCondition,
@@ -704,6 +712,20 @@ pub(crate) enum IntegrateCommand {
         #[command(subcommand)]
         command: ClaudeCommand,
     },
+    /// Put brgr's usage recorder in front of Cursor Agent's status line.
+    Cursor {
+        #[command(subcommand)]
+        command: CursorCommand,
+    },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum CursorCommand {
+    /// Edits `cli-config.json`, or the file it links to, after saving a copy;
+    /// the status line you have keeps drawing. Needed for handoff conditions.
+    Install,
+    Status,
+    Uninstall,
 }
 
 #[derive(Subcommand)]
@@ -724,6 +746,21 @@ pub(crate) enum CodexCommand {
     Install,
     Status,
     Uninstall,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, clap::ValueEnum)]
+pub(crate) enum ContextSource {
+    Claude,
+    Cursor,
+}
+
+impl ContextSource {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Claude => "claude",
+            Self::Cursor => "cursor",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, clap::ValueEnum)]

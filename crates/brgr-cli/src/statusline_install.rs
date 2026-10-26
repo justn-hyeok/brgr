@@ -1,12 +1,13 @@
-//! Opt-in: put `brgr __context` in front of Claude Code's status line.
+//! Opt-in: put `brgr __context` in front of a harness's status line.
 //!
-//! Claude Code gives its status line command the session's context and plan
-//! usage, and it has room for only one such command. `integrate claude install
-//! --context` makes brgr's recorder that command and chains to the one the user
-//! had, so the status line looks the same. Nothing else in `settings.json` is
-//! touched: the file is edited as text, only the `statusLine` member changes,
-//! and the previous member is kept verbatim so `uninstall` restores it exactly.
-//! A symlinked `settings.json` (a managed config) is edited at its target.
+//! Claude Code and Cursor Agent give their status line command the session's
+//! context (Claude Code also its plan usage), and each has room for only one such
+//! command. `integrate claude install --context` and `integrate cursor install`
+//! make brgr's recorder that command and chain to the one the user had, so the
+//! status line looks the same. Nothing else in the config file is touched: it is
+//! edited as text, only the `statusLine` member changes, and the previous member
+//! is kept verbatim so `uninstall` restores it exactly. A symlinked config (a
+//! managed one) is edited at its target.
 
 use std::{
     fs,
@@ -20,7 +21,42 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tempfile::NamedTempFile;
 
-const RECEIPT: &str = "claude-statusline.json";
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Harness {
+    Claude,
+    Cursor,
+}
+
+impl Harness {
+    fn receipt(self) -> &'static str {
+        match self {
+            Self::Claude => "claude-statusline.json",
+            Self::Cursor => "cursor-statusline.json",
+        }
+    }
+
+    /// The `brgr __context` flag that tells the recorder which harness this is.
+    fn source_flag(self) -> &'static str {
+        match self {
+            Self::Claude => "",
+            Self::Cursor => " --source cursor",
+        }
+    }
+
+    fn config_file(self) -> Result<PathBuf> {
+        Ok(match self {
+            Self::Claude => crate::codex_integration::claude_home()?.join("settings.json"),
+            Self::Cursor => {
+                let dir = match std::env::var_os("CURSOR_CONFIG_DIR") {
+                    Some(path) => PathBuf::from(path),
+                    None => PathBuf::from(std::env::var_os("HOME").context("HOME is not set")?)
+                        .join(".cursor"),
+                };
+                dir.join("cli-config.json")
+            }
+        })
+    }
+}
 /// Marks a status line command as brgr's recorder.
 const MARKER: &str = " __context";
 
@@ -267,12 +303,8 @@ fn status_line_command(value: &Value) -> Option<&str> {
         .flatten()
 }
 
-fn settings_file() -> Result<PathBuf> {
-    Ok(crate::codex_integration::claude_home()?.join("settings.json"))
-}
-
-fn read_receipt(brgr_home: &Path) -> Result<Option<Receipt>> {
-    let path = brgr_home.join(RECEIPT);
+fn read_receipt(brgr_home: &Path, harness: Harness) -> Result<Option<Receipt>> {
+    let path = brgr_home.join(harness.receipt());
     if !path.exists() {
         return Ok(None);
     }
@@ -330,8 +362,8 @@ fn previous_status_line(
     Ok((original, chain))
 }
 
-pub(crate) fn install(brgr_home: &Path, executable: &Path) -> Result<Value> {
-    let link = settings_file()?;
+pub(crate) fn install(brgr_home: &Path, harness: Harness, executable: &Path) -> Result<Value> {
+    let link = harness.config_file()?;
     // A managed config is often a symlink; edit what it points to, not the link.
     let target = if link.exists() {
         link.canonicalize()?
@@ -352,12 +384,13 @@ pub(crate) fn install(brgr_home: &Path, executable: &Path) -> Result<Value> {
     if !parsed.is_object() {
         bail!("{} is not a JSON object", target.display());
     }
-    let receipt = read_receipt(brgr_home)?;
+    let receipt = read_receipt(brgr_home, harness)?;
     let (original, chain) = previous_status_line(&text, &parsed, receipt.as_ref())?;
     let mut command = format!(
-        "{} --home {} __context",
+        "{} --home {} __context{}",
         shell_quote(&executable.to_string_lossy()),
-        shell_quote(&brgr_home.to_string_lossy())
+        shell_quote(&brgr_home.to_string_lossy()),
+        harness.source_flag(),
     );
     if let Some(chain) = &chain {
         command.push_str(" -- ");
@@ -398,7 +431,7 @@ pub(crate) fn install(brgr_home: &Path, executable: &Path) -> Result<Value> {
         backup: backup.clone(),
     };
     write_atomic(
-        &brgr_home.join(RECEIPT),
+        &brgr_home.join(harness.receipt()),
         &serde_json::to_vec_pretty(&receipt)?,
         0o600,
     )?;
@@ -411,8 +444,8 @@ pub(crate) fn install(brgr_home: &Path, executable: &Path) -> Result<Value> {
     }))
 }
 
-pub(crate) fn status(brgr_home: &Path) -> Result<Value> {
-    let Some(receipt) = read_receipt(brgr_home)? else {
+pub(crate) fn status(brgr_home: &Path, harness: Harness) -> Result<Value> {
+    let Some(receipt) = read_receipt(brgr_home, harness)? else {
         return Ok(json!({"status": "not_installed"}));
     };
     let current = fs::read_to_string(&receipt.settings)
@@ -428,8 +461,8 @@ pub(crate) fn status(brgr_home: &Path) -> Result<Value> {
     }))
 }
 
-pub(crate) fn uninstall(brgr_home: &Path) -> Result<Value> {
-    let Some(receipt) = read_receipt(brgr_home)? else {
+pub(crate) fn uninstall(brgr_home: &Path, harness: Harness) -> Result<Value> {
+    let Some(receipt) = read_receipt(brgr_home, harness)? else {
         return Ok(json!({"status": "not_installed"}));
     };
     let text = fs::read_to_string(&receipt.settings).ok();
@@ -461,7 +494,7 @@ pub(crate) fn uninstall(brgr_home: &Path) -> Result<Value> {
         // The user changed it since; leave their setting alone.
         false
     };
-    fs::remove_file(brgr_home.join(RECEIPT))?;
+    fs::remove_file(brgr_home.join(harness.receipt()))?;
     Ok(json!({"status": "uninstalled", "status_line_restored": restored}))
 }
 

@@ -82,22 +82,49 @@ fn measure(config: &HandoffConfig, signal: &Signal) -> Over {
     Over { reasons, rearmed }
 }
 
+/// What a head's brgr command should do about its usage.
+#[derive(Debug, PartialEq)]
+pub(crate) struct Verdict {
+    /// The note to print, if any.
+    pub(crate) note: Option<String>,
+    /// The reasons, when the configured handoff is due and may be run.
+    pub(crate) handoff: Option<Vec<String>>,
+}
+
 /// The note to print, if any, and the state to keep. `owner_kind` is the
 /// harness the head runs in, the part of its owner id before the colon.
+#[cfg(test)]
 pub(crate) fn decide(
     config: &HandoffConfig,
     signal: &Signal,
     state: State,
     now: u64,
     owner_kind: &str,
+    target_quota: Option<f64>,
 ) -> (Option<String>, State) {
+    let (verdict, state) = evaluate(config, signal, state, now, owner_kind, target_quota);
+    (verdict.note, state)
+}
+
+pub(crate) fn evaluate(
+    config: &HandoffConfig,
+    signal: &Signal,
+    state: State,
+    now: u64,
+    owner_kind: &str,
+    target_quota: Option<f64>,
+) -> (Verdict, State) {
+    let nothing = Verdict {
+        note: None,
+        handoff: None,
+    };
     let Some(kind) = config.kind.as_deref().filter(|_| config.is_armed()) else {
-        return (None, state);
+        return (nothing, state);
     };
     // Handing to the harness the head already runs in would be told again by
     // the new head at once.
     if kind == owner_kind || now.saturating_sub(signal.at) > MAX_AGE {
-        return (None, state);
+        return (nothing, state);
     }
     let over = measure(config, signal);
     let mut state = state;
@@ -107,11 +134,35 @@ pub(crate) fn decide(
     if over.reasons.is_empty()
         || !(state.armed || now.saturating_sub(state.last_note_at) >= REPEAT_AFTER)
     {
-        return (None, state);
+        return (nothing, state);
     }
     state.armed = false;
     state.last_note_at = now;
-    (Some(note(config, kind, &over.reasons)), state)
+    // Handing to a harness whose own plan is already at the limit only moves the
+    // problem; say so instead of giving the command.
+    if let (Some(limit), Some(target)) = (config.quota_percent, target_quota)
+        && target >= f64::from(limit)
+    {
+        let verdict = Verdict {
+            note: Some(target_over_note(kind, &over.reasons, target, limit)),
+            handoff: None,
+        };
+        return (verdict, state);
+    }
+    let verdict = Verdict {
+        note: Some(note(config, kind, &over.reasons)),
+        handoff: Some(over.reasons),
+    };
+    (verdict, state)
+}
+
+fn target_over_note(kind: &str, reasons: &[String], target: f64, limit: u8) -> String {
+    format!(
+        "brgr: this head's {} is over the limit you set, but {kind}, the harness you chose to \
+         hand off to, is itself at {target:.0}% of its plan (limit {limit}%), so no handoff \
+         command is given. Change the target with `brgr config set-handoff-condition`, or wait.",
+        reasons.join(" and "),
+    )
 }
 
 fn note(config: &HandoffConfig, kind: &str, reasons: &[String]) -> String {
@@ -179,17 +230,50 @@ pub(crate) fn print(paths: &Paths) {
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
         .unwrap_or_default();
     let owner_kind = owner.as_str().split(':').next().unwrap_or_default();
-    let (text, state) = decide(
+    let target_quota = config
+        .handoff
+        .kind
+        .as_deref()
+        .and_then(|kind| context_signal::latest_quota(paths, kind, MAX_AGE));
+    let (verdict, state) = evaluate(
         &config.handoff,
         &signal,
         state,
         context_signal::now(),
         owner_kind,
+        target_quota,
     );
-    if let Some(text) = text {
-        eprintln!("{text}");
-    }
+    // Written before anything slow runs, so a handoff that takes a while is not
+    // started twice by a second command.
     let _ = crate::write_json_atomic(&path, &state);
+    match (&verdict.handoff, config.handoff.auto) {
+        (Some(reasons), true) => {
+            match crate::head::auto_handoff(paths, &store, &owner, &config.handoff, reasons) {
+                Ok(receipt) => eprintln!(
+                    "brgr: this head's {} is over the limit you set, so a handoff to {} was \
+                     started automatically (incoming pane {}). Finish your current step; the \
+                     incoming head takes command, and {}",
+                    reasons.join(" and "),
+                    config.handoff.kind.as_deref().unwrap_or_default(),
+                    receipt["incoming_pane"].as_str().unwrap_or("unknown"),
+                    if config.handoff.exit_old {
+                        "this pane closes after it has retired the handoff."
+                    } else {
+                        "this pane stays open."
+                    },
+                ),
+                Err(error) => eprintln!(
+                    "{}\nbrgr: the automatic handoff did not start: {error:#}",
+                    verdict.note.as_deref().unwrap_or_default()
+                ),
+            }
+        }
+        _ => {
+            if let Some(text) = &verdict.note {
+                eprintln!("{text}");
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -203,13 +287,14 @@ mod tests {
             context_percent: Some(70),
             quota_percent: Some(85),
             agent_args: vec!["--yolo".to_owned()],
+            auto: false,
         }
     }
 
     fn signal(context: Option<f64>, quota: Option<f64>, at: u64) -> Signal {
         Signal {
             session: "s".to_owned(),
-            source: "status-line".to_owned(),
+            source: "claude".to_owned(),
             at,
             context_percent: context,
             context_window: Some(1_000_000),
@@ -232,6 +317,7 @@ mod tests {
             state,
             now,
             "claude",
+            None,
         )
     }
 
@@ -294,6 +380,7 @@ mod tests {
             State::default(),
             1_000 + MAX_AGE + 1,
             "claude",
+            None,
         );
         assert_eq!(text, None);
     }
@@ -306,6 +393,7 @@ mod tests {
             State::default(),
             1_000,
             "codex",
+            None,
         );
         assert_eq!(text, None);
     }
@@ -316,14 +404,14 @@ mod tests {
         off.kind = None;
         let signal = signal(Some(99.0), Some(99.0), 1_000);
         assert_eq!(
-            decide(&off, &signal, State::default(), 1_000, "claude").0,
+            decide(&off, &signal, State::default(), 1_000, "claude", None).0,
             None
         );
         let mut no_limit = config();
         no_limit.context_percent = None;
         no_limit.quota_percent = None;
         assert_eq!(
-            decide(&no_limit, &signal, State::default(), 1_000, "claude").0,
+            decide(&no_limit, &signal, State::default(), 1_000, "claude", None).0,
             None
         );
     }
@@ -334,5 +422,65 @@ mod tests {
         let text = text.unwrap();
         assert!(text.contains("context window 80%"), "{text}");
         assert!(text.contains("five-hour plan window 90%"), "{text}");
+    }
+
+    #[test]
+    fn a_target_already_at_its_plan_limit_is_named_instead_of_handed_to() {
+        let (text, state) = decide(
+            &config(),
+            &signal(Some(80.0), Some(10.0), 1_000),
+            State::default(),
+            1_000,
+            "claude",
+            Some(91.0),
+        );
+        let text = text.unwrap();
+        assert!(text.contains("codex, the harness you chose"), "{text}");
+        assert!(text.contains("91% of its plan"), "{text}");
+        assert!(!text.contains("brgr head handoff TASK"), "{text}");
+        // Said once per crossing, like the command would have been.
+        let (again, _) = decide(
+            &config(),
+            &signal(Some(81.0), Some(10.0), 1_060),
+            state,
+            1_060,
+            "claude",
+            Some(91.0),
+        );
+        assert_eq!(again, None);
+    }
+
+    #[test]
+    fn a_target_below_its_limit_or_unmeasured_gets_the_command() {
+        for target in [None, Some(40.0), Some(84.9)] {
+            let (text, _) = decide(
+                &config(),
+                &signal(Some(80.0), Some(10.0), 1_000),
+                State::default(),
+                1_000,
+                "claude",
+                target,
+            );
+            assert!(
+                text.unwrap()
+                    .contains("brgr head handoff TASK --kind codex"),
+                "{target:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_target_is_not_checked_without_a_plan_limit() {
+        let mut context_only = config();
+        context_only.quota_percent = None;
+        let (text, _) = decide(
+            &context_only,
+            &signal(Some(80.0), Some(10.0), 1_000),
+            State::default(),
+            1_000,
+            "claude",
+            Some(99.0),
+        );
+        assert!(text.unwrap().contains("brgr head handoff TASK"));
     }
 }

@@ -501,7 +501,7 @@ fn the_incoming_prompt_states_the_owner_and_home_on_every_command() {
     start_handoff(&home, &task_id, &fake, &dir, false);
     let log = calls(&dir);
     let prefix = "env BRGR_OWNER_ID='codex:head-takeover' BRGR_HOME='";
-    for command in ["head take", "status", "result", "head retire"] {
+    for command in ["head take", "status", "result", "head retire", "head exit"] {
         let at = log
             .find(&format!("{command} "))
             .or_else(|| log.find(&format!("{command}`")))
