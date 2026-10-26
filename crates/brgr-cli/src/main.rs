@@ -442,7 +442,6 @@ async fn config_command(paths: &Paths, command: &ConfigCommand, json_output: boo
         ConfigCommand::SetHandoffCondition {
             kind,
             exit_old,
-            context_percent,
             quota_percent,
             agent_args,
             auto,
@@ -450,19 +449,14 @@ async fn config_command(paths: &Paths, command: &ConfigCommand, json_output: boo
             if kind.is_empty() || kind.contains(char::is_whitespace) {
                 bail!("--kind must be a Herdr agent kind such as codex");
             }
-            if context_percent.is_none() && quota_percent.is_none() {
-                bail!("name at least one of --context-percent and --quota-percent");
-            }
-            for percent in [context_percent, quota_percent].into_iter().flatten() {
-                if !(1..=99).contains(percent) {
-                    bail!("a threshold is a percentage from 1 to 99");
-                }
+            if !(1..=99).contains(quota_percent) {
+                bail!("a threshold is a percentage from 1 to 99");
             }
             config.handoff = config::HandoffConfig {
                 kind: Some(kind.clone()),
                 exit_old: *exit_old,
-                context_percent: *context_percent,
-                quota_percent: *quota_percent,
+                context_percent: None,
+                quota_percent: Some(*quota_percent),
                 agent_args: agent_args.clone(),
                 auto: *auto,
             };

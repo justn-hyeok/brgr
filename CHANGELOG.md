@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- A handoff condition is plan usage only. `set-handoff-condition` no longer takes
+  `--context-percent`, and `--quota-percent` is required: a full context window is
+  not a reason to hand a head to another harness. A config written by 2.15.5 or
+  2.15.6 that names `context_percent` still loads; the value is ignored and not
+  written back.
+
 ## 2.15.6 — 2026-10-27
 
 Completes roadmap 2.6: a head hands its command to another harness when its usage

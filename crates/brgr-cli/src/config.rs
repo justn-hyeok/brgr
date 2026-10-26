@@ -126,7 +126,9 @@ pub struct HandoffConfig {
     pub kind: Option<String>,
     /// Approve closing the outgoing head's pane after the handoff.
     pub exit_old: bool,
-    /// Tell the head when its context window is this full, in percent.
+    /// Read and dropped: a full context window is never a reason to hand off.
+    /// Kept so a config written by 2.15.5 or 2.15.6 still loads.
+    #[serde(skip_serializing)]
     pub context_percent: Option<u8>,
     /// Tell the head when either plan window is this used, in percent.
     pub quota_percent: Option<u8>,
@@ -144,7 +146,7 @@ impl HandoffConfig {
 
     /// The target and at least one threshold are set.
     pub(crate) fn is_armed(&self) -> bool {
-        self.kind.is_some() && (self.context_percent.is_some() || self.quota_percent.is_some())
+        self.kind.is_some() && self.quota_percent.is_some()
     }
 }
 

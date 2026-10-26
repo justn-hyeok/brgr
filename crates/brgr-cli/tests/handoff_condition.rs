@@ -137,16 +137,16 @@ fn now() -> u64 {
         + NOW_OFFSET
 }
 
-fn write_signal(home: &Path, session: &str, context: f64, at: u64) {
+fn write_signal(home: &Path, session: &str, quota: f64, at: u64) {
     let dir = home.join("context");
     fs::create_dir_all(&dir).unwrap();
     let signal = serde_json::json!({
         "session": session,
-        "source": "claude",
+        "source": "codex",
         "at": at,
-        "context_percent": context,
+        "context_percent": 99.0,
         "context_window": 1_000_000,
-        "five_hour_percent": null,
+        "five_hour_percent": quota,
         "five_hour_resets_at": null,
         "seven_day_percent": null,
         "seven_day_resets_at": null,
@@ -167,7 +167,7 @@ fn arm(home: &Path) {
             "--kind",
             "claude",
             "--exit-old",
-            "--context-percent",
+            "--quota-percent",
             "70",
             "--agent-arg=--dangerously-skip-permissions",
         ],
@@ -187,7 +187,10 @@ fn a_head_over_its_limit_is_told_once_with_the_exact_handoff_command() {
     arm(&home);
     write_signal(&home, "session-head", 72.0, now());
     let first = stderr_of(&home, &task_id, &head_env());
-    assert!(first.contains("context window 72% (limit 70%)"), "{first}");
+    assert!(
+        first.contains("five-hour plan window 72% (limit 70%)"),
+        "{first}"
+    );
     assert!(
         first.contains(
             "brgr head handoff TASK --kind claude --exit-old --agent-arg=--dangerously-skip-permissions"
@@ -255,7 +258,7 @@ fn a_handoff_condition_needs_a_target_and_a_percentage() {
             "set-handoff-condition",
             "--kind",
             "claude",
-            "--context-percent",
+            "--quota-percent",
             "100",
         ],
         vec![
@@ -263,7 +266,7 @@ fn a_handoff_condition_needs_a_target_and_a_percentage() {
             "set-handoff-condition",
             "--kind",
             "two words",
-            "--context-percent",
+            "--quota-percent",
             "70",
         ],
     ] {
@@ -304,8 +307,6 @@ fn arm_with_quota(home: &Path) {
             "set-handoff-condition",
             "--kind",
             "claude",
-            "--context-percent",
-            "70",
             "--quota-percent",
             "85",
         ],
@@ -318,7 +319,7 @@ fn a_target_whose_plan_is_already_over_is_named_and_not_handed_to() {
     let (_temp, home, workspace) = gjc_home();
     let task_id = start_task(&home, &workspace);
     arm_with_quota(&home);
-    write_signal(&home, "session-head", 80.0, now());
+    write_signal(&home, "session-head", 90.0, now());
     // Some Claude session reported 91% of its plan a minute ago.
     write_report(&home, "claude-elsewhere", "claude", 91.0, now() - 60);
     let said = stderr_of(&home, &task_id, &head_env());
@@ -332,7 +333,7 @@ fn a_stale_or_other_harness_report_does_not_block_the_handoff() {
     let (_temp, home, workspace) = gjc_home();
     let task_id = start_task(&home, &workspace);
     arm_with_quota(&home);
-    write_signal(&home, "session-head", 80.0, now());
+    write_signal(&home, "session-head", 90.0, now());
     // Too old to say anything about the plan now, and the wrong harness.
     write_report(&home, "claude-old", "claude", 99.0, now() - 7_200);
     write_report(&home, "codex-other", "codex", 99.0, now() - 60);
@@ -406,7 +407,7 @@ fn arm_auto(home: &Path, auto: bool) {
         "--kind",
         "claude",
         "--exit-old",
-        "--context-percent",
+        "--quota-percent",
         "70",
     ];
     if auto {
@@ -487,4 +488,49 @@ fn an_auto_handoff_that_cannot_start_says_why_and_still_gives_the_command() {
     );
     assert!(said.contains("verified Herdr pane"), "{said}");
     assert!(said.contains("handoff TASK --kind claude"), "{said}");
+}
+
+#[test]
+fn a_full_context_window_alone_is_never_told() {
+    let (_temp, home, workspace) = gjc_home();
+    let task_id = start_task(&home, &workspace);
+    arm(&home);
+    // The signal says 99% of the context window and 10% of the plan.
+    write_signal(&home, "session-head", 10.0, now());
+    assert!(!stderr_of(&home, &task_id, &head_env()).contains("over the limit"));
+}
+
+#[test]
+fn the_context_threshold_is_gone_but_an_old_config_still_loads() {
+    let (_temp, home, _workspace) = gjc_home();
+    assert!(
+        !run(
+            &home,
+            &[
+                "config",
+                "set-handoff-condition",
+                "--kind",
+                "claude",
+                "--quota-percent",
+                "80",
+                "--context-percent",
+                "70",
+            ],
+            &[],
+        )
+        .status
+        .success()
+    );
+    // A config written by 2.15.5 or 2.15.6 named both thresholds.
+    fs::write(
+        home.join("config.toml"),
+        "[handoff]\nkind = \"claude\"\ncontext_percent = 70\nquota_percent = 80\n",
+    )
+    .unwrap();
+    let config = json_output(&run(&home, &["config", "show"], &[]));
+    assert_eq!(config["handoff"]["quota_percent"], 80, "{config}");
+    assert!(
+        config["handoff"].get("context_percent").is_none(),
+        "{config}"
+    );
 }
