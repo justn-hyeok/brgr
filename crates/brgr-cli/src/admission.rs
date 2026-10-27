@@ -1133,16 +1133,9 @@ async fn start_after_admission(
     options: &StartOptions<'_>,
     session: Option<String>,
 ) -> Result<()> {
-    if (launch.spec.owner_id.as_str().starts_with("claude:")
-        || launch.spec.owner_id.as_str().starts_with("cursor:"))
-        && let Some(session) = session.as_deref()
-        && let Err(error) =
-            notification::register_current_surface(paths, store, &launch.spec.owner_id, session)
-                .await
-    {
-        eprintln!("brgr completion notification remains queued: {error}");
+    if options.workflow.is_none() {
+        register_and_deliver(paths, store, launch, session.as_deref()).await;
     }
-    notification::spawn_registration_and_delivery(paths, &launch.spec, session.as_deref());
 
     if matches!(options.execution, ExecutionDisposition::Foreground) {
         return crate::supervision::supervise_with_mode(
@@ -1172,6 +1165,24 @@ async fn start_after_admission(
         options.mode.reason,
     );
     Ok(())
+}
+
+async fn register_and_deliver(
+    paths: &Paths,
+    store: &mut Store,
+    launch: &LaunchEnvelope,
+    session: Option<&str>,
+) {
+    if (launch.spec.owner_id.as_str().starts_with("claude:")
+        || launch.spec.owner_id.as_str().starts_with("cursor:"))
+        && let Some(session) = session
+        && let Err(error) =
+            notification::register_current_surface(paths, store, &launch.spec.owner_id, session)
+                .await
+    {
+        eprintln!("brgr completion notification remains queued: {error}");
+    }
+    notification::spawn_registration_and_delivery(paths, &launch.spec, session);
 }
 
 fn print_launch_receipt(

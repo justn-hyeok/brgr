@@ -1,5 +1,7 @@
 //! Durable workflow runs: create, status, and owner-driven state changes.
 
+mod driver;
+
 use std::fmt::Write as _;
 
 use anyhow::{Result, bail};
@@ -26,6 +28,25 @@ pub(crate) enum WorkflowCommand {
     Status { run: String },
     /// Move a run between the states the journal allows.
     SetState { run: String, state: String },
+    /// Start a workflow script under a detached node driver.
+    Run {
+        script: std::path::PathBuf,
+        #[arg(long, default_value_t = 4, value_parser = clap::value_parser!(u32).range(1..=64))]
+        max_parallel: u32,
+    },
+    /// Start the driver again after it died, from the top of the same script.
+    Resume { run: String },
+    /// Stop the driver and every unfinished step of a run.
+    Cancel { run: String },
+    #[command(name = "__drive", hide = true)]
+    Drive {
+        run: String,
+        script: std::path::PathBuf,
+    },
+}
+
+pub(crate) fn is_hidden_drive(command: &WorkflowCommand) -> bool {
+    matches!(command, WorkflowCommand::Drive { .. })
 }
 
 pub(crate) fn run(paths: &Paths, command: WorkflowCommand, json_output: bool) -> Result<()> {
@@ -36,6 +57,13 @@ pub(crate) fn run(paths: &Paths, command: WorkflowCommand, json_output: bool) ->
         } => create(paths, max_parallel, script_digest, json_output),
         WorkflowCommand::Status { run } => status(paths, &run, json_output),
         WorkflowCommand::SetState { run, state } => set_state(paths, &run, &state, json_output),
+        WorkflowCommand::Run {
+            script,
+            max_parallel,
+        } => driver::run_script(paths, &script, max_parallel, json_output),
+        WorkflowCommand::Resume { run } => driver::resume(paths, &run, json_output),
+        WorkflowCommand::Cancel { run } => driver::cancel_run(paths, &run, json_output),
+        WorkflowCommand::Drive { run, script } => driver::drive(paths, &run, &script),
     }
 }
 
@@ -45,15 +73,19 @@ fn create(
     script_digest: Option<String>,
     json_output: bool,
 ) -> Result<()> {
+    let script_digest = script_digest.unwrap_or_else(|| "none".to_owned());
+    let run = create_owned_run(paths, max_parallel, &script_digest)?;
+    print_run_receipt(&run, json_output);
+    Ok(())
+}
+
+fn create_owned_run(paths: &Paths, max_parallel: u32, script_digest: &str) -> Result<WorkflowRun> {
     let owner = owner_from_environment()?;
     let store = Store::open(&paths.store)?;
     let session = current_session()?;
     bind_owner_session(&store, &owner, session.as_deref())?;
     let run_id = new_run_id()?;
-    let script_digest = script_digest.unwrap_or_else(|| "none".to_owned());
-    let run = store.create_workflow_run(&run_id, &owner, &script_digest, max_parallel)?;
-    print_run_receipt(&run, json_output);
-    Ok(())
+    Ok(store.create_workflow_run(&run_id, &owner, script_digest, max_parallel)?)
 }
 
 fn status(paths: &Paths, run: &str, json_output: bool) -> Result<()> {

@@ -694,15 +694,7 @@ impl Store {
             "INSERT INTO inbox_items (owner_id, result_id) VALUES (?1, ?2)",
             params![owner_id.as_str(), result.result_id.to_string()],
         )?;
-        transaction.execute(
-            "INSERT INTO completion_notifications (result_id, task_id, owner_id)
-             VALUES (?1, ?2, ?3)",
-            params![
-                result.result_id.to_string(),
-                result.task_id.to_string(),
-                owner_id.as_str(),
-            ],
-        )?;
+        insert_completion_notification(&transaction, owner_id, result)?;
         if complete_run {
             insert_run_completion(&transaction, result)?;
         }
@@ -794,4 +786,24 @@ impl Store {
             Err(error) => Err(StoreError::Database(error)),
         }
     }
+}
+
+fn insert_completion_notification(
+    transaction: &rusqlite::Transaction<'_>,
+    owner_id: &OwnerId,
+    result: &ResultEnvelope,
+) -> Result<(), StoreError> {
+    if crate::workflow::load_step_for_task(transaction, result.task_id)?.is_some() {
+        return Ok(());
+    }
+    transaction.execute(
+        "INSERT INTO completion_notifications (result_id, task_id, owner_id)
+         VALUES (?1, ?2, ?3)",
+        params![
+            result.result_id.to_string(),
+            result.task_id.to_string(),
+            owner_id.as_str(),
+        ],
+    )?;
+    Ok(())
 }

@@ -236,6 +236,9 @@ async fn main() -> Result<()> {
             | Command::Session { .. }
             | Command::SealReport { .. }
             | Command::NativeResult { .. }
+    ) && !matches!(
+        &cli.command,
+        Command::Workflow { command } if crate::workflow::is_hidden_drive(command)
     ) && let Some(dir) = env::var_os(plugin_bridge::BRIDGE_DIR_ENV)
     {
         let budget_seconds = bridge_host::bridge_budget_seconds(&cli.command);
@@ -256,6 +259,9 @@ async fn main() -> Result<()> {
             | Command::SealReport { .. }
             | Command::NativeResult { .. }
             | Command::OmpRun { .. }
+    ) || matches!(
+        &cli.command,
+        Command::Workflow { command } if crate::workflow::is_hidden_drive(command)
     );
     let outcome = Box::pin(execute(&paths, cli.command, cli.json)).await;
     if !internal {

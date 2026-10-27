@@ -254,6 +254,18 @@ impl Store {
         load_run(&self.connection, run_id)
     }
 
+    /// The journaled step that launched `task_id`, if this task is a workflow step.
+    ///
+    /// # Errors
+    ///
+    /// Returns a database failure, or an invalid stored identifier.
+    pub fn workflow_step_for_task(
+        &self,
+        task_id: TaskId,
+    ) -> Result<Option<WorkflowStep>, StoreError> {
+        load_step_for_task(&self.connection, task_id)
+    }
+
     /// Every step of a run, in the order they were inserted.
     ///
     /// # Errors
@@ -455,15 +467,51 @@ fn load_step(
         )
         .optional()?
         .map(|(id, key, input_digest, task_id, revision)| {
-            Ok(WorkflowStep {
-                run_id: WorkflowRunId::new(id)?,
-                step_key: WorkflowStepKey::new(key)?,
-                input_digest,
-                task_id: parse_task_id(&task_id)?,
-                revision: u32::try_from(revision).map_err(|_| StoreError::NumericOverflow)?,
-            })
+            parse_step_row(id, key, input_digest, &task_id, revision)
         })
         .transpose()
+}
+
+pub(crate) fn load_step_for_task(
+    connection: &Connection,
+    task_id: TaskId,
+) -> Result<Option<WorkflowStep>, StoreError> {
+    connection
+        .query_row(
+            "SELECT run_id, step_key, input_digest, task_id, revision
+             FROM workflow_steps WHERE task_id = ?1",
+            [task_id.to_string()],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, i64>(4)?,
+                ))
+            },
+        )
+        .optional()?
+        .map(|(id, key, input_digest, task_id, revision)| {
+            parse_step_row(id, key, input_digest, &task_id, revision)
+        })
+        .transpose()
+}
+
+fn parse_step_row(
+    id: String,
+    key: String,
+    input_digest: String,
+    task_id: &str,
+    revision: i64,
+) -> Result<WorkflowStep, StoreError> {
+    Ok(WorkflowStep {
+        run_id: WorkflowRunId::new(id)?,
+        step_key: WorkflowStepKey::new(key)?,
+        input_digest,
+        task_id: parse_task_id(task_id)?,
+        revision: u32::try_from(revision).map_err(|_| StoreError::NumericOverflow)?,
+    })
 }
 
 fn parse_task_id(value: &str) -> Result<TaskId, StoreError> {

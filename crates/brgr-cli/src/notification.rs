@@ -539,6 +539,9 @@ async fn mark_delivered(store: &Store, target: &NotificationTarget, token: &str)
 
 fn notifications_enabled(paths: &Paths, task: TaskId) -> Result<bool> {
     let store = Store::open(&paths.store)?;
+    if store.workflow_step_for_task(task)?.is_some() {
+        return Ok(false);
+    }
     let spec = store.task(task)?;
     Ok(crate::config::Config::load(&paths.config)?
         .calling(&spec.route.harness_id)

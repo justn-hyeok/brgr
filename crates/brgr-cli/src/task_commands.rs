@@ -13,7 +13,7 @@ use crate::{
 };
 use anyhow::{Context, Result, bail};
 use brgr_protocol::{
-    AttemptState, Decision, DecisionId, DecisionVerdict, OwnerId, SCHEMA_V1, TaskId,
+    AttemptState, Decision, DecisionId, DecisionVerdict, OwnerId, SCHEMA_V1, TaskId, TaskSpec,
     TerminalOutcome,
 };
 use brgr_store::{Store, StoreError, SubtreeNode};
@@ -209,6 +209,12 @@ pub(crate) async fn wait_for_result(
     }
 }
 
+pub(crate) enum CancelOutcome {
+    Requested { requested: Vec<TaskId> },
+    AlreadyTerminal,
+    ForceStopped { pane_closed: bool },
+}
+
 pub(crate) fn cancel(
     paths: &Paths,
     task: TaskId,
@@ -216,65 +222,17 @@ pub(crate) fn cancel(
     force: bool,
     json_output: bool,
 ) -> Result<()> {
-    let store = Store::open(&paths.store)?;
-    let spec = store.task(task)?;
-    let proof = if force {
-        eprintln!(
-            "brgr: force-cancelling a task owned by {}; session check skipped",
-            spec.owner_id
-        );
-        None
-    } else {
-        let (session_id, binding_epoch) = require_owner(&store, &spec.owner_id)?;
-        Some(brgr_store::OwnerProof::new(
-            spec.owner_id.clone(),
-            &session_id,
-            binding_epoch,
-        )?)
-    };
-    let nodes = if tree {
-        store.subtree(task)?
-    } else {
-        vec![SubtreeNode {
-            task_id: task,
-            parent_task_id: None,
-            depth: 0,
-        }]
-    };
-    let mut active = Vec::new();
-    for node in &nodes {
-        let child = store.task(node.task_id)?;
-        if !task_needs_cancel(&store, node.task_id)? {
-            continue;
+    match cancel_task(paths, task, tree, force)? {
+        CancelOutcome::Requested { requested } => {
+            print_value(
+                &json!({"task_id": task, "state": "cancel_requested", "tree": tree,
+                "requested": requested}),
+                json_output,
+            );
+            Ok(())
         }
-        let launch: LaunchEnvelope =
-            serde_json::from_slice(&fs::read(paths.launch(node.task_id, child.revision))?)?;
-        if launch
-            .manifest
-            .as_ref()
-            .map_or(child.route.harness_id == "local.omp-herdr", |manifest| {
-                manifest.adapter == brgr_runner::OMP_ROLE_ADAPTER_V1
-            })
-        {
-            bail!("Herdr-backed OMP cancellation is not certified; use the process adapter");
-        }
-        active.push(node.task_id);
-    }
-    if active.is_empty() && !tree {
-        if force {
-            let had_pane = paths.pane_receipt(task, spec.revision).is_file();
-            pane_adapter::close_leftover_pane(paths, task, spec.revision, false);
-            let pane_closed = had_pane
-                && fs::read(paths.pane_receipt(task, spec.revision))
-                    .ok()
-                    .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-                    .and_then(|value| {
-                        value
-                            .get("cleanup")
-                            .and_then(|cleanup| cleanup.as_str())
-                            .map(|cleanup| cleanup == "closed")
-                    })
-                    .unwrap_or(false);
+        CancelOutcome::AlreadyTerminal => bail!("task {task} is already terminal"),
+        CancelOutcome::ForceStopped { pane_closed } => {
             print_value(
                 &json!({
                     "task_id": task,
@@ -284,9 +242,24 @@ pub(crate) fn cancel(
                 }),
                 json_output,
             );
-            return Ok(());
+            Ok(())
         }
-        bail!("task {task} is already terminal");
+    }
+}
+
+pub(crate) fn cancel_task(
+    paths: &Paths,
+    task: TaskId,
+    tree: bool,
+    force: bool,
+) -> Result<CancelOutcome> {
+    let store = Store::open(&paths.store)?;
+    let spec = store.task(task)?;
+    let proof = cancellation_proof(&store, &spec, force)?;
+    let nodes = cancel_nodes(&store, task, tree)?;
+    let active = active_cancel_targets(paths, &store, &nodes)?;
+    if active.is_empty() && !tree {
+        return Ok(empty_cancel_outcome(paths, task, &spec, force));
     }
     // The intent records live inside the same transaction that checks the
     // session is still the head: work handed away is stopped by the new head,
@@ -311,12 +284,91 @@ pub(crate) fn cancel(
             }
         }
     }
-    print_value(
-        &json!({"task_id": task, "state": "cancel_requested", "tree": tree,
-        "requested": requested}),
-        json_output,
-    );
-    Ok(())
+    Ok(CancelOutcome::Requested { requested })
+}
+
+fn cancellation_proof(
+    store: &Store,
+    spec: &TaskSpec,
+    force: bool,
+) -> Result<Option<brgr_store::OwnerProof>> {
+    if force {
+        eprintln!(
+            "brgr: force-cancelling a task owned by {}; session check skipped",
+            spec.owner_id
+        );
+        return Ok(None);
+    }
+    let (session_id, binding_epoch) = require_owner(store, &spec.owner_id)?;
+    Ok(Some(brgr_store::OwnerProof::new(
+        spec.owner_id.clone(),
+        &session_id,
+        binding_epoch,
+    )?))
+}
+
+fn cancel_nodes(store: &Store, task: TaskId, tree: bool) -> Result<Vec<SubtreeNode>> {
+    if tree {
+        Ok(store.subtree(task)?)
+    } else {
+        Ok(vec![SubtreeNode {
+            task_id: task,
+            parent_task_id: None,
+            depth: 0,
+        }])
+    }
+}
+
+fn active_cancel_targets(
+    paths: &Paths,
+    store: &Store,
+    nodes: &[SubtreeNode],
+) -> Result<Vec<TaskId>> {
+    let mut active = Vec::new();
+    for node in nodes {
+        let child = store.task(node.task_id)?;
+        if !task_needs_cancel(store, node.task_id)? {
+            continue;
+        }
+        let launch: LaunchEnvelope =
+            serde_json::from_slice(&fs::read(paths.launch(node.task_id, child.revision))?)?;
+        if launch
+            .manifest
+            .as_ref()
+            .map_or(child.route.harness_id == "local.omp-herdr", |manifest| {
+                manifest.adapter == brgr_runner::OMP_ROLE_ADAPTER_V1
+            })
+        {
+            bail!("Herdr-backed OMP cancellation is not certified; use the process adapter");
+        }
+        active.push(node.task_id);
+    }
+    Ok(active)
+}
+
+fn empty_cancel_outcome(
+    paths: &Paths,
+    task: TaskId,
+    spec: &TaskSpec,
+    force: bool,
+) -> CancelOutcome {
+    if !force {
+        return CancelOutcome::AlreadyTerminal;
+    }
+    let had_pane = paths.pane_receipt(task, spec.revision).is_file();
+    pane_adapter::close_leftover_pane(paths, task, spec.revision, false);
+    let pane_closed = had_pane
+        && fs::read(paths.pane_receipt(task, spec.revision))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+            .and_then(|value| {
+                value
+                    .get("cleanup")
+                    .and_then(|cleanup| cleanup.as_str())
+                    .map(|cleanup| cleanup == "closed")
+            })
+            .unwrap_or(false);
+    CancelOutcome::ForceStopped { pane_closed }
 }
 
 pub(crate) fn task_needs_cancel(store: &Store, task: TaskId) -> Result<bool> {
