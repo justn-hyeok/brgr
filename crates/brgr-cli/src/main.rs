@@ -791,6 +791,17 @@ mod tests {
                 validate_bridge_host_command(&prune.command, root.path(), root.path()).is_err()
             );
         }
+
+        let init_inside =
+            Cli::try_parse_from(["brgr", "workflow", "init", inside.to_str().unwrap()]).unwrap();
+        validate_bridge_host_command(&init_inside.command, root.path(), root.path()).unwrap();
+
+        let init_outside =
+            Cli::try_parse_from(["brgr", "workflow", "init", outside.path().to_str().unwrap()])
+                .unwrap();
+        assert!(
+            validate_bridge_host_command(&init_outside.command, root.path(), root.path()).is_err()
+        );
     }
 
     #[test]

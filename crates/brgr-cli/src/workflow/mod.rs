@@ -1,6 +1,7 @@
 //! Durable workflow runs: create, status, and owner-driven state changes.
 
 mod driver;
+mod init;
 
 use std::fmt::Write as _;
 
@@ -38,6 +39,14 @@ pub(crate) enum WorkflowCommand {
     Resume { run: String },
     /// Stop the driver and every unfinished step of a run.
     Cancel { run: String },
+    /// Write the JavaScript SDK and an example script into a directory.
+    Init {
+        #[arg(value_name = "DIR")]
+        dir: Option<std::path::PathBuf>,
+        /// Replace an existing SDK or example file even if its contents differ.
+        #[arg(long)]
+        force: bool,
+    },
     #[command(name = "__drive", hide = true)]
     Drive {
         run: String,
@@ -63,6 +72,7 @@ pub(crate) fn run(paths: &Paths, command: WorkflowCommand, json_output: bool) ->
         } => driver::run_script(paths, &script, max_parallel, json_output),
         WorkflowCommand::Resume { run } => driver::resume(paths, &run, json_output),
         WorkflowCommand::Cancel { run } => driver::cancel_run(paths, &run, json_output),
+        WorkflowCommand::Init { dir, force } => init::write_sdk(dir.as_deref(), force, json_output),
         WorkflowCommand::Drive { run, script } => driver::drive(paths, &run, &script),
     }
 }

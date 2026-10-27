@@ -178,35 +178,47 @@ stale Head의 결정 시도, 기존 Head 종료 실패, 나가는 Head가 침묵
 
 ## Phase 3. Dynamic Workflows
 
-릴리스 방향: Head Migration 다음의 별도 마이너 · 상태: Phase 1 기반 재사용
+릴리스 방향: Head Migration 다음의 별도 마이너 · 상태: 첫 버전 구현 (agent/parallel, 저널, 드라이버, SDK)
 
 작은 Workflow Runtime을 추가하고 기존 brgr 위임 계약을 실행 백엔드로 사용한다.
 `six-ddc/codex-dynamic-workflows`는 참고 후보이며 그대로 이식하기로 결정한
-것은 아니다. 첫 공개 순서는 Head Migration 이후로 둔다.
+것은 아니다.
+
+지금 있는 것: 단계 저널, `brgr workflow create`, `brgr workflow status RUN`,
+`brgr workflow set-state RUN blocked`, `brgr workflow run SCRIPT`,
+`brgr workflow resume RUN`, `brgr workflow cancel RUN`, `brgr workflow init`,
+`brgr run OBJECTIVE --workflow RUN --step KEY` (병렬 한도에 걸리면 종료 코드 75),
+분리된 node 드라이버, 런 상태 변화당 owner 알림 하나, 그리고 의존성 없는
+JavaScript SDK (`agent()`, `parallel()`). SDK는 accept/reject/apply/land를
+노출하지 않는다. 완료 조건은 실행 도중의 **관찰한** 결과를 바탕으로 처음에는
+존재하지 않았던 작업을 새로 생성하는 것이다. SDK가 돌려준 값은 승인된 변경이
+아니다.
+
+아직 없는 것: `pipeline()`, 재시도 정책, 단계별 기한, TypeScript 도구,
+실행 중인 런의 Head 이전.
 
 첫 버전의 실행 표현은 네 가지로 제한한다.
 
-| 표현 | 역할 |
-| --- | --- |
-| `agent()` | 기존 brgr 경로로 bounded 작업을 위임한다 |
-| `parallel()` | 독립 작업을 병렬 실행하고 각각의 결과를 회수한다 |
-| `pipeline()` | 앞 단계의 기록된 결과를 다음 단계 입력으로 연결한다 |
-| 일반 JS/TS 조건문·반복문 | 관찰한 결과에 따라 동적으로 분기하고 새 작업을 생성한다 |
+| 표현 | 역할 | 첫 버전 |
+| --- | --- | --- |
+| `agent()` | 기존 brgr 경로로 bounded 작업을 위임한다 | 있음 |
+| `parallel()` | 독립 작업을 병렬 실행하고 각각의 결과를 회수한다 | 있음 |
+| `pipeline()` | 앞 단계의 기록된 결과를 다음 단계 입력으로 연결한다 | 없음 |
+| 일반 JS 조건문·반복문 | 관찰한 결과에 따라 동적으로 분기하고 새 작업을 생성한다 | 있음 |
 
-아래 코드는 API 형태를 설명하는 예시이며 현재 지원되는 API가 아니다.
-`agent()`가 반환한 결과의 수신과 owner의 accept/reject는 별도 절차다.
+아래는 현재 `agent()` / `parallel()` 형태다. 반환값의 수신과 owner의
+accept/reject는 별도 절차다.
 
-```ts
+```javascript
+import { agent, parallel } from "./brgr-workflow.mjs";
+
 const reviews = await parallel([
-  agent({ harness: "codex", task: "Review security" }),
-  agent({ harness: "claude", task: "Review architecture" })
+  () => agent({ task: "Review security" }),
+  () => agent({ task: "Review architecture" }),
 ]);
 
-if (reviews.some(r => r.hasCriticalIssue)) {
-  await agent({
-    harness: "codex",
-    task: "Reproduce and fix verified issues"
-  });
+if (reviews.some((review) => review.report.includes("critical"))) {
+  await agent({ task: "Reproduce and fix verified issues" });
 }
 ```
 
