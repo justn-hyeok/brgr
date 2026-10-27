@@ -1,12 +1,16 @@
 # Changelog
 
-## Unreleased
+## 2.15.9 — 2026-10-27
+
+A harness probe can no longer outlive a killed brgr and fill the disk.
 
 - A harness probe (`--version`, `--help`, model catalog) now reads its output
   over pipes instead of temporary files. A probe whose supervisor was killed
   used to keep writing to a file nobody watched until the disk was full; a pipe
   closes with its reader, so the probe ends on its next write. Output limits and
   deadlines are unchanged.
+- Tests only: the probe flood test no longer runs an endless writer, and two
+  bridge tests no longer fail when the machine is saturated.
 
 ## 2.15.8 — 2026-10-27
 
