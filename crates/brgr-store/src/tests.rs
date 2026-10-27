@@ -4,7 +4,7 @@ use super::fixtures::{result, sealed_result, task};
 
 /// Every source file the write-path guards read. Checked against the modules
 /// `lib.rs` declares, so a new module cannot quietly escape them.
-const SCANNED: [(&str, &str); 18] = [
+const SCANNED: [(&str, &str); 19] = [
     ("lib.rs", include_str!("lib.rs")),
     ("artifact.rs", include_str!("artifact.rs")),
     ("attempt.rs", include_str!("attempt.rs")),
@@ -23,6 +23,7 @@ const SCANNED: [(&str, &str); 18] = [
     ("task.rs", include_str!("task.rs")),
     ("tests.rs", include_str!("tests.rs")),
     ("tree.rs", include_str!("tree.rs")),
+    ("workflow.rs", include_str!("workflow.rs")),
 ];
 
 use super::contention::{BUSY_RETRY_BACKOFF, is_lock_contention};
@@ -2020,6 +2021,13 @@ const RETRY_DECISIONS: &[(&str, bool)] = &[
     ("fail_retirement", false),
     ("abort_takeover", false),
     ("close", false),
+    // Workflow writes are reissuable: a script that crashed re-runs from the
+    // top, and `record_workflow_step` is the same admission class as
+    // `record_task_with_parent` — waiting here would hold that lock. None of
+    // these is a write a running attempt depends on.
+    ("create_workflow_run", false),
+    ("record_workflow_step", false),
+    ("set_workflow_run_state", false),
 ];
 
 /// Every write path must have a recorded decision about waiting for a lock.

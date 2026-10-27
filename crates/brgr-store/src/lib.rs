@@ -17,6 +17,7 @@ mod schema;
 mod takeover;
 mod task;
 mod tree;
+mod workflow;
 
 use std::{fmt::Write as _, fs, io::Read, path::Path};
 
@@ -47,6 +48,10 @@ pub use takeover::{
     Takeover, TakeoverEvent, TakeoverId, TakeoverState,
 };
 pub use tree::SubtreeNode;
+pub use workflow::{
+    WorkflowRun, WorkflowRunId, WorkflowRunState, WorkflowStep, WorkflowStepKey,
+    WorkflowStepOutcome,
+};
 
 /// The result of an idempotent store mutation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

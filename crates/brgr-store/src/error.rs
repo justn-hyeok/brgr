@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use brgr_protocol::{AttemptId, AttemptState, OwnerId, ResultId, TaskId};
 
 use crate::takeover::{TakeoverId, TakeoverState};
+use crate::workflow::{WorkflowRunId, WorkflowStepKey};
 
 /// Failures surfaced by durable metadata and artifact operations.
 #[derive(Debug, thiserror::Error)]
@@ -179,6 +180,31 @@ pub enum StoreError {
     InvalidArtifactReference,
     #[error("artifact digest or size does not match its sealed reference")]
     ArtifactIntegrityMismatch,
+    #[error("workflow run id is invalid: {0}")]
+    InvalidWorkflowRunId(String),
+    #[error("workflow step key is invalid: {0}")]
+    InvalidWorkflowStepKey(String),
+    #[error("stored workflow run state is invalid: {0}")]
+    InvalidWorkflowRunState(String),
+    #[error("workflow max_parallel must be between 1 and 64")]
+    InvalidWorkflowMaxParallel,
+    #[error("workflow run {0} does not exist")]
+    WorkflowRunNotFound(WorkflowRunId),
+    #[error("workflow run {0} is not running")]
+    WorkflowRunNotRunning(WorkflowRunId),
+    #[error("workflow run {0} belongs to another owner than the step's task")]
+    WorkflowStepOwnerMismatch(WorkflowRunId),
+    #[error("workflow run {0} already exists with different fields")]
+    WorkflowRunConflict(WorkflowRunId),
+    #[error("workflow run {0} has reached a terminal state")]
+    WorkflowRunTerminal(WorkflowRunId),
+    #[error("workflow step {step_key} in run {run_id} was replayed with a different input digest")]
+    WorkflowStepDiverged {
+        run_id: WorkflowRunId,
+        step_key: WorkflowStepKey,
+    },
+    #[error("workflow run has reached its parallel step limit")]
+    WorkflowParallelLimit,
 }
 
 impl StoreError {
