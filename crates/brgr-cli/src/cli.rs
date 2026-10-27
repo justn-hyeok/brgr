@@ -91,6 +91,11 @@ pub(crate) enum Command {
         #[command(subcommand)]
         command: crate::debate::DebateCommand,
     },
+    /// Create, inspect, or update a durable workflow run.
+    Workflow {
+        #[command(subcommand)]
+        command: crate::workflow::WorkflowCommand,
+    },
     /// Send native input to the task's owned TUI, such as an answer to a menu.
     Input {
         task: TaskId,
@@ -472,6 +477,12 @@ pub(crate) struct RunArgs {
     pub(crate) foreground: bool,
     #[command(flatten)]
     pub(crate) keep: RetentionArgs,
+    /// Workflow run this step belongs to. Requires `--step`.
+    #[arg(long, requires = "step")]
+    pub(crate) workflow: Option<String>,
+    /// Step key inside the workflow run. Requires `--workflow`.
+    #[arg(long, requires = "workflow")]
+    pub(crate) step: Option<String>,
 }
 
 impl RunArgs {
