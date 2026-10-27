@@ -1438,6 +1438,11 @@ mod tests {
         assert_eq!(oversized.stdout.len(), 65_536);
     }
 
+    /// The flood is finite on purpose: if the test process is killed while the
+    /// flood runs, the probe's process group is orphaned and nothing watches
+    /// its output file. An endless writer would then fill the disk.
+    const FLOOD_CEILING_BYTES: u64 = 256 * 1024 * 1024;
+
     #[tokio::test]
     async fn probe_stops_a_flood_before_its_deadline_and_reads_the_original_descriptor() {
         let root = tempfile::tempdir().unwrap();
@@ -1446,7 +1451,7 @@ mod tests {
         std::fs::write(
             &executable,
             format!(
-                "#!/bin/sh\n/bin/ln stdout '{}'\nexec /usr/bin/yes MODEL_CATALOG_FLOOD\n",
+                "#!/bin/sh\n/bin/ln stdout '{}'\nexec /usr/bin/head -c {FLOOD_CEILING_BYTES} /dev/zero\n",
                 captured.display()
             ),
         )
