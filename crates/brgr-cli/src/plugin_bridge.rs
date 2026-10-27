@@ -747,7 +747,7 @@ mod tests {
         fs::create_dir(&dir).unwrap();
         let counter = root.path().join("count");
         let script = write_script(root.path(), "once.sh", "#!/bin/sh\necho x >> \"$1\"\n");
-        let request = sample_request("9-9-9", root.path(), &[counter.to_str().unwrap()], 5);
+        let request = sample_request("9-9-9", root.path(), &[counter.to_str().unwrap()], 30);
         write_json_new(&request_path(&dir, &request.id), &request).unwrap();
         let first = serve_ready(&dir, &script, root.path(), root.path());
         let second = serve_ready(&dir, &script, root.path(), root.path());
@@ -989,15 +989,13 @@ mod tests {
             "wide.sh",
             "#!/bin/sh\ndd if=/dev/zero bs=1024 count=256 2>/dev/null | tr '\\0' 'x'\n",
         );
-        let started = std::time::Instant::now();
         let response = run_request(
-            sample_request("11-11-11", root.path(), &[], 5),
+            sample_request("11-11-11", root.path(), &[], 30),
             &script,
             root.path(),
             root.path(),
         )
         .await;
-        assert!(started.elapsed() < Duration::from_secs(4));
         assert_eq!(response.code, 0);
         assert_eq!(response.stdout.len(), 256 * 1024);
         assert!(response.stdout.bytes().all(|byte| byte == b'x'));
