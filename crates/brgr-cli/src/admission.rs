@@ -26,10 +26,15 @@ use brgr_protocol::{
 };
 use brgr_registry::{ActivationReceipt, Health, Registry};
 use brgr_runner::HarnessManifest;
-use brgr_store::Store;
+use brgr_store::{
+    Store, StoreError, WorkflowRunId, WorkflowRunState, WorkflowStepKey, WorkflowStepOutcome,
+};
 use config::Config;
+use serde::Serialize;
 use serde_json::json;
 use sha2::{Digest, Sha256};
+
+use crate::workflow::{self, diverged_error};
 
 pub(crate) fn acceptance_criteria(objective: &str, criteria: Vec<String>) -> Vec<String> {
     if criteria.is_empty() {
@@ -52,6 +57,30 @@ pub(crate) struct StartOptions<'a> {
     pub(crate) mode: Resolution,
     pub(crate) calling_options: config::CallingOptions,
     pub(crate) instructions_digest: Option<String>,
+    pub(crate) workflow: Option<WorkflowStepAdmission>,
+}
+
+/// One `brgr run --workflow --step` admission, computed before any worktree.
+pub(crate) struct WorkflowStepAdmission {
+    run_id: WorkflowRunId,
+    step_key: WorkflowStepKey,
+    input_digest: String,
+}
+
+#[derive(Serialize)]
+struct WorkflowStepInput<'a> {
+    objective: &'a str,
+    harness: &'a str,
+    model: &'a Option<String>,
+    effort: &'a Option<String>,
+    criteria: &'a [String],
+    scope: &'a [String],
+    role_instructions: &'a [String],
+    requires_write: bool,
+    requires_browser: bool,
+    requires_mcp: &'a [String],
+    require_capability: &'a [String],
+    workspace: &'a str,
 }
 
 pub(crate) enum WorkspaceSnapshot {
@@ -121,19 +150,24 @@ pub(crate) async fn run_task(paths: &Paths, mut args: RunArgs, json_output: bool
     config::validate_manifest_argv(&calling.argv, &activated)?;
     let task_id = TaskId::new();
     let forward_criteria = args.forwards_criteria();
-    let source_workspace = args.workspace.unwrap_or(env::current_dir()?);
+    let source_workspace = args.workspace.clone().unwrap_or(env::current_dir()?);
     let parent = delegation_parent(&args.delegation)?;
     let owner_id = if let Some((_, attempt)) = parent {
         OwnerId::new(format!("worker:{attempt}"))?
     } else {
         owner_from_environment()?
     };
+    let workflow = workflow_step_from_run(&args, &harness, &calling, &source_workspace)?;
+    let create_request_id = match &workflow {
+        Some(step) => format!("wf-{}-{}", step.run_id, step.step_key),
+        None => format!("run-{task_id}"),
+    };
     let criteria = acceptance_criteria(&args.objective, args.criteria);
     let spec = TaskSpec {
         schema: SCHEMA_V1.to_owned(),
         task_id,
         revision: 1,
-        create_request_id: format!("run-{task_id}"),
+        create_request_id,
         owner_id,
         objective: args.objective,
         workspace: source_workspace.to_string_lossy().into_owned(),
@@ -193,6 +227,7 @@ pub(crate) async fn run_task(paths: &Paths, mut args: RunArgs, json_output: bool
                 mode,
                 calling_options: calling,
                 instructions_digest,
+                workflow,
             },
         )),
     )
@@ -412,6 +447,7 @@ pub(crate) async fn revise_task(paths: &Paths, args: ReviseArgs, json_output: bo
             mode,
             calling_options: calling,
             instructions_digest,
+            workflow: None,
         },
     )
     .await
@@ -628,7 +664,11 @@ fn certified_launch_drifted(activated: &HarnessManifest, current: &HarnessManife
     certified(activated) != certified(current)
 }
 
-fn bind_owner_session(store: &Store, owner: &OwnerId, session: Option<&str>) -> Result<()> {
+pub(crate) fn bind_owner_session(
+    store: &Store,
+    owner: &OwnerId,
+    session: Option<&str>,
+) -> Result<()> {
     match (store.owner_binding(owner)?, session) {
         (Some((bound, _)), Some(current)) if bound == current => {}
         (None, Some(current)) => {
@@ -791,7 +831,6 @@ pub(crate) async fn start_task(
         options.mode.mode == ResolvedMode::Headless,
     )?;
     let pane_mode = source_pane.is_some() && activated.adapter != brgr_runner::OMP_ROLE_ADAPTER_V1;
-    let admission = workspace::acquire_admission_lock(&paths.worktrees, options.source_workspace)?;
     let store = Store::open(&paths.store)?;
     if let Some((parent_task, parent_attempt)) = options.parent {
         store.validate_delegation_parent(parent_task, parent_attempt, &spec.owner_id)?;
@@ -805,6 +844,16 @@ pub(crate) async fn start_task(
     // while the workspace is being prepared. An unbound owner has nothing to
     // take over and keeps the plain write.
     let proof = admission_proof(&store, &spec.owner_id, session.as_deref())?;
+    if replay_existing_workflow_step(
+        paths,
+        &spec,
+        options.workflow.as_ref(),
+        options.json_output,
+        options.mode,
+    )? {
+        return Ok(());
+    }
+    let admission = workspace::acquire_admission_lock(&paths.worktrees, options.source_workspace)?;
     let task_id = spec.task_id;
     let harness_id = spec.route.harness_id.clone();
     let workspace = prepare_task_workspace(paths, &mut spec, &activated.adapter, &options)?;
@@ -823,44 +872,272 @@ pub(crate) async fn start_task(
         claimant: Claimant::Supervisor,
         source_pane,
         source_session: session.clone(),
-        calling_options: Some(options.calling_options),
-        instructions_digest: options.instructions_digest,
+        calling_options: Some(options.calling_options.clone()),
+        instructions_digest: options.instructions_digest.clone(),
     };
     let launch_path = paths.launch(task_id, launch.spec.revision);
     write_json_new(&launch_path, &launch)?;
     let mut store = Store::open(&paths.store)?;
     let request_digest_text = task_request_digest(&launch.spec)?;
-    // The spec records the worktree, not the repository it came from; `brgr
-    // prune` needs the repository once that worktree is gone.
-    if let Some(primary) = workspace::primary_checkout(&workspace) {
-        store.record_task_checkout(task_id, launch.spec.revision, &primary.to_string_lossy())?;
-    }
-    if let Some((parent_task, parent_attempt)) = options.parent {
-        record_admission(
-            &mut store,
-            &launch,
-            &request_digest_text,
-            Some((parent_task, parent_attempt)),
-            proof.as_ref(),
-        )?;
-    } else {
-        record_admission(
-            &mut store,
-            &launch,
-            &request_digest_text,
-            None,
-            proof.as_ref(),
-        )?;
-    }
+    let recorded = RecordedLaunch {
+        paths,
+        launch: &launch,
+        launch_path: &launch_path,
+        workspace: &workspace,
+    };
+    let commit = commit_recorded_task(
+        &recorded,
+        &mut store,
+        &request_digest_text,
+        &options,
+        proof.as_ref(),
+    )?;
     drop(admission);
-    // Claude Code and Cursor have no hook that binds their pane, and the
-    // detached dispatcher cannot prove it runs inside that pane. This shell
-    // can, so record the owner's pane now.
+    match commit {
+        AdmissionCommit::Created => {}
+        AdmissionCommit::Replayed => return Ok(()),
+        AdmissionCommit::ParallelLimit(run_id) => workflow::exit_parallel_limit(&run_id),
+    }
+    start_after_admission(
+        paths,
+        &mut store,
+        &launch,
+        &launch_path,
+        &workspace,
+        &options,
+        session,
+    )
+    .await
+}
+
+enum AdmissionCommit {
+    Created,
+    Replayed,
+    ParallelLimit(WorkflowRunId),
+}
+
+struct RecordedLaunch<'a> {
+    paths: &'a Paths,
+    launch: &'a LaunchEnvelope,
+    launch_path: &'a Path,
+    workspace: &'a Path,
+}
+
+fn workflow_step_from_run(
+    args: &RunArgs,
+    harness: &str,
+    calling: &config::CallingOptions,
+    workspace: &Path,
+) -> Result<Option<WorkflowStepAdmission>> {
+    let (Some(run), Some(step)) = (&args.workflow, &args.step) else {
+        return Ok(None);
+    };
+    let workspace = workspace.to_string_lossy();
+    Ok(Some(WorkflowStepAdmission {
+        run_id: WorkflowRunId::new(run.clone())?,
+        step_key: WorkflowStepKey::new(step.clone())?,
+        input_digest: sha256_hex(&serde_json::to_vec(&WorkflowStepInput {
+            objective: &args.objective,
+            harness,
+            model: &calling.model,
+            effort: &calling.effort,
+            criteria: &args.criteria,
+            scope: &args.scopes,
+            role_instructions: &args.role_instructions,
+            requires_write: args.capabilities.requires_write,
+            requires_browser: args.capabilities.requires_browser,
+            requires_mcp: &args.capabilities.requires_mcp,
+            require_capability: &args.capabilities.required,
+            workspace: &workspace,
+        })?),
+    }))
+}
+
+fn replay_existing_workflow_step(
+    paths: &Paths,
+    spec: &TaskSpec,
+    workflow: Option<&WorkflowStepAdmission>,
+    json_output: bool,
+    mode: Resolution,
+) -> Result<bool> {
+    let Some(workflow) = workflow else {
+        return Ok(false);
+    };
+    let store = Store::open(&paths.store)?;
+    let run = store.workflow_run(&workflow.run_id)?;
+    if run.owner_id != spec.owner_id {
+        bail!("workflow run {} belongs to another owner", workflow.run_id);
+    }
+    if run.state != WorkflowRunState::Running {
+        bail!("workflow run {} is not running", workflow.run_id);
+    }
+    let Some(existing) = store
+        .workflow_steps(&workflow.run_id)?
+        .into_iter()
+        .find(|step| step.step_key == workflow.step_key)
+    else {
+        return Ok(false);
+    };
+    if existing.input_digest != workflow.input_digest {
+        return Err(diverged_error(&workflow.step_key));
+    }
+    print_existing_task_receipt(paths, &store, existing.task_id, json_output, mode)?;
+    Ok(true)
+}
+
+fn commit_recorded_task(
+    recorded: &RecordedLaunch<'_>,
+    store: &mut Store,
+    request_digest: &str,
+    options: &StartOptions<'_>,
+    proof: Option<&brgr_store::OwnerProof>,
+) -> Result<AdmissionCommit> {
+    if let Some(workflow) = options.workflow.as_ref() {
+        return commit_workflow_step(recorded, store, request_digest, workflow, options);
+    }
+    if let Some(primary) = workspace::primary_checkout(recorded.workspace) {
+        store.record_task_checkout(
+            recorded.launch.spec.task_id,
+            recorded.launch.spec.revision,
+            &primary.to_string_lossy(),
+        )?;
+    }
+    record_admission(
+        store,
+        recorded.launch,
+        request_digest,
+        options.parent,
+        proof,
+    )?;
+    Ok(AdmissionCommit::Created)
+}
+
+fn commit_workflow_step(
+    recorded: &RecordedLaunch<'_>,
+    store: &mut Store,
+    request_digest: &str,
+    workflow: &WorkflowStepAdmission,
+    options: &StartOptions<'_>,
+) -> Result<AdmissionCommit> {
+    let outcome = match store.record_workflow_step(
+        &workflow.run_id,
+        &workflow.step_key,
+        &workflow.input_digest,
+        &recorded.launch.spec,
+        request_digest,
+    ) {
+        Ok(outcome) => outcome,
+        Err(StoreError::WorkflowParallelLimit) => {
+            recorded.discard();
+            return Ok(AdmissionCommit::ParallelLimit(workflow.run_id.clone()));
+        }
+        Err(StoreError::WorkflowStepDiverged { step_key, .. }) => {
+            recorded.discard();
+            return Err(diverged_error(&step_key));
+        }
+        Err(error) => {
+            recorded.discard();
+            return Err(error.into());
+        }
+    };
+    match outcome {
+        WorkflowStepOutcome::Created { .. } => {
+            if let Some(primary) = workspace::primary_checkout(recorded.workspace) {
+                store.record_task_checkout(
+                    recorded.launch.spec.task_id,
+                    recorded.launch.spec.revision,
+                    &primary.to_string_lossy(),
+                )?;
+            }
+            Ok(AdmissionCommit::Created)
+        }
+        WorkflowStepOutcome::Existing { task_id, .. } => {
+            recorded.discard();
+            print_existing_task_receipt(
+                recorded.paths,
+                store,
+                task_id,
+                options.json_output,
+                options.mode,
+            )?;
+            Ok(AdmissionCommit::Replayed)
+        }
+    }
+}
+
+impl RecordedLaunch<'_> {
+    fn discard(&self) {
+        discard_unrecorded_admission(
+            self.paths,
+            self.workspace,
+            self.launch_path,
+            &self.launch.spec,
+        );
+    }
+}
+
+fn discard_unrecorded_admission(
+    paths: &Paths,
+    workspace: &Path,
+    launch_path: &Path,
+    spec: &TaskSpec,
+) {
+    let _ = fs::remove_file(launch_path);
+    let _ = fs::remove_file(
+        paths
+            .runs
+            .join(format!("{}-r{}.snapshot.json", spec.task_id, spec.revision)),
+    );
+    workspace::discard_prepared_worktree(&paths.worktrees, workspace);
+}
+
+fn print_existing_task_receipt(
+    paths: &Paths,
+    store: &Store,
+    task_id: TaskId,
+    json_output: bool,
+    mode: Resolution,
+) -> Result<()> {
+    let spec = store.task(task_id)?;
+    if let Ok(bytes) = fs::read(paths.launch(task_id, spec.revision))
+        && let Ok(launch) = serde_json::from_slice::<LaunchEnvelope>(&bytes)
+    {
+        print_launch_receipt(
+            &launch,
+            Path::new(&launch.spec.workspace),
+            json_output,
+            mode.mode,
+            mode.reason,
+        );
+        return Ok(());
+    }
+    print_value(
+        &json!({
+            "task_id": spec.task_id,
+            "state": "starting",
+            "workspace": spec.workspace,
+            "harness": spec.route.harness_id,
+            "revision": spec.revision,
+        }),
+        json_output,
+    );
+    Ok(())
+}
+
+async fn start_after_admission(
+    paths: &Paths,
+    store: &mut Store,
+    launch: &LaunchEnvelope,
+    launch_path: &Path,
+    workspace: &Path,
+    options: &StartOptions<'_>,
+    session: Option<String>,
+) -> Result<()> {
     if (launch.spec.owner_id.as_str().starts_with("claude:")
         || launch.spec.owner_id.as_str().starts_with("cursor:"))
         && let Some(session) = session.as_deref()
         && let Err(error) =
-            notification::register_current_surface(paths, &store, &launch.spec.owner_id, session)
+            notification::register_current_surface(paths, store, &launch.spec.owner_id, session)
                 .await
     {
         eprintln!("brgr completion notification remains queued: {error}");
@@ -870,17 +1147,17 @@ pub(crate) async fn start_task(
     if matches!(options.execution, ExecutionDisposition::Foreground) {
         return crate::supervision::supervise_with_mode(
             paths,
-            &launch_path,
+            launch_path,
             options.json_output,
             options.mode.mode,
             options.mode.reason,
         )
         .await;
     }
-    if let Err(error) = spawn_supervisor(paths, &launch_path) {
+    if let Err(error) = spawn_supervisor(paths, launch_path) {
         record_unstarted_terminal(
             paths,
-            &mut store,
+            store,
             &launch.spec,
             TerminalOutcome::Failed,
             format!("detached supervisor could not start: {error}"),
@@ -888,8 +1165,8 @@ pub(crate) async fn start_task(
         return Err(error);
     }
     print_launch_receipt(
-        &launch,
-        &workspace,
+        launch,
+        workspace,
         options.json_output,
         options.mode.mode,
         options.mode.reason,
@@ -1064,12 +1341,16 @@ pub(crate) fn validate_source_home(
 }
 
 pub(crate) fn task_request_digest(spec: &TaskSpec) -> Result<String> {
-    let request_digest = Sha256::digest(serde_json::to_vec(spec)?);
+    Ok(sha256_hex(&serde_json::to_vec(spec)?))
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
     let mut text = String::with_capacity(64);
-    for byte in request_digest {
-        write!(&mut text, "{byte:02x}")?;
+    for byte in digest {
+        let _ = write!(&mut text, "{byte:02x}");
     }
-    Ok(text)
+    text
 }
 
 pub(crate) fn require_parent_may_delegate(

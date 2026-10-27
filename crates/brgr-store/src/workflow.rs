@@ -244,6 +244,16 @@ impl Store {
         Ok(outcome)
     }
 
+    /// One workflow run.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::WorkflowRunNotFound`] when the run is missing, or
+    /// a database failure.
+    pub fn workflow_run(&self, run_id: &WorkflowRunId) -> Result<WorkflowRun, StoreError> {
+        load_run(&self.connection, run_id)
+    }
+
     /// Every step of a run, in the order they were inserted.
     ///
     /// # Errors

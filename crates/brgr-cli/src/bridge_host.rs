@@ -71,6 +71,11 @@ pub(crate) fn validate_bridge_host_command(
         .context("brgr Herdr bridge workspace is unavailable")?;
     match command {
         Command::Run(args) => {
+            if args.workflow.is_some() {
+                bail!(
+                    "this brgr command is unavailable through the Herdr host bridge; run it explicitly outside the plugin Codex pane"
+                );
+            }
             require_bridge_workspace(
                 args.workspace.as_deref().unwrap_or(current_dir),
                 &workspace_root,
@@ -124,7 +129,8 @@ pub(crate) fn validate_bridge_host_command(
         Command::Apply { workspace, .. } | Command::Land { workspace, .. } => {
             require_bridge_workspace(workspace, &workspace_root)
         }
-        Command::Harness { .. }
+        Command::Workflow { .. }
+        | Command::Harness { .. }
         | Command::Integrate { .. }
         | Command::Prune { .. }
         | Command::Errors {

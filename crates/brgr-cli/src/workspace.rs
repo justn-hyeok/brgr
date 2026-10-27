@@ -514,6 +514,50 @@ fn admission_lock_holder_is_dead(path: &Path) -> bool {
     }
 }
 
+/// Removes a task worktree brgr just created when admission did not record the
+/// task. Never touches a path outside the worktrees root.
+pub(crate) fn discard_prepared_worktree(worktrees_root: &Path, workspace: &Path) {
+    let Ok(root) = worktrees_root.canonicalize() else {
+        return;
+    };
+    let Ok(workspace) = workspace.canonicalize() else {
+        return;
+    };
+    if !workspace.starts_with(&root) {
+        return;
+    }
+    let Ok(relative) = workspace.strip_prefix(&root) else {
+        return;
+    };
+    let mut components = relative.components();
+    let Some(std::path::Component::Normal(repo)) = components.next() else {
+        return;
+    };
+    let Some(std::path::Component::Normal(slug)) = components.next() else {
+        return;
+    };
+    let worktree = root.join(repo).join(slug);
+    if !worktree.is_dir() {
+        return;
+    }
+    if let Some(primary) = primary_checkout(&worktree) {
+        let _ = Command::new("git")
+            .arg("-C")
+            .arg(&primary)
+            .args(["worktree", "remove", "--force"])
+            .arg(&worktree)
+            .output();
+        let branch = format!("brgr/task-{}", slug.to_string_lossy());
+        let _ = Command::new("git")
+            .arg("-C")
+            .arg(&primary)
+            .args(["branch", "-D", &branch])
+            .output();
+        return;
+    }
+    let _ = fs::remove_dir_all(&worktree);
+}
+
 /// The primary checkout of the repository `checkout` belongs to, or `None` for
 /// a workspace that is not a git checkout.
 pub(crate) fn primary_checkout(checkout: &Path) -> Option<PathBuf> {

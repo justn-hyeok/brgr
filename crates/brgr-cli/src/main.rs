@@ -32,6 +32,7 @@ mod task_commands;
 mod tree_status;
 mod tui_host;
 mod watch;
+mod workflow;
 mod workspace;
 mod worktree_prune;
 
@@ -297,6 +298,7 @@ async fn execute(paths: &Paths, command: Command, json_output: bool) -> Result<(
         } => watch::watch(paths, tasks, timeout_seconds).await,
         Command::Message { command } => message::run(paths, command, json_output).await,
         Command::Debate { command } => debate::run(paths, command, json_output).await,
+        Command::Workflow { command } => crate::workflow::run(paths, command, json_output),
         Command::Input { task, text, key } => pane_adapter::send_native_input(
             paths,
             task,

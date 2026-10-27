@@ -41,18 +41,14 @@ pub(crate) fn status(
     if let Some(task_id) = task {
         let spec = store.task(task_id)?;
         check_reader(&store, &spec.owner_id, observe)?;
-        let state = match store.attempt_state(task_id) {
-            Ok(state) => state,
-            Err(StoreError::TaskNotFound(_)) => AttemptState::Queued,
-            Err(error) => return Err(error.into()),
-        };
+        let state = attempt_state_name(&store, task_id)?;
         let launch = fs::read(paths.launch(task_id, spec.revision))
             .ok()
             .and_then(|bytes| serde_json::from_slice::<LaunchEnvelope>(&bytes).ok());
         print_value(
             &json!({
                 "task": spec,
-                "state": format!("{state:?}").to_lowercase(),
+                "state": state,
                 "workspace": spec.workspace,
                 "base_commit": spec.evidence.base_commit,
                 "workspace_present": workspace::workspace_is_present(&spec.workspace),
@@ -81,6 +77,16 @@ pub(crate) fn status(
         print_value(&json!(tasks), json_output);
     }
     Ok(())
+}
+
+/// The task's current attempt state, the same name `brgr status TASK` prints.
+pub(crate) fn attempt_state_name(store: &Store, task: TaskId) -> Result<String> {
+    let state = match store.attempt_state(task) {
+        Ok(state) => state,
+        Err(StoreError::TaskNotFound(_)) => AttemptState::Queued,
+        Err(error) => return Err(error.into()),
+    };
+    Ok(format!("{state:?}").to_lowercase())
 }
 
 /// The owner's session for a read, or, with `--observe`, no check at all.
