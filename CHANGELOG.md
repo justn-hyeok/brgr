@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Dynamic Workflows: `workflow run` and `workflow resume` from a verified Herdr
+  pane record that pane so script steps can open TUI workers beside it. Without
+  a pane, stderr notes that steps must use `mode headless`; headless workflows
+  still run.
+
 ## 2.15.7 — 2026-10-27
 
 - A handoff condition is plan usage only. `set-handoff-condition` no longer takes

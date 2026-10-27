@@ -80,8 +80,19 @@ function validateOptions(options) {
 }
 
 function wrapChildError(error) {
-  const stderr = error && typeof error.stderr === "string" ? error.stderr : "";
-  return new Error(stderr.trim() || (error && error.message) || "brgr command failed");
+  const stderr = error && typeof error.stderr === "string" ? error.stderr.trim() : "";
+  const fallback = (error && error.message) || "brgr command failed";
+  const text = stderr || fallback;
+  const message = text.startsWith("Error:") ? text.slice("Error:".length).trimStart() : text;
+  return new Error(message);
+}
+
+function sourcePanePrefix(mode) {
+  const pane = process.env.BRGR_WORKFLOW_SOURCE_PANE;
+  if (!pane || mode === "headless") {
+    return [];
+  }
+  return ["--source-pane", pane];
 }
 
 function parseJson(stdout, command) {
@@ -118,11 +129,11 @@ async function requireRunning(runId) {
   }
 }
 
-async function launchStep(args, runId) {
+async function launchStep(args, runId, mode) {
   let delay = BACKOFF_START_MS;
   for (;;) {
     try {
-      return await execBrgr(["run", ...args]);
+      return await execBrgr([...sourcePanePrefix(mode), "run", ...args]);
     } catch (error) {
       if (error && error.code === TEMPFAIL) {
         await requireRunning(runId);
@@ -224,7 +235,7 @@ export async function agent(options) {
   const key = Object.hasOwn(options, "key") ? options.key : String(agentsStarted);
   agentsStarted += 1;
   const launched = parseJson(
-    (await launchStep(runArgs(options, runId, key), runId)).stdout,
+    (await launchStep(runArgs(options, runId, key), runId, options.mode)).stdout,
     "run",
   );
   if (!launched.task_id) {

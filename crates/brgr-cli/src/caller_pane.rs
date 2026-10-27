@@ -26,10 +26,7 @@ use std::{
 /// The caller's Herdr pane, when this process provably runs inside it.
 pub(crate) fn verified() -> Option<String> {
     if let Some(pane) = crate::invocation::current().pane.as_deref() {
-        return crate::current_session()
-            .ok()
-            .flatten()
-            .and_then(|session| for_session(&session, Some(pane)));
+        return named(pane);
     }
     let native = inherited();
     if native.is_some() {
@@ -39,6 +36,25 @@ pub(crate) fn verified() -> Option<String> {
         .ok()
         .flatten()
         .and_then(|session| for_session(&session, crate::invocation::current().pane.as_deref()))
+}
+
+/// `--source-pane PANE`, checked against the caller's own session.
+pub(crate) fn named(pane: &str) -> Option<String> {
+    crate::current_session()
+        .ok()
+        .flatten()
+        .and_then(|session| for_session(&session, Some(pane)))
+        .or_else(|| crate::workflow::trusts_recorded_pane(pane).then(|| pane.to_owned()))
+}
+
+/// A pane that is alive and runs a harness that can receive `FROM BRGR`. It
+/// proves the pane exists, not that the caller owns it, so it is only a check
+/// on a pane some other step already verified.
+pub(crate) fn live_owner_pane(pane: &str) -> Option<String> {
+    live_kind(pane)
+        .as_deref()
+        .is_some_and(owner_inbox_kind)
+        .then(|| pane.to_owned())
 }
 
 fn inherited() -> Option<String> {

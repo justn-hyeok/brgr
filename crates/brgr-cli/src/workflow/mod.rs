@@ -3,6 +3,8 @@
 mod driver;
 mod init;
 
+pub(crate) use driver::trusts_recorded_pane;
+
 use std::fmt::Write as _;
 
 use anyhow::{Result, bail};

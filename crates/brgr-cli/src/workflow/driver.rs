@@ -34,10 +34,13 @@ const ALLOWED_ENV: &[&str] = &[
     "BRGR_HOME",
     "BRGR_OWNER_ID",
     "BRGR_SESSION_ID",
+    "BRGR_WORKFLOW_SOURCE_PANE",
     "CODEX_THREAD_ID",
     "CLAUDE_CODE_SESSION_ID",
     "CURSOR_CONVERSATION_ID",
 ];
+
+const NO_VERIFIED_PANE: &str = "no verified Herdr pane: workflow steps must use mode headless";
 
 struct PidGuard {
     path: PathBuf,
@@ -91,6 +94,7 @@ pub(super) fn run_script(
         &script_record_path(paths, &run.run_id),
         script.to_string_lossy().as_bytes(),
     )?;
+    bind_source_pane(paths, &run.run_id)?;
     spawn_driver(paths, &run.run_id, &script)?;
     print_launch_receipt(paths, &run, json_output);
     Ok(())
@@ -123,6 +127,7 @@ pub(super) fn resume(paths: &Paths, run: &str, json_output: bool) -> Result<()> 
         store.set_workflow_run_state(&run_id, WorkflowRunState::Running)?;
     }
     let script = recorded_script(paths, &run_id)?;
+    bind_source_pane(paths, &run_id)?;
     spawn_driver(paths, &run_id, &script)?;
     let run = store.workflow_run(&run_id)?;
     print_launch_receipt(paths, &run, json_output);
@@ -302,6 +307,11 @@ fn apply_driver_env(
     if let Some(session) = session {
         command.env("BRGR_SESSION_ID", session);
     }
+    if let Some(pane) = recorded_source_pane(paths, run_id) {
+        command.env("BRGR_WORKFLOW_SOURCE_PANE", pane);
+    } else {
+        command.env_remove("BRGR_WORKFLOW_SOURCE_PANE");
+    }
     Ok(())
 }
 
@@ -414,6 +424,33 @@ fn print_launch_receipt(paths: &Paths, run: &WorkflowRun, json_output: bool) {
     );
 }
 
+fn bind_source_pane(paths: &Paths, run_id: &WorkflowRunId) -> Result<()> {
+    if let Some(pane) = resolved_source_pane(paths, run_id) {
+        return write_private(
+            &pane_record_path(paths, run_id),
+            format!("{pane}\n").as_bytes(),
+        );
+    }
+    let _ = fs::remove_file(pane_record_path(paths, run_id));
+    eprintln!("{NO_VERIFIED_PANE}");
+    Ok(())
+}
+
+fn resolved_source_pane(paths: &Paths, run_id: &WorkflowRunId) -> Option<String> {
+    if let Some(pane) = crate::caller_pane::verified() {
+        return Some(pane);
+    }
+    recorded_source_pane(paths, run_id)
+        .filter(|pane| crate::caller_pane::live_owner_pane(pane).is_some())
+}
+
+fn recorded_source_pane(paths: &Paths, run_id: &WorkflowRunId) -> Option<String> {
+    fs::read_to_string(pane_record_path(paths, run_id))
+        .ok()
+        .map(|text| text.trim().to_owned())
+        .filter(|pane| !pane.is_empty())
+}
+
 fn pid_path(paths: &Paths, run_id: &WorkflowRunId) -> PathBuf {
     paths.runs.join(format!("{run_id}.workflow.pid"))
 }
@@ -424,4 +461,24 @@ fn log_path(paths: &Paths, run_id: &WorkflowRunId) -> PathBuf {
 
 fn script_record_path(paths: &Paths, run_id: &WorkflowRunId) -> PathBuf {
     paths.runs.join(format!("{run_id}.workflow.script"))
+}
+
+fn pane_record_path(paths: &Paths, run_id: &WorkflowRunId) -> PathBuf {
+    paths.runs.join(format!("{run_id}.workflow.pane"))
+}
+
+/// Whether `pane` is the one `workflow run` verified for the run this process
+/// drives. Only a workflow driver, which has no pane of its own, qualifies; any
+/// other caller naming a pane gets the ordinary check alone.
+pub(crate) fn trusts_recorded_pane(pane: &str) -> bool {
+    let Some(run) = env::var("BRGR_WORKFLOW_RUN")
+        .ok()
+        .and_then(|run| WorkflowRunId::new(run).ok())
+    else {
+        return false;
+    };
+    Paths::new(env::var_os("BRGR_HOME").map(PathBuf::from)).is_ok_and(|paths| {
+        recorded_source_pane(&paths, &run).as_deref() == Some(pane)
+            && crate::caller_pane::live_owner_pane(pane).is_some()
+    })
 }
