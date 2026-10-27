@@ -440,7 +440,8 @@ fn resolved_source_pane(paths: &Paths, run_id: &WorkflowRunId) -> Option<String>
     if let Some(pane) = crate::caller_pane::verified() {
         return Some(pane);
     }
-    recorded_source_pane(paths, run_id).filter(|pane| crate::caller_pane::named(pane).is_some())
+    recorded_source_pane(paths, run_id)
+        .filter(|pane| crate::caller_pane::live_owner_pane(pane).is_some())
 }
 
 fn recorded_source_pane(paths: &Paths, run_id: &WorkflowRunId) -> Option<String> {
@@ -464,4 +465,20 @@ fn script_record_path(paths: &Paths, run_id: &WorkflowRunId) -> PathBuf {
 
 fn pane_record_path(paths: &Paths, run_id: &WorkflowRunId) -> PathBuf {
     paths.runs.join(format!("{run_id}.workflow.pane"))
+}
+
+/// Whether `pane` is the one `workflow run` verified for the run this process
+/// drives. Only a workflow driver, which has no pane of its own, qualifies; any
+/// other caller naming a pane gets the ordinary check alone.
+pub(crate) fn trusts_recorded_pane(pane: &str) -> bool {
+    let Some(run) = env::var("BRGR_WORKFLOW_RUN")
+        .ok()
+        .and_then(|run| WorkflowRunId::new(run).ok())
+    else {
+        return false;
+    };
+    Paths::new(env::var_os("BRGR_HOME").map(PathBuf::from)).is_ok_and(|paths| {
+        recorded_source_pane(&paths, &run).as_deref() == Some(pane)
+            && crate::caller_pane::live_owner_pane(pane).is_some()
+    })
 }

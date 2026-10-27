@@ -680,3 +680,26 @@ fn a_brgr_error_is_not_prefixed_with_a_second_error() {
         "doubled Error prefix: {log}"
     );
 }
+
+#[test]
+fn a_named_pane_outside_a_workflow_driver_is_not_trusted_just_for_being_alive() {
+    // `--source-pane` names a live Claude pane that this process neither runs
+    // inside nor owns a workflow record for: it must be refused, not used.
+    let fixture = fixture_claude();
+    // This process is "in" p-me; it names p-other.
+    let (_dir, _fake, herdr) = herdr_for(&fixture, "p-me");
+    let output = run_with(
+        &fixture.home,
+        &fixture.workspace,
+        &["--source-pane", "p-other", "run", "BRGR_FIXTURE_OK"],
+        &owner_env(),
+        &herdr,
+    );
+    assert!(
+        !output.status.success(),
+        "a live agent pane was accepted as the source: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let said = String::from_utf8_lossy(&output.stderr);
+    assert!(said.contains("exact Herdr source"), "{said}");
+}
