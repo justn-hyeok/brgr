@@ -96,7 +96,6 @@ use prompt::{render_task_prompt, worker_prompt};
 
 use std::{
     ffi::OsStr,
-    io::{Read as _, Seek as _, SeekFrom},
     os::unix::process::CommandExt,
     path::Path,
     process::{ExitStatus, Stdio},
@@ -335,26 +334,14 @@ impl ProcessRunner {
             return Err(RunnerError::InvalidArgument);
         }
         let scratch = TempDir::new()?;
-        let stdout_path = scratch.path().join("stdout");
-        let stderr_path = scratch.path().join("stderr");
-        let mut stdout_file = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create_new(true)
-            .open(&stdout_path)?;
-        let mut stderr_file = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create_new(true)
-            .open(&stderr_path)?;
         let mut command = Command::new(executable);
         command
             .args(argv)
             .current_dir(scratch.path())
             .env_clear()
             .stdin(Stdio::null())
-            .stdout(Stdio::from(stdout_file.try_clone()?))
-            .stderr(Stdio::from(stderr_file.try_clone()?))
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
             .kill_on_drop(true);
         command.as_std_mut().process_group(0);
         for name in ["HOME", "LANG"] {
@@ -369,19 +356,26 @@ impl ProcessRunner {
         }
         let started = Instant::now();
         let mut child = command.spawn().map_err(RunnerError::SpawnIo)?;
-        let (status, timed_out, quota_exceeded) = wait_for_probe_exit(
-            &mut child,
-            started,
-            deadline,
-            &stdout_file,
-            &stderr_file,
-            65_536,
-        )
-        .await?;
-        let (stdout, stdout_truncated) = read_probe_file(&mut stdout_file, 65_536)?;
-        let (stderr, stderr_truncated) = read_probe_file(&mut stderr_file, 65_536)?;
+        let pid = child.id().ok_or(RunnerError::MissingProcessId)?;
+        let mut stdout_task = tokio::spawn(read_probe_pipe(
+            child
+                .stdout
+                .take()
+                .ok_or(RunnerError::MissingPipe("stdout"))?,
+            pid,
+        ));
+        let mut stderr_task = tokio::spawn(read_probe_pipe(
+            child
+                .stderr
+                .take()
+                .ok_or(RunnerError::MissingPipe("stderr"))?,
+            pid,
+        ));
+        let (status, timed_out) = wait_for_probe_exit(&mut child, pid, started, deadline).await?;
+        let (stdout, stdout_truncated) = join_probe_pipe(&mut stdout_task, pid).await?;
+        let (stderr, stderr_truncated) = join_probe_pipe(&mut stderr_task, pid).await?;
         let exit_code = status.and_then(|value| value.code());
-        let output_truncated = quota_exceeded || stdout_truncated || stderr_truncated;
+        let output_truncated = stdout_truncated || stderr_truncated;
         let result = if exit_code == Some(0) && !timed_out && !output_truncated {
             stdout.clone()
         } else {
@@ -447,46 +441,69 @@ fn apply_delegation_env(command: &mut Command, context: &DelegationContext<'_>) 
     }
 }
 
-fn read_probe_file(file: &mut std::fs::File, limit: u64) -> Result<(Vec<u8>, bool), RunnerError> {
-    let mut bytes = Vec::new();
-    file.seek(SeekFrom::Start(0))?;
-    file.take(limit.saturating_add(1)).read_to_end(&mut bytes)?;
-    let truncated = u64::try_from(bytes.len()).unwrap_or(u64::MAX) > limit;
-    if truncated {
-        bytes.truncate(usize::try_from(limit).expect("probe limit fits usize"));
+/// Largest probe output kept; the probe is stopped once either stream passes it.
+const PROBE_OUTPUT_LIMIT: u64 = 65_536;
+/// How long a probe's pipes may stay open after the probe itself has gone, for
+/// example because a grandchild inherited them.
+const PROBE_PIPE_GRACE: Duration = Duration::from_millis(500);
+
+/// Probe output travels over pipes, not files: a pipe closes with its reader, so
+/// a probe whose supervisor was killed ends on its next write instead of filling
+/// the disk with nobody watching.
+async fn read_probe_pipe<R>(reader: R, pid: u32) -> Result<(Vec<u8>, bool), std::io::Error>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    let capture = capture::read_bounded(reader, PROBE_OUTPUT_LIMIT).await?;
+    if capture.1 {
+        kill_probe_group(pid);
     }
-    Ok((bytes, truncated))
+    Ok(capture)
+}
+
+async fn join_probe_pipe(
+    task: &mut tokio::task::JoinHandle<Result<(Vec<u8>, bool), std::io::Error>>,
+    pid: u32,
+) -> Result<(Vec<u8>, bool), RunnerError> {
+    if let Ok(joined) = timeout(PROBE_PIPE_GRACE, &mut *task).await {
+        return join_capture(joined);
+    }
+    kill_probe_group(pid);
+    if let Ok(joined) = timeout(PROBE_PIPE_GRACE, &mut *task).await {
+        let (bytes, _) = join_capture(joined)?;
+        return Ok((bytes, true));
+    }
+    task.abort();
+    Ok((Vec::new(), true))
 }
 
 async fn wait_for_probe_exit(
     child: &mut tokio::process::Child,
+    pid: u32,
     started: Instant,
     deadline: Duration,
-    stdout: &std::fs::File,
-    stderr: &std::fs::File,
-    limit: u64,
-) -> Result<(Option<ExitStatus>, bool, bool), RunnerError> {
-    loop {
-        if let Some(status) = child.try_wait()? {
-            return Ok((Some(status), false, false));
+) -> Result<(Option<ExitStatus>, bool), RunnerError> {
+    tokio::select! {
+        status = child.wait() => Ok((Some(status?), false)),
+        () = tokio::time::sleep_until((started + deadline).into()) => {
+            Ok((Some(stop_probe_group(child, pid).await?), true))
         }
-        if stdout.metadata()?.len() > limit || stderr.metadata()?.len() > limit {
-            return Ok((Some(stop_probe_group(child).await?), false, true));
-        }
-        if started.elapsed() >= deadline {
-            return Ok((Some(stop_probe_group(child).await?), true, false));
-        }
-        sleep(Duration::from_millis(1)).await;
     }
 }
 
-async fn stop_probe_group(child: &mut tokio::process::Child) -> Result<ExitStatus, RunnerError> {
-    let pid = child.id().ok_or(RunnerError::MissingProcessId)?;
-    let kill = std::process::Command::new("/bin/kill")
+fn kill_probe_group(pid: u32) -> bool {
+    std::process::Command::new("/bin/kill")
         .arg("-KILL")
         .arg(format!("-{pid}"))
-        .output()?;
-    if !kill.status.success() && child.try_wait()?.is_none() {
+        .output()
+        .is_ok_and(|output| output.status.success())
+}
+
+async fn stop_probe_group(
+    child: &mut tokio::process::Child,
+    pid: u32,
+) -> Result<ExitStatus, RunnerError> {
+    if !kill_probe_group(pid) && child.try_wait()?.is_none() {
         child.start_kill()?;
     }
     Ok(child.wait().await?)
@@ -1438,51 +1455,137 @@ mod tests {
         assert_eq!(oversized.stdout.len(), 65_536);
     }
 
-    /// The flood is finite on purpose: if the test process is killed while the
-    /// flood runs, the probe's process group is orphaned and nothing watches
-    /// its output file. An endless writer would then fill the disk.
+    /// The flood is finite on purpose: a probe whose output is not drained would
+    /// otherwise write forever. The probe is stopped long before this.
     const FLOOD_CEILING_BYTES: u64 = 256 * 1024 * 1024;
 
     #[tokio::test]
-    async fn probe_stops_a_flood_before_its_deadline_and_reads_the_original_descriptor() {
+    async fn probe_stops_a_flood_before_its_deadline() {
         let root = tempfile::tempdir().unwrap();
         let executable = root.path().join("probe");
-        let captured = root.path().join("captured");
+        let pid_path = root.path().join("pid");
         std::fs::write(
             &executable,
             format!(
-                "#!/bin/sh\n/bin/ln stdout '{}'\nexec /usr/bin/head -c {FLOOD_CEILING_BYTES} /dev/zero\n",
-                captured.display()
+                "#!/bin/sh\necho $$ > '{}'\nexec /usr/bin/head -c {FLOOD_CEILING_BYTES} /dev/zero\n",
+                pid_path.display()
             ),
         )
         .unwrap();
         std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let flooded = ProcessRunner::probe(&executable, &[], Duration::from_secs(2))
+        let flooded = ProcessRunner::probe(&executable, &[], Duration::from_secs(5))
             .await
             .unwrap();
         assert!(flooded.output_truncated);
         assert!(
             !flooded.timed_out,
-            "the deadline fired before the output watchdog stopped the flood"
+            "the deadline fired before the output limit stopped the flood"
         );
-        // The watchdog is a sampled soft limit, not an OS-enforced disk quota.
-        // A fixed byte ceiling is scheduler-dependent on fast CI machines;
-        // instead prove the process group is gone and the file stops growing.
-        let stopped_len = std::fs::metadata(&captured).unwrap().len();
-        tokio::time::sleep(Duration::from_millis(25)).await;
-        assert_eq!(std::fs::metadata(&captured).unwrap().len(), stopped_len);
+        assert_eq!(flooded.stdout.len(), 65_536);
+        assert!(flooded.result.is_empty());
+        let pid = std::fs::read_to_string(&pid_path).unwrap();
+        assert!(
+            !process_is_alive(pid.trim()),
+            "the flooding probe is still running"
+        );
+    }
 
+    #[tokio::test]
+    async fn probe_output_is_read_from_the_pipe_not_a_path_the_probe_can_replace() {
+        let root = tempfile::tempdir().unwrap();
+        let executable = root.path().join("probe");
         std::fs::write(
             &executable,
-            "#!/bin/sh\n/bin/mv stdout moved\n/bin/ln -s /etc/passwd stdout\nprintf 'SAFE_PROBE'\n",
+            "#!/bin/sh\n/bin/mv stdout moved 2>/dev/null\n/bin/ln -s /etc/passwd stdout\nprintf 'SAFE_PROBE'\n",
         )
         .unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
         let replaced = ProcessRunner::probe(&executable, &[], INCIDENTAL_PROBE_DEADLINE)
             .await
             .unwrap();
         assert!(!replaced.timed_out);
         assert_eq!(replaced.stdout, b"SAFE_PROBE");
         assert!(!replaced.output_truncated);
+    }
+
+    const ORPHAN_HELPER_ENV: &str = "BRGR_PROBE_ORPHAN_HELPER_DIR";
+
+    /// Runs only when `probe_writer_dies_with_a_killed_parent` re-executes this
+    /// test binary; in an ordinary run it does nothing.
+    #[tokio::test]
+    async fn probe_orphan_helper() {
+        let Some(dir) = std::env::var_os(ORPHAN_HELPER_ENV) else {
+            return;
+        };
+        let dir = PathBuf::from(dir);
+        let executable = dir.join("probe");
+        std::fs::write(
+            &executable,
+            format!(
+                "#!/bin/sh\necho $$ > '{}'\ni=0\nwhile [ \"$i\" -lt 600 ]; do echo tick; i=$((i+1)); sleep 0.05; done\n",
+                dir.join("pid").display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let _ = ProcessRunner::probe(&executable, &[], INCIDENTAL_PROBE_DEADLINE).await;
+    }
+
+    fn process_is_alive(pid: &str) -> bool {
+        std::process::Command::new("/bin/kill")
+            .args(["-0", pid])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    }
+
+    /// A probe child whose parent is killed must not outlive it: nothing is left
+    /// to watch its output, and a file-backed capture let it write until the
+    /// disk was full. A pipe closes with the parent, so the child's next write
+    /// ends it.
+    #[test]
+    fn probe_writer_dies_with_a_killed_parent() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut parent = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "tests::probe_orphan_helper",
+                "--exact",
+                "--test-threads=1",
+                "--nocapture",
+            ])
+            .env(ORPHAN_HELPER_ENV, dir.path())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let pid_path = dir.path().join("pid");
+        let started = Instant::now();
+        let pid = loop {
+            if let Ok(text) = std::fs::read_to_string(&pid_path)
+                && !text.trim().is_empty()
+            {
+                break text.trim().to_owned();
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(20),
+                "the probe child never started"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        parent.kill().unwrap();
+        parent.wait().unwrap();
+        let killed = Instant::now();
+        while process_is_alive(&pid) && killed.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let survived = process_is_alive(&pid);
+        if survived {
+            let _ = std::process::Command::new("/bin/kill")
+                .args(["-KILL", &pid])
+                .output();
+        }
+        assert!(!survived, "the probe child outlived its killed parent");
     }
 
     #[test]
