@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- A harness probe (`--version`, `--help`, model catalog) now reads its output
+  over pipes instead of temporary files. A probe whose supervisor was killed
+  used to keep writing to a file nobody watched until the disk was full; a pipe
+  closes with its reader, so the probe ends on its next write. Output limits and
+  deadlines are unchanged.
+
 ## 2.15.8 — 2026-10-27
 
 Dynamic Workflows, first version: a script creates a later task from a sealed
