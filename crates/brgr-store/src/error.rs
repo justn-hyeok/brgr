@@ -192,6 +192,8 @@ pub enum StoreError {
     WorkflowRunNotFound(WorkflowRunId),
     #[error("workflow run {0} is not running")]
     WorkflowRunNotRunning(WorkflowRunId),
+    #[error("workflow run {0} belongs to another owner than the step's task")]
+    WorkflowStepOwnerMismatch(WorkflowRunId),
     #[error("workflow run {0} already exists with different fields")]
     WorkflowRunConflict(WorkflowRunId),
     #[error("workflow run {0} has reached a terminal state")]

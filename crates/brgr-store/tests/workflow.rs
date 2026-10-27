@@ -486,3 +486,30 @@ fn create_workflow_run_is_idempotent_and_refuses_a_conflicting_repeat() {
     assert_eq!(kept.max_parallel, 3);
     assert_eq!(kept.script_digest, "digest-script");
 }
+
+#[test]
+fn a_step_whose_task_belongs_to_another_owner_is_refused_and_creates_nothing() {
+    let root = TempDir::new().unwrap();
+    let mut store = Store::open(root.path()).unwrap();
+    let run_id = run_id("run-owner");
+    store
+        .create_workflow_run(&run_id, &owner(), "digest-script", 2)
+        .unwrap();
+    let stranger = OwnerId::new("codex:someone-else").unwrap();
+    let task = spec(&stranger, TaskId::new());
+    assert!(
+        matches!(
+            store.record_workflow_step(
+                &run_id,
+                &step_key("fetch"),
+                "digest-in",
+                &task,
+                "digest-req"
+            ),
+            Err(StoreError::WorkflowStepOwnerMismatch(_))
+        ),
+        "a task owned by someone else was journaled under the run"
+    );
+    assert_eq!(count_table(root.path(), "tasks"), 0);
+    assert_eq!(count_table(root.path(), "workflow_steps"), 0);
+}

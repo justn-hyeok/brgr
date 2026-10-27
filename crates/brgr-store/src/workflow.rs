@@ -324,6 +324,9 @@ fn record_step_in_transaction(
     if run.state != WorkflowRunState::Running {
         return Err(StoreError::WorkflowRunNotRunning(run_id.clone()));
     }
+    if task.owner_id != run.owner_id {
+        return Err(StoreError::WorkflowStepOwnerMismatch(run_id.clone()));
+    }
     if let Some(existing) = load_step(transaction, run_id, step_key)? {
         if existing.input_digest == input_digest {
             return Ok(WorkflowStepOutcome::Existing {
