@@ -1,11 +1,28 @@
 # Changelog
 
-## Unreleased
+## 2.15.8 — 2026-10-27
 
-- Dynamic Workflows: `workflow run` and `workflow resume` from a verified Herdr
-  pane record that pane so script steps can open TUI workers beside it. Without
-  a pane, stderr notes that steps must use `mode headless`; headless workflows
-  still run.
+Dynamic Workflows, first version: a script creates a later task from a sealed
+result it has observed, and brgr keeps the run durable.
+
+- `brgr workflow run SCRIPT.mjs` runs a script under node as a detached driver
+  with a journaled run; `workflow resume` restarts a dead driver and journaled
+  steps replay instead of creating a second task; `workflow status`,
+  `workflow cancel`, `workflow create` and `workflow set-state` inspect and
+  control it. `brgr workflow init` writes the SDK (`agent()`, `parallel()`) and
+  an example. A step is launched with `brgr run --workflow RUN --step KEY`,
+  which is idempotent, refuses a changed input under the same key, and honors
+  the run's `--max-parallel` (exit code 75 until a slot frees).
+- The owner gets exactly one notice per run state change (blocked, completed,
+  failed, cancelled). Individual step tasks send no completion push.
+- Steps open TUI workers beside the head's pane when `workflow run` was started
+  from a verified Herdr pane; otherwise steps must use `mode: "headless"`.
+  Codex heads use `mode: "headless"` for now.
+- The SDK returns sealed results (`failed`, `cancelled` and `lost` are returned,
+  not thrown) and exposes no accept, reject, apply or land.
+- Not in this version: `pipeline()`, retries, per-step deadlines, TypeScript
+  tooling, head migration during a run.
+- Additive store tables for runs, steps and run notices; no migration.
 
 ## 2.15.7 — 2026-10-27
 
