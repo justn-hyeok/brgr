@@ -134,7 +134,9 @@ pub(super) fn cancel_run(paths: &Paths, run: &str, json_output: bool) -> Result<
     let run_id = WorkflowRunId::new(run)?;
     let current = store.workflow_run(&run_id)?;
     require_owner(&store, &current.owner_id)?;
+    let previous = current.state;
     let run = mark_cancelled(&store, &run_id, current)?;
+    crate::notification::spawn_for_workflow_transition(paths, previous, &run);
     let driver_stopped = stop_live_driver(paths, &run_id);
     let cancelled_tasks = cancel_unfinished_steps(paths, &store, &run_id)?;
     print_value(
@@ -266,12 +268,14 @@ fn settle_driver_exit(paths: &Paths, run_id: &WorkflowRunId, succeeded: bool) ->
     if run.state != WorkflowRunState::Running {
         return Ok(());
     }
+    let previous = run.state;
     let next = if succeeded {
         WorkflowRunState::Completed
     } else {
         WorkflowRunState::Failed
     };
-    store.set_workflow_run_state(run_id, next)?;
+    let run = store.set_workflow_run_state(run_id, next)?;
+    crate::notification::spawn_for_workflow_transition(paths, previous, &run);
     Ok(())
 }
 

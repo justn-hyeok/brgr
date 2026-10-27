@@ -34,7 +34,10 @@ use contention::BUSY_TIMEOUT;
 pub use debate::{DebateGroup, PeerDraft, PeerMessage};
 pub use error::StoreError;
 pub use message::{MessageDirection, MessageDraft, MessageKind, TaskMessage};
-pub use notification::{NotificationTarget, PendingNotification, QuestionTarget};
+pub use notification::{
+    NotificationTarget, PendingNotification, PendingWorkflowNotification, QuestionTarget,
+    WorkflowNotificationTarget,
+};
 pub use owner::OwnerProof;
 use owner::assert_owner_binding;
 pub use result::{OpenReason, Settlement};
@@ -49,8 +52,8 @@ pub use takeover::{
 };
 pub use tree::SubtreeNode;
 pub use workflow::{
-    WorkflowRun, WorkflowRunId, WorkflowRunState, WorkflowStep, WorkflowStepKey,
-    WorkflowStepOutcome,
+    WorkflowNotice, WorkflowRun, WorkflowRunId, WorkflowRunState, WorkflowStep, WorkflowStepCounts,
+    WorkflowStepKey, WorkflowStepOutcome,
 };
 
 /// The result of an idempotent store mutation.

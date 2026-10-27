@@ -1,7 +1,22 @@
 use brgr_protocol::{OwnerId, ResultId, TaskId};
 use rusqlite::{OptionalExtension as _, params};
 
+use super::workflow::{WorkflowRunId, WorkflowRunState};
 use super::{Store, StoreError, owner::assert_owner_binding};
+
+pub(crate) const CLEAR_DELIVERY: &str = "delivered_session = NULL,
+           delivered_epoch = NULL, delivered_pane = NULL,
+           claim_token = NULL, claim_until = 0";
+const CLAIM_SET: &str = "claim_token = ?1, claim_until = ?2, attempts = attempts + 1";
+const DELIVERED_SET: &str = "delivered_session = ?1, delivered_epoch = ?2, delivered_pane = ?3,
+                claim_token = NULL, claim_until = 0, last_error = NULL";
+const RELEASE_SET: &str = "claim_token = NULL, claim_until = 0, last_error = ?1";
+const SURFACE_COLUMNS: &str = "n.owner_id, b.session_id, s.pane_id,
+                        b.binding_epoch, s.herdr_bin, s.herdr_session,
+                        COALESCE(n.claim_token, ''), n.claim_until";
+const SURFACE_JOIN: &str = "JOIN owner_bindings b ON b.owner_id = n.owner_id
+                 JOIN owner_surfaces s ON s.owner_id = b.owner_id
+                   AND s.session_id = b.session_id AND s.binding_epoch = b.binding_epoch";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PendingNotification {
@@ -48,6 +63,82 @@ struct ClaimRow {
     herdr_session: Option<String>,
     prior_token: String,
     lease: i64,
+}
+
+struct SurfaceClaim {
+    owner: String,
+    session: String,
+    pane: String,
+    epoch: i64,
+    herdr_bin: String,
+    herdr_session: Option<String>,
+    prior_token: String,
+    lease: i64,
+}
+
+/// A workflow run notice waiting to be pushed to its owner.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PendingWorkflowNotification {
+    pub run_id: WorkflowRunId,
+    pub seq: u64,
+    pub state: WorkflowRunState,
+    pub owner_id: OwnerId,
+    pub attempts: u64,
+    pub last_error: Option<String>,
+}
+
+/// The owner surface a claimed workflow notice should be delivered to.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorkflowNotificationTarget {
+    pub run_id: WorkflowRunId,
+    pub seq: u64,
+    pub state: WorkflowRunState,
+    pub owner_id: OwnerId,
+    pub session_id: String,
+    pub binding_epoch: u64,
+    pub pane_id: String,
+    pub herdr_session: Option<String>,
+    pub herdr_bin: String,
+}
+
+fn claim_is_held(prior_token: &str, lease: i64, token: &str, now_seconds: i64) -> bool {
+    lease > now_seconds && prior_token != token
+}
+
+fn owner_surface_matches(table: &str) -> String {
+    format!(
+        "EXISTS (SELECT 1 FROM owner_bindings b
+                   JOIN owner_surfaces s ON s.owner_id = b.owner_id
+                   WHERE b.owner_id = {table}.owner_id
+                     AND b.session_id = ?1 AND b.binding_epoch = ?2
+                     AND s.session_id = b.session_id AND s.binding_epoch = b.binding_epoch
+                     AND s.pane_id = ?3)"
+    )
+}
+
+fn surface_from_row(row: &rusqlite::Row, start: usize) -> rusqlite::Result<SurfaceClaim> {
+    Ok(SurfaceClaim {
+        owner: row.get(start)?,
+        session: row.get(start + 1)?,
+        pane: row.get(start + 2)?,
+        epoch: row.get(start + 3)?,
+        herdr_bin: row.get(start + 4)?,
+        herdr_session: row.get(start + 5)?,
+        prior_token: row.get(start + 6)?,
+        lease: row.get(start + 7)?,
+    })
+}
+
+fn parse_seq(seq: i64) -> Result<u64, StoreError> {
+    u64::try_from(seq).map_err(|_| StoreError::NumericOverflow)
+}
+
+fn parse_epoch(epoch: i64) -> Result<u64, StoreError> {
+    u64::try_from(epoch).map_err(|_| StoreError::NumericOverflow)
+}
+
+fn seq_param(seq: u64) -> Result<i64, StoreError> {
+    i64::try_from(seq).map_err(|_| StoreError::NumericOverflow)
 }
 
 impl Store {
@@ -216,28 +307,27 @@ impl Store {
         let transaction = self.write_transaction()?;
         let record: Option<ClaimRow> = transaction
             .query_row(
-                "SELECT n.task_id, n.owner_id, b.session_id, s.pane_id,
-                        b.binding_epoch, s.herdr_bin, s.herdr_session,
-                        COALESCE(n.claim_token, ''), n.claim_until
+                &format!(
+                    "SELECT n.task_id, {SURFACE_COLUMNS}
                  FROM completion_notifications n
                  JOIN inbox_items i ON i.result_id = n.result_id AND i.owner_id = n.owner_id
-                 JOIN owner_bindings b ON b.owner_id = n.owner_id
-                 JOIN owner_surfaces s ON s.owner_id = b.owner_id
-                   AND s.session_id = b.session_id AND s.binding_epoch = b.binding_epoch
+                 {SURFACE_JOIN}
                  WHERE n.result_id = ?1 AND n.resolved = 0
-                   AND n.delivered_session IS NULL AND i.acknowledged = 0",
+                   AND n.delivered_session IS NULL AND i.acknowledged = 0"
+                ),
                 [result_id.to_string()],
                 |row| {
+                    let surface = surface_from_row(row, 1)?;
                     Ok(ClaimRow {
                         task: row.get(0)?,
-                        owner: row.get(1)?,
-                        session: row.get(2)?,
-                        pane: row.get(3)?,
-                        epoch: row.get(4)?,
-                        herdr_bin: row.get(5)?,
-                        herdr_session: row.get(6)?,
-                        prior_token: row.get(7)?,
-                        lease: row.get(8)?,
+                        owner: surface.owner,
+                        session: surface.session,
+                        pane: surface.pane,
+                        epoch: surface.epoch,
+                        herdr_bin: surface.herdr_bin,
+                        herdr_session: surface.herdr_session,
+                        prior_token: surface.prior_token,
+                        lease: surface.lease,
                     })
                 },
             )
@@ -245,12 +335,11 @@ impl Store {
         let Some(record) = record else {
             return Ok(None);
         };
-        if record.lease > now_seconds && record.prior_token != token {
+        if claim_is_held(&record.prior_token, record.lease, token, now_seconds) {
             return Ok(None);
         }
         transaction.execute(
-            "UPDATE completion_notifications SET claim_token = ?1,
-               claim_until = ?2, attempts = attempts + 1 WHERE result_id = ?3",
+            &format!("UPDATE completion_notifications SET {CLAIM_SET} WHERE result_id = ?3"),
             params![
                 token,
                 now_seconds.saturating_add(lease_seconds),
@@ -266,7 +355,7 @@ impl Store {
                 .map_err(|_| StoreError::InvalidNotification)?,
             owner_id: OwnerId::new(record.owner)?,
             session_id: record.session,
-            binding_epoch: u64::try_from(record.epoch).map_err(|_| StoreError::NumericOverflow)?,
+            binding_epoch: parse_epoch(record.epoch)?,
             pane_id: record.pane,
             herdr_session: record.herdr_session,
             herdr_bin: record.herdr_bin,
@@ -284,17 +373,13 @@ impl Store {
         token: &str,
     ) -> Result<(), StoreError> {
         let changed = self.connection.execute(
-            "UPDATE completion_notifications SET delivered_session = ?1,
-                delivered_epoch = ?2, delivered_pane = ?3,
-                claim_token = NULL, claim_until = 0, last_error = NULL
+            &format!(
+                "UPDATE completion_notifications SET {DELIVERED_SET}
              WHERE result_id = ?4 AND claim_token = ?5 AND resolved = 0
                AND delivered_session IS NULL
-               AND EXISTS (SELECT 1 FROM owner_bindings b
-                   JOIN owner_surfaces s ON s.owner_id = b.owner_id
-                   WHERE b.owner_id = completion_notifications.owner_id
-                     AND b.session_id = ?1 AND b.binding_epoch = ?2
-                     AND s.session_id = b.session_id AND s.binding_epoch = b.binding_epoch
-                     AND s.pane_id = ?3)",
+               AND {}",
+                owner_surface_matches("completion_notifications")
+            ),
             params![
                 target.session_id,
                 i64::try_from(target.binding_epoch).map_err(|_| StoreError::NumericOverflow)?,
@@ -322,10 +407,198 @@ impl Store {
     ) -> Result<(), StoreError> {
         let diagnostic: String = error.chars().take(512).collect();
         self.connection.execute(
-            "UPDATE completion_notifications SET claim_token = NULL,
-               claim_until = 0, last_error = ?1
-             WHERE result_id = ?2 AND claim_token = ?3 AND resolved = 0",
+            &format!(
+                "UPDATE completion_notifications SET {RELEASE_SET}
+             WHERE result_id = ?2 AND claim_token = ?3 AND resolved = 0"
+            ),
             params![diagnostic, result_id.to_string(), token],
+        )?;
+        Ok(())
+    }
+
+    /// Lists undelivered workflow notices for one run.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid stored IDs or a database failure.
+    pub fn pending_workflow_notifications(
+        &self,
+        run_id: &WorkflowRunId,
+    ) -> Result<Vec<PendingWorkflowNotification>, StoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT run_id, seq, state, owner_id, attempts, last_error
+             FROM workflow_notifications
+             WHERE run_id = ?1 AND resolved = 0 AND delivered_session IS NULL
+             ORDER BY seq",
+        )?;
+        let rows = statement.query_map([run_id.as_str()], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, i64>(4)?,
+                row.get::<_, Option<String>>(5)?,
+            ))
+        })?;
+        rows.map(|row| parse_pending_workflow(row?)).collect()
+    }
+
+    /// Finds workflow runs that have undelivered notices for a bound session.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid stored IDs or a database failure.
+    pub fn pending_workflow_notification_runs_for_session(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<WorkflowRunId>, StoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT DISTINCT n.run_id FROM workflow_notifications n
+             JOIN owner_bindings b ON b.owner_id = n.owner_id
+             WHERE b.session_id = ?1 AND n.resolved = 0
+               AND n.delivered_session IS NULL
+             ORDER BY n.rowid",
+        )?;
+        statement
+            .query_map([session_id], |row| row.get::<_, String>(0))?
+            .map(|row| WorkflowRunId::new(row?))
+            .collect()
+    }
+
+    /// Claims one pending workflow notice for bounded notification delivery.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if stored identity or the database is invalid.
+    pub fn claim_workflow_notification(
+        &self,
+        run_id: &WorkflowRunId,
+        seq: u64,
+        token: &str,
+        now_seconds: i64,
+        lease_seconds: i64,
+    ) -> Result<Option<WorkflowNotificationTarget>, StoreError> {
+        if token.is_empty() || lease_seconds <= 0 {
+            return Err(StoreError::InvalidNotification);
+        }
+        let seq_i = seq_param(seq)?;
+        let transaction = self.write_transaction()?;
+        let record: Option<(String, SurfaceClaim)> = transaction
+            .query_row(
+                &format!(
+                    "SELECT n.state, {SURFACE_COLUMNS}
+                 FROM workflow_notifications n
+                 {SURFACE_JOIN}
+                 WHERE n.run_id = ?1 AND n.seq = ?2 AND n.resolved = 0
+                   AND n.delivered_session IS NULL"
+                ),
+                params![run_id.as_str(), seq_i],
+                |row| Ok((row.get(0)?, surface_from_row(row, 1)?)),
+            )
+            .optional()?;
+        let Some((state, record)) = record else {
+            return Ok(None);
+        };
+        if claim_is_held(&record.prior_token, record.lease, token, now_seconds) {
+            return Ok(None);
+        }
+        transaction.execute(
+            &format!(
+                "UPDATE workflow_notifications SET {CLAIM_SET} WHERE run_id = ?3 AND seq = ?4"
+            ),
+            params![
+                token,
+                now_seconds.saturating_add(lease_seconds),
+                run_id.as_str(),
+                seq_i
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(Some(WorkflowNotificationTarget {
+            run_id: run_id.clone(),
+            seq,
+            state: WorkflowRunState::parse(&state)?,
+            owner_id: OwnerId::new(record.owner)?,
+            session_id: record.session,
+            binding_epoch: parse_epoch(record.epoch)?,
+            pane_id: record.pane,
+            herdr_session: record.herdr_session,
+            herdr_bin: record.herdr_bin,
+        }))
+    }
+
+    /// Completes a claimed workflow delivery only while the owner binding matches.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a stale claim or owner transfer.
+    pub fn mark_workflow_notification_delivered(
+        &self,
+        target: &WorkflowNotificationTarget,
+        token: &str,
+    ) -> Result<(), StoreError> {
+        let changed = self.connection.execute(
+            &format!(
+                "UPDATE workflow_notifications SET {DELIVERED_SET}
+             WHERE run_id = ?4 AND seq = ?5 AND claim_token = ?6 AND resolved = 0
+               AND delivered_session IS NULL
+               AND {}",
+                owner_surface_matches("workflow_notifications")
+            ),
+            params![
+                target.session_id,
+                i64::try_from(target.binding_epoch).map_err(|_| StoreError::NumericOverflow)?,
+                target.pane_id,
+                target.run_id.as_str(),
+                seq_param(target.seq)?,
+                token,
+            ],
+        )?;
+        if changed != 1 {
+            return Err(StoreError::NotificationClaimStale);
+        }
+        Ok(())
+    }
+
+    /// Releases a workflow notice claim for a later retry.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database update fails.
+    pub fn release_workflow_notification_claim(
+        &self,
+        run_id: &WorkflowRunId,
+        seq: u64,
+        token: &str,
+        error: &str,
+    ) -> Result<(), StoreError> {
+        let diagnostic: String = error.chars().take(512).collect();
+        self.connection.execute(
+            &format!(
+                "UPDATE workflow_notifications SET {RELEASE_SET}
+             WHERE run_id = ?2 AND seq = ?3 AND claim_token = ?4 AND resolved = 0"
+            ),
+            params![diagnostic, run_id.as_str(), seq_param(seq)?, token],
+        )?;
+        Ok(())
+    }
+
+    /// Marks a workflow notice resolved so it is not delivered again.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database update fails.
+    pub fn resolve_workflow_notification(
+        &self,
+        run_id: &WorkflowRunId,
+        seq: u64,
+    ) -> Result<(), StoreError> {
+        self.connection.execute(
+            "UPDATE workflow_notifications SET resolved = 1,
+               claim_token = NULL, claim_until = 0
+             WHERE run_id = ?1 AND seq = ?2",
+            params![run_id.as_str(), seq_param(seq)?],
         )?;
         Ok(())
     }
@@ -403,4 +676,18 @@ impl Store {
         )?;
         Ok(())
     }
+}
+
+fn parse_pending_workflow(
+    row: (String, i64, String, String, i64, Option<String>),
+) -> Result<PendingWorkflowNotification, StoreError> {
+    let (run_id, seq, state, owner_id, attempts, last_error) = row;
+    Ok(PendingWorkflowNotification {
+        run_id: WorkflowRunId::new(run_id)?,
+        seq: parse_seq(seq)?,
+        state: WorkflowRunState::parse(&state)?,
+        owner_id: OwnerId::new(owner_id)?,
+        attempts: u64::try_from(attempts).map_err(|_| StoreError::NumericOverflow)?,
+        last_error,
+    })
 }

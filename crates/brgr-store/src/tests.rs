@@ -1993,6 +1993,10 @@ const RETRY_DECISIONS: &[(&str, bool)] = &[
     ("claim_notification", false),
     ("mark_notification_delivered", false),
     ("release_notification_claim", false),
+    ("claim_workflow_notification", false),
+    ("mark_workflow_notification_delivered", false),
+    ("release_workflow_notification_claim", false),
+    ("resolve_workflow_notification", false),
     // The dispatcher re-reads pending questions every poll, so a lost
     // notice record costs one repeated notice, not a lost question.
     ("record_question_notice", false),

@@ -74,6 +74,7 @@ pub(crate) async fn hook(paths: &Paths, event: HookEvent) -> Result<()> {
                 eprintln!("brgr completion notification remains queued: {error}");
             }
         }
+        notification::spawn_pending_workflow_for_session(paths, &store, &session_id);
     }
     let pending = store.pending_for_session(&session_id)?;
     emit(event, &session_id, &pending);

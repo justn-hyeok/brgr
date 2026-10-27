@@ -263,6 +263,24 @@ CREATE TABLE IF NOT EXISTS workflow_steps (
     FOREIGN KEY (run_id) REFERENCES workflow_runs(run_id)
 );
 CREATE INDEX IF NOT EXISTS workflow_steps_task_id ON workflow_steps (task_id);
+CREATE TABLE IF NOT EXISTS workflow_notifications (
+    run_id TEXT NOT NULL,
+    seq INTEGER NOT NULL CHECK (seq > 0),
+    state TEXT NOT NULL CHECK (state IN ('blocked','completed','failed','cancelled')),
+    owner_id TEXT NOT NULL,
+    resolved INTEGER NOT NULL DEFAULT 0 CHECK (resolved IN (0, 1)),
+    delivered_session TEXT,
+    delivered_epoch INTEGER,
+    delivered_pane TEXT,
+    claim_token TEXT,
+    claim_until INTEGER NOT NULL DEFAULT 0,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    PRIMARY KEY (run_id, seq),
+    FOREIGN KEY (run_id) REFERENCES workflow_runs(run_id)
+);
+CREATE INDEX IF NOT EXISTS workflow_notifications_owner
+ON workflow_notifications (owner_id, resolved, delivered_session);
 ";
 
 /// Identifies the exact [`SCHEMA`] a store was last initialized with, so an
@@ -522,6 +540,8 @@ mod tests {
             "workflow_runs",
             "workflow_steps",
             "workflow_steps_task_id",
+            "workflow_notifications",
+            "workflow_notifications_owner",
         ] {
             assert!(
                 declared.contains(&expected),
