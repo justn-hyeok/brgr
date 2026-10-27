@@ -245,6 +245,24 @@ CREATE TABLE IF NOT EXISTS handoff_manifests (
     created_at INTEGER NOT NULL,
     FOREIGN KEY (takeover_id) REFERENCES head_takeovers(takeover_id)
 );
+CREATE TABLE IF NOT EXISTS workflow_runs (
+    run_id TEXT PRIMARY KEY,
+    owner_id TEXT NOT NULL,
+    script_digest TEXT NOT NULL,
+    max_parallel INTEGER NOT NULL CHECK (max_parallel BETWEEN 1 AND 64),
+    state TEXT NOT NULL CHECK (state IN ('running','blocked','completed','failed','cancelled')),
+    created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS workflow_steps (
+    run_id TEXT NOT NULL,
+    step_key TEXT NOT NULL,
+    input_digest TEXT NOT NULL,
+    task_id TEXT NOT NULL,
+    revision INTEGER NOT NULL,
+    PRIMARY KEY (run_id, step_key),
+    FOREIGN KEY (run_id) REFERENCES workflow_runs(run_id)
+);
+CREATE INDEX IF NOT EXISTS workflow_steps_task_id ON workflow_steps (task_id);
 ";
 
 /// Identifies the exact [`SCHEMA`] a store was last initialized with, so an
@@ -501,6 +519,9 @@ mod tests {
             "one_active_attempt_per_revision",
             "results_task_revision",
             "attempts_task_revision",
+            "workflow_runs",
+            "workflow_steps",
+            "workflow_steps_task_id",
         ] {
             assert!(
                 declared.contains(&expected),

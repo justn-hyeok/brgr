@@ -1,7 +1,7 @@
 //! Task rows: admission, revisions, checkouts, and task queries.
 
 use brgr_protocol::{AttemptId, OwnerId, TaskId, TaskSpec};
-use rusqlite::{OptionalExtension as _, params};
+use rusqlite::{OptionalExtension as _, Transaction, params};
 
 use super::{
     OwnerProof, Store, StoreError, WriteOutcome,
@@ -106,82 +106,10 @@ impl Store {
         task.validate()?;
         validate_digest(request_digest)?;
         let transaction = self.write_transaction()?;
-        if let Some(proof) = proof {
-            assert_owner_proof(&transaction, proof)?;
-            // A revision may be the task's first, so the owner compared here is
-            // the one the spec claims, not one already on a row.
-            if task.owner_id != proof.owner_id {
-                return Err(StoreError::OwnerProofMismatch);
-            }
-            // The third owner-side action a committed handoff waits to observe.
-            note_owner_action(
-                &transaction,
-                &proof.owner_id,
-                &proof.session_id,
-                proof.binding_epoch,
-            )?;
-        }
-        let idempotency =
-            record_idempotency(&transaction, &task.create_request_id, request_digest)?;
-        let recorded_parent = recorded_delegation_parent(&transaction, task.task_id)?;
-        let requested_parent =
-            parent.map(|(task_id, attempt_id)| (task_id.to_string(), attempt_id.to_string()));
-        if idempotency == WriteOutcome::AlreadyApplied {
-            let matches = transaction
-                .query_row(
-                    "SELECT task_id, revision FROM tasks WHERE create_request_id = ?1",
-                    [&task.create_request_id],
-                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, u32>(1)?)),
-                )
-                .optional()?
-                .is_some_and(|(task_id, revision)| {
-                    task_id == task.task_id.to_string() && revision == task.revision
-                });
-            if !matches {
-                return Err(StoreError::IdempotencyConflict(
-                    task.create_request_id.clone(),
-                ));
-            }
-            if requested_parent.is_some() && recorded_parent != requested_parent {
-                return Err(StoreError::InvalidDelegationParent);
-            }
-            transaction.commit()?;
-            return Ok(WriteOutcome::AlreadyApplied);
-        }
-
-        validate_new_task_parent(
-            &transaction,
-            task.task_id,
-            recorded_parent.as_ref(),
-            requested_parent.as_ref(),
-        )?;
-
-        let depth = validated_parent_depth(&transaction, task, parent)?;
-
-        let spec_json = serde_json::to_string(task)?;
-        transaction.execute(
-            "INSERT INTO tasks
-             (task_id, revision, owner_id, create_request_id, request_digest, spec_json)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![
-                task.task_id.to_string(),
-                task.revision,
-                task.owner_id.as_str(),
-                task.create_request_id,
-                request_digest,
-                spec_json,
-            ],
-        )?;
-        if let (Some((parent_task_id, parent_attempt_id)), Some(depth), None) =
-            (parent, depth, recorded_parent)
-        {
-            transaction.execute(
-                "INSERT INTO delegation_edges (child_task_id, parent_task_id, parent_attempt_id, depth) VALUES (?1, ?2, ?3, ?4)",
-                params![task.task_id.to_string(), parent_task_id.to_string(), parent_attempt_id.to_string(), depth],
-            )?;
-        }
+        let outcome =
+            record_task_in_transaction(&transaction, task, request_digest, parent, proof)?;
         transaction.commit()?;
-        Ok(WriteOutcome::Inserted)
+        Ok(outcome)
     }
 
     /// Loads the latest revision for a task.
@@ -359,4 +287,102 @@ impl Store {
         let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
         rows.map(|row| Ok(serde_json::from_str(&row?)?)).collect()
     }
+}
+
+/// The body of task admission, shared with workflow step recording so a step
+/// row and its task are written in one transaction rather than copied.
+pub(crate) fn record_task_in_transaction(
+    transaction: &Transaction<'_>,
+    task: &TaskSpec,
+    request_digest: &str,
+    parent: Option<(TaskId, AttemptId)>,
+    proof: Option<&OwnerProof>,
+) -> Result<WriteOutcome, StoreError> {
+    if let Some(proof) = proof {
+        assert_owner_proof(transaction, proof)?;
+        // A revision may be the task's first, so the owner compared here is
+        // the one the spec claims, not one already on a row.
+        if task.owner_id != proof.owner_id {
+            return Err(StoreError::OwnerProofMismatch);
+        }
+        // The third owner-side action a committed handoff waits to observe.
+        note_owner_action(
+            transaction,
+            &proof.owner_id,
+            &proof.session_id,
+            proof.binding_epoch,
+        )?;
+    }
+    let idempotency = record_idempotency(transaction, &task.create_request_id, request_digest)?;
+    let recorded_parent = recorded_delegation_parent(transaction, task.task_id)?;
+    let requested_parent =
+        parent.map(|(task_id, attempt_id)| (task_id.to_string(), attempt_id.to_string()));
+    if idempotency == WriteOutcome::AlreadyApplied {
+        return replayed_task(
+            transaction,
+            task,
+            recorded_parent.as_ref(),
+            requested_parent.as_ref(),
+        );
+    }
+
+    validate_new_task_parent(
+        transaction,
+        task.task_id,
+        recorded_parent.as_ref(),
+        requested_parent.as_ref(),
+    )?;
+
+    let depth = validated_parent_depth(transaction, task, parent)?;
+
+    let spec_json = serde_json::to_string(task)?;
+    transaction.execute(
+        "INSERT INTO tasks
+         (task_id, revision, owner_id, create_request_id, request_digest, spec_json)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            task.task_id.to_string(),
+            task.revision,
+            task.owner_id.as_str(),
+            task.create_request_id,
+            request_digest,
+            spec_json,
+        ],
+    )?;
+    if let (Some((parent_task_id, parent_attempt_id)), Some(depth), None) =
+        (parent, depth, recorded_parent)
+    {
+        transaction.execute(
+            "INSERT INTO delegation_edges (child_task_id, parent_task_id, parent_attempt_id, depth) VALUES (?1, ?2, ?3, ?4)",
+            params![task.task_id.to_string(), parent_task_id.to_string(), parent_attempt_id.to_string(), depth],
+        )?;
+    }
+    Ok(WriteOutcome::Inserted)
+}
+
+fn replayed_task(
+    transaction: &Transaction<'_>,
+    task: &TaskSpec,
+    recorded_parent: Option<&(String, String)>,
+    requested_parent: Option<&(String, String)>,
+) -> Result<WriteOutcome, StoreError> {
+    let matches = transaction
+        .query_row(
+            "SELECT task_id, revision FROM tasks WHERE create_request_id = ?1",
+            [&task.create_request_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, u32>(1)?)),
+        )
+        .optional()?
+        .is_some_and(|(task_id, revision)| {
+            task_id == task.task_id.to_string() && revision == task.revision
+        });
+    if !matches {
+        return Err(StoreError::IdempotencyConflict(
+            task.create_request_id.clone(),
+        ));
+    }
+    if requested_parent.is_some() && recorded_parent != requested_parent {
+        return Err(StoreError::InvalidDelegationParent);
+    }
+    Ok(WriteOutcome::AlreadyApplied)
 }
