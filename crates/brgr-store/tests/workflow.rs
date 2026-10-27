@@ -513,3 +513,34 @@ fn a_step_whose_task_belongs_to_another_owner_is_refused_and_creates_nothing() {
     assert_eq!(count_table(root.path(), "tasks"), 0);
     assert_eq!(count_table(root.path(), "workflow_steps"), 0);
 }
+
+#[test]
+fn workflow_step_for_task_returns_the_journaled_step_or_none() {
+    let root = TempDir::new().unwrap();
+    let mut store = Store::open(root.path()).unwrap();
+    let owner_id = owner();
+    let run_id = run_id("run-lookup");
+    store
+        .create_workflow_run(&run_id, &owner_id, "digest-script", 2)
+        .unwrap();
+    let task = spec(&owner_id, TaskId::new());
+    store
+        .record_workflow_step(
+            &run_id,
+            &step_key("fetch"),
+            "digest-in",
+            &task,
+            "digest-req",
+        )
+        .unwrap();
+    let found = store.workflow_step_for_task(task.task_id).unwrap().unwrap();
+    assert_eq!(found.run_id, run_id);
+    assert_eq!(found.step_key, step_key("fetch"));
+    assert_eq!(found.task_id, task.task_id);
+    assert!(
+        store
+            .workflow_step_for_task(TaskId::new())
+            .unwrap()
+            .is_none()
+    );
+}
