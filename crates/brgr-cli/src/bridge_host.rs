@@ -129,6 +129,12 @@ pub(crate) fn validate_bridge_host_command(
         Command::Apply { workspace, .. } | Command::Land { workspace, .. } => {
             require_bridge_workspace(workspace, &workspace_root)
         }
+        // `workflow init` writes SDK files and does not touch owner state, the
+        // store, or a worker. Same confinement as artifact export: the target
+        // directory must already exist inside the selected workspace.
+        Command::Workflow {
+            command: crate::workflow::WorkflowCommand::Init { dir, .. },
+        } => require_bridge_workspace(dir.as_deref().unwrap_or(current_dir), &workspace_root),
         Command::Workflow { .. }
         | Command::Harness { .. }
         | Command::Integrate { .. }

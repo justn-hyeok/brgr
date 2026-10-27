@@ -494,6 +494,89 @@ fn the_host_bridge_refuses_the_workflow_group() {
 }
 
 #[test]
+fn the_host_bridge_allows_workflow_init_inside_the_workspace() {
+    let fixture = fixture_home();
+    let workspace = fixture.workspace.to_str().unwrap();
+    let home = fixture.home.to_str().unwrap();
+    let bridge = [
+        ("BRGR_PLUGIN_HOST_HOME", home),
+        ("BRGR_PLUGIN_HOST_WORKSPACE", workspace),
+        ("BRGR_OWNER_ID", "codex:workflow-owner"),
+        ("BRGR_SESSION_ID", "workflow-session"),
+    ];
+    let allowed = run(&fixture.home, &["workflow", "init", workspace], &bridge);
+    assert!(
+        allowed.status.success(),
+        "workflow init inside the workspace was refused: {}",
+        String::from_utf8_lossy(&allowed.stderr)
+    );
+    assert!(fixture.workspace.join("brgr-workflow.mjs").is_file());
+    assert!(fixture.workspace.join("example.mjs").is_file());
+}
+
+#[test]
+fn the_host_bridge_refuses_workflow_init_outside_the_workspace() {
+    let fixture = fixture_home();
+    let workspace = fixture.workspace.to_str().unwrap();
+    let home = fixture.home.to_str().unwrap();
+    let outside = fixture.workspace.parent().unwrap().join("outside");
+    fs::create_dir_all(&outside).unwrap();
+    let bridge = [
+        ("BRGR_PLUGIN_HOST_HOME", home),
+        ("BRGR_PLUGIN_HOST_WORKSPACE", workspace),
+        ("BRGR_OWNER_ID", "codex:workflow-owner"),
+        ("BRGR_SESSION_ID", "workflow-session"),
+    ];
+    let denied = run(
+        &fixture.home,
+        &["workflow", "init", outside.to_str().unwrap()],
+        &bridge,
+    );
+    assert!(
+        !denied.status.success(),
+        "workflow init escaped the workspace"
+    );
+    let stderr = String::from_utf8_lossy(&denied.stderr);
+    assert!(
+        stderr.contains("unavailable through the Herdr host bridge")
+            || stderr.contains("outside the selected Herdr workspace"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn workflow_init_writes_the_sdk_and_refuses_a_different_existing_file() {
+    let fixture = fixture_home();
+    let dir = fixture.workspace.to_str().unwrap();
+    json_output(&run(&fixture.home, &["workflow", "init", dir], &[]));
+    let sdk = fixture.workspace.join("brgr-workflow.mjs");
+    let example = fixture.workspace.join("example.mjs");
+    assert!(sdk.is_file(), "init did not write brgr-workflow.mjs");
+    assert!(example.is_file(), "init did not write example.mjs");
+    let sdk_text = fs::read_to_string(&sdk).unwrap();
+    assert!(sdk_text.contains("export async function agent"));
+    assert!(sdk_text.contains("export async function parallel"));
+    assert!(!sdk_text.contains("export async function accept"));
+    assert!(!sdk_text.contains("export async function reject"));
+    fs::write(&sdk, "not the sdk\n").unwrap();
+    let refused = run(&fixture.home, &["workflow", "init", dir], &[]);
+    assert!(
+        !refused.status.success(),
+        "init overwrote a different file without --force"
+    );
+    json_output(&run(
+        &fixture.home,
+        &["workflow", "init", dir, "--force"],
+        &[],
+    ));
+    let restored = fs::read_to_string(&sdk).unwrap();
+    assert!(
+        restored.contains("export async function agent"),
+        "--force did not restore the SDK"
+    );
+}
+
+#[test]
 fn a_missing_or_non_running_run_refuses_a_step() {
     let fixture = fixture_home();
     let envs = owner_env();

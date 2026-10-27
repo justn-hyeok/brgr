@@ -573,6 +573,51 @@ claude plugin install brgr@brgr
 Inside a running terminal session the same install is
 `/plugin install brgr --marketplace justn-hyeok/brgr`.
 
+## Dynamic Workflows
+
+The first version of Dynamic Workflows records a durable run, launches a
+JavaScript driver under node, and lets a script create a later task from a
+sealed result it has actually observed. Nothing the SDK returns is an accepted
+change; the owner still decides each sealed result. The SDK does not expose
+accept, reject, apply, or land.
+
+Write the SDK and a short example with `brgr workflow init`. Start the driver
+with `brgr workflow run SCRIPT`. Inspect a run with `brgr workflow status RUN`.
+If the driver dies, `brgr workflow resume RUN` starts the same script from the
+top; journaled steps replay instead of creating a second task. Stop a run with
+`brgr workflow cancel RUN`. While a worker has asked a question, the SDK calls
+`brgr workflow set-state RUN blocked` once, then `brgr workflow set-state RUN running`
+after the owner replies.
+
+A script imports the local module and uses `agent()` and `parallel()`:
+
+```javascript
+import { agent, parallel } from "./brgr-workflow.mjs";
+
+const reviews = await parallel([
+  () => agent({ task: "Review security" }),
+  () => agent({ task: "Review architecture" }),
+]);
+
+if (reviews.some((review) => review.report.includes("critical"))) {
+  await agent({ task: "Reproduce and fix verified issues" });
+}
+```
+
+`agent()` launches `brgr run OBJECTIVE --workflow RUN --step KEY` with an argv
+array, never a shell. Exit code 75 means the run is at its parallel limit; the
+SDK retries with bounded backoff until the run is no longer running. A sealed
+`candidate` is returned as `completed`. `failed`, `cancelled`, and `lost` are
+returned, not thrown. Automatic step keys are the number of `agent()` calls
+started so far in that script run.
+
+`parallel()` starts every thunk in array order synchronously so those automatic
+keys are assigned in array order, then awaits them and preserves that order.
+
+This version does not include `pipeline()`, retries, per-step deadlines,
+TypeScript tooling, or head migration during a run. `brgr workflow create`
+still records a run without a driver when a caller needs only the journal.
+
 ## Development
 
 ```bash
