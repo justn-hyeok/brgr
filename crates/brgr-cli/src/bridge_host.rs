@@ -142,6 +142,7 @@ pub(crate) fn validate_bridge_host_command(
         | Command::Hook { .. }
         | Command::Context { .. }
         | Command::Notify { .. }
+        | Command::NotifyWorkflow { .. }
         | Command::PaneRun(_)
         | Command::TuiHost { .. }
         | Command::Session { .. }

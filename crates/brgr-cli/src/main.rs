@@ -232,6 +232,7 @@ async fn main() -> Result<()> {
             | Command::Hook { .. }
             | Command::Context { .. }
             | Command::Notify { .. }
+            | Command::NotifyWorkflow { .. }
             | Command::TuiHost { .. }
             | Command::Session { .. }
             | Command::SealReport { .. }
@@ -253,6 +254,7 @@ async fn main() -> Result<()> {
             | Command::Hook { .. }
             | Command::Context { .. }
             | Command::Notify { .. }
+            | Command::NotifyWorkflow { .. }
             | Command::PaneRun(_)
             | Command::TuiHost { .. }
             | Command::Session { .. }
@@ -344,7 +346,9 @@ async fn execute(paths: &Paths, command: Command, json_output: bool) -> Result<(
             Ok(())
         }
         Command::Context { source, chain } => context_signal::run(paths, source.as_str(), &chain),
-        Command::Notify { task } => notification::deliver_pending(paths, task).await,
+        command @ (Command::Notify { .. } | Command::NotifyWorkflow { .. }) => {
+            deliver_notice(paths, command).await
+        }
         Command::PaneRun(args) => pane_adapter::run_pane_adapter(paths, &args),
         Command::TuiHost { config } => tui_host::run(&config),
         Command::Session { task } => pane_adapter::serve_session(paths, task),
@@ -385,6 +389,16 @@ async fn execute(paths: &Paths, command: Command, json_output: bool) -> Result<(
                 keep_pane,
             },
         ),
+    }
+}
+
+async fn deliver_notice(paths: &Paths, command: Command) -> Result<()> {
+    match command {
+        Command::Notify { task } => notification::deliver_pending(paths, task).await,
+        Command::NotifyWorkflow { run } => {
+            notification::deliver_pending_workflow(paths, &run).await
+        }
+        _ => bail!("not a notification dispatcher"),
     }
 }
 

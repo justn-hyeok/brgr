@@ -106,6 +106,17 @@ fn status(paths: &Paths, run: &str, json_output: bool) -> Result<()> {
             }))
         })
         .collect::<Result<Vec<_>>>()?;
+    let notices = store
+        .workflow_notifications(&run_id)?
+        .into_iter()
+        .map(|notice| {
+            json!({
+                "seq": notice.seq,
+                "state": notice.state.as_str(),
+                "delivered": notice.delivered_session.is_some(),
+            })
+        })
+        .collect::<Vec<_>>();
     print_value(
         &json!({
             "run_id": run.run_id.to_string(),
@@ -114,6 +125,7 @@ fn status(paths: &Paths, run: &str, json_output: bool) -> Result<()> {
             "max_parallel": run.max_parallel,
             "script_digest": run.script_digest,
             "steps": steps,
+            "notices": notices,
         }),
         json_output,
     );
@@ -126,7 +138,9 @@ fn set_state(paths: &Paths, run: &str, state: &str, json_output: bool) -> Result
     let current = store.workflow_run(&run_id)?;
     require_owner(&store, &current.owner_id)?;
     let state = parse_run_state(state)?;
+    let previous = current.state;
     let run = store.set_workflow_run_state(&run_id, state)?;
+    crate::notification::spawn_for_workflow_transition(paths, previous, &run);
     print_run_receipt(&run, json_output);
     Ok(())
 }

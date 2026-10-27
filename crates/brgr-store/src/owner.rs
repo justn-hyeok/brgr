@@ -2,6 +2,7 @@
 
 use rusqlite::{OptionalExtension as _, Transaction, params};
 
+use super::notification::CLEAR_DELIVERY;
 use super::{Store, StoreError, WriteOutcome};
 use brgr_protocol::OwnerId;
 
@@ -163,13 +164,20 @@ pub(crate) fn rebind_in_transaction(
         params![owner_id.as_str(), session_id, epoch],
     )?;
     transaction.execute(
-        "UPDATE completion_notifications SET delivered_session = NULL,
-           delivered_epoch = NULL, delivered_pane = NULL,
-           claim_token = NULL, claim_until = 0
-         WHERE owner_id = ?1 AND resolved = 0
-           AND EXISTS (SELECT 1 FROM inbox_items i
-               WHERE i.result_id = completion_notifications.result_id
-                 AND i.owner_id = ?1 AND i.acknowledged = 0)",
+        &format!(
+            "UPDATE completion_notifications SET {CLEAR_DELIVERY}
+             WHERE owner_id = ?1 AND resolved = 0
+               AND EXISTS (SELECT 1 FROM inbox_items i
+                   WHERE i.result_id = completion_notifications.result_id
+                     AND i.owner_id = ?1 AND i.acknowledged = 0)"
+        ),
+        [owner_id.as_str()],
+    )?;
+    transaction.execute(
+        &format!(
+            "UPDATE workflow_notifications SET {CLEAR_DELIVERY}
+             WHERE owner_id = ?1 AND resolved = 0"
+        ),
         [owner_id.as_str()],
     )?;
     u64::try_from(epoch).map_err(|_| StoreError::NumericOverflow)

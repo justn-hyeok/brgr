@@ -10,7 +10,10 @@ use std::{
 
 use anyhow::{Context as _, Result, bail};
 use brgr_protocol::{OwnerId, TaskId, TaskSpec, TerminalOutcome};
-use brgr_store::{NotificationTarget, QuestionTarget, Store, StoreError, TakeoverState};
+use brgr_store::{
+    NotificationTarget, PendingWorkflowNotification, QuestionTarget, Store, StoreError,
+    TakeoverState, WorkflowNotificationTarget, WorkflowRunId, WorkflowRunState,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::time::{sleep, timeout};
@@ -52,14 +55,7 @@ pub async fn register_incoming_head(paths: &Paths, incoming: &crate::head::Incom
         }
     }
     if ready {
-        for task in store
-            .pending_notification_tasks_for_session(session_id)
-            .unwrap_or_default()
-        {
-            if let Err(error) = spawn_for_task(paths, task) {
-                eprintln!("brgr completion notification remains queued: {error}");
-            }
-        }
+        spawn_pending_for_session(paths, &store, session_id);
     }
 }
 
@@ -380,31 +376,111 @@ pub fn spawn_for_task(paths: &Paths, task: TaskId) -> Result<()> {
     if !notifications_enabled(paths, task)? {
         return Ok(());
     }
+    let task_id = task.to_string();
+    spawn_dispatcher(
+        paths,
+        &format!("{task}.notify.log"),
+        &["__notify", &task_id],
+        |command| configure_task_dispatcher(paths, command, task),
+    )
+}
+
+/// Starts the detached dispatcher that pushes one workflow run's notices.
+///
+/// # Errors
+///
+/// Returns an error if the dispatcher process cannot be started.
+pub fn spawn_for_workflow(paths: &Paths, run_id: &WorkflowRunId) -> Result<()> {
+    spawn_dispatcher(
+        paths,
+        &format!("{run_id}.workflow.notify.log"),
+        &["__notify-workflow", run_id.as_str()],
+        |command| {
+            if let Ok(store) = Store::open(&paths.store)
+                && let Ok(run) = store.workflow_run(run_id)
+                && let Ok(Some((session, _))) = store.owner_binding(&run.owner_id)
+            {
+                command.args(["--owner-session", &session]);
+            }
+        },
+    )
+}
+
+/// Spawns delivery when a run actually moved onto an owner-facing state.
+pub fn spawn_for_workflow_transition(
+    paths: &Paths,
+    previous: WorkflowRunState,
+    run: &brgr_store::WorkflowRun,
+) {
+    if previous == run.state || !run.state.notifies_owner() {
+        return;
+    }
+    if let Err(error) = spawn_for_workflow(paths, &run.run_id) {
+        eprintln!("brgr workflow notification remains queued: {error}");
+    }
+}
+
+pub fn spawn_pending_for_session(paths: &Paths, store: &Store, session_id: &str) {
+    for task in store
+        .pending_notification_tasks_for_session(session_id)
+        .unwrap_or_default()
+    {
+        if let Err(error) = spawn_for_task(paths, task) {
+            eprintln!("brgr completion notification remains queued: {error}");
+        }
+    }
+    spawn_pending_workflow_for_session(paths, store, session_id);
+}
+
+pub(crate) fn spawn_pending_workflow_for_session(paths: &Paths, store: &Store, session_id: &str) {
+    for run_id in store
+        .pending_workflow_notification_runs_for_session(session_id)
+        .unwrap_or_default()
+    {
+        if let Err(error) = spawn_for_workflow(paths, &run_id) {
+            eprintln!("brgr workflow notification remains queued: {error}");
+        }
+    }
+}
+
+fn configure_task_dispatcher(paths: &Paths, command: &mut Command, task: TaskId) {
+    let Ok(store) = Store::open(&paths.store) else {
+        return;
+    };
+    let Ok(spec) = store.task(task) else {
+        return;
+    };
+    let Ok(Some((session, _))) = store.owner_binding(&spec.owner_id) else {
+        return;
+    };
+    command.args(["--owner-session", &session]);
+    if let Some(pane) = fs::read(paths.launch(task, spec.revision))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<crate::LaunchEnvelope>(&bytes).ok())
+        .and_then(|launch| launch.source_pane)
+        .filter(|pane| crate::caller_pane::pending_session(pane).is_none())
+    {
+        command.args(["--source-pane", &pane]);
+    }
+}
+
+fn spawn_dispatcher(
+    paths: &Paths,
+    log_name: &str,
+    args: &[&str],
+    configure: impl FnOnce(&mut Command),
+) -> Result<()> {
     let mut command = Command::new(env::current_exe()?);
     let log = OpenOptions::new()
         .create(true)
         .append(true)
         .mode(0o600)
-        .open(paths.runs.join(format!("{task}.notify.log")))?;
-    if let Ok(store) = Store::open(&paths.store)
-        && let Ok(spec) = store.task(task)
-        && let Ok(Some((session, _))) = store.owner_binding(&spec.owner_id)
-    {
-        command.args(["--owner-session", &session]);
-        if let Some(pane) = fs::read(paths.launch(task, spec.revision))
-            .ok()
-            .and_then(|bytes| serde_json::from_slice::<crate::LaunchEnvelope>(&bytes).ok())
-            .and_then(|launch| launch.source_pane)
-            .filter(|pane| crate::caller_pane::pending_session(pane).is_none())
-        {
-            command.args(["--source-pane", &pane]);
-        }
-    }
+        .open(paths.runs.join(log_name))?;
+    configure(&mut command);
     command
         .arg("--home")
         .arg(&paths.home)
-        .arg("__notify")
-        .arg(task.to_string())
+        .args(args)
         .env_remove(plugin_bridge::BRIDGE_DIR_ENV)
         .env_remove(plugin_bridge::BRIDGE_HOST_HOME_ENV)
         .env_remove(plugin_bridge::BRIDGE_HOST_WORKSPACE_ENV)
@@ -422,21 +498,9 @@ pub async fn deliver_pending(paths: &Paths, task: TaskId) -> Result<()> {
     if !notifications_enabled(paths, task)? {
         return Ok(());
     }
-    let lock = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .mode(0o600)
-        .open(paths.runs.join(format!("{task}.notify.lock")))?;
-    match lock.try_lock() {
-        Ok(()) => {}
-        Err(TryLockError::WouldBlock) => return Ok(()),
-        Err(error) => return Err(error.into()),
-    }
-    // Keep this descriptor alive throughout delivery. The OS releases the
-    // lock after a crash, so a later hook may resume the durable queue.
-    let _lock = lock;
+    let Some(_lock) = try_notify_lock(&paths.runs.join(format!("{task}.notify.lock")))? else {
+        return Ok(());
+    };
     let started = Instant::now();
     let store = open_store(paths, started).await?;
     // A finished task with nothing left to send exits before anything else:
@@ -494,7 +558,9 @@ pub async fn deliver_pending(paths: &Paths, task: TaskId) -> Result<()> {
                 continue;
             };
             match try_deliver(paths, &target).await {
-                Ok(()) => mark_delivered(&store, &target, &token).await?,
+                Ok(()) => {
+                    commit_delivery(|| store.mark_notification_delivered(&target, &token)).await?;
+                }
                 Err(error) => {
                     failed = true;
                     if let Err(release_error) = store.release_notification_claim(
@@ -521,10 +587,10 @@ pub async fn deliver_pending(paths: &Paths, task: TaskId) -> Result<()> {
 
 /// The prompt was accepted. Keep the lease while retrying its receipt, so
 /// transient database contention does not trigger another prompt.
-async fn mark_delivered(store: &Store, target: &NotificationTarget, token: &str) -> Result<()> {
+async fn commit_delivery(mut mark: impl FnMut() -> Result<(), StoreError>) -> Result<()> {
     let started = Instant::now();
     loop {
-        match store.mark_notification_delivered(target, token) {
+        match mark() {
             Ok(()) | Err(StoreError::NotificationClaimStale) => return Ok(()),
             Err(error)
                 if error.is_retryable_database_contention()
@@ -535,6 +601,191 @@ async fn mark_delivered(store: &Store, target: &NotificationTarget, token: &str)
             Err(error) => return Err(error.into()),
         }
     }
+}
+
+fn try_notify_lock(path: &Path) -> Result<Option<std::fs::File>> {
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(path)?;
+    match lock.try_lock() {
+        Ok(()) => Ok(Some(lock)),
+        Err(TryLockError::WouldBlock) => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// Delivers queued workflow notices for one run until none remain.
+///
+/// # Errors
+///
+/// Returns an error if the store cannot be opened or a durable write fails.
+pub async fn deliver_pending_workflow(paths: &Paths, run: &str) -> Result<()> {
+    let run_id = WorkflowRunId::new(run)?;
+    let Some(_lock) = try_notify_lock(&paths.runs.join(format!("{run_id}.workflow.notify.lock")))?
+    else {
+        return Ok(());
+    };
+    let started = Instant::now();
+    let store = open_store(paths, started).await?;
+    let mut registered = register_for_workflow(paths, &store, &run_id).await;
+    let mut next_try = Instant::now() + Duration::from_secs(2);
+    let mut gap = Duration::from_secs(2);
+    let database = paths.store.join("brgr.sqlite3");
+    let mut backoff = POLL_INTERVAL;
+    while started.elapsed() < MAX_LIFETIME {
+        if !database.exists() {
+            return Ok(());
+        }
+        if !registered && Instant::now() >= next_try {
+            registered = register_for_workflow(paths, &store, &run_id).await;
+            gap = (gap * 2).min(Duration::from_mins(1));
+            next_try = Instant::now() + gap;
+        }
+        match drain_workflow_notices(paths, &store, &run_id).await? {
+            Drain::Empty => return Ok(()),
+            Drain::Retry => {
+                backoff = (backoff * 2).min(MAX_BACKOFF);
+                sleep(backoff).await;
+            }
+            Drain::Progress => {
+                backoff = POLL_INTERVAL;
+                sleep(backoff).await;
+            }
+        }
+    }
+    Ok(())
+}
+
+enum Drain {
+    Empty,
+    Retry,
+    Progress,
+}
+
+async fn drain_workflow_notices(
+    paths: &Paths,
+    store: &Store,
+    run_id: &WorkflowRunId,
+) -> Result<Drain> {
+    let pending = match store.pending_workflow_notifications(run_id) {
+        Ok(pending) => pending,
+        Err(error) if error.is_retryable_database_contention() => {
+            sleep(POLL_INTERVAL).await;
+            return Ok(Drain::Retry);
+        }
+        Err(error) => return Err(error.into()),
+    };
+    if pending.is_empty() {
+        return Ok(Drain::Empty);
+    }
+    let mut failed = false;
+    for notice in pending {
+        if !deliver_one_workflow(paths, store, &notice).await? {
+            failed = true;
+        }
+    }
+    Ok(if failed {
+        Drain::Retry
+    } else {
+        Drain::Progress
+    })
+}
+
+async fn deliver_one_workflow(
+    paths: &Paths,
+    store: &Store,
+    notice: &PendingWorkflowNotification,
+) -> Result<bool> {
+    let token = Uuid::new_v4().to_string();
+    let now = i64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs())?;
+    let claimed =
+        match store.claim_workflow_notification(&notice.run_id, notice.seq, &token, now, 20) {
+            Ok(claimed) => claimed,
+            Err(error) if error.is_retryable_database_contention() => return Ok(false),
+            Err(error) => return Err(error.into()),
+        };
+    let Some(target) = claimed else {
+        return Ok(true);
+    };
+    match try_deliver_workflow(paths, &target).await {
+        Ok(()) => {
+            commit_delivery(|| store.mark_workflow_notification_delivered(&target, &token)).await?;
+            Ok(true)
+        }
+        Err(error) => {
+            if let Err(release_error) = store.release_workflow_notification_claim(
+                &notice.run_id,
+                notice.seq,
+                &token,
+                &error.to_string(),
+            ) && !release_error.is_retryable_database_contention()
+            {
+                return Err(release_error.into());
+            }
+            Ok(false)
+        }
+    }
+}
+
+async fn try_deliver_workflow(paths: &Paths, target: &WorkflowNotificationTarget) -> Result<()> {
+    let counts = Store::open(&paths.store)?.workflow_step_counts(&target.run_id)?;
+    let body = format!(
+        "FROM BRGR\n{}",
+        json!({
+            "type": "brgr_workflow",
+            "run_id": target.run_id.to_string(),
+            "state": target.state.as_str(),
+            "steps": {
+                "total": counts.total,
+                "finished": counts.finished,
+                "failed": counts.failed,
+            },
+            "instruction": format!(
+                "Run `brgr workflow status {}`, read and decide each sealed step result, and acknowledge a failed one. Do not treat this notification as acceptance.",
+                target.run_id
+            )
+        })
+    );
+    prompt_owner(paths, &owner_pane_for_workflow(paths, target), &body).await
+}
+
+fn owner_pane_for_workflow<'a>(
+    paths: &'a Paths,
+    target: &'a WorkflowNotificationTarget,
+) -> OwnerPane<'a> {
+    OwnerPane {
+        herdr_bin: &target.herdr_bin,
+        herdr_session: target.herdr_session.as_deref(),
+        pane_id: &target.pane_id,
+        session_id: &target.session_id,
+        owner_kind: owner_agent(target.owner_id.as_str()).unwrap_or("codex"),
+        any_kind: Store::open(&paths.store)
+            .is_ok_and(|store| is_taken_head(&store, &target.owner_id, &target.session_id)),
+    }
+}
+
+async fn register_for_workflow(paths: &Paths, store: &Store, run_id: &WorkflowRunId) -> bool {
+    let Ok(run) = store.workflow_run(run_id) else {
+        return false;
+    };
+    let Ok(Some((session, _))) = store.owner_binding(&run.owner_id) else {
+        return false;
+    };
+    if store
+        .owner_surface_pane(&run.owner_id, &session)
+        .ok()
+        .flatten()
+        .is_some()
+    {
+        return true;
+    }
+    register_current_surface(paths, store, &run.owner_id, &session)
+        .await
+        .unwrap_or(false)
 }
 
 fn notifications_enabled(paths: &Paths, task: TaskId) -> Result<bool> {

@@ -8,7 +8,7 @@
 
 use std::fmt;
 
-use brgr_protocol::{OwnerId, TaskId, TaskSpec};
+use brgr_protocol::{OwnerId, TaskId, TaskSpec, TerminalOutcome};
 use rusqlite::{Connection, OptionalExtension as _, Transaction, params};
 
 use super::{Store, StoreError, task::record_task_in_transaction, validate_digest};
@@ -100,7 +100,7 @@ impl WorkflowRunState {
         }
     }
 
-    fn parse(value: &str) -> Result<Self, StoreError> {
+    pub(crate) fn parse(value: &str) -> Result<Self, StoreError> {
         match value {
             "running" => Ok(Self::Running),
             "blocked" => Ok(Self::Blocked),
@@ -114,6 +114,15 @@ impl WorkflowRunState {
     #[must_use]
     pub fn is_terminal(self) -> bool {
         matches!(self, Self::Completed | Self::Failed | Self::Cancelled)
+    }
+
+    /// Owner-facing notices fire on these states, not on a return to running.
+    #[must_use]
+    pub fn notifies_owner(self) -> bool {
+        matches!(
+            self,
+            Self::Blocked | Self::Completed | Self::Failed | Self::Cancelled
+        )
     }
 
     /// `running <-> blocked`, and `running|blocked -> completed|failed|cancelled`.
@@ -158,6 +167,25 @@ pub struct WorkflowStep {
 pub enum WorkflowStepOutcome {
     Created { task_id: TaskId, revision: u32 },
     Existing { task_id: TaskId, revision: u32 },
+}
+
+/// One recorded owner notice for a workflow run state change.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorkflowNotice {
+    pub run_id: WorkflowRunId,
+    pub seq: u64,
+    pub state: WorkflowRunState,
+    pub owner_id: OwnerId,
+    pub delivered_session: Option<String>,
+    pub delivered_pane: Option<String>,
+}
+
+/// Step totals included in a workflow owner notice.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WorkflowStepCounts {
+    pub total: u64,
+    pub finished: u64,
+    pub failed: u64,
 }
 
 impl Store {
@@ -323,6 +351,7 @@ impl Store {
             if !current.state.allows(state) {
                 return Err(StoreError::WorkflowRunTerminal(run_id.clone()));
             }
+            insert_run_notice(&transaction, &current, state)?;
             transaction.execute(
                 "UPDATE workflow_runs SET state = ?1 WHERE run_id = ?2",
                 params![state.as_str(), run_id.as_str()],
@@ -332,6 +361,109 @@ impl Store {
         transaction.commit()?;
         Ok(run)
     }
+
+    /// Every owner notice recorded for a run, in transition order.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::WorkflowRunNotFound`] when the run is missing, or
+    /// a database failure.
+    pub fn workflow_notifications(
+        &self,
+        run_id: &WorkflowRunId,
+    ) -> Result<Vec<WorkflowNotice>, StoreError> {
+        if load_run_optional(&self.connection, run_id)?.is_none() {
+            return Err(StoreError::WorkflowRunNotFound(run_id.clone()));
+        }
+        let mut statement = self.connection.prepare(
+            "SELECT run_id, seq, state, owner_id, delivered_session, delivered_pane
+             FROM workflow_notifications WHERE run_id = ?1 ORDER BY seq",
+        )?;
+        let rows = statement.query_map([run_id.as_str()], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, Option<String>>(5)?,
+            ))
+        })?;
+        rows.map(|row| {
+            let (stored_run, seq, state, owner_id, delivered_session, delivered_pane) = row?;
+            Ok(WorkflowNotice {
+                run_id: WorkflowRunId::new(stored_run)?,
+                seq: u64::try_from(seq).map_err(|_| StoreError::NumericOverflow)?,
+                state: WorkflowRunState::parse(&state)?,
+                owner_id: OwnerId::new(owner_id)?,
+                delivered_session,
+                delivered_pane,
+            })
+        })
+        .collect()
+    }
+
+    /// How many steps a run has launched, sealed, or failed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::WorkflowRunNotFound`] when the run is missing, or
+    /// a database failure.
+    pub fn workflow_step_counts(
+        &self,
+        run_id: &WorkflowRunId,
+    ) -> Result<WorkflowStepCounts, StoreError> {
+        let steps = self.workflow_steps(run_id)?;
+        let total = u64::try_from(steps.len()).map_err(|_| StoreError::NumericOverflow)?;
+        let mut finished = 0;
+        let mut failed = 0;
+        for step in steps {
+            match self.revision_result(step.task_id, step.revision) {
+                Ok(Some(result)) => {
+                    finished += 1;
+                    if matches!(
+                        result.outcome,
+                        TerminalOutcome::Failed | TerminalOutcome::Lost
+                    ) {
+                        failed += 1;
+                    }
+                }
+                Ok(None) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(WorkflowStepCounts {
+            total,
+            finished,
+            failed,
+        })
+    }
+}
+
+fn insert_run_notice(
+    transaction: &Transaction<'_>,
+    run: &WorkflowRun,
+    state: WorkflowRunState,
+) -> Result<(), StoreError> {
+    if !state.notifies_owner() {
+        return Ok(());
+    }
+    let seq: i64 = transaction.query_row(
+        "SELECT COALESCE(MAX(seq), 0) + 1 FROM workflow_notifications WHERE run_id = ?1",
+        [run.run_id.as_str()],
+        |row| row.get(0),
+    )?;
+    transaction.execute(
+        "INSERT INTO workflow_notifications (run_id, seq, state, owner_id)
+         VALUES (?1, ?2, ?3, ?4)",
+        params![
+            run.run_id.as_str(),
+            seq,
+            state.as_str(),
+            run.owner_id.as_str()
+        ],
+    )?;
+    Ok(())
 }
 
 fn record_step_in_transaction(
@@ -602,6 +734,11 @@ mod tests {
         assert!(WorkflowRunState::Cancelled.is_terminal());
         assert!(!WorkflowRunState::Running.is_terminal());
         assert!(!WorkflowRunState::Blocked.is_terminal());
+        assert!(!WorkflowRunState::Running.notifies_owner());
+        assert!(WorkflowRunState::Blocked.notifies_owner());
+        assert!(WorkflowRunState::Completed.notifies_owner());
+        assert!(WorkflowRunState::Failed.notifies_owner());
+        assert!(WorkflowRunState::Cancelled.notifies_owner());
         assert!(matches!(
             WorkflowRunState::parse("working"),
             Err(StoreError::InvalidWorkflowRunState(_))

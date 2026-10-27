@@ -544,3 +544,212 @@ fn workflow_step_for_task_returns_the_journaled_step_or_none() {
             .is_none()
     );
 }
+
+fn notice_rows(root: &Path, run_id: &str) -> Vec<(i64, String, Option<String>)> {
+    let connection = Connection::open(root.join("brgr.sqlite3")).unwrap();
+    let mut statement = connection
+        .prepare(
+            "SELECT seq, state, delivered_session FROM workflow_notifications
+             WHERE run_id = ?1 ORDER BY seq",
+        )
+        .unwrap();
+    statement
+        .query_map([run_id], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+            ))
+        })
+        .unwrap()
+        .map(|row| row.unwrap())
+        .collect()
+}
+
+#[test]
+fn blocked_then_running_then_blocked_creates_two_notices_and_a_repeated_cancel_creates_one() {
+    let root = TempDir::new().unwrap();
+    let store = Store::open(root.path()).unwrap();
+    let owner_id = owner();
+
+    let bounce = run_id("run-bounce");
+    store
+        .create_workflow_run(&bounce, &owner_id, "digest-script", 1)
+        .unwrap();
+    store
+        .set_workflow_run_state(&bounce, WorkflowRunState::Blocked)
+        .unwrap();
+    store
+        .set_workflow_run_state(&bounce, WorkflowRunState::Running)
+        .unwrap();
+    store
+        .set_workflow_run_state(&bounce, WorkflowRunState::Blocked)
+        .unwrap();
+    let bounced = notice_rows(root.path(), bounce.as_str());
+    assert_eq!(
+        bounced
+            .iter()
+            .map(|(seq, state, _)| (*seq, state.as_str()))
+            .collect::<Vec<_>>(),
+        vec![(1, "blocked"), (2, "blocked")],
+        "blocked -> running -> blocked must record two notices, not one"
+    );
+
+    let cancel = run_id("run-cancel-twice");
+    store
+        .create_workflow_run(&cancel, &owner_id, "digest-script", 1)
+        .unwrap();
+    store
+        .set_workflow_run_state(&cancel, WorkflowRunState::Cancelled)
+        .unwrap();
+    let again = store.set_workflow_run_state(&cancel, WorkflowRunState::Cancelled);
+    assert!(
+        matches!(again, Err(StoreError::WorkflowRunTerminal(_))),
+        "a second cancel must not rewrite the run: {again:?}"
+    );
+    let cancelled = notice_rows(root.path(), cancel.as_str());
+    assert_eq!(
+        cancelled
+            .iter()
+            .map(|(seq, state, _)| (*seq, state.as_str()))
+            .collect::<Vec<_>>(),
+        vec![(1, "cancelled")],
+        "cancelling twice must keep a single notice"
+    );
+}
+
+#[test]
+fn a_failed_state_update_after_the_notice_insert_rolls_back_both() {
+    let root = TempDir::new().unwrap();
+    let store = Store::open(root.path()).unwrap();
+    let owner_id = owner();
+    let run_id = run_id("run-atomic-notice");
+    store
+        .create_workflow_run(&run_id, &owner_id, "digest-script", 1)
+        .unwrap();
+
+    let connection = Connection::open(root.path().join("brgr.sqlite3")).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TRIGGER fail_state_update BEFORE UPDATE ON workflow_runs
+             WHEN EXISTS (SELECT 1 FROM workflow_notifications WHERE run_id = NEW.run_id)
+             BEGIN
+               SELECT RAISE(ABORT, 'forced state update failure');
+             END;",
+        )
+        .unwrap();
+
+    let refused = store.set_workflow_run_state(&run_id, WorkflowRunState::Blocked);
+    assert!(
+        refused.is_err(),
+        "the forced state-update failure was not surfaced: {refused:?}"
+    );
+    assert_eq!(
+        store.workflow_run(&run_id).unwrap().state,
+        WorkflowRunState::Running,
+        "the state change committed without its notice"
+    );
+    assert!(
+        notice_rows(root.path(), run_id.as_str()).is_empty(),
+        "the notice row survived a failed state update"
+    );
+}
+
+#[test]
+fn a_workflow_step_terminal_result_still_writes_no_completion_notification() {
+    let root = TempDir::new().unwrap();
+    let mut store = Store::open(root.path()).unwrap();
+    let owner_id = owner();
+    let run_id = run_id("run-step-quiet");
+    store
+        .create_workflow_run(&run_id, &owner_id, "digest-script", 1)
+        .unwrap();
+    let task = spec(&owner_id, TaskId::new());
+    store
+        .record_workflow_step(
+            &run_id,
+            &step_key("quiet"),
+            "digest-in",
+            &task,
+            "digest-req",
+        )
+        .unwrap();
+    let attempt_id = AttemptId::new();
+    store
+        .claim_attempt(task.task_id, task.revision, attempt_id)
+        .unwrap();
+    store
+        .commit_terminal_result(&owner_id, &failed_result(&task, attempt_id))
+        .unwrap();
+    assert_eq!(
+        count_where(
+            root.path(),
+            "SELECT COUNT(*) FROM completion_notifications WHERE task_id = ?1",
+            &task.task_id.to_string()
+        ),
+        0,
+        "a workflow step wrote a per-task completion notice"
+    );
+}
+
+#[test]
+fn a_workflow_notice_claim_token_prevents_a_second_delivery() {
+    let root = TempDir::new().unwrap();
+    let store = Store::open(root.path()).unwrap();
+    let owner_id = owner();
+    let run_id = run_id("run-claim");
+    store
+        .create_workflow_run(&run_id, &owner_id, "digest-script", 1)
+        .unwrap();
+    store.bind_owner(&owner_id, "session-a", 1).unwrap();
+    store
+        .register_owner_surface(
+            &owner_id,
+            "session-a",
+            1,
+            "w1:p1",
+            Some("test-session"),
+            "/bin/herdr",
+        )
+        .unwrap();
+    store
+        .set_workflow_run_state(&run_id, WorkflowRunState::Blocked)
+        .unwrap();
+
+    let pending = store.pending_workflow_notifications(&run_id).unwrap();
+    assert_eq!(pending.len(), 1, "{pending:?}");
+    let seq = pending[0].seq;
+    let first = store
+        .claim_workflow_notification(&run_id, seq, "claim-a", 100, 20)
+        .unwrap()
+        .expect("the first claimer must receive the notice");
+    assert_eq!(first.pane_id, "w1:p1");
+    assert!(
+        store
+            .claim_workflow_notification(&run_id, seq, "other", 101, 20)
+            .unwrap()
+            .is_none(),
+        "a live claim was handed to a second token"
+    );
+    store
+        .mark_workflow_notification_delivered(&first, "claim-a")
+        .unwrap();
+    assert!(
+        store
+            .pending_workflow_notifications(&run_id)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        store
+            .claim_workflow_notification(&run_id, seq, "claim-b", 200, 20)
+            .unwrap()
+            .is_none(),
+        "a delivered notice was claimed again"
+    );
+    assert!(matches!(
+        store.mark_workflow_notification_delivered(&first, "claim-a"),
+        Err(StoreError::NotificationClaimStale)
+    ));
+    store.resolve_workflow_notification(&run_id, seq).unwrap();
+}

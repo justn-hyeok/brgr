@@ -426,6 +426,7 @@ pub(crate) async fn bind(
                 eprintln!("brgr completion notification remains queued: {error}");
             }
         }
+        notification::spawn_pending_workflow_for_session(paths, &store, &session);
     }
     print_value(
         &json!({"owner_id": spec.owner_id, "session_id": session, "binding_epoch": epoch}),

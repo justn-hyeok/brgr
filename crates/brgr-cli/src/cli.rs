@@ -256,6 +256,8 @@ pub(crate) enum Command {
     },
     #[command(name = "__notify", hide = true)]
     Notify { task: TaskId },
+    #[command(name = "__notify-workflow", hide = true)]
+    NotifyWorkflow { run: String },
     #[command(name = "__pane-run", hide = true)]
     PaneRun(PaneRunArgs),
     #[command(name = "__tui-host", hide = true)]
