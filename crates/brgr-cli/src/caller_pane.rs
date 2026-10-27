@@ -26,10 +26,7 @@ use std::{
 /// The caller's Herdr pane, when this process provably runs inside it.
 pub(crate) fn verified() -> Option<String> {
     if let Some(pane) = crate::invocation::current().pane.as_deref() {
-        return crate::current_session()
-            .ok()
-            .flatten()
-            .and_then(|session| for_session(&session, Some(pane)));
+        return named(pane);
     }
     let native = inherited();
     if native.is_some() {
@@ -39,6 +36,21 @@ pub(crate) fn verified() -> Option<String> {
         .ok()
         .flatten()
         .and_then(|session| for_session(&session, crate::invocation::current().pane.as_deref()))
+}
+
+/// `--source-pane PANE`: the same check a detached workflow `brgr run` repeats.
+/// A live owner-kind pane is enough when this process is not inside it.
+pub(crate) fn named(pane: &str) -> Option<String> {
+    crate::current_session()
+        .ok()
+        .flatten()
+        .and_then(|session| for_session(&session, Some(pane)))
+        .or_else(|| {
+            live_kind(pane)
+                .as_deref()
+                .is_some_and(owner_inbox_kind)
+                .then(|| pane.to_owned())
+        })
 }
 
 fn inherited() -> Option<String> {

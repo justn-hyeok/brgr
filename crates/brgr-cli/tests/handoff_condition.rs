@@ -1,8 +1,12 @@
 //! The note a head gets when its usage passes the configured limit.
+mod common;
+
 use std::{fs, path::Path, process::Command};
 
 use serde_json::Value;
 use tempfile::TempDir;
+
+use common::{calls, fake_herdr, herdr_env};
 
 fn brgr() -> &'static str {
     env!("CARGO_BIN_EXE_brgr")
@@ -341,43 +345,6 @@ fn a_stale_or_other_harness_report_does_not_block_the_handoff() {
     assert!(said.contains("handoff TASK --kind claude"), "{said}");
 }
 
-fn fake_herdr(dir: &Path) -> std::path::PathBuf {
-    let script = dir.join("herdr");
-    fs::write(
-        &script,
-        r#"#!/bin/bash
-echo "$@" >> "$FAKE_HERDR_DIR/calls.log"
-if [ "$1" = "--session" ]; then shift 2; fi
-case "$1 $2" in
-  "pane split")
-    echo '{"result":{"pane":{"pane_id":"p-new"}}}' ;;
-  "pane get")
-    echo "{\"result\":{\"pane\":{\"terminal_id\":\"term-$3\"}}}" ;;
-  "agent get")
-    s=idle
-    [ -f "$FAKE_HERDR_DIR/status-$3" ] && s=$(cat "$FAKE_HERDR_DIR/status-$3")
-    echo "{\"result\":{\"agent\":{\"agent\":\"claude\",\"pane_id\":\"$3\",\"agent_status\":\"$s\"}}}" ;;
-  "pane layout") exit 1 ;;
-  "pane read") ;;
-  *) ;;
-esac
-exit 0
-"#,
-    )
-    .unwrap();
-    fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
-    script
-}
-
-fn herdr_env<'a>(fake: &'a Path, dir: &'a Path, pane: &'a str) -> Vec<(&'static str, String)> {
-    vec![
-        ("HERDR_ENV", "1".to_owned()),
-        ("HERDR_PANE_ID", pane.to_owned()),
-        ("HERDR_BIN_PATH", fake.to_str().unwrap().to_owned()),
-        ("FAKE_HERDR_DIR", dir.to_str().unwrap().to_owned()),
-    ]
-}
-
 fn run_with(
     home: &Path,
     args: &[&str],
@@ -387,10 +354,6 @@ fn run_with(
     let mut envs: Vec<(&str, &str)> = base.to_vec();
     envs.extend(extra.iter().map(|(name, value)| (*name, value.as_str())));
     run(home, args, &envs)
-}
-
-fn calls(dir: &Path) -> String {
-    fs::read_to_string(dir.join("calls.log")).unwrap_or_default()
 }
 
 fn calls_for(dir: &Path, prefix: &str) -> usize {

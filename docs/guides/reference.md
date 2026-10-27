@@ -589,6 +589,9 @@ top; journaled steps replay instead of creating a second task. Stop a run with
 `brgr workflow set-state RUN blocked` once, then `brgr workflow set-state RUN running`
 after the owner replies.
 
+Steps open TUI worker panes beside the head's pane when `brgr workflow run SCRIPT`
+was started from a verified Herdr pane. Otherwise use `mode: "headless"`.
+
 A script imports the local module and uses `agent()` and `parallel()`:
 
 ```javascript
