@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Workflow `agent()` takes an optional `deadline` (positive integer seconds, at
+  most 86400). The SDK cancels the step when wall-clock time from the task's
+  creation runs out, returns the sealed outcome with `timed_out: true`, and
+  does not fail the run. A changed deadline under the same step key diverges.
+  A worker question suspends enforcement without extending the clock.
 - A revised workflow step stays unfinished, and keeps its parallel slot, until
   its newest revision is sealed. `workflow status` and the SDK's `agent()` wait
   no longer treat revision 1's result as the end of the step.

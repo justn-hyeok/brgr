@@ -188,13 +188,13 @@ stale Head의 결정 시도, 기존 Head 종료 실패, 나가는 Head가 침묵
 `brgr workflow set-state RUN blocked`, `brgr workflow run SCRIPT`,
 `brgr workflow resume RUN`, `brgr workflow cancel RUN`, `brgr workflow init`,
 `brgr run OBJECTIVE --workflow RUN --step KEY` (병렬 한도에 걸리면 종료 코드 75),
-분리된 node 드라이버, 런 상태 변화당 owner 알림 하나, 그리고 의존성 없는
-JavaScript SDK (`agent()`, `parallel()`). SDK는 accept/reject/apply/land를
-노출하지 않는다. 완료 조건은 실행 도중의 **관찰한** 결과를 바탕으로 처음에는
-존재하지 않았던 작업을 새로 생성하는 것이다. SDK가 돌려준 값은 승인된 변경이
-아니다.
+분리된 node 드라이버, 런 상태 변화당 owner 알림 하나, 의존성 없는
+JavaScript SDK (`agent()`, `parallel()`), 그리고 단계별 기한 (`agent()`의
+`deadline`, 결과의 `timed_out`). SDK는 accept/reject/apply/land를 노출하지
+않는다. 완료 조건은 실행 도중의 **관찰한** 결과를 바탕으로 처음에는 존재하지
+않았던 작업을 새로 생성하는 것이다. SDK가 돌려준 값은 승인된 변경이 아니다.
 
-아직 없는 것: `pipeline()`, 재시도 정책, 단계별 기한, TypeScript 도구,
+아직 없는 것: `pipeline()`, 재시도 정책, TypeScript 도구,
 실행 중인 런의 Head 이전.
 
 첫 버전의 실행 표현은 네 가지로 제한한다.

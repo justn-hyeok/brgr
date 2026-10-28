@@ -81,6 +81,8 @@ struct WorkflowStepInput<'a> {
     requires_mcp: &'a [String],
     require_capability: &'a [String],
     workspace: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    deadline: Option<u64>,
 }
 
 pub(crate) enum WorkspaceSnapshot {
@@ -949,6 +951,7 @@ fn workflow_step_from_run(
             requires_mcp: &args.capabilities.requires_mcp,
             require_capability: &args.capabilities.required,
             workspace: &workspace,
+            deadline: args.step_deadline,
         })?),
     }))
 }
