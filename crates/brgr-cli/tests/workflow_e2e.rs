@@ -4,7 +4,7 @@ use std::{
     fs,
     os::unix::fs::PermissionsExt as _,
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
     thread,
     time::{Duration, Instant},
 };
@@ -108,6 +108,37 @@ const objective = readFileSync(
 ).trim();
 await agent({ task: objective, mode: "headless" });
 await new Promise((resolve) => setTimeout(resolve, 60_000));
+"#;
+
+const REVISE_SCRIPT: &str = r#"
+import { writeFileSync } from "node:fs";
+import { agent } from "./brgr-workflow.mjs";
+
+const sealed = await agent({ task: "BRGR_FIXTURE_OK first", mode: "headless", key: "revised" });
+writeFileSync(process.env.BRGR_HOME + "/agent-result.json", JSON.stringify(sealed));
+"#;
+
+const HOLD_REV2_GJC: &str = r#"#!/bin/sh
+set -eu
+case "${1:-}" in
+  --version) printf 'gjc v-hold-rev2\n'; exit 0;;
+  --help) printf '%s\n' '-p, --print' '--mode=<value>' '--no-session' '--no-mcp' '--model' '--thinking'; exit 0;;
+esac
+prompt_file=
+for argument in "$@"; do
+  case "$argument" in @*) prompt_file=${argument#@};; esac
+done
+if [ -n "$prompt_file" ] && /usr/bin/grep -q REV2 "$prompt_file"; then
+  n=0
+  while [ ! -e "$BRGR_HOME/release-rev2" ] && [ "$n" -lt 600 ]; do
+    /bin/sleep 0.1
+    n=$((n + 1))
+  done
+  printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"REV2_SEALED"}]}}'
+else
+  printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"REV1_SEALED"}]}}'
+fi
+printf '%s\n' '{"type":"agent_end","stopReason":"completed"}'
 "#;
 
 const FAILING_GJC: &str = r#"#!/bin/sh
@@ -322,13 +353,17 @@ fn owner_env() -> [(&'static str, &'static str); 2] {
     ]
 }
 
-fn wait_until(timeout: Duration, mut ready: impl FnMut() -> bool) -> bool {
+fn wait_until(timeout: Duration, ready: impl FnMut() -> bool) -> bool {
+    wait_until_every(timeout, Duration::from_millis(100), ready)
+}
+
+fn wait_until_every(timeout: Duration, every: Duration, mut ready: impl FnMut() -> bool) -> bool {
     let started = Instant::now();
     while started.elapsed() < timeout {
         if ready() {
             return true;
         }
-        thread::sleep(Duration::from_millis(100));
+        thread::sleep(every);
     }
     false
 }
@@ -377,15 +412,196 @@ fn write_script(fixture: &Fixture, name: &str, source: &str) -> PathBuf {
 }
 
 fn start_workflow(fixture: &Fixture, script: &Path) -> String {
-    json_output(&run(
-        &fixture.home,
-        &fixture.workspace,
-        &["workflow", "run", script.to_str().unwrap()],
-        &owner_env(),
-    ))["run_id"]
+    start_workflow_with(fixture, script, &[])
+}
+
+fn start_workflow_with(fixture: &Fixture, script: &Path, extra: &[&str]) -> String {
+    let script = script.to_str().unwrap();
+    let mut args = vec!["workflow", "run", script];
+    args.extend_from_slice(extra);
+    json_output(&run(&fixture.home, &fixture.workspace, &args, &owner_env()))["run_id"]
         .as_str()
         .unwrap()
         .to_owned()
+}
+
+fn wait_for_first_step(fixture: &Fixture, run_id: &str) -> String {
+    let mut task_id = String::new();
+    assert!(
+        wait_until(Duration::from_secs(90), || {
+            let status = run(
+                &fixture.home,
+                &fixture.workspace,
+                &["workflow", "status", run_id],
+                &owner_env(),
+            );
+            let Some(value) = status
+                .status
+                .success()
+                .then(|| serde_json::from_slice::<Value>(&status.stdout).ok())
+                .flatten()
+            else {
+                return false;
+            };
+            let Some(task) = value["steps"]
+                .as_array()
+                .and_then(|steps| steps.first())
+                .and_then(|step| step["task_id"].as_str())
+            else {
+                return false;
+            };
+            task.clone_into(&mut task_id);
+            true
+        }),
+        "first step was never journaled: {}",
+        dump_run(fixture, run_id)
+    );
+    task_id
+}
+
+fn create_workflow(fixture: &Fixture, extra: &[&str]) -> String {
+    let mut args = vec!["workflow", "create"];
+    args.extend_from_slice(extra);
+    json_output(&run(&fixture.home, &fixture.workspace, &args, &owner_env()))["run_id"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+fn write_wait_gate(fixture: &Fixture) -> PathBuf {
+    let path = fixture.scripts.join("wait-gate-brgr");
+    fs::write(
+        &path,
+        format!(
+            r#"#!/bin/sh
+set -eu
+real="{real}"
+home="{home}"
+count="$home/wait-count"
+first_wait="$home/first-wait.json"
+first_result="$home/first-result.json"
+if [ "${{1:-}}" = "--json" ] && [ "${{2:-}}" = "wait" ]; then
+  n=0
+  if [ -f "$count" ]; then
+    n=$(cat "$count")
+  fi
+  n=$((n + 1))
+  printf '%s\n' "$n" > "$count"
+  if [ "$n" -eq 1 ]; then
+    "$real" "$@" > "$first_wait"
+    task="$3"
+    "$real" --json result "$task" > "$first_result"
+    printf '1\n' > "$home/wait-returned"
+    while [ ! -e "$home/allow-wait-return" ]; do
+      /bin/sleep 0.05
+    done
+    cat "$first_wait"
+    exit 0
+  fi
+fi
+if [ "${{1:-}}" = "--json" ] && [ "${{2:-}}" = "result" ]; then
+  n=0
+  if [ -f "$count" ]; then
+    n=$(cat "$count")
+  fi
+  if [ "$n" -eq 1 ] && [ -f "$first_result" ]; then
+    cat "$first_result"
+    exit 0
+  fi
+fi
+exec "$real" "$@"
+"#,
+            real = brgr(),
+            home = fixture.home.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+    path
+}
+
+fn spawn_agent_script(
+    fixture: &Fixture,
+    script: &Path,
+    run_id: &str,
+    brgr_bin: &Path,
+) -> std::process::Child {
+    let mut command = Command::new("node");
+    command
+        .arg(script)
+        .current_dir(&fixture.workspace)
+        .env("BRGR_BIN", brgr_bin)
+        .env("BRGR_HOME", &fixture.home)
+        .env("BRGR_WORKFLOW_RUN", run_id)
+        .env("BRGR_OWNER_ID", "codex:workflow-owner")
+        .env("BRGR_SESSION_ID", "workflow-session")
+        .env_remove("BRGR_PARENT_TASK_ID")
+        .env_remove("BRGR_PARENT_ATTEMPT_ID")
+        .env_remove("CODEX_THREAD_ID")
+        .env_remove("CLAUDE_CODE_SESSION_ID")
+        .env_remove("CURSOR_CONVERSATION_ID")
+        .env("BRGR_TEST_TRUST_HERDR_PANE", "1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    for name in HERDR {
+        command.env_remove(name);
+    }
+    command.spawn().unwrap()
+}
+
+fn reject_and_revise(fixture: &Fixture, task: &str) {
+    json_output(&run(
+        &fixture.home,
+        &fixture.workspace,
+        &["reject", task, "--reason", "revise the step"],
+        &owner_env(),
+    ));
+    json_output(&run(
+        &fixture.home,
+        &fixture.workspace,
+        &[
+            "revise",
+            task,
+            "BRGR_FIXTURE_OK REV2",
+            "--workspace",
+            fixture.workspace.to_str().unwrap(),
+        ],
+        &owner_env(),
+    ));
+}
+
+fn launch_workflow_step(
+    fixture: &Fixture,
+    run_id: &str,
+    step: &str,
+    objective: &str,
+) -> std::process::Output {
+    run(
+        &fixture.home,
+        &fixture.workspace,
+        &[
+            "run",
+            objective,
+            "--workspace",
+            fixture.workspace.to_str().unwrap(),
+            "--workflow",
+            run_id,
+            "--step",
+            step,
+        ],
+        &owner_env(),
+    )
+}
+
+fn agent_result(fixture: &Fixture) -> Value {
+    let path = fixture.home.join("agent-result.json");
+    wait_for_file(&path, Duration::from_secs(90));
+    serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap()
+}
+
+fn release_revision_two(fixture: &Fixture) {
+    fs::write(fixture.home.join("release-rev2"), b"1").unwrap();
 }
 
 fn step_keys(status: &Value) -> Vec<String> {
@@ -684,4 +900,178 @@ fn a_changed_objective_under_an_automatic_key_diverges_and_launches_nothing_new(
     );
     let log = workflow_log(&fixture, &run_id);
     assert!(log.contains("diverged"), "resume did not diverge: {log}");
+}
+
+#[test]
+fn a_script_receives_the_newest_revision_when_the_owner_revises_a_sealed_step() {
+    require_node();
+    let fixture = fixture_with_script(HOLD_REV2_GJC);
+    init_sdk(&fixture);
+    let script = write_script(&fixture, "revise.mjs", REVISE_SCRIPT);
+    let run_id = create_workflow(&fixture, &["--max-parallel", "1"]);
+    let gate = write_wait_gate(&fixture);
+    let mut child = spawn_agent_script(&fixture, &script, &run_id, &gate);
+    wait_for_file(&fixture.home.join("wait-returned"), Duration::from_secs(90));
+    let task = wait_for_first_step(&fixture, &run_id);
+    reject_and_revise(&fixture, &task);
+
+    let listed = json_output(&run(
+        &fixture.home,
+        &fixture.workspace,
+        &["workflow", "status", &run_id],
+        &owner_env(),
+    ));
+    assert_eq!(listed["state"], "running", "{listed}");
+    assert_eq!(listed["steps"][0]["revision"], 1, "{listed}");
+
+    let probe = launch_workflow_step(&fixture, &run_id, "probe", "BRGR_FIXTURE_OK probe");
+    assert_eq!(
+        probe.status.code(),
+        Some(75),
+        "a revised step without a newest result freed its parallel slot: status={} stderr={}",
+        probe.status,
+        String::from_utf8_lossy(&probe.stderr)
+    );
+    assert!(
+        !fixture.home.join("agent-result.json").is_file(),
+        "the script received a sealed result before revision 2 finished"
+    );
+
+    fs::write(fixture.home.join("allow-wait-return"), b"1").unwrap();
+    release_revision_two(&fixture);
+    let sealed = agent_result(&fixture);
+    let status = child.wait().unwrap();
+    assert!(status.success(), "agent script failed: {status}");
+    assert_eq!(sealed["revision"], 2, "{sealed}");
+    assert_eq!(sealed["outcome"], "completed", "{sealed}");
+    assert!(
+        sealed["report"]
+            .as_str()
+            .is_some_and(|text| text.contains("REV2_SEALED")),
+        "{sealed}"
+    );
+}
+
+#[test]
+fn resume_after_a_revise_returns_the_newest_revision_result() {
+    require_node();
+    let fixture = fixture_with_script(HOLD_REV2_GJC);
+    init_sdk(&fixture);
+    let script = write_script(&fixture, "revise-resume.mjs", REVISE_SCRIPT);
+    let run_id = create_workflow(&fixture, &[]);
+    let gate = write_wait_gate(&fixture);
+    let mut first = spawn_agent_script(&fixture, &script, &run_id, &gate);
+    wait_for_file(&fixture.home.join("wait-returned"), Duration::from_secs(90));
+    let task = wait_for_first_step(&fixture, &run_id);
+    reject_and_revise(&fixture, &task);
+    assert!(
+        !fixture.home.join("agent-result.json").is_file(),
+        "the script received a result before resume"
+    );
+    let _ = first.kill();
+    let _ = first.wait();
+    let mut resumed = spawn_agent_script(&fixture, &script, &run_id, Path::new(brgr()));
+    release_revision_two(&fixture);
+    let sealed = agent_result(&fixture);
+    let status = resumed.wait().unwrap();
+    assert!(status.success(), "resumed script failed: {status}");
+    let listed = json_output(&run(
+        &fixture.home,
+        &fixture.workspace,
+        &["workflow", "status", &run_id],
+        &owner_env(),
+    ));
+    assert_eq!(step_keys(&listed), vec!["revised"], "{listed}");
+    assert_eq!(sealed["revision"], 2, "{sealed}");
+    assert!(
+        sealed["report"]
+            .as_str()
+            .is_some_and(|text| text.contains("REV2_SEALED")),
+        "{sealed}"
+    );
+}
+
+#[test]
+fn wait_for_sealed_keeps_waiting_when_status_shows_a_newer_revision() {
+    require_node();
+    let fixture = fixture_home();
+    init_sdk(&fixture);
+    let argv_log = fixture.scripts.join("fake-brgr.log");
+    let wait_count = fixture.scripts.join("wait-count");
+    let fake_bin = fixture.scripts.join("fake-brgr");
+    fs::write(
+        &fake_bin,
+        format!(
+            r#"#!/bin/sh
+printf '%s\n' "$*" >> "{log}"
+count_file="{count}"
+task="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+rid1="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+rid2="cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+case " $* " in
+  *" wait "*)
+    n=0
+    if [ -f "$count_file" ]; then
+      n=$(cat "$count_file")
+    fi
+    n=$((n + 1))
+    printf '%s\n' "$n" > "$count_file"
+    if [ "$n" -eq 1 ]; then
+      printf '%s\n' "{{\"task_id\":\"$task\",\"result_id\":\"$rid1\",\"outcome\":\"candidate\",\"revision\":1}}"
+    else
+      printf '%s\n' "{{\"task_id\":\"$task\",\"result_id\":\"$rid2\",\"outcome\":\"candidate\",\"revision\":2}}"
+    fi
+    ;;
+  *" workflow status "*)
+    printf '%s\n' '{{\"state\":\"running\"}}'
+    ;;
+  *" status "*)
+    printf '%s\n' "{{\"task\":{{\"revision\":2}},\"state\":\"running\"}}"
+    ;;
+  *" result "*)
+    n=0
+    if [ -f "$count_file" ]; then
+      n=$(cat "$count_file")
+    fi
+    if [ "$n" -eq 1 ]; then
+      printf '%s\n' "{{\"result\":{{\"outcome\":\"candidate\",\"revision\":1,\"result_id\":\"$rid1\"}},\"artifacts\":[{{\"text\":\"REV1\"}}]}}"
+    else
+      printf '%s\n' "{{\"result\":{{\"outcome\":\"candidate\",\"revision\":2,\"result_id\":\"$rid2\"}},\"artifacts\":[{{\"text\":\"REV2\"}}]}}"
+    fi
+    ;;
+  *" run "*)
+    printf '%s\n' "{{\"task_id\":\"$task\"}}"
+    ;;
+  *)
+    printf '%s\n' '{{\"ok\":true}}'
+    ;;
+esac
+"#,
+            log = argv_log.display(),
+            count = wait_count.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&fake_bin, fs::Permissions::from_mode(0o700)).unwrap();
+    let script = write_script(&fixture, "stale-wait.mjs", REVISE_SCRIPT);
+    let output = Command::new("node")
+        .arg(&script)
+        .current_dir(&fixture.scripts)
+        .env("BRGR_BIN", &fake_bin)
+        .env("BRGR_HOME", &fixture.home)
+        .env("BRGR_WORKFLOW_RUN", "wf-aaaaaaaaaaaa")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "sdk script failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let sealed: Value =
+        serde_json::from_str(&fs::read_to_string(fixture.home.join("agent-result.json")).unwrap())
+            .unwrap();
+    assert_eq!(sealed["revision"], 2, "{sealed}");
+    assert_eq!(sealed["outcome"], "completed", "{sealed}");
+    assert_eq!(sealed["report"], "REV2", "{sealed}");
 }

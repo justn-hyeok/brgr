@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- A revised workflow step stays unfinished, and keeps its parallel slot, until
+  its newest revision is sealed. `workflow status` and the SDK's `agent()` wait
+  no longer treat revision 1's result as the end of the step.
+
 ## 2.15.9 — 2026-10-27
 
 A harness probe can no longer outlive a killed brgr and fill the disk.

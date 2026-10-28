@@ -753,3 +753,93 @@ fn a_workflow_notice_claim_token_prevents_a_second_delivery() {
     ));
     store.resolve_workflow_notification(&run_id, seq).unwrap();
 }
+
+#[test]
+fn a_revised_step_is_unfinished_until_its_newest_revision_is_sealed() {
+    let root = TempDir::new().unwrap();
+    let mut store = Store::open(root.path()).unwrap();
+    let owner_id = owner();
+    let run_id = run_id("run-revised-step");
+    store
+        .create_workflow_run(&run_id, &owner_id, "digest-script", 1)
+        .unwrap();
+
+    let first_task = spec(&owner_id, TaskId::new());
+    let first = store
+        .record_workflow_step(
+            &run_id,
+            &step_key("one"),
+            "digest-in-1",
+            &first_task,
+            "digest-req-1",
+        )
+        .unwrap();
+    let WorkflowStepOutcome::Created { task_id, revision } = first else {
+        panic!("the first step must be created, got {first:?}");
+    };
+    assert_eq!(revision, 1);
+
+    let attempt_one = AttemptId::new();
+    store.claim_attempt(task_id, revision, attempt_one).unwrap();
+    store
+        .commit_terminal_result(&owner_id, &failed_result(&first_task, attempt_one))
+        .unwrap();
+    assert_eq!(
+        store.workflow_step_counts(&run_id).unwrap().finished,
+        1,
+        "a sealed launch revision must still count as finished while it is latest"
+    );
+
+    let mut revised = first_task.clone();
+    revised.revision = 2;
+    revised.create_request_id = format!("request-{task_id}-r2");
+    store.record_task(&revised, "digest-req-1-r2").unwrap();
+
+    let counts = store.workflow_step_counts(&run_id).unwrap();
+    assert_eq!(
+        counts.finished, 0,
+        "a step whose latest revision has no result counted as finished: {counts:?}"
+    );
+    assert_eq!(counts.total, 1);
+
+    let second_task = spec(&owner_id, TaskId::new());
+    let refused = store.record_workflow_step(
+        &run_id,
+        &step_key("two"),
+        "digest-in-2",
+        &second_task,
+        "digest-req-2",
+    );
+    assert!(
+        matches!(refused, Err(StoreError::WorkflowParallelLimit)),
+        "a revised step without a newest result freed its parallel slot: {refused:?}"
+    );
+
+    let attempt_two = AttemptId::new();
+    store.claim_attempt(task_id, 2, attempt_two).unwrap();
+    store
+        .commit_terminal_result(&owner_id, &failed_result(&revised, attempt_two))
+        .unwrap();
+    assert_eq!(
+        store.workflow_step_counts(&run_id).unwrap().finished,
+        1,
+        "sealing the newest revision did not finish the step"
+    );
+
+    let admitted = store
+        .record_workflow_step(
+            &run_id,
+            &step_key("two"),
+            "digest-in-2",
+            &second_task,
+            "digest-req-2",
+        )
+        .unwrap();
+    assert!(
+        matches!(
+            admitted,
+            WorkflowStepOutcome::Created { task_id, .. } if task_id == second_task.task_id
+        ),
+        "a sealed newest revision did not free its parallel slot: {admitted:?}"
+    );
+}
