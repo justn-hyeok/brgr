@@ -8,6 +8,8 @@ const BACKOFF_START_MS = 1000;
 const BACKOFF_CAP_MS = 15000;
 const MAX_OUTPUT = 16 * 1024 * 1024;
 const MAX_DEADLINE_SECONDS = 86400;
+const WAIT_TIMEOUT_NEEDLE = "did not produce a terminal result before the wait timeout";
+const ALREADY_TERMINAL_NEEDLE = "is already terminal";
 
 let agentsStarted = 0;
 
@@ -106,12 +108,16 @@ function wrapChildError(error) {
   return new Error(message);
 }
 
+function option(flag, value) {
+  return `--${flag}=${value}`;
+}
+
 function sourcePanePrefix(mode) {
   const pane = process.env.BRGR_WORKFLOW_SOURCE_PANE;
   if (!pane || mode === "headless") {
     return [];
   }
-  return ["--source-pane", pane];
+  return [option("source-pane", pane)];
 }
 
 function parseJson(stdout, command) {
@@ -144,6 +150,13 @@ async function invoke(args) {
 async function requireRunning(runId) {
   const status = parseJson((await invoke(["workflow", "status", runId])).stdout, "workflow status");
   if (status.state !== "running") {
+    throw new Error(`workflow run ${runId} is ${status.state}`);
+  }
+}
+
+async function requireActive(runId) {
+  const status = parseJson((await invoke(["workflow", "status", runId])).stdout, "workflow status");
+  if (status.state !== "running" && status.state !== "blocked") {
     throw new Error(`workflow run ${runId} is ${status.state}`);
   }
 }
@@ -201,24 +214,45 @@ function sealedFrom(waited, detailed) {
 }
 
 function remainingSeconds(createdAt, deadlineSeconds) {
-  return deadlineSeconds - (Math.floor(Date.now() / 1000) - createdAt);
+  if (!Number.isFinite(createdAt) || !Number.isFinite(deadlineSeconds)) {
+    return 0;
+  }
+  const now = Math.floor(Date.now() / 1000);
+  const elapsed = Math.max(0, now - createdAt);
+  return deadlineSeconds - elapsed;
 }
 
-function isWaitTimeout(error) {
+function waitTimeoutSeconds(remaining) {
+  if (remaining == null) {
+    return null;
+  }
+  if (!Number.isFinite(remaining) || remaining <= 0) {
+    return 1;
+  }
+  return Math.min(MAX_DEADLINE_SECONDS, Math.max(1, Math.ceil(remaining)));
+}
+
+function deadlineTimedOut(createdAt, deadlineSeconds, outcome) {
   return (
-    error instanceof Error &&
-    error.message.includes("did not produce a terminal result before the wait timeout")
+    outcome === "cancelled" &&
+    createdAt != null &&
+    remainingSeconds(createdAt, deadlineSeconds) <= 0
   );
 }
 
-function isAlreadyTerminal(error) {
-  return error instanceof Error && error.message.includes("is already terminal");
+function isWaitTimeout(error) {
+  return error instanceof Error && error.message.includes(WAIT_TIMEOUT_NEEDLE);
 }
 
-async function readCreatedAt(taskId) {
+function isAlreadyTerminal(error) {
+  return error instanceof Error && error.message.includes(ALREADY_TERMINAL_NEEDLE);
+}
+
+async function readCreatedAt(taskId, runId) {
   for (;;) {
-    const status = parseJson((await invoke(["status", taskId])).stdout, "status");
-    if (typeof status.created_at === "number") {
+    await requireActive(runId);
+    const status = parseJson((await invoke(["status", "--", taskId])).stdout, "status");
+    if (typeof status.created_at === "number" && Number.isFinite(status.created_at)) {
       return status.created_at;
     }
     await sleep(WAIT_POLL_MS);
@@ -226,10 +260,11 @@ async function readCreatedAt(taskId) {
 }
 
 async function waitOnce(taskId, timeoutSeconds) {
-  const args = ["wait", taskId];
+  const args = ["wait"];
   if (timeoutSeconds != null) {
-    args.push("--timeout-seconds", String(timeoutSeconds));
+    args.push(option("timeout-seconds", timeoutSeconds));
   }
+  args.push("--", taskId);
   try {
     return { waited: parseJson((await invoke(args)).stdout, "wait"), timedOut: false };
   } catch (error) {
@@ -255,7 +290,7 @@ async function clearBlocked(runId, markedBlocked) {
 }
 
 async function sealedIfCurrent(taskId, waited) {
-  const status = parseJson((await invoke(["status", taskId])).stdout, "status");
+  const status = parseJson((await invoke(["status", "--", taskId])).stdout, "status");
   const latest = status.task && status.task.revision;
   if (typeof latest !== "number") {
     throw new Error("brgr status did not return task.revision");
@@ -263,15 +298,13 @@ async function sealedIfCurrent(taskId, waited) {
   if (latest !== waited.revision) {
     return null;
   }
-  const detailed = parseJson((await invoke(["result", taskId])).stdout, "result");
+  const detailed = parseJson((await invoke(["result", "--", taskId])).stdout, "result");
   return sealedFrom(waited, detailed);
 }
 
-async function cancelAndWait(taskId, runId) {
-  let requested = false;
+async function cancelAndWait(taskId, runId, createdAt, deadlineSeconds) {
   try {
-    await invoke(["cancel", taskId]);
-    requested = true;
+    await invoke(["cancel", "--", taskId]);
   } catch (error) {
     if (!isAlreadyTerminal(error)) {
       throw error;
@@ -280,19 +313,19 @@ async function cancelAndWait(taskId, runId) {
   const sealed = await waitForSealed(taskId, runId);
   return {
     ...sealed,
-    timed_out: requested && sealed.outcome === "cancelled",
+    timed_out: deadlineTimedOut(createdAt, deadlineSeconds, sealed.outcome),
   };
 }
 
 async function waitForSealed(taskId, runId, deadlineSeconds) {
   const createdAt =
-    typeof deadlineSeconds === "number" ? await readCreatedAt(taskId) : null;
+    typeof deadlineSeconds === "number" ? await readCreatedAt(taskId, runId) : null;
   let markedBlocked = false;
   for (;;) {
+    await requireActive(runId);
     const remaining =
       createdAt == null ? null : remainingSeconds(createdAt, deadlineSeconds);
-    const waitTimeout =
-      remaining == null ? null : Math.max(1, Math.ceil(Math.max(remaining, 0)));
+    const waitTimeout = waitTimeoutSeconds(remaining);
     const { waited, timedOut } = await waitOnce(taskId, waitTimeout);
     if (waited && waited.state === "awaiting_input") {
       markedBlocked = await markBlocked(runId, markedBlocked);
@@ -303,13 +336,16 @@ async function waitForSealed(taskId, runId, deadlineSeconds) {
     if (waited && waited.result_id) {
       const sealed = await sealedIfCurrent(taskId, waited);
       if (sealed) {
-        return sealed;
+        return {
+          ...sealed,
+          timed_out: deadlineTimedOut(createdAt, deadlineSeconds, sealed.outcome),
+        };
       }
       await sleep(WAIT_POLL_MS);
       continue;
     }
     if (timedOut && remaining != null && remainingSeconds(createdAt, deadlineSeconds) <= 0) {
-      return cancelAndWait(taskId, runId);
+      return cancelAndWait(taskId, runId, createdAt, deadlineSeconds);
     }
     if (timedOut && remaining != null) {
       continue;
@@ -319,27 +355,28 @@ async function waitForSealed(taskId, runId, deadlineSeconds) {
 }
 
 function runArgs(options, runId, key) {
-  const args = [options.task, "--workflow", runId, "--step", key];
+  const args = [option("workflow", runId), option("step", key)];
   if (options.harness) {
-    args.push("--harness", options.harness);
+    args.push(option("harness", options.harness));
   }
   if (options.model) {
-    args.push("--model", options.model);
+    args.push(option("model", options.model));
   }
   if (options.effort) {
-    args.push("--effort", options.effort);
+    args.push(option("effort", options.effort));
   }
   if (options.mode) {
-    args.push("--mode", options.mode);
+    args.push(option("mode", options.mode));
   }
   if (Array.isArray(options.criteria)) {
     for (const criterion of options.criteria) {
-      args.push("--criterion", criterion);
+      args.push(option("criterion", criterion));
     }
   }
   if (Object.hasOwn(options, "deadline")) {
-    args.push("--step-deadline", String(options.deadline));
+    args.push(option("step-deadline", options.deadline));
   }
+  args.push("--", options.task);
   return args;
 }
 

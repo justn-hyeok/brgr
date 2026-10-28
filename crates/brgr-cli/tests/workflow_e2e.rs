@@ -204,6 +204,57 @@ const sealed = await agent({ task: "BRGR_FIXTURE_OK first", mode: "headless", ke
 writeFileSync(process.env.BRGR_HOME + "/agent-result.json", JSON.stringify(sealed));
 "#;
 
+const DASH_TASK_SCRIPT: &str = r#"
+import { writeFileSync } from "node:fs";
+import { agent } from "./brgr-workflow.mjs";
+
+const sealed = await agent({
+  task: "--workspace /etc",
+  key: "--help",
+  deadline: 60,
+  mode: "headless",
+});
+writeFileSync(process.env.BRGR_HOME + "/agent-result.json", JSON.stringify(sealed));
+"#;
+
+const FUTURE_CLOCK_SCRIPT: &str = r#"
+import { writeFileSync } from "node:fs";
+import { agent } from "./brgr-workflow.mjs";
+
+const sealed = await agent({
+  task: "BRGR_FIXTURE_OK",
+  key: "future",
+  deadline: 2,
+  mode: "headless",
+});
+writeFileSync(process.env.BRGR_HOME + "/agent-result.json", JSON.stringify(sealed));
+"#;
+
+const ALREADY_CANCELLED_SCRIPT: &str = r#"
+import { writeFileSync } from "node:fs";
+import { agent } from "./brgr-workflow.mjs";
+
+const sealed = await agent({
+  task: "HOLD until release",
+  key: "late",
+  deadline: 2,
+  mode: "headless",
+});
+writeFileSync(process.env.BRGR_HOME + "/agent-result.json", JSON.stringify(sealed));
+"#;
+
+const CANCELLED_RUN_SCRIPT: &str = r#"
+import { writeFileSync } from "node:fs";
+import { agent } from "./brgr-workflow.mjs";
+
+try {
+  await agent({ task: "queued", key: "queued", deadline: 2, mode: "headless" });
+  writeFileSync(process.env.BRGR_HOME + "/agent-error.txt", "agent() returned");
+} catch (error) {
+  writeFileSync(process.env.BRGR_HOME + "/agent-error.txt", String(error && error.message));
+}
+"#;
+
 const HOLD_REV2_GJC: &str = r#"#!/bin/sh
 set -eu
 case "${1:-}" in
@@ -615,8 +666,11 @@ if [ "${{1:-}}" = "--json" ] && [ "${{2:-}}" = "wait" ]; then
   printf '%s\n' "$n" > "$count"
   if [ "$n" -eq 1 ]; then
     "$real" "$@" > "$first_wait"
-    task="$3"
-    "$real" --json result "$task" > "$first_result"
+    task=""
+    for argument in "$@"; do
+      task="$argument"
+    done
+    "$real" --json result -- "$task" > "$first_result"
     printf '1\n' > "$home/wait-returned"
     while [ ! -e "$home/allow-wait-return" ]; do
       /bin/sleep 0.05
@@ -1158,8 +1212,8 @@ case " $* " in
       printf '%s\n' "{{\"task_id\":\"$task\",\"result_id\":\"$rid2\",\"outcome\":\"candidate\",\"revision\":2}}"
     fi
     ;;
-  *" workflow status "*)
-    printf '%s\n' '{{\"state\":\"running\"}}'
+  *" workflow "*)
+    printf '%s\n' "{{\"state\":\"running\"}}"
     ;;
   *" status "*)
     printf '%s\n' "{{\"task\":{{\"revision\":2}},\"state\":\"running\"}}"
@@ -1407,7 +1461,7 @@ fn status_created_at_follows_the_store_clock_not_the_launch_file() {
     );
     let launch = launch_file(&fixture, &task);
     let file = fs::File::options().write(true).open(&launch).unwrap();
-    file.set_modified(SystemTime::now() + Duration::from_secs(86_400))
+    file.set_modified(SystemTime::now() + Duration::from_hours(24))
         .unwrap();
     drop(file);
     let after_touch = status_created_at(&fixture, &task);
@@ -1488,4 +1542,246 @@ fn a_step_awaiting_input_is_not_cancelled_by_the_deadline() {
     reply_to_worker_question(&fixture, &task, "token-42");
     let status = wait_run_state(&fixture, &run_id, "completed", Duration::from_secs(90));
     assert_eq!(step_keys(&status), vec!["ask"], "{status}");
+}
+
+fn write_fake_brgr(fixture: &Fixture, body: &str) -> PathBuf {
+    let log = fixture.scripts.join("fake-brgr.log");
+    let fake_bin = fixture.scripts.join("fake-brgr");
+    fs::write(
+        &fake_bin,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"{log}\"\n{body}\n",
+            log = log.display(),
+            body = body
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&fake_bin, fs::Permissions::from_mode(0o700)).unwrap();
+    fake_bin
+}
+
+fn run_sdk_script(fixture: &Fixture, fake_bin: &Path, script: &Path) -> std::process::Output {
+    Command::new("node")
+        .arg(script)
+        .current_dir(&fixture.scripts)
+        .env("BRGR_BIN", fake_bin)
+        .env("BRGR_HOME", &fixture.home)
+        .env("BRGR_WORKFLOW_RUN", "wf-aaaaaaaaaaaa")
+        .env("BRGR_OWNER_ID", "codex:workflow-owner")
+        .env("BRGR_SESSION_ID", "workflow-session")
+        .env_remove("BRGR_PARENT_TASK_ID")
+        .env_remove("BRGR_PARENT_ATTEMPT_ID")
+        .env_remove("CODEX_THREAD_ID")
+        .env_remove("CLAUDE_CODE_SESSION_ID")
+        .env_remove("CURSOR_CONVERSATION_ID")
+        .output()
+        .unwrap()
+}
+
+fn fake_argv_log(fixture: &Fixture) -> String {
+    fs::read_to_string(fixture.scripts.join("fake-brgr.log")).unwrap_or_default()
+}
+
+fn wait_for_child(
+    child: &mut std::process::Child,
+    timeout: Duration,
+) -> Option<std::process::ExitStatus> {
+    let started = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Some(status),
+            Ok(None) => {}
+            Err(_) => return None,
+        }
+        if started.elapsed() >= timeout {
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
+#[test]
+fn sdk_run_argv_does_not_turn_dash_values_into_options() {
+    require_node();
+    let fixture = fixture_home();
+    init_sdk(&fixture);
+    let fake_bin = write_fake_brgr(
+        &fixture,
+        r#"
+task="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+rid="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+now=$(/bin/date +%s)
+case " $* " in
+  *" run "*) printf '{"task_id":"%s"}\n' "$task";;
+  *" workflow status "*) printf '{"state":"running"}\n';;
+  *" status "*) printf '{"task":{"revision":1},"state":"running","created_at":%s}\n' "$now";;
+  *" wait "*) printf '{"task_id":"%s","result_id":"%s","outcome":"candidate","revision":1}\n' "$task" "$rid";;
+  *" result "*) printf '{"result":{"outcome":"candidate","revision":1,"result_id":"%s"},"artifacts":[{"text":"ok"}]}\n' "$rid";;
+  *) printf '{"ok":true}\n';;
+esac
+"#,
+    );
+    let script = write_script(&fixture, "dash-task.mjs", DASH_TASK_SCRIPT);
+    let output = run_sdk_script(&fixture, &fake_bin, &script);
+    assert!(
+        output.status.success(),
+        "sdk script failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let log = fake_argv_log(&fixture);
+    assert!(
+        log.contains("-- --workspace /etc"),
+        "task text was not protected by -- : {log}"
+    );
+    assert!(
+        log.contains("--step=--help"),
+        "step key was not passed with = : {log}"
+    );
+    assert!(
+        log.contains("--step-deadline=60"),
+        "deadline was not passed with = : {log}"
+    );
+}
+
+#[test]
+fn a_future_created_at_does_not_make_wait_use_a_huge_timeout() {
+    require_node();
+    let fixture = fixture_home();
+    init_sdk(&fixture);
+    let fake_bin = write_fake_brgr(
+        &fixture,
+        r#"
+task="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+rid="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+now=$(/bin/date +%s)
+future=$((now + 800000))
+case " $* " in
+  *" run "*) printf '{"task_id":"%s"}\n' "$task";;
+  *" workflow status "*) printf '{"state":"running"}\n';;
+  *" status "*) printf '{"task":{"revision":1},"state":"running","created_at":%s}\n' "$future";;
+  *" wait "*) printf '{"task_id":"%s","result_id":"%s","outcome":"candidate","revision":1}\n' "$task" "$rid";;
+  *" result "*) printf '{"result":{"outcome":"candidate","revision":1,"result_id":"%s"},"artifacts":[{"text":"ok"}]}\n' "$rid";;
+  *) printf '{"ok":true}\n';;
+esac
+"#,
+    );
+    let script = write_script(&fixture, "future-clock.mjs", FUTURE_CLOCK_SCRIPT);
+    let output = run_sdk_script(&fixture, &fake_bin, &script);
+    assert!(
+        output.status.success(),
+        "sdk script failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let log = fake_argv_log(&fixture);
+    let wait_line = log
+        .lines()
+        .find(|line| line.contains("wait "))
+        .unwrap_or("");
+    assert!(
+        !wait_line.contains("800000") && !wait_line.contains("80000"),
+        "wait used the future-skewed remaining time: {wait_line}"
+    );
+    let parsed = wait_line
+        .split("--timeout-seconds")
+        .nth(1)
+        .and_then(|rest| {
+            rest.trim_start_matches('=')
+                .split_whitespace()
+                .next()
+                .and_then(|value| value.parse::<u64>().ok())
+        });
+    assert!(
+        parsed.is_some_and(|value| value <= 2),
+        "wait timeout was {parsed:?} from {wait_line}"
+    );
+}
+
+#[test]
+fn a_cancelled_seal_past_the_deadline_is_reported_as_timed_out() {
+    require_node();
+    let fixture = fixture_home();
+    init_sdk(&fixture);
+    let fake_bin = write_fake_brgr(
+        &fixture,
+        r#"
+task="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+rid="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+now=$(/bin/date +%s)
+past=$((now - 10))
+case " $* " in
+  *" run "*) printf '{"task_id":"%s"}\n' "$task";;
+  *" workflow status "*) printf '{"state":"running"}\n';;
+  *" status "*) printf '{"task":{"revision":1},"state":"terminal","created_at":%s}\n' "$past";;
+  *" wait "*) printf '{"task_id":"%s","result_id":"%s","outcome":"cancelled","revision":1}\n' "$task" "$rid";;
+  *" result "*) printf '{"result":{"outcome":"cancelled","revision":1,"result_id":"%s"},"artifacts":[]}\n' "$rid";;
+  *" cancel "*) printf '{"task_id":"%s","state":"cancel_requested"}\n' "$task";;
+  *) printf '{"ok":true}\n';;
+esac
+"#,
+    );
+    let script = write_script(&fixture, "already-cancelled.mjs", ALREADY_CANCELLED_SCRIPT);
+    let output = run_sdk_script(&fixture, &fake_bin, &script);
+    assert!(
+        output.status.success(),
+        "sdk script failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let sealed: Value =
+        serde_json::from_str(&fs::read_to_string(fixture.home.join("agent-result.json")).unwrap())
+            .unwrap();
+    assert_eq!(sealed["outcome"], "cancelled", "{sealed}");
+    assert_eq!(sealed["timed_out"], true, "{sealed}");
+}
+
+#[test]
+fn agent_stops_waiting_when_the_workflow_run_is_no_longer_running() {
+    require_node();
+    let fixture = fixture_home();
+    init_sdk(&fixture);
+    let fake_bin = write_fake_brgr(
+        &fixture,
+        r#"
+task="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+case " $* " in
+  *" run "*) printf '{"task_id":"%s"}\n' "$task";;
+  *" workflow status "*) printf '{"state":"cancelled"}\n';;
+  *" status "*) printf '{"task":{"revision":1},"state":"queued"}\n';;
+  *) printf '{"ok":true}\n';;
+esac
+"#,
+    );
+    let script = write_script(&fixture, "cancelled-run.mjs", CANCELLED_RUN_SCRIPT);
+    let mut child = Command::new("node")
+        .arg(&script)
+        .current_dir(&fixture.scripts)
+        .env("BRGR_BIN", &fake_bin)
+        .env("BRGR_HOME", &fixture.home)
+        .env("BRGR_WORKFLOW_RUN", "wf-aaaaaaaaaaaa")
+        .env("BRGR_OWNER_ID", "codex:workflow-owner")
+        .env("BRGR_SESSION_ID", "workflow-session")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let status = wait_for_child(&mut child, Duration::from_secs(5));
+    assert!(
+        status.is_some(),
+        "agent() kept polling after the run was cancelled: log={}",
+        fake_argv_log(&fixture)
+    );
+    wait_for_file(
+        &fixture.home.join("agent-error.txt"),
+        Duration::from_secs(2),
+    );
+    let message = fs::read_to_string(fixture.home.join("agent-error.txt")).unwrap();
+    assert!(
+        message.contains("cancelled") && !message.contains("agent() returned"),
+        "unexpected stop: {message}"
+    );
 }

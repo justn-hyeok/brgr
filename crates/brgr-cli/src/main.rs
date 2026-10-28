@@ -922,4 +922,126 @@ mod tests {
         second_read["result"]["agent"]["terminal_id"] = json!("term-reused");
         assert!(omp_completion_ready(&initial, &second_read, "brgr-fixture").is_err());
     }
+
+    #[test]
+    fn step_deadline_requires_workflow_and_step_and_rejects_out_of_range() {
+        let refuses = |args: &[&str]| {
+            assert!(
+                Cli::try_parse_from(args.iter().copied()).is_err(),
+                "accepted {args:?}"
+            );
+        };
+        refuses(&["brgr", "run", "obj", "--step-deadline", "30"]);
+        refuses(&[
+            "brgr",
+            "run",
+            "obj",
+            "--workflow",
+            "w",
+            "--step",
+            "s",
+            "--step-deadline",
+            "0",
+        ]);
+        refuses(&[
+            "brgr",
+            "run",
+            "obj",
+            "--workflow",
+            "w",
+            "--step",
+            "s",
+            "--step-deadline",
+            "86401",
+        ]);
+        refuses(&[
+            "brgr",
+            "run",
+            "obj",
+            "--workflow",
+            "w",
+            "--step",
+            "s",
+            "--step-deadline",
+            "1.5",
+        ]);
+        refuses(&[
+            "brgr",
+            "run",
+            "obj",
+            "--workflow",
+            "w",
+            "--step",
+            "s",
+            "--step-deadline",
+            "nope",
+        ]);
+        refuses(&[
+            "brgr",
+            "run",
+            "obj",
+            "--workflow",
+            "w",
+            "--step",
+            "s",
+            "--step-deadline",
+            "18446744073709551616",
+        ]);
+        let parsed = Cli::try_parse_from([
+            "brgr",
+            "run",
+            "obj",
+            "--workflow",
+            "w",
+            "--step",
+            "s",
+            "--step-deadline",
+            "86400",
+        ])
+        .unwrap();
+        let Command::Run(args) = parsed.command else {
+            panic!("not a run");
+        };
+        assert_eq!(args.step_deadline, Some(86_400));
+    }
+
+    #[test]
+    fn a_run_objective_after_double_dash_may_begin_with_a_dash() {
+        let parsed = Cli::try_parse_from([
+            "brgr",
+            "run",
+            "--workflow",
+            "w",
+            "--step=--help",
+            "--step-deadline=2",
+            "--",
+            "--workspace /etc",
+        ])
+        .unwrap();
+        let Command::Run(args) = parsed.command else {
+            panic!("not a run");
+        };
+        assert_eq!(args.objective, "--workspace /etc");
+        assert_eq!(args.step.as_deref(), Some("--help"));
+        assert_eq!(args.step_deadline, Some(2));
+
+        let task = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+        Cli::try_parse_from(["brgr", "status", "--", task]).unwrap();
+        Cli::try_parse_from(["brgr", "wait", "--timeout-seconds=1", "--", task]).unwrap();
+        Cli::try_parse_from(["brgr", "cancel", "--", task]).unwrap();
+        Cli::try_parse_from(["brgr", "result", "--", task]).unwrap();
+    }
+
+    #[test]
+    fn workflow_sdk_wait_and_cancel_needles_match_cli_messages() {
+        let sdk = include_str!("../assets/brgr-workflow.mjs");
+        let commands = include_str!("task_commands.rs");
+        for needle in [
+            "did not produce a terminal result before the wait timeout",
+            "is already terminal",
+        ] {
+            assert!(sdk.contains(needle), "sdk lost {needle}");
+            assert!(commands.contains(needle), "cli lost {needle}");
+        }
+    }
 }
