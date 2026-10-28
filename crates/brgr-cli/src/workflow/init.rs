@@ -11,7 +11,7 @@ const SDK: &str = include_str!("../../assets/brgr-workflow.mjs");
 const EXAMPLE: &str = r#"import { agent, parallel } from "./brgr-workflow.mjs";
 
 const reviews = await parallel([
-  () => agent({ task: "Review security" }),
+  () => agent({ task: "Review security", deadline: 600 }),
   () => agent({ task: "Review architecture" }),
 ]);
 

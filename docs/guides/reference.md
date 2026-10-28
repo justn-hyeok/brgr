@@ -598,7 +598,7 @@ A script imports the local module and uses `agent()` and `parallel()`:
 import { agent, parallel } from "./brgr-workflow.mjs";
 
 const reviews = await parallel([
-  () => agent({ task: "Review security" }),
+  () => agent({ task: "Review security", deadline: 600 }),
   () => agent({ task: "Review architecture" }),
 ]);
 
@@ -618,9 +618,17 @@ finished only when that newest revision is sealed.
 `parallel()` starts every thunk in array order synchronously so those automatic
 keys are assigned in array order, then awaits them and preserves that order.
 
-This version does not include `pipeline()`, retries, per-step deadlines,
-TypeScript tooling, or head migration during a run. `brgr workflow create`
-still records a run without a driver when a caller needs only the journal.
+`agent()` accepts an optional `deadline`, a positive integer number of seconds
+at most 86400. The SDK measures remaining wall-clock time from the step's task
+creation, so a resume neither resets nor loses it. A worker question does not
+extend the clock; it only suspends enforcement while the task is
+`awaiting_input`. On expiry the SDK cancels the step and returns the sealed
+outcome with `timed_out: true`; every other result has `timed_out: false`. A
+deadline never fails the run; the script decides what to do with `timed_out`.
+
+This version does not include `pipeline()`, retries, TypeScript tooling, or
+head migration during a run. `brgr workflow create` still records a run
+without a driver when a caller needs only the journal.
 
 ## Development
 

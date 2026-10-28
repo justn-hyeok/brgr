@@ -485,6 +485,14 @@ pub(crate) struct RunArgs {
     /// Step key inside the workflow run. Requires `--workflow`.
     #[arg(long, requires = "workflow")]
     pub(crate) step: Option<String>,
+    /// Workflow step wall-clock deadline in seconds. Requires `--workflow` and `--step`.
+    #[arg(
+        long,
+        hide = true,
+        requires_all = ["workflow", "step"],
+        value_parser = clap::value_parser!(u64).range(1..=86_400)
+    )]
+    pub(crate) step_deadline: Option<u64>,
 }
 
 impl RunArgs {

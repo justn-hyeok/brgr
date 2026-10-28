@@ -110,6 +110,92 @@ await agent({ task: objective, mode: "headless" });
 await new Promise((resolve) => setTimeout(resolve, 60_000));
 "#;
 
+const DEADLINE_CANCEL_SCRIPT: &str = r#"
+import { writeFileSync } from "node:fs";
+import { agent } from "./brgr-workflow.mjs";
+
+const sealed = await agent({
+  task: "SLOW keep going",
+  mode: "headless",
+  key: "slow",
+  deadline: 2,
+});
+writeFileSync(process.env.BRGR_HOME + "/agent-result.json", JSON.stringify(sealed));
+"#;
+
+const DEADLINE_OK_SCRIPT: &str = r#"
+import { writeFileSync } from "node:fs";
+import { agent } from "./brgr-workflow.mjs";
+
+const sealed = await agent({
+  task: "BRGR_FIXTURE_OK",
+  mode: "headless",
+  key: "fast",
+  deadline: 60,
+});
+writeFileSync(process.env.BRGR_HOME + "/agent-result.json", JSON.stringify(sealed));
+"#;
+
+const INVALID_DEADLINE_SCRIPT: &str = r#"
+import { writeFileSync } from "node:fs";
+import { agent } from "./brgr-workflow.mjs";
+
+const cases = [0, -1, 1.5, "2", NaN];
+for (const deadline of cases) {
+  try {
+    await agent({ task: "BRGR_FIXTURE_OK", mode: "headless", deadline });
+    throw new Error("expected TypeError for " + String(deadline));
+  } catch (error) {
+    if (!(error instanceof TypeError)) {
+      throw error;
+    }
+  }
+}
+writeFileSync("deadline-typeerror-ok", "1");
+"#;
+
+const DEADLINE_DIVERGED_SCRIPT: &str = r#"
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { agent } from "./brgr-workflow.mjs";
+
+const deadline = Number(
+  readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "deadline.txt"),
+    "utf8",
+  ).trim(),
+);
+await agent({ task: "BRGR_FIXTURE_OK", mode: "headless", deadline });
+await new Promise((resolve) => setTimeout(resolve, 60_000));
+"#;
+
+const DEADLINE_RESUME_SCRIPT: &str = r#"
+import { writeFileSync } from "node:fs";
+import { agent } from "./brgr-workflow.mjs";
+
+const sealed = await agent({
+  task: "HOLD until release",
+  mode: "headless",
+  key: "hold",
+  deadline: 25,
+});
+writeFileSync(process.env.BRGR_HOME + "/agent-result.json", JSON.stringify(sealed));
+"#;
+
+const QUESTION_DEADLINE_SCRIPT: &str = r#"
+import { writeFileSync } from "node:fs";
+import { agent } from "./brgr-workflow.mjs";
+
+const sealed = await agent({
+  task: "ASK which token",
+  mode: "headless",
+  key: "ask",
+  deadline: 2,
+});
+writeFileSync(process.env.BRGR_HOME + "/agent-result.json", JSON.stringify(sealed));
+"#;
+
 const REVISE_SCRIPT: &str = r#"
 import { writeFileSync } from "node:fs";
 import { agent } from "./brgr-workflow.mjs";
@@ -179,6 +265,27 @@ else
   answer=BRGR_FIXTURE_OK
 fi
 printf '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"%s"}]}}\n' "$answer"
+printf '%s\n' '{"type":"agent_end","stopReason":"completed"}'
+"#;
+
+const HOLD_GJC: &str = r#"#!/bin/sh
+set -eu
+case "${1:-}" in
+  --version) printf 'gjc v-hold-fixture\n'; exit 0;;
+  --help) printf '%s\n' '-p, --print' '--mode=<value>' '--no-session' '--no-mcp' '--model' '--thinking'; exit 0;;
+esac
+prompt_file=
+for argument in "$@"; do
+  case "$argument" in @*) prompt_file=${argument#@};; esac
+done
+if [ -n "$prompt_file" ] && /usr/bin/grep -q HOLD "$prompt_file"; then
+  n=0
+  while [ ! -e "$BRGR_HOME/release-hold" ] && [ "$n" -lt 6000 ]; do
+    /bin/sleep 0.1
+    n=$((n + 1))
+  done
+fi
+printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"BRGR_FIXTURE_OK"}]}}'
 printf '%s\n' '{"type":"agent_end","stopReason":"completed"}'
 "#;
 
@@ -423,6 +530,25 @@ fn start_workflow_with(fixture: &Fixture, script: &Path, extra: &[&str]) -> Stri
         .as_str()
         .unwrap()
         .to_owned()
+}
+
+fn wait_for_step_running(fixture: &Fixture, run_id: &str, task: &str) {
+    assert!(
+        wait_until(Duration::from_secs(90), || {
+            let status = run(
+                &fixture.home,
+                &fixture.workspace,
+                &["status", task],
+                &owner_env(),
+            );
+            status.status.success()
+                && serde_json::from_slice::<Value>(&status.stdout)
+                    .ok()
+                    .is_some_and(|value| value["state"].as_str() == Some("running"))
+        }),
+        "step {task} never started running: {}",
+        dump_run(fixture, run_id)
+    );
 }
 
 fn wait_for_first_step(fixture: &Fixture, run_id: &str) -> String {
@@ -760,45 +886,7 @@ fn a_question_blocks_the_run_until_the_owner_replies() {
         .count();
     assert_eq!(blocked_notices, 1, "{blocked}");
     let task = blocked["steps"][0]["task_id"].as_str().unwrap().to_owned();
-    let question = json_output(&run(
-        &fixture.home,
-        &fixture.workspace,
-        &[
-            "message",
-            "wait",
-            &task,
-            "--for",
-            "owner",
-            "--timeout-seconds",
-            "30",
-        ],
-        &owner_env(),
-    ));
-    let question_id = question["message_id"].as_str().unwrap();
-    json_output(&run(
-        &fixture.home,
-        &fixture.workspace,
-        &[
-            "message",
-            "send",
-            &task,
-            "--to",
-            "worker",
-            "--kind",
-            "reply",
-            "--reply-to",
-            question_id,
-            "--body",
-            "token-42",
-        ],
-        &owner_env(),
-    ));
-    json_output(&run(
-        &fixture.home,
-        &fixture.workspace,
-        &["message", "ack", &task, question_id, "--for", "owner"],
-        &owner_env(),
-    ));
+    reply_to_worker_question(&fixture, &task, "token-42");
     let status = wait_run_state(&fixture, &run_id, "completed", Duration::from_secs(90));
     assert_eq!(
         notice_states(&status)
@@ -1074,4 +1162,192 @@ esac
     assert_eq!(sealed["revision"], 2, "{sealed}");
     assert_eq!(sealed["outcome"], "completed", "{sealed}");
     assert_eq!(sealed["report"], "REV2", "{sealed}");
+}
+
+fn step_task_id(status: &Value) -> String {
+    status["steps"][0]["task_id"].as_str().unwrap().to_owned()
+}
+
+fn sealed_outcome(fixture: &Fixture, task: &str) -> String {
+    json_output(&run(
+        &fixture.home,
+        &fixture.workspace,
+        &["result", task],
+        &owner_env(),
+    ))["result"]["outcome"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+fn reply_to_worker_question(fixture: &Fixture, task: &str, body: &str) {
+    let question = json_output(&run(
+        &fixture.home,
+        &fixture.workspace,
+        &[
+            "message",
+            "wait",
+            task,
+            "--for",
+            "owner",
+            "--timeout-seconds",
+            "30",
+        ],
+        &owner_env(),
+    ));
+    let question_id = question["message_id"].as_str().unwrap();
+    json_output(&run(
+        &fixture.home,
+        &fixture.workspace,
+        &[
+            "message",
+            "send",
+            task,
+            "--to",
+            "worker",
+            "--kind",
+            "reply",
+            "--reply-to",
+            question_id,
+            "--body",
+            body,
+        ],
+        &owner_env(),
+    ));
+    json_output(&run(
+        &fixture.home,
+        &fixture.workspace,
+        &["message", "ack", task, question_id, "--for", "owner"],
+        &owner_env(),
+    ));
+}
+
+#[test]
+fn a_worker_that_outlives_a_two_second_deadline_is_cancelled() {
+    require_node();
+    let fixture = fixture_home();
+    init_sdk(&fixture);
+    let script = write_script(&fixture, "deadline-cancel.mjs", DEADLINE_CANCEL_SCRIPT);
+    let run_id = start_workflow(&fixture, &script);
+    let status = wait_run_state(&fixture, &run_id, "completed", Duration::from_secs(90));
+    assert_eq!(step_keys(&status), vec!["slow"], "{status}");
+    assert_eq!(status["steps"][0]["state"], "terminal", "{status}");
+    let sealed = agent_result(&fixture);
+    assert_eq!(sealed["outcome"], "cancelled", "{sealed}");
+    assert_eq!(sealed["timed_out"], true, "{sealed}");
+    let task = step_task_id(&status);
+    assert_eq!(sealed_outcome(&fixture, &task), "cancelled");
+}
+
+#[test]
+fn a_worker_that_finishes_before_the_deadline_returns_with_timed_out_false() {
+    require_node();
+    let fixture = fixture_home();
+    init_sdk(&fixture);
+    let script = write_script(&fixture, "deadline-ok.mjs", DEADLINE_OK_SCRIPT);
+    let run_id = start_workflow(&fixture, &script);
+    let status = wait_run_state(&fixture, &run_id, "completed", Duration::from_secs(90));
+    assert_eq!(step_keys(&status), vec!["fast"], "{status}");
+    let sealed = agent_result(&fixture);
+    assert_eq!(sealed["outcome"], "completed", "{sealed}");
+    assert_eq!(sealed["timed_out"], false, "{sealed}");
+}
+
+#[test]
+fn invalid_deadline_values_throw_before_any_task_exists() {
+    require_node();
+    let fixture = fixture_home();
+    init_sdk(&fixture);
+    let script = write_script(&fixture, "deadline-types.mjs", INVALID_DEADLINE_SCRIPT);
+    let run_id = start_workflow(&fixture, &script);
+    let status = wait_run_state(&fixture, &run_id, "completed", Duration::from_secs(30));
+    assert!(
+        step_keys(&status).is_empty(),
+        "invalid deadline launched a task: {status}"
+    );
+    assert!(
+        fixture.workspace.join("deadline-typeerror-ok").is_file(),
+        "script did not record TypeError coverage"
+    );
+}
+
+#[test]
+fn a_changed_deadline_under_an_existing_step_key_diverges_and_launches_nothing_new() {
+    require_node();
+    let fixture = fixture_home();
+    init_sdk(&fixture);
+    fs::write(fixture.scripts.join("deadline.txt"), "60\n").unwrap();
+    let script = write_script(&fixture, "deadline-diverge.mjs", DEADLINE_DIVERGED_SCRIPT);
+    let run_id = start_workflow(&fixture, &script);
+    let _task = wait_for_first_step(&fixture, &run_id);
+    kill_driver(&fixture, &run_id);
+    fs::write(fixture.scripts.join("deadline.txt"), "30\n").unwrap();
+    json_output(&run(
+        &fixture.home,
+        &fixture.workspace,
+        &["workflow", "resume", &run_id],
+        &owner_env(),
+    ));
+    let status = wait_run_state(&fixture, &run_id, "failed", Duration::from_secs(30));
+    assert_eq!(
+        status["steps"].as_array().map(Vec::len),
+        Some(1),
+        "{status}"
+    );
+    let log = workflow_log(&fixture, &run_id);
+    assert!(log.contains("diverged"), "resume did not diverge: {log}");
+}
+
+#[test]
+fn resume_after_the_driver_dies_does_not_reset_the_step_deadline() {
+    require_node();
+    let fixture = fixture_with_script(HOLD_GJC);
+    init_sdk(&fixture);
+    let script = write_script(&fixture, "deadline-resume.mjs", DEADLINE_RESUME_SCRIPT);
+    let run_id = start_workflow(&fixture, &script);
+    let task = wait_for_first_step(&fixture, &run_id);
+    wait_for_step_running(&fixture, &run_id, &task);
+    kill_driver(&fixture, &run_id);
+    thread::sleep(Duration::from_secs(28));
+    let resumed_at = Instant::now();
+    json_output(&run(
+        &fixture.home,
+        &fixture.workspace,
+        &["workflow", "resume", &run_id],
+        &owner_env(),
+    ));
+    let status = wait_run_state(&fixture, &run_id, "completed", Duration::from_secs(90));
+    assert!(
+        resumed_at.elapsed() < Duration::from_secs(20),
+        "resume waited a fresh deadline: elapsed={:?} log={}",
+        resumed_at.elapsed(),
+        workflow_log(&fixture, &run_id)
+    );
+    let sealed = agent_result(&fixture);
+    assert_eq!(sealed["outcome"], "cancelled", "{sealed}");
+    assert_eq!(sealed["timed_out"], true, "{sealed}");
+    assert_eq!(status["steps"][0]["state"], "terminal", "{status}");
+}
+
+#[test]
+fn a_step_awaiting_input_is_not_cancelled_by_the_deadline() {
+    require_node();
+    let fixture = fixture_with_script(ASKING_GJC);
+    init_sdk(&fixture);
+    let script = write_script(&fixture, "ask-deadline.mjs", QUESTION_DEADLINE_SCRIPT);
+    let run_id = start_workflow(&fixture, &script);
+    let blocked = wait_run_state(&fixture, &run_id, "blocked", Duration::from_secs(90));
+    let task = step_task_id(&blocked);
+    thread::sleep(Duration::from_secs(5));
+    let still = json_output(&run(
+        &fixture.home,
+        &fixture.workspace,
+        &["workflow", "status", &run_id],
+        &owner_env(),
+    ));
+    assert_eq!(still["state"], "blocked", "{still}");
+    assert_ne!(still["steps"][0]["state"], "terminal", "{still}");
+    reply_to_worker_question(&fixture, &task, "token-42");
+    let status = wait_run_state(&fixture, &run_id, "completed", Duration::from_secs(90));
+    assert_eq!(step_keys(&status), vec!["ask"], "{status}");
 }
