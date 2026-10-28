@@ -418,7 +418,8 @@ impl Store {
         let mut finished = 0;
         let mut failed = 0;
         for step in steps {
-            match self.revision_result(step.task_id, step.revision) {
+            let revision = self.latest_revision(step.task_id)?;
+            match self.revision_result(step.task_id, revision) {
                 Ok(Some(result)) => {
                     finished += 1;
                     if matches!(
@@ -527,7 +528,10 @@ fn unfinished_step_count(
              WHERE s.run_id = ?1
                AND NOT EXISTS (
                  SELECT 1 FROM results r
-                 WHERE r.task_id = s.task_id AND r.revision = s.revision
+                 WHERE r.task_id = s.task_id
+                   AND r.revision = (
+                     SELECT MAX(t.revision) FROM tasks t WHERE t.task_id = s.task_id
+                   )
                )",
             [run_id.as_str()],
             |row| row.get(0),

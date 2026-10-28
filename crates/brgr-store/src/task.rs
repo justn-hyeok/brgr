@@ -1,7 +1,7 @@
 //! Task rows: admission, revisions, checkouts, and task queries.
 
 use brgr_protocol::{AttemptId, OwnerId, TaskId, TaskSpec};
-use rusqlite::{OptionalExtension as _, Transaction, params};
+use rusqlite::{Connection, OptionalExtension as _, Transaction, params};
 
 use super::{
     OwnerProof, Store, StoreError, WriteOutcome,
@@ -128,6 +128,15 @@ impl Store {
             .optional()?
             .ok_or(StoreError::TaskNotFound(task_id))?;
         Ok(serde_json::from_str(&json)?)
+    }
+
+    /// The highest recorded revision number for a task.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::TaskNotFound`] when the task is missing.
+    pub fn latest_revision(&self, task_id: TaskId) -> Result<u32, StoreError> {
+        latest_revision_on(&self.connection, task_id)
     }
 
     /// Lists the most recently created task revisions.
@@ -287,6 +296,19 @@ impl Store {
         let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
         rows.map(|row| Ok(serde_json::from_str(&row?)?)).collect()
     }
+}
+
+pub(crate) fn latest_revision_on(
+    connection: &Connection,
+    task_id: TaskId,
+) -> Result<u32, StoreError> {
+    connection
+        .query_row(
+            "SELECT MAX(revision) FROM tasks WHERE task_id = ?1",
+            [task_id.to_string()],
+            |row| row.get::<_, Option<u32>>(0),
+        )?
+        .ok_or(StoreError::TaskNotFound(task_id))
 }
 
 /// The body of task admission, shared with workflow step recording so a step

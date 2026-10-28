@@ -612,7 +612,8 @@ array, never a shell. Exit code 75 means the run is at its parallel limit; the
 SDK retries with bounded backoff until the run is no longer running. A sealed
 `candidate` is returned as `completed`. `failed`, `cancelled`, and `lost` are
 returned, not thrown. Automatic step keys are the number of `agent()` calls
-started so far in that script run.
+started so far in that script run. A step whose task has been revised is
+finished only when that newest revision is sealed.
 
 `parallel()` starts every thunk in array order synchronously so those automatic
 keys are assigned in array order, then awaits them and preserves that order.

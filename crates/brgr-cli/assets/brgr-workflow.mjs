@@ -199,6 +199,15 @@ async function waitForSealed(taskId, runId) {
     if (!waited.result_id) {
       throw new Error("brgr wait returned neither a result nor awaiting_input");
     }
+    const status = parseJson((await invoke(["status", taskId])).stdout, "status");
+    const latest = status.task && status.task.revision;
+    if (typeof latest !== "number") {
+      throw new Error("brgr status did not return task.revision");
+    }
+    if (latest !== waited.revision) {
+      await sleep(WAIT_POLL_MS);
+      continue;
+    }
     const detailed = parseJson((await invoke(["result", taskId])).stdout, "result");
     return sealedFrom(waited, detailed);
   }

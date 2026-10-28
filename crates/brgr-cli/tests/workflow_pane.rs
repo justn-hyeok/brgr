@@ -623,6 +623,7 @@ case " $* " in
   *" wait "*) echo '{{"state":"completed","task_id":"00000000-0000-4000-8000-000000000000","result_id":"00000000-0000-4000-8000-000000000001","revision":1,"outcome":"candidate"}}';;
   *" result "*) echo '{{"result":{{"outcome":"candidate","revision":1,"result_id":"00000000-0000-4000-8000-000000000001"}},"artifacts":[{{"text":"ok"}}]}}';;
   *" workflow status "*) echo '{{"state":"running"}}';;
+  *" status "*) echo '{{"task":{{"revision":1}},"state":"running"}}';;
   *" run "*) echo '{{"task_id":"00000000-0000-4000-8000-000000000000"}}';;
   *) echo '{{"ok":true}}';;
 esac
