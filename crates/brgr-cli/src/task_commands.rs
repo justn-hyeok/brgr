@@ -1,10 +1,6 @@
 //! Reading and deciding tasks: status, result, wait, cancel, bind, accept/reject.
 
-use std::{
-    env,
-    fs::{self},
-    time::{Duration, UNIX_EPOCH},
-};
+use std::{env, fs, time::Duration};
 
 use crate::supervision::reconcile_pending;
 use crate::{
@@ -56,7 +52,7 @@ pub(crate) fn status(
                 "calling_options": launch.as_ref().and_then(|value|value.calling_options.as_ref()),
                 "source_pane": launch.as_ref().and_then(|value|value.source_pane.as_ref()),
                 "source_session": launch.as_ref().and_then(|value|value.source_session.as_ref()),
-                "created_at": task_created_at(paths, &store, &spec),
+                "created_at": task_created_at(&store, spec.task_id),
             }),
             json_output,
         );
@@ -80,24 +76,16 @@ pub(crate) fn status(
     Ok(())
 }
 
-/// Unix seconds when the task was first admitted, from the revision-1 launch
-/// file (or the attempt clock if that file is gone).
-fn task_created_at(paths: &Paths, store: &Store, spec: &TaskSpec) -> Option<u64> {
-    launch_created_at(paths, spec.task_id, 1)
-        .or_else(|| launch_created_at(paths, spec.task_id, spec.revision))
-        .or_else(|| {
-            store
-                .latest_attempt_clock(spec.task_id)
-                .ok()
-                .flatten()
-                .and_then(|started| u64::try_from(started).ok())
-        })
-}
-
-fn launch_created_at(paths: &Paths, task_id: TaskId, revision: u32) -> Option<u64> {
-    let meta = fs::metadata(paths.launch(task_id, revision)).ok()?;
-    let time = meta.created().or_else(|_| meta.modified()).ok()?;
-    time.duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs())
+/// Unix seconds when the task's first attempt started, from the store.
+///
+/// `None` until an attempt has been claimed. A later revision does not move
+/// it: the first attempt stays the deadline anchor.
+fn task_created_at(store: &Store, task_id: TaskId) -> Option<u64> {
+    store
+        .earliest_attempt_clock(task_id)
+        .ok()
+        .flatten()
+        .and_then(|started| u64::try_from(started).ok())
 }
 
 /// The task's current attempt state, the same name `brgr status TASK` prints.

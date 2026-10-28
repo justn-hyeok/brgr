@@ -619,12 +619,16 @@ finished only when that newest revision is sealed.
 keys are assigned in array order, then awaits them and preserves that order.
 
 `agent()` accepts an optional `deadline`, a positive integer number of seconds
-at most 86400. The SDK measures remaining wall-clock time from the step's task
-creation, so a resume neither resets nor loses it. A worker question does not
-extend the clock; it only suspends enforcement while the task is
-`awaiting_input`. On expiry the SDK cancels the step and returns the sealed
-outcome with `timed_out: true`; every other result has `timed_out: false`. A
-deadline never fails the run; the script decides what to do with `timed_out`.
+at most 86400. The SDK measures remaining wall-clock time from when the step's
+first attempt started (the `created_at` field on that task's status), so a
+resume or a revise neither resets nor loses it. That clock lives in the store,
+not in launch-file timestamps. Until an attempt has started, `created_at` is
+null and the SDK waits for it: the deadline measures execution, not admission.
+A worker question does not extend the clock; it only suspends enforcement
+while the task is `awaiting_input`. On expiry the SDK cancels the step and
+returns the sealed outcome with `timed_out: true`; every other result has
+`timed_out: false`. A deadline never fails the run; the script decides what
+to do with `timed_out`.
 
 This version does not include `pipeline()`, retries, TypeScript tooling, or
 head migration during a run. `brgr workflow create` still records a run

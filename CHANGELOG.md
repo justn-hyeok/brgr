@@ -2,11 +2,20 @@
 
 ## Unreleased
 
+- Workflow step-deadline hardening: the SDK passes task text, step keys, and
+  deadlines so clap cannot parse them as options; a future `created_at` cannot
+  stretch the wait; a cancelled seal after the deadline is `timed_out: true`
+  on resume; `agent()` stops if the run is no longer running while it waits
+  for the first attempt clock.
+- `created_at` on task status is when the task's first attempt started, from
+  the store, not the launch file's birth time. It is null until an attempt
+  exists, and a revise does not restart it. The workflow step deadline
+  measures execution from that clock, not admission.
 - Workflow `agent()` takes an optional `deadline` (positive integer seconds, at
   most 86400). The SDK cancels the step when wall-clock time from the task's
-  creation runs out, returns the sealed outcome with `timed_out: true`, and
-  does not fail the run. A changed deadline under the same step key diverges.
-  A worker question suspends enforcement without extending the clock.
+  first attempt runs out, returns the sealed outcome with `timed_out: true`,
+  and does not fail the run. A changed deadline under the same step key
+  diverges. A worker question suspends enforcement without extending the clock.
 - A revised workflow step stays unfinished, and keeps its parallel slot, until
   its newest revision is sealed. `workflow status` and the SDK's `agent()` wait
   no longer treat revision 1's result as the end of the step.
