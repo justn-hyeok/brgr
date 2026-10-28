@@ -117,16 +117,19 @@ impl Store {
     ///
     /// Returns an error if the database lookup fails.
     pub fn latest_attempt_clock(&self, task_id: TaskId) -> Result<Option<i64>, StoreError> {
-        self.connection
-            .query_row(
-                "SELECT c.started_at FROM attempts a
-                 JOIN attempt_clocks c ON c.attempt_id = a.attempt_id
-                 WHERE a.task_id = ?1 ORDER BY a.rowid DESC LIMIT 1",
-                [task_id.to_string()],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(StoreError::from)
+        attempt_clock(&self.connection, task_id, true)
+    }
+
+    /// Reads the start clock for the earliest attempt on a task, if present.
+    ///
+    /// A later revision does not move this: the first claimed attempt stays
+    /// the anchor. `None` until an attempt has been claimed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database lookup fails.
+    pub fn earliest_attempt_clock(&self, task_id: TaskId) -> Result<Option<i64>, StoreError> {
+        attempt_clock(&self.connection, task_id, false)
     }
 
     /// Counts child tasks whose latest revision has no terminal result.
@@ -175,6 +178,26 @@ pub(super) fn active_child_count(
         [parent_attempt_id.to_string()],
         |row| row.get(0),
     )?)
+}
+
+fn attempt_clock(
+    connection: &Connection,
+    task_id: TaskId,
+    latest: bool,
+) -> Result<Option<i64>, StoreError> {
+    let sql = if latest {
+        "SELECT c.started_at FROM attempts a
+         JOIN attempt_clocks c ON c.attempt_id = a.attempt_id
+         WHERE a.task_id = ?1 ORDER BY a.rowid DESC LIMIT 1"
+    } else {
+        "SELECT c.started_at FROM attempts a
+         JOIN attempt_clocks c ON c.attempt_id = a.attempt_id
+         WHERE a.task_id = ?1 ORDER BY a.rowid ASC LIMIT 1"
+    };
+    connection
+        .query_row(sql, [task_id.to_string()], |row| row.get(0))
+        .optional()
+        .map_err(StoreError::from)
 }
 
 fn query_subtree(connection: &Connection, root: TaskId) -> Result<Vec<SubtreeNode>, StoreError> {

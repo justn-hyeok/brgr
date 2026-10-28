@@ -6,7 +6,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Command, Stdio},
     thread,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
 
 use serde_json::Value;
@@ -825,6 +825,54 @@ fn dump_run(fixture: &Fixture, run_id: &str) -> String {
     )
 }
 
+fn launch_file(fixture: &Fixture, task: &str) -> PathBuf {
+    fixture.home.join("launches").join(format!("{task}.json"))
+}
+
+fn set_task_attempt_clocks(fixture: &Fixture, task: &str, started_at: i64) {
+    let connection =
+        rusqlite::Connection::open(fixture.home.join("store").join("brgr.sqlite3")).unwrap();
+    let updated = connection
+        .execute(
+            "UPDATE attempt_clocks SET started_at = ?1
+             WHERE attempt_id IN (SELECT attempt_id FROM attempts WHERE task_id = ?2)",
+            rusqlite::params![started_at, task],
+        )
+        .unwrap();
+    assert!(
+        updated >= 1,
+        "no attempt clock for {task} in {}",
+        fixture.home.display()
+    );
+}
+
+fn status_created_at(fixture: &Fixture, task: &str) -> Value {
+    json_output(&run(
+        &fixture.home,
+        &fixture.workspace,
+        &["status", task],
+        &owner_env(),
+    ))
+}
+
+fn wait_until_running(fixture: &Fixture, task: &str) {
+    assert!(
+        wait_until(Duration::from_secs(90), || {
+            let output = run(
+                &fixture.home,
+                &fixture.workspace,
+                &["status", task],
+                &owner_env(),
+            );
+            output.status.success()
+                && serde_json::from_slice::<Value>(&output.stdout)
+                    .ok()
+                    .is_some_and(|value| value["state"].as_str() == Some("running"))
+        }),
+        "task {task} never started running"
+    );
+}
+
 #[test]
 fn a_follow_up_task_is_created_only_from_an_observed_report() {
     require_node();
@@ -1327,6 +1375,96 @@ fn resume_after_the_driver_dies_does_not_reset_the_step_deadline() {
     assert_eq!(sealed["outcome"], "cancelled", "{sealed}");
     assert_eq!(sealed["timed_out"], true, "{sealed}");
     assert_eq!(status["steps"][0]["state"], "terminal", "{status}");
+}
+
+#[test]
+fn status_created_at_follows_the_store_clock_not_the_launch_file() {
+    let fixture = fixture_with_script(HOLD_GJC);
+    let launched = json_output(&run(
+        &fixture.home,
+        &fixture.workspace,
+        &[
+            "run",
+            "HOLD until release",
+            "--workspace",
+            fixture.workspace.to_str().unwrap(),
+        ],
+        &owner_env(),
+    ));
+    let task = launched["task_id"].as_str().unwrap().to_owned();
+    wait_until_running(&fixture, &task);
+    let first = status_created_at(&fixture, &task);
+    let created = first["created_at"]
+        .as_u64()
+        .expect("running task has no created_at");
+    let anchored = created.saturating_sub(86_400);
+    set_task_attempt_clocks(&fixture, &task, i64::try_from(anchored).unwrap());
+    let after_store = status_created_at(&fixture, &task);
+    assert_eq!(
+        after_store["created_at"].as_u64(),
+        Some(anchored),
+        "created_at ignored the store clock: {after_store}"
+    );
+    let launch = launch_file(&fixture, &task);
+    let file = fs::File::options().write(true).open(&launch).unwrap();
+    file.set_modified(SystemTime::now() + Duration::from_secs(86_400))
+        .unwrap();
+    drop(file);
+    let after_touch = status_created_at(&fixture, &task);
+    assert_eq!(
+        after_touch["created_at"].as_u64(),
+        Some(anchored),
+        "touching the launch file moved created_at: {after_touch}"
+    );
+    json_output(&run(
+        &fixture.home,
+        &fixture.workspace,
+        &["cancel", &task],
+        &owner_env(),
+    ));
+    fs::remove_file(&launch).unwrap();
+    let after_remove = json_output(&run(
+        &fixture.home,
+        &fixture.workspace,
+        &["status", &task, "--observe"],
+        &owner_env(),
+    ));
+    assert_eq!(
+        after_remove["created_at"].as_u64(),
+        Some(anchored),
+        "removing the launch file moved created_at: {after_remove}"
+    );
+}
+
+#[cfg(debug_assertions)]
+#[test]
+fn status_created_at_is_null_until_an_attempt_starts() {
+    let fixture = fixture_home();
+    let mut envs = owner_env().to_vec();
+    envs.push(("BRGR_TEST_EXIT_BEFORE_TASK_CLAIM", "1"));
+    let launched = json_output(&run(
+        &fixture.home,
+        &fixture.workspace,
+        &[
+            "run",
+            "queued only",
+            "--workspace",
+            fixture.workspace.to_str().unwrap(),
+        ],
+        &envs,
+    ));
+    let task = launched["task_id"].as_str().unwrap();
+    let status = json_output(&run(
+        &fixture.home,
+        &fixture.workspace,
+        &["status", task, "--observe"],
+        &owner_env(),
+    ));
+    assert_eq!(status["state"], "queued", "{status}");
+    assert!(
+        status["created_at"].is_null(),
+        "created_at was set before an attempt started: {status}"
+    );
 }
 
 #[test]

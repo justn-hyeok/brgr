@@ -1505,6 +1505,48 @@ fn subtree_cancellation_blocks_new_children_and_bounds_concurrency() {
 }
 
 #[test]
+fn earliest_attempt_clock_stays_on_the_first_attempt_after_a_revision() {
+    let root = TempDir::new().unwrap();
+    let mut store = Store::open(root.path()).unwrap();
+    let task = task();
+    store.record_task(&task, "digest-1").unwrap();
+    assert_eq!(store.earliest_attempt_clock(task.task_id).unwrap(), None);
+    let first = AttemptId::new();
+    store.claim_attempt(task.task_id, 1, first).unwrap();
+    store
+        .connection
+        .execute(
+            "UPDATE attempt_clocks SET started_at = 1700000000 WHERE attempt_id = ?1",
+            [first.to_string()],
+        )
+        .unwrap();
+    store
+        .commit_terminal_result(&task.owner_id, &sealed_result(&store, &task, first))
+        .unwrap();
+    let mut revised = task.clone();
+    revised.revision = 2;
+    revised.create_request_id = "request-2".to_owned();
+    store.record_task(&revised, "digest-2").unwrap();
+    let second = AttemptId::new();
+    store.claim_attempt(task.task_id, 2, second).unwrap();
+    store
+        .connection
+        .execute(
+            "UPDATE attempt_clocks SET started_at = 1800000000 WHERE attempt_id = ?1",
+            [second.to_string()],
+        )
+        .unwrap();
+    assert_eq!(
+        store.latest_attempt_clock(task.task_id).unwrap(),
+        Some(1_800_000_000)
+    );
+    assert_eq!(
+        store.earliest_attempt_clock(task.task_id).unwrap(),
+        Some(1_700_000_000)
+    );
+}
+
+#[test]
 fn retrying_child_still_occupies_its_parent_concurrency_slot() {
     let root = TempDir::new().unwrap();
     let mut store = Store::open(root.path()).unwrap();
