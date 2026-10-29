@@ -1104,6 +1104,24 @@ mod tests {
     }
 
     #[test]
+    fn a_criterion_beginning_with_a_dash_is_not_parsed_as_an_option() {
+        let parsed = Cli::try_parse_from([
+            "brgr",
+            "run",
+            "obj",
+            "--criterion",
+            "--help",
+            "--harness",
+            "local.gjc",
+        ])
+        .unwrap();
+        let Command::Run(args) = parsed.command else {
+            panic!("not a run");
+        };
+        assert_eq!(args.criteria, vec!["--help".to_owned()]);
+    }
+
+    #[test]
     fn a_dashed_objective_without_a_terminator_is_still_the_task_text() {
         let parsed =
             Cli::try_parse_from(["brgr", "run", "--workspace /etc", "--harness", "local.gjc"])

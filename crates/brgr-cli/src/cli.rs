@@ -456,7 +456,7 @@ pub(crate) struct RunArgs {
     pub(crate) model: Option<String>,
     #[arg(long)]
     pub(crate) effort: Option<String>,
-    #[arg(long = "criterion")]
+    #[arg(long = "criterion", allow_hyphen_values = true)]
     pub(crate) criteria: Vec<String>,
     #[arg(long = "scope")]
     pub(crate) scopes: Vec<String>,
@@ -543,7 +543,7 @@ pub(crate) struct ReviseArgs {
     pub(crate) permission: Option<PermissionArg>,
     #[arg(allow_hyphen_values = true)]
     pub(crate) objective: String,
-    #[arg(long = "criterion")]
+    #[arg(long = "criterion", allow_hyphen_values = true)]
     pub(crate) criteria: Vec<String>,
     #[arg(long = "scope")]
     pub(crate) scopes: Vec<String>,
