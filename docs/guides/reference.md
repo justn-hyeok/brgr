@@ -613,7 +613,8 @@ SDK retries with bounded backoff until the run is no longer running. A sealed
 `candidate` is returned as `completed`. `failed`, `cancelled`, and `lost` are
 returned, not thrown. Automatic step keys are the number of `agent()` calls
 started so far in that script run. A step whose task has been revised is
-finished only when that newest revision is sealed.
+finished only when that newest revision is sealed. `agent()` also returns
+`attempts`, the number of attempts made for that call.
 
 `parallel()` starts every thunk in array order synchronously so those automatic
 keys are assigned in array order, then awaits them and preserves that order.
@@ -630,7 +631,20 @@ returns the sealed outcome with `timed_out: true`; every other result has
 `timed_out: false`. A deadline never fails the run; the script decides what
 to do with `timed_out`.
 
-This version does not include `pipeline()`, retries, TypeScript tooling, or
+`agent()` accepts an optional `retries`, an integer from 0 to 3 inclusive,
+default 0. Nothing is retried unless the script sets it. A retry happens only
+when the sealed outcome is exactly `failed`. `lost`, `cancelled`, a deadline
+`timed_out`, and any unrecognized outcome are returned as they are and never
+retried: a run of uncertain state may have side effects. Each retry is a new
+journaled step whose key is the base key plus a reserved suffix (`KEY~retry1`,
+then `KEY~retry2`, `KEY~retry3`). User keys cannot contain `~`. A resumed
+script replays each journaled attempt and does not launch a key that already
+exists. Changing `retries` under a journaled key diverges, the same way a
+changed deadline does. A deadline applies per attempt: each attempt gets the
+full deadline from its own first-attempt clock. Retries share the run's
+`max_parallel` cap and stop if the run is no longer running or blocked.
+
+This version does not include `pipeline()`, TypeScript tooling, or
 head migration during a run. `brgr workflow create` still records a run
 without a driver when a caller needs only the journal.
 

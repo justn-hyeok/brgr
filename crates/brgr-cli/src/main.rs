@@ -1006,14 +1006,102 @@ mod tests {
     }
 
     #[test]
+    fn step_retries_requires_workflow_and_step_and_rejects_out_of_range() {
+        let refuses = |args: &[&str]| {
+            assert!(
+                Cli::try_parse_from(args.iter().copied()).is_err(),
+                "accepted {args:?}"
+            );
+        };
+        refuses(&["brgr", "run", "obj", "--step-retries", "1"]);
+        refuses(&[
+            "brgr",
+            "run",
+            "obj",
+            "--workflow",
+            "w",
+            "--step",
+            "s",
+            "--step-retries",
+            "4",
+        ]);
+        refuses(&[
+            "brgr",
+            "run",
+            "obj",
+            "--workflow",
+            "w",
+            "--step",
+            "s",
+            "--step-retries",
+            "-1",
+        ]);
+        refuses(&[
+            "brgr",
+            "run",
+            "obj",
+            "--workflow",
+            "w",
+            "--step",
+            "s",
+            "--step-retries",
+            "x",
+        ]);
+        refuses(&[
+            "brgr",
+            "run",
+            "obj",
+            "--workflow",
+            "w",
+            "--step",
+            "s",
+            "--step-retries",
+            "99999999999999999999",
+        ]);
+        let parsed = Cli::try_parse_from([
+            "brgr",
+            "run",
+            "obj",
+            "--workflow",
+            "w",
+            "--step",
+            "s",
+            "--step-retries",
+            "3",
+        ])
+        .unwrap();
+        let Command::Run(args) = parsed.command else {
+            panic!("not a run");
+        };
+        assert_eq!(args.step_retries, Some(3));
+        let zero = Cli::try_parse_from([
+            "brgr",
+            "run",
+            "obj",
+            "--workflow",
+            "w",
+            "--step",
+            "s",
+            "--step-retries",
+            "0",
+        ])
+        .unwrap();
+        let Command::Run(zero_args) = zero.command else {
+            panic!("not a run");
+        };
+        assert_eq!(zero_args.step_retries, Some(0));
+    }
+
+    #[test]
     fn a_run_objective_after_double_dash_may_begin_with_a_dash() {
         let parsed = Cli::try_parse_from([
             "brgr",
             "run",
             "--workflow",
             "w",
-            "--step=--help",
+            "--step=--help~retry1",
             "--step-deadline=2",
+            "--step-retries=1",
             "--",
             "--workspace /etc",
         ])
@@ -1022,8 +1110,9 @@ mod tests {
             panic!("not a run");
         };
         assert_eq!(args.objective, "--workspace /etc");
-        assert_eq!(args.step.as_deref(), Some("--help"));
+        assert_eq!(args.step.as_deref(), Some("--help~retry1"));
         assert_eq!(args.step_deadline, Some(2));
+        assert_eq!(args.step_retries, Some(1));
 
         let task = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
         Cli::try_parse_from(["brgr", "status", "--", task]).unwrap();

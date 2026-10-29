@@ -493,6 +493,14 @@ pub(crate) struct RunArgs {
         value_parser = clap::value_parser!(u64).range(1..=86_400)
     )]
     pub(crate) step_deadline: Option<u64>,
+    /// How many times a failed workflow step may be retried. Requires `--workflow` and `--step`.
+    #[arg(
+        long,
+        hide = true,
+        requires_all = ["workflow", "step"],
+        value_parser = clap::value_parser!(u64).range(0..=3)
+    )]
+    pub(crate) step_retries: Option<u64>,
 }
 
 impl RunArgs {

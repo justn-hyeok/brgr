@@ -843,3 +843,169 @@ fn a_revised_step_is_unfinished_until_its_newest_revision_is_sealed() {
         "a sealed newest revision did not free its parallel slot: {admitted:?}"
     );
 }
+
+fn seal(store: &mut Store, owner_id: &OwnerId, task: &TaskSpec, outcome: TerminalOutcome) {
+    let attempt_id = AttemptId::new();
+    store
+        .claim_attempt(task.task_id, task.revision, attempt_id)
+        .unwrap();
+    let mut result = failed_result(task, attempt_id);
+    result.outcome = outcome;
+    store.commit_terminal_result(owner_id, &result).unwrap();
+}
+
+#[test]
+fn a_retry_key_is_admitted_only_after_the_predecessor_failed_in_the_same_run() {
+    let root = TempDir::new().unwrap();
+    let mut store = Store::open(root.path()).unwrap();
+    let owner_id = owner();
+    let run_id = run_id("run-retry");
+    store
+        .create_workflow_run(&run_id, &owner_id, "digest-script", 4)
+        .unwrap();
+    let first = spec(&owner_id, TaskId::new());
+    store
+        .record_workflow_step(
+            &run_id,
+            &step_key("fetch"),
+            "digest-in",
+            &first,
+            "digest-req",
+        )
+        .unwrap();
+
+    let retry = spec(&owner_id, TaskId::new());
+    let missing = store.record_workflow_step(
+        &run_id,
+        &step_key("fetch~retry1"),
+        "digest-retry",
+        &retry,
+        "digest-req-retry",
+    );
+    assert!(
+        matches!(missing, Err(StoreError::WorkflowRetryPredecessor { .. })),
+        "a retry was admitted before the predecessor sealed: {missing:?}"
+    );
+
+    seal(&mut store, &owner_id, &first, TerminalOutcome::Failed);
+    let created = store
+        .record_workflow_step(
+            &run_id,
+            &step_key("fetch~retry1"),
+            "digest-retry",
+            &retry,
+            "digest-req-retry",
+        )
+        .unwrap();
+    assert!(matches!(created, WorkflowStepOutcome::Created { .. }));
+
+    let replay = store
+        .record_workflow_step(
+            &run_id,
+            &step_key("fetch~retry1"),
+            "digest-retry",
+            &spec(&owner_id, TaskId::new()),
+            "digest-req-retry-2",
+        )
+        .unwrap();
+    assert!(
+        matches!(replay, WorkflowStepOutcome::Existing { .. }),
+        "a journaled retry launched a second task: {replay:?}"
+    );
+}
+
+#[test]
+fn a_retry_key_is_refused_when_the_predecessor_is_not_failed() {
+    for outcome in [TerminalOutcome::Cancelled, TerminalOutcome::Lost] {
+        let root = TempDir::new().unwrap();
+        let mut store = Store::open(root.path()).unwrap();
+        let owner_id = owner();
+        let run_id = run_id("run-not-failed");
+        store
+            .create_workflow_run(&run_id, &owner_id, "digest-script", 2)
+            .unwrap();
+        let first = spec(&owner_id, TaskId::new());
+        store
+            .record_workflow_step(
+                &run_id,
+                &step_key("fetch"),
+                "digest-in",
+                &first,
+                "digest-req",
+            )
+            .unwrap();
+        seal(&mut store, &owner_id, &first, outcome);
+        let retry = spec(&owner_id, TaskId::new());
+        let refused = store.record_workflow_step(
+            &run_id,
+            &step_key("fetch~retry1"),
+            "digest-retry",
+            &retry,
+            "digest-req-retry",
+        );
+        assert!(
+            matches!(refused, Err(StoreError::WorkflowRetryPredecessor { .. })),
+            "{outcome:?} predecessor admitted a retry: {refused:?}"
+        );
+        assert_eq!(store.workflow_steps(&run_id).unwrap().len(), 1);
+    }
+}
+
+#[test]
+fn a_retry_cannot_skip_an_attempt_or_use_another_run() {
+    let root = TempDir::new().unwrap();
+    let mut store = Store::open(root.path()).unwrap();
+    let owner_id = owner();
+    let first_run = run_id("run-a");
+    let second_run = run_id("run-b");
+    store
+        .create_workflow_run(&first_run, &owner_id, "digest-script", 4)
+        .unwrap();
+    store
+        .create_workflow_run(&second_run, &owner_id, "digest-script", 4)
+        .unwrap();
+    let first = spec(&owner_id, TaskId::new());
+    store
+        .record_workflow_step(
+            &first_run,
+            &step_key("fetch"),
+            "digest-in",
+            &first,
+            "digest-req",
+        )
+        .unwrap();
+    seal(&mut store, &owner_id, &first, TerminalOutcome::Failed);
+
+    let skipped = spec(&owner_id, TaskId::new());
+    let refused_skip = store.record_workflow_step(
+        &first_run,
+        &step_key("fetch~retry2"),
+        "digest-retry2",
+        &skipped,
+        "digest-req-2",
+    );
+    assert!(
+        matches!(
+            refused_skip,
+            Err(StoreError::WorkflowRetryPredecessor { .. })
+        ),
+        "retry2 was admitted without retry1: {refused_skip:?}"
+    );
+
+    let foreign = spec(&owner_id, TaskId::new());
+    let refused_foreign = store.record_workflow_step(
+        &second_run,
+        &step_key("fetch~retry1"),
+        "digest-retry",
+        &foreign,
+        "digest-req-foreign",
+    );
+    assert!(
+        matches!(
+            refused_foreign,
+            Err(StoreError::WorkflowRetryPredecessor { .. })
+        ),
+        "a retry used another run's predecessor: {refused_foreign:?}"
+    );
+    assert!(store.workflow_steps(&second_run).unwrap().is_empty());
+}

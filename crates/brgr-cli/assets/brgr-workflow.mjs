@@ -8,6 +8,7 @@ const BACKOFF_START_MS = 1000;
 const BACKOFF_CAP_MS = 15000;
 const MAX_OUTPUT = 16 * 1024 * 1024;
 const MAX_DEADLINE_SECONDS = 86400;
+const MAX_RETRIES = 3;
 const WAIT_TIMEOUT_NEEDLE = "did not produce a terminal result before the wait timeout";
 const ALREADY_TERMINAL_NEEDLE = "is already terminal";
 
@@ -72,6 +73,9 @@ function validateOptions(options) {
   requireString(options, "effort", false);
   requireString(options, "mode", false);
   requireString(options, "key", false);
+  if (Object.hasOwn(options, "key") && options.key.includes("~")) {
+    throw new TypeError("agent() key must not contain '~'");
+  }
   if (Object.hasOwn(options, "criteria")) {
     if (
       !Array.isArray(options.criteria) ||
@@ -81,6 +85,7 @@ function validateOptions(options) {
     }
   }
   requireDeadline(options);
+  requireRetries(options);
 }
 
 function requireDeadline(options) {
@@ -98,6 +103,33 @@ function requireDeadline(options) {
       "agent() deadline must be a positive integer number of seconds at most 86400",
     );
   }
+}
+
+function requireRetries(options) {
+  if (!Object.hasOwn(options, "retries")) {
+    return 0;
+  }
+  const value = options.retries;
+  if (
+    typeof value !== "number" ||
+    !Number.isInteger(value) ||
+    value < 0 ||
+    value > MAX_RETRIES
+  ) {
+    throw new TypeError("agent() retries must be an integer from 0 to 3");
+  }
+  return value;
+}
+
+function attemptKey(base, attempt) {
+  if (attempt <= 1) {
+    return base;
+  }
+  return `${base}~retry${attempt - 1}`;
+}
+
+function shouldRetry(sealed, attempt, retries) {
+  return sealed.outcome === "failed" && !sealed.timed_out && attempt <= retries;
 }
 
 function wrapChildError(error) {
@@ -354,7 +386,7 @@ async function waitForSealed(taskId, runId, deadlineSeconds) {
   }
 }
 
-function runArgs(options, runId, key) {
+function runArgs(options, runId, key, retries) {
   const args = [option("workflow", runId), option("step", key)];
   if (options.harness) {
     args.push(option("harness", options.harness));
@@ -376,26 +408,44 @@ function runArgs(options, runId, key) {
   if (Object.hasOwn(options, "deadline")) {
     args.push(option("step-deadline", options.deadline));
   }
+  if (retries > 0) {
+    args.push(option("step-retries", retries));
+  }
   args.push("--", options.task);
   return args;
 }
 
-export async function agent(options) {
-  validateOptions(options);
-  const runId = process.env.BRGR_WORKFLOW_RUN;
-  if (!runId) {
-    throw new Error("BRGR_WORKFLOW_RUN is not set");
-  }
-  const key = Object.hasOwn(options, "key") ? options.key : String(agentsStarted);
-  agentsStarted += 1;
+async function runAttempt(options, runId, key, retries) {
   const launched = parseJson(
-    (await launchStep(runArgs(options, runId, key), runId, options.mode)).stdout,
+    (await launchStep(runArgs(options, runId, key, retries), runId, options.mode)).stdout,
     "run",
   );
   if (!launched.task_id) {
     throw new Error("brgr run did not return a task_id");
   }
   return waitForSealed(launched.task_id, runId, options.deadline);
+}
+
+export async function agent(options) {
+  validateOptions(options);
+  const retries = requireRetries(options);
+  const runId = process.env.BRGR_WORKFLOW_RUN;
+  if (!runId) {
+    throw new Error("BRGR_WORKFLOW_RUN is not set");
+  }
+  const baseKey = Object.hasOwn(options, "key") ? options.key : String(agentsStarted);
+  agentsStarted += 1;
+  let sealed;
+  let attempts = 0;
+  for (let attempt = 1; attempt <= retries + 1; attempt += 1) {
+    await requireActive(runId);
+    sealed = await runAttempt(options, runId, attemptKey(baseKey, attempt), retries);
+    attempts = attempt;
+    if (!shouldRetry(sealed, attempt, retries)) {
+      break;
+    }
+  }
+  return { ...sealed, attempts };
 }
 
 export async function parallel(thunks) {

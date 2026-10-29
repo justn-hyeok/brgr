@@ -8,7 +8,7 @@
 
 use std::fmt;
 
-use brgr_protocol::{OwnerId, TaskId, TaskSpec, TerminalOutcome};
+use brgr_protocol::{OwnerId, ResultEnvelope, TaskId, TaskSpec, TerminalOutcome};
 use rusqlite::{Connection, OptionalExtension as _, Transaction, params};
 
 use super::{Store, StoreError, task::record_task_in_transaction, validate_digest};
@@ -52,7 +52,8 @@ impl fmt::Display for WorkflowRunId {
 pub struct WorkflowStepKey(String);
 
 impl WorkflowStepKey {
-    /// A step key is 1..=128 characters of `A-Za-z0-9_-`.
+    /// A step key is 1..=128 characters of `A-Za-z0-9_-`, or that form plus a
+    /// reserved retry suffix `~retry1`, `~retry2`, or `~retry3`.
     ///
     /// # Errors
     ///
@@ -60,15 +61,38 @@ impl WorkflowStepKey {
     /// too long, or contains a character outside the allowed set.
     pub fn new(value: impl Into<String>) -> Result<Self, StoreError> {
         let value = value.into();
-        if !valid_token(&value, STEP_KEY_MAX) {
-            return Err(StoreError::InvalidWorkflowStepKey(value));
+        if valid_token(&value, STEP_KEY_MAX) || parse_retry_suffix(&value).is_some() {
+            return Ok(Self(value));
         }
-        Ok(Self(value))
+        Err(StoreError::InvalidWorkflowStepKey(value))
     }
 
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+
+    /// The 1..=3 retry index encoded in a reserved suffix, if this is a retry key.
+    #[must_use]
+    pub fn retry_index(&self) -> Option<u8> {
+        parse_retry_suffix(&self.0).map(|(_, index)| index)
+    }
+
+    /// The journaled key this retry follows: the base key for `~retry1`, or the
+    /// previous retry suffix otherwise.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::InvalidWorkflowStepKey`] if the predecessor form is
+    /// not a valid step key. That cannot happen for a key `new` already accepted.
+    pub fn retry_predecessor(&self) -> Result<Option<Self>, StoreError> {
+        let Some((base, index)) = parse_retry_suffix(&self.0) else {
+            return Ok(None);
+        };
+        if index == 1 {
+            return Ok(Some(Self::new(base.to_owned())?));
+        }
+        Ok(Some(Self::new(format!("{base}~retry{}", index - 1))?))
     }
 }
 
@@ -494,6 +518,7 @@ fn record_step_in_transaction(
             step_key: step_key.clone(),
         });
     }
+    require_failed_predecessor(transaction, run_id, step_key)?;
     let unfinished = unfinished_step_count(transaction, run_id)?;
     if unfinished >= i64::from(run.max_parallel) {
         return Err(StoreError::WorkflowParallelLimit);
@@ -663,6 +688,64 @@ fn valid_token(value: &str, max_len: usize) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
 }
 
+fn parse_retry_suffix(value: &str) -> Option<(&str, u8)> {
+    let (base, rest) = value.split_once('~')?;
+    let index = match rest {
+        "retry1" => 1,
+        "retry2" => 2,
+        "retry3" => 3,
+        _ => return None,
+    };
+    if !valid_token(base, STEP_KEY_MAX) || value.len() > STEP_KEY_MAX {
+        return None;
+    }
+    Some((base, index))
+}
+
+fn require_failed_predecessor(
+    transaction: &Transaction<'_>,
+    run_id: &WorkflowRunId,
+    step_key: &WorkflowStepKey,
+) -> Result<(), StoreError> {
+    let Some(predecessor_key) = step_key.retry_predecessor()? else {
+        return Ok(());
+    };
+    let Some(predecessor) = load_step(transaction, run_id, &predecessor_key)? else {
+        return Err(StoreError::WorkflowRetryPredecessor {
+            run_id: run_id.clone(),
+            step_key: step_key.clone(),
+        });
+    };
+    match latest_step_outcome(transaction, predecessor.task_id)? {
+        Some(TerminalOutcome::Failed) => Ok(()),
+        _ => Err(StoreError::WorkflowRetryPredecessor {
+            run_id: run_id.clone(),
+            step_key: step_key.clone(),
+        }),
+    }
+}
+
+fn latest_step_outcome(
+    connection: &Connection,
+    task_id: TaskId,
+) -> Result<Option<TerminalOutcome>, StoreError> {
+    let revision = super::task::latest_revision_on(connection, task_id)?;
+    let json: Option<String> = connection
+        .query_row(
+            "SELECT envelope_json FROM results WHERE task_id = ?1 AND revision = ?2
+             ORDER BY rowid DESC LIMIT 1",
+            params![task_id.to_string(), revision],
+            |row| row.get(0),
+        )
+        .optional()?;
+    json.map(|json| {
+        serde_json::from_str::<ResultEnvelope>(&json)
+            .map(|envelope| envelope.outcome)
+            .map_err(StoreError::from)
+    })
+    .transpose()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -693,6 +776,40 @@ mod tests {
             WorkflowStepKey::new("step key"),
             Err(StoreError::InvalidWorkflowStepKey(_))
         ));
+        assert!(WorkflowStepKey::new("fetch~retry1").is_ok());
+        assert!(WorkflowStepKey::new("fetch~retry3").is_ok());
+        assert!(matches!(
+            WorkflowStepKey::new("fetch~retry4"),
+            Err(StoreError::InvalidWorkflowStepKey(_))
+        ));
+        assert!(matches!(
+            WorkflowStepKey::new("fetch~retry0"),
+            Err(StoreError::InvalidWorkflowStepKey(_))
+        ));
+        assert!(matches!(
+            WorkflowStepKey::new("fetch~retry10"),
+            Err(StoreError::InvalidWorkflowStepKey(_))
+        ));
+        assert!(matches!(
+            WorkflowStepKey::new("~retry1"),
+            Err(StoreError::InvalidWorkflowStepKey(_))
+        ));
+        assert!(matches!(
+            WorkflowStepKey::new("fetch~other"),
+            Err(StoreError::InvalidWorkflowStepKey(_))
+        ));
+        let retry = WorkflowStepKey::new("fetch~retry1").unwrap();
+        assert_eq!(retry.retry_index(), Some(1));
+        assert_eq!(
+            retry.retry_predecessor().unwrap().unwrap().as_str(),
+            "fetch"
+        );
+        let second = WorkflowStepKey::new("fetch~retry2").unwrap();
+        assert_eq!(
+            second.retry_predecessor().unwrap().unwrap().as_str(),
+            "fetch~retry1"
+        );
+        assert_eq!(WorkflowStepKey::new("fetch").unwrap().retry_index(), None);
     }
 
     #[test]

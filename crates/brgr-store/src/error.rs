@@ -203,6 +203,13 @@ pub enum StoreError {
         run_id: WorkflowRunId,
         step_key: WorkflowStepKey,
     },
+    #[error(
+        "workflow retry {step_key} in run {run_id} is missing a failed predecessor in this run"
+    )]
+    WorkflowRetryPredecessor {
+        run_id: WorkflowRunId,
+        step_key: WorkflowStepKey,
+    },
     #[error("workflow run has reached its parallel step limit")]
     WorkflowParallelLimit,
 }
