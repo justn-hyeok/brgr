@@ -9,16 +9,12 @@ use crate::print_value;
 
 const SDK: &str = include_str!("../../assets/brgr-workflow.mjs");
 const DTS: &str = include_str!("../../assets/brgr-workflow.d.ts");
-const EXAMPLE: &str = r#"import { agent, parallel } from "./brgr-workflow.mjs";
+const EXAMPLE: &str = r#"import { agent, pipeline } from "./brgr-workflow.mjs";
 
-const reviews = await parallel([
+const { results, stopped_at } = await pipeline([
   () => agent({ task: "Review security", deadline: 600 }),
-  () => agent({ task: "Review architecture" }),
+  (prev) => agent({ task: `Fix issues from: ${prev.report}` }),
 ]);
-
-if (reviews.some((review) => review.report.includes("critical"))) {
-  await agent({ task: "Reproduce and fix verified issues" });
-}
 "#;
 
 pub(super) fn write_sdk(dir: Option<&Path>, force: bool, json_output: bool) -> Result<()> {

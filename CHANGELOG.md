@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Dynamic Workflows: `pipeline()` runs an array of stage functions strictly in
+  order, passes each sealed result to the next, and stops on a non-completed
+  outcome with `{ results, stopped_at }`. Automatic keys come from the same
+  counter as `agent()`; inside `parallel()` a `key` prefix is required so
+  resume keys do not depend on interleaving.
+- `brgr workflow init` writes `brgr-workflow.d.ts` next to the SDK (no build
+  step), with the same refuse-different/`--force` behavior as the other files.
+- A workflow launch that hits the parallel cap (exit 75) while the run is
+  `blocked` waits instead of throwing. A blocked run still admits a step under
+  the cap and returns 75 at the cap.
 - Workflow `agent()` takes an optional `retries` (integer 0..=3, default 0).
   Only a sealed `failed` outcome is retried; `lost`, `cancelled`, and a
   deadline `timed_out` are not. Each retry is a new journaled step
