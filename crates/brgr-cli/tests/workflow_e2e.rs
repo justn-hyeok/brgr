@@ -522,6 +522,23 @@ try {
 writeFileSync("pipeline-parallel-typeerror-ok", "1");
 "#;
 
+const PIPELINE_DASH_SCRIPT: &str = r#"
+import { writeFileSync } from "node:fs";
+import { agent, pipeline } from "./brgr-workflow.mjs";
+
+await pipeline([
+  () => agent({ task: "first", mode: "headless" }),
+  (prev) =>
+    agent({
+      task: prev.report,
+      deadline: 60,
+      retries: 1,
+      mode: "headless",
+    }),
+]);
+writeFileSync(process.env.BRGR_HOME + "/pipeline-dash-ok", "1");
+"#;
+
 const RESULT_FIELDS_SCRIPT: &str = r#"
 import { writeFileSync } from "node:fs";
 import { agent } from "./brgr-workflow.mjs";
@@ -2637,6 +2654,54 @@ esac
     assert!(
         log.contains("--step-retries=1"),
         "retries was not passed with = : {log}"
+    );
+}
+
+#[test]
+fn pipeline_stage_report_argv_does_not_turn_dash_values_into_options() {
+    require_node();
+    let fixture = fixture_home();
+    init_sdk(&fixture);
+    let fake_bin = write_fake_brgr(
+        &fixture,
+        r#"
+task="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+rid="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+now=$(/bin/date +%s)
+case " $* " in
+  *" run "*) printf '{"task_id":"%s"}\n' "$task";;
+  *" workflow status "*) printf '{"state":"running"}\n';;
+  *" status "*) printf '{"task":{"revision":1},"state":"running","created_at":%s}\n' "$now";;
+  *" wait "*) printf '{"task_id":"%s","result_id":"%s","outcome":"candidate","revision":1}\n' "$task" "$rid";;
+  *" result "*) printf '{"result":{"outcome":"candidate","revision":1,"result_id":"%s"},"artifacts":[{"text":"--workspace /etc"}]}\n' "$rid";;
+  *) printf '{"ok":true}\n';;
+esac
+"#,
+    );
+    let script = write_script(&fixture, "pipeline-dash.mjs", PIPELINE_DASH_SCRIPT);
+    let output = run_sdk_script(&fixture, &fake_bin, &script);
+    assert!(
+        output.status.success(),
+        "sdk script failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let log = fake_argv_log(&fixture);
+    assert!(
+        log.contains("-- --workspace /etc"),
+        "pipeline stage report was not protected by -- : {log}"
+    );
+    assert!(
+        log.contains("--step-deadline=60"),
+        "deadline was not passed with = : {log}"
+    );
+    assert!(
+        log.contains("--step-retries=1"),
+        "retries was not passed with = : {log}"
+    );
+    wait_for_file(
+        &fixture.home.join("pipeline-dash-ok"),
+        Duration::from_secs(5),
     );
 }
 
