@@ -1,6 +1,6 @@
 # Execution Model Roadmap
 
-상태: Phase 1 store/CLI는 v2.14.2, 버려진 Head 인계는 v2.15.0 · 작성 2026-10-14 · 버전 정책 2026-10-26
+상태: Phase 1 store/CLI는 v2.14.2, 버려진 Head 인계는 v2.15.0 · 작성 2026-10-14 · 버전 정책 2026-10-26 · 전달 경로 선행 결정 2026-10-29
 
 > 에이전트 세션이 아니라 brgr이 작업의 생명주기를 소유한다.
 
@@ -33,6 +33,7 @@ brgr을 못 칠 때 들어오는 세션이 인계를 시작하고 지휘권을 �
   -> Continuity Foundation
   -> Head Migration
   -> Dynamic Workflows
+  -> 하네스 중립 전달 경로
   -> Unified Continuity
 ```
 
@@ -235,9 +236,48 @@ if (reviews.some((review) => review.report.includes("critical"))) {
   처리하는 계약을 유지하고, 결과를 모른다는 이유로 worker를 자동 재실행하지 않는다.
 - runtime 재시작으로 완료된 작업이나 명시적 owner 결정을 중복 실행하지 않는다.
 
+## Phase 3.5. 하네스 중립 전달 경로
+
+릴리스 방향: v2.x 패치 · 상태: 결정됨, 미착수 · 추적: [#200](https://github.com/justn-hyeok/brgr/issues/200)
+
+Unified Continuity보다 먼저 한다. 2026-10-29에 정한 순서다.
+
+Head 교체가 성립하려면 기존 worker의 결과·질문·알림이 새 Head에 닿아야 한다.
+그런데 지금 brgr이 Head나 worker에게 텍스트를 밀어넣는 경로는 Herdr pane
+프롬프트(`herdr agent prompt`) 하나이고, 호출 지점마다 따로 구현돼 있다.
+owner 알림은 `prompt_owner`, 인계 중인 새 Head는 `tell_head`, worker에게 가는
+owner 메시지는 `deliver_worker_messages`가 각각 Herdr를 직접 부른다. headless
+worker는 push 경로가 없어 `brgr message`가 store에만 쌓인다. 이 위에 Head 교체를
+얹으면 Herdr 분리 때 같은 코드를 다시 뜯어야 하므로, 전달 경로를 먼저 하나로
+모은다.
+
+```text
+deliver(recipient, text)
+  recipient = Head { owner, session } | Worker { task, revision, attempt }
+  routes, 순서대로:
+    1. live pane prompt   — Herdr pane이 있고 agent가 idle로 검증될 때
+    2. harness hook 주입  — Codex hook, Claude Code mod처럼 다음 턴에 노출
+    3. headless resume    — process adapter worker의 입력
+  어느 경로도 안 되면 pending 유지, 전달 경로를 기록
+```
+
+완료 조건.
+
+- `--headless` worker가 실행 중에 owner 메시지를 받는다.
+- Herdr 밖의 Claude Code owner가 `FROM BRGR` 완료 알림을 받는다.
+- `head handoff`의 새 Head 알림을 포함한 모든 호출 지점이 이 함수를 통하고,
+  함수 밖에 `herdr agent prompt` 직접 호출이 남지 않는다.
+- 경로가 바뀌어도 같은 메시지가 두 번 들어가지 않는다. 모든 경로가 실패하면
+  pending이 유지되고 `brgr status --tree`가 보여 준다.
+- 기본 실행 모드(Pane)는 바꾸지 않는다.
+
+이 단계는 Herdr 분리의 일부이지만 전부는 아니다. `--mode auto` 기본값 전환과
+pane 화면을 읽지 않는 Codex owner 식별은 기존 호출 동작을 바꾸므로 이 로드맵
+밖에서 따로 결정한다.
+
 ## Phase 4. Unified Continuity
 
-릴리스 방향: Phase 2와 3 다음의 별도 마이너 · 상태: 각각을 실사용한 뒤
+릴리스 방향: Phase 2, 3, 3.5 다음의 별도 마이너 · 상태: Phase 3.5 뒤
 
 실행 중인 동적 workflow의 Head를 교체해도 작업이 계속되게 한다.
 
@@ -255,17 +295,20 @@ if (reviews.some((review) => review.report.includes("critical"))) {
 출시 게이트는 실행 중인 worker, 대기 결과·질문, 이미 기록된 분기와 후속 작업을
 유지하면서 새 Head가 workflow를 계속 진행하는 것이다. 인계와 workflow 재개를
 각각 검증한 뒤 결합해, 실패가 어느 경계에서 발생했는지 확인할 수 있어야 한다.
+새 Head에게 가는 모든 전달은 Phase 3.5의 함수를 쓴다. 여기서 pane 전용 경로를
+새로 만들지 않는다.
 
 ## 투자 우선순위
 
 점수는 현재 구조를 바탕으로 한 상대적 제품 판단이다. 검증된 공수나 일정을 뜻하지 않는다.
-구현 순서는 Phase 0의 지속 개선 -> 2.5/2.6 -> 3 -> 4다.
+구현 순서는 Phase 0의 지속 개선 -> 2.5/2.6 -> 3 -> 3.5 -> 4다.
 
 | 투자 대상 | 효과 / 5 | 공수 / 5 | 판단 |
 | --- | --- | --- | --- |
 | 공통 Continuity 기반 | 5 | 3 | store/CLI는 v2.14.2. `claim`은 v2.15.0 |
 | Head Migration | 5 | 4 | 수동 인계, 자동 퇴장, 사용량 조건부 인계(알림과 `--auto`)까지 출시 |
 | Dynamic Workflows | 5 | 5 | 그다음 마이너. 실행 모델을 확장하므로 따로 낸다 |
+| 하네스 중립 전달 경로 | 4 | 2 | 패치. Unified Continuity의 선행 조건이며 Herdr 분리의 절반 |
 | 하네스 호환성 | 4 | 2 | 매일의 경험이며 전부 패치다 |
 | 계층 탭·위성 UI | 2 | 3 | 현재 로드맵에서 제외한다 |
 

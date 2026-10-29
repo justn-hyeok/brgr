@@ -2120,6 +2120,10 @@ fn resume_mid_retry_does_not_launch_a_duplicate() {
         vec!["retry-me", "retry-me~retry1"],
         "{before}"
     );
+    // Killing the driver before the retry's supervisor claims the task leaves
+    // that task `lost`, which is correct and never retried; wait until it runs.
+    let retry_task = before["steps"][1]["task_id"].as_str().unwrap().to_owned();
+    wait_for_step_running(&fixture, &run_id, &retry_task);
     kill_driver(&fixture, &run_id);
     json_output(&run(
         &fixture.home,
