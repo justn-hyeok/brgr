@@ -1104,18 +1104,6 @@ mod tests {
     }
 
     #[test]
-    fn a_dashed_objective_without_a_terminator_is_still_the_task_text() {
-        let parsed =
-            Cli::try_parse_from(["brgr", "run", "--workspace /etc", "--harness", "local.gjc"])
-                .unwrap();
-        let Command::Run(args) = parsed.command else {
-            panic!("not a run");
-        };
-        assert_eq!(args.objective, "--workspace /etc");
-        assert!(args.workspace.is_none());
-    }
-
-    #[test]
     fn a_run_objective_after_double_dash_may_begin_with_a_dash() {
         let parsed = Cli::try_parse_from([
             "brgr",

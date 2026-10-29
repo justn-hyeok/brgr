@@ -439,7 +439,6 @@ pub(crate) enum ArtifactCommand {
 
 #[derive(Args)]
 pub(crate) struct RunArgs {
-    #[arg(allow_hyphen_values = true)]
     pub(crate) objective: String,
     /// Select the native pane or one-shot headless route explicitly.
     #[arg(long, value_enum)]
@@ -541,7 +540,6 @@ pub(crate) struct ReviseArgs {
     /// Ignored: workers always run with full permissions.
     #[arg(long, value_enum, hide = true)]
     pub(crate) permission: Option<PermissionArg>,
-    #[arg(allow_hyphen_values = true)]
     pub(crate) objective: String,
     #[arg(long = "criterion")]
     pub(crate) criteria: Vec<String>,
