@@ -83,6 +83,10 @@ struct WorkflowStepInput<'a> {
     workspace: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     deadline: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    retries: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    attempt: Option<u64>,
 }
 
 pub(crate) enum WorkspaceSnapshot {
@@ -935,9 +939,11 @@ fn workflow_step_from_run(
         return Ok(None);
     };
     let workspace = workspace.to_string_lossy();
+    let step_key = WorkflowStepKey::new(step.clone())?;
+    let (retries, attempt) = retry_policy(args, &step_key)?;
     Ok(Some(WorkflowStepAdmission {
         run_id: WorkflowRunId::new(run.clone())?,
-        step_key: WorkflowStepKey::new(step.clone())?,
+        step_key,
         input_digest: sha256_hex(&serde_json::to_vec(&WorkflowStepInput {
             objective: &args.objective,
             harness,
@@ -952,8 +958,27 @@ fn workflow_step_from_run(
             require_capability: &args.capabilities.required,
             workspace: &workspace,
             deadline: args.step_deadline,
+            retries,
+            attempt,
         })?),
     }))
+}
+
+fn retry_policy(args: &RunArgs, step_key: &WorkflowStepKey) -> Result<(Option<u64>, Option<u64>)> {
+    let retries = match args.step_retries {
+        None | Some(0) => None,
+        Some(value) => Some(value),
+    };
+    let attempt = step_key.retry_index().map(|index| u64::from(index) + 1);
+    if let Some(index) = step_key.retry_index() {
+        match retries {
+            Some(value) if value >= u64::from(index) => {}
+            _ => bail!(
+                "workflow retry step {step_key} requires --step-retries covering this attempt"
+            ),
+        }
+    }
+    Ok((retries, attempt))
 }
 
 fn replay_existing_workflow_step(

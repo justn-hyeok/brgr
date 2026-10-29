@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Workflow `agent()` takes an optional `retries` (integer 0..=3, default 0).
+  Only a sealed `failed` outcome is retried; `lost`, `cancelled`, and a
+  deadline `timed_out` are not. Each retry is a new journaled step
+  (`KEY~retryN`), the last sealed result is returned with `attempts`, and a
+  deadline applies per attempt. Changing `retries` under a journaled key
+  diverges. Existing journals without retries keep the same input digest.
 - Workflow step-deadline hardening: the SDK passes task text, step keys, and
   deadlines so clap cannot parse them as options; a future `created_at` cannot
   stretch the wait; a cancelled seal after the deadline is `timed_out: true`

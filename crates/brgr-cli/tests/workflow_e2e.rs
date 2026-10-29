@@ -255,6 +255,130 @@ try {
 }
 "#;
 
+const RETRY_ONCE_SCRIPT: &str = r#"
+import { writeFileSync } from "node:fs";
+import { agent } from "./brgr-workflow.mjs";
+
+const sealed = await agent({
+  task: "retry once",
+  mode: "headless",
+  key: "retry-me",
+  retries: 1,
+});
+writeFileSync(process.env.BRGR_HOME + "/agent-result.json", JSON.stringify(sealed));
+"#;
+
+const RETRY_EXHAUSTED_SCRIPT: &str = r#"
+import { writeFileSync } from "node:fs";
+import { agent } from "./brgr-workflow.mjs";
+
+const sealed = await agent({
+  task: "FAIL always",
+  mode: "headless",
+  key: "always-fail",
+  retries: 2,
+});
+writeFileSync(process.env.BRGR_HOME + "/agent-result.json", JSON.stringify(sealed));
+"#;
+
+const RETRY_ZERO_SCRIPT: &str = r#"
+import { writeFileSync } from "node:fs";
+import { agent } from "./brgr-workflow.mjs";
+
+const sealed = await agent({
+  task: "FAIL",
+  mode: "headless",
+  key: "fail-step",
+  retries: 0,
+});
+writeFileSync(process.env.BRGR_HOME + "/agent-result.json", JSON.stringify(sealed));
+"#;
+
+const RETRY_ABSENT_SCRIPT: &str = r#"
+import { writeFileSync } from "node:fs";
+import { agent } from "./brgr-workflow.mjs";
+
+const sealed = await agent({
+  task: "FAIL",
+  mode: "headless",
+  key: "fail-step",
+});
+writeFileSync(process.env.BRGR_HOME + "/agent-result.json", JSON.stringify(sealed));
+"#;
+
+const RETRY_LOST_SCRIPT: &str = r#"
+import { writeFileSync } from "node:fs";
+import { agent } from "./brgr-workflow.mjs";
+
+const sealed = await agent({
+  task: "lost step",
+  mode: "headless",
+  key: "lost-step",
+  retries: 2,
+});
+writeFileSync(process.env.BRGR_HOME + "/agent-result.json", JSON.stringify(sealed));
+"#;
+
+const RETRY_CANCELLED_SCRIPT: &str = r#"
+import { writeFileSync } from "node:fs";
+import { agent } from "./brgr-workflow.mjs";
+
+const sealed = await agent({
+  task: "cancelled step",
+  mode: "headless",
+  key: "cancelled-step",
+  retries: 2,
+});
+writeFileSync(process.env.BRGR_HOME + "/agent-result.json", JSON.stringify(sealed));
+"#;
+
+const RETRY_DIVERGED_SCRIPT: &str = r#"
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { agent } from "./brgr-workflow.mjs";
+
+const retries = Number(
+  readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "retries.txt"),
+    "utf8",
+  ).trim(),
+);
+await agent({ task: "BRGR_FIXTURE_OK", mode: "headless", retries });
+await new Promise((resolve) => setTimeout(resolve, 60_000));
+"#;
+
+const INVALID_RETRIES_SCRIPT: &str = r#"
+import { writeFileSync } from "node:fs";
+import { agent } from "./brgr-workflow.mjs";
+
+const cases = [4, -1, 1.5, "2", NaN];
+for (const retries of cases) {
+  try {
+    await agent({ task: "BRGR_FIXTURE_OK", mode: "headless", retries });
+    throw new Error("expected TypeError for " + String(retries));
+  } catch (error) {
+    if (!(error instanceof TypeError)) {
+      throw error;
+    }
+  }
+}
+writeFileSync("retries-typeerror-ok", "1");
+"#;
+
+const RETRY_DASH_SCRIPT: &str = r#"
+import { writeFileSync } from "node:fs";
+import { agent } from "./brgr-workflow.mjs";
+
+const sealed = await agent({
+  task: "--workspace /etc",
+  key: "--help",
+  retries: 1,
+  mode: "headless",
+});
+writeFileSync(process.env.BRGR_HOME + "/agent-result.json", JSON.stringify(sealed));
+"#;
+
 const HOLD_REV2_GJC: &str = r#"#!/bin/sh
 set -eu
 case "${1:-}" in
@@ -294,6 +418,35 @@ if [ -n "$prompt_file" ] && /usr/bin/grep -q BRGR_FIXTURE_OK "$prompt_file"; the
   exit 0
 fi
 exit 7
+"#;
+
+const FAIL_ONCE_GJC: &str = r#"#!/bin/sh
+set -eu
+case "${1:-}" in
+  --version) printf 'gjc v-fail-once\n'; exit 0;;
+  --help) printf '%s\n' '-p, --print' '--mode=<value>' '--no-session' '--no-mcp' '--model' '--thinking'; exit 0;;
+esac
+count_file="${BRGR_HOME:-}/step-attempts"
+if [ -z "${BRGR_HOME:-}" ] || [ ! -f "$count_file" ]; then
+  printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"BRGR_FIXTURE_OK"}]}}'
+  printf '%s\n' '{"type":"agent_end","stopReason":"completed"}'
+  exit 0
+fi
+n=$(cat "$count_file")
+n=$((n + 1))
+printf '%s\n' "$n" > "$count_file"
+if [ "$n" -eq 1 ]; then
+  exit 7
+fi
+if [ -f "${BRGR_HOME}/hold-retries" ]; then
+  n=0
+  while [ ! -e "${BRGR_HOME}/release-hold" ] && [ "$n" -lt 6000 ]; do
+    /bin/sleep 0.1
+    n=$((n + 1))
+  done
+fi
+printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"BRGR_FIXTURE_OK"}]}}'
+printf '%s\n' '{"type":"agent_end","stopReason":"completed"}'
 "#;
 
 const ASKING_GJC: &str = r#"#!/bin/sh
@@ -757,20 +910,95 @@ fn launch_workflow_step(
     step: &str,
     objective: &str,
 ) -> std::process::Output {
-    run(
-        &fixture.home,
-        &fixture.workspace,
-        &[
-            "run",
-            objective,
-            "--workspace",
-            fixture.workspace.to_str().unwrap(),
-            "--workflow",
-            run_id,
-            "--step",
-            step,
-        ],
-        &owner_env(),
+    launch_workflow_step_with(fixture, run_id, step, objective, &[])
+}
+
+fn launch_workflow_step_with(
+    fixture: &Fixture,
+    run_id: &str,
+    step: &str,
+    objective: &str,
+    extra: &[&str],
+) -> std::process::Output {
+    let workspace = fixture.workspace.to_str().unwrap();
+    let mut args = vec![
+        "run",
+        objective,
+        "--workspace",
+        workspace,
+        "--workflow",
+        run_id,
+        "--step",
+        step,
+    ];
+    args.extend_from_slice(extra);
+    run(&fixture.home, &fixture.workspace, &args, &owner_env())
+}
+
+fn wait_for_n_steps(fixture: &Fixture, run_id: &str, n: usize) -> Value {
+    let mut listed = Value::Null;
+    assert!(
+        wait_until(Duration::from_secs(90), || {
+            let status = run(
+                &fixture.home,
+                &fixture.workspace,
+                &["workflow", "status", run_id],
+                &owner_env(),
+            );
+            let Some(value) = status
+                .status
+                .success()
+                .then(|| serde_json::from_slice::<Value>(&status.stdout).ok())
+                .flatten()
+            else {
+                return false;
+            };
+            if value["steps"]
+                .as_array()
+                .is_some_and(|steps| steps.len() == n)
+            {
+                listed = value;
+                return true;
+            }
+            false
+        }),
+        "did not reach {n} journaled steps: {}",
+        dump_run(fixture, run_id)
+    );
+    listed
+}
+
+fn step_digest(fixture: &Fixture, run_id: &str, key: &str) -> String {
+    let connection =
+        rusqlite::Connection::open(fixture.home.join("store").join("brgr.sqlite3")).unwrap();
+    connection
+        .query_row(
+            "SELECT input_digest FROM workflow_steps WHERE run_id = ?1 AND step_key = ?2",
+            rusqlite::params![run_id, key],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
+fn enable_fail_once(fixture: &Fixture) {
+    fs::write(fixture.home.join("step-attempts"), b"0").unwrap();
+}
+
+fn fake_terminal_body(outcome: &str) -> String {
+    format!(
+        r#"
+task="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+rid="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+now=$(/bin/date +%s)
+case " $* " in
+  *" run "*) printf '{{"task_id":"%s"}}\n' "$task";;
+  *" workflow status "*) printf '{{"state":"running"}}\n';;
+  *" status "*) printf '{{"task":{{"revision":1}},"state":"terminal","created_at":%s}}\n' "$now";;
+  *" wait "*) printf '{{"task_id":"%s","result_id":"%s","outcome":"{outcome}","revision":1}}\n' "$task" "$rid";;
+  *" result "*) printf '{{"result":{{"outcome":"{outcome}","revision":1,"result_id":"%s"}},"artifacts":[]}}\n' "$rid";;
+  *) printf '{{"ok":true}}\n';;
+esac
+"#
     )
 }
 
@@ -1783,5 +2011,496 @@ esac
     assert!(
         message.contains("cancelled") && !message.contains("agent() returned"),
         "unexpected stop: {message}"
+    );
+}
+
+#[test]
+fn a_step_that_fails_once_then_succeeds_returns_attempts_two() {
+    require_node();
+    let fixture = fixture_with_script(FAIL_ONCE_GJC);
+    init_sdk(&fixture);
+    enable_fail_once(&fixture);
+    let script = write_script(&fixture, "retry-once.mjs", RETRY_ONCE_SCRIPT);
+    let run_id = start_workflow(&fixture, &script);
+    let status = wait_run_state(&fixture, &run_id, "completed", Duration::from_secs(90));
+    assert_eq!(
+        step_keys(&status),
+        vec!["retry-me", "retry-me~retry1"],
+        "{status}"
+    );
+    let sealed = agent_result(&fixture);
+    assert_eq!(sealed["outcome"], "completed", "{sealed}");
+    assert_eq!(sealed["attempts"], 2, "{sealed}");
+    assert_eq!(sealed["timed_out"], false, "{sealed}");
+}
+
+#[test]
+fn a_step_that_fails_more_than_retries_returns_the_last_failure() {
+    require_node();
+    let fixture = fixture_with_script(FAILING_GJC);
+    init_sdk(&fixture);
+    let script = write_script(&fixture, "retry-exhausted.mjs", RETRY_EXHAUSTED_SCRIPT);
+    let run_id = start_workflow(&fixture, &script);
+    let status = wait_run_state(&fixture, &run_id, "completed", Duration::from_secs(90));
+    assert_eq!(
+        step_keys(&status),
+        vec!["always-fail", "always-fail~retry1", "always-fail~retry2"],
+        "{status}"
+    );
+    let sealed = agent_result(&fixture);
+    assert_eq!(sealed["outcome"], "failed", "{sealed}");
+    assert_eq!(sealed["attempts"], 3, "{sealed}");
+}
+
+#[test]
+fn a_lost_outcome_is_not_retried() {
+    require_node();
+    let fixture = fixture_home();
+    init_sdk(&fixture);
+    let fake_bin = write_fake_brgr(&fixture, &fake_terminal_body("lost"));
+    let script = write_script(&fixture, "retry-lost.mjs", RETRY_LOST_SCRIPT);
+    let output = run_sdk_script(&fixture, &fake_bin, &script);
+    assert!(
+        output.status.success(),
+        "sdk script failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let sealed = agent_result(&fixture);
+    assert_eq!(sealed["outcome"], "lost", "{sealed}");
+    assert_eq!(sealed["attempts"], 1, "{sealed}");
+    let runs = fake_argv_log(&fixture)
+        .lines()
+        .filter(|line| line.contains(" run "))
+        .count();
+    assert_eq!(runs, 1, "lost was retried: {}", fake_argv_log(&fixture));
+}
+
+#[test]
+fn a_cancelled_outcome_is_not_retried() {
+    require_node();
+    let fixture = fixture_home();
+    init_sdk(&fixture);
+    let fake_bin = write_fake_brgr(&fixture, &fake_terminal_body("cancelled"));
+    let script = write_script(&fixture, "retry-cancelled.mjs", RETRY_CANCELLED_SCRIPT);
+    let output = run_sdk_script(&fixture, &fake_bin, &script);
+    assert!(
+        output.status.success(),
+        "sdk script failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let sealed = agent_result(&fixture);
+    assert_eq!(sealed["outcome"], "cancelled", "{sealed}");
+    assert_eq!(sealed["attempts"], 1, "{sealed}");
+    let runs = fake_argv_log(&fixture)
+        .lines()
+        .filter(|line| line.contains(" run "))
+        .count();
+    assert_eq!(
+        runs,
+        1,
+        "cancelled was retried: {}",
+        fake_argv_log(&fixture)
+    );
+}
+
+#[test]
+fn resume_mid_retry_does_not_launch_a_duplicate() {
+    require_node();
+    let fixture = fixture_with_script(FAIL_ONCE_GJC);
+    init_sdk(&fixture);
+    enable_fail_once(&fixture);
+    fs::write(fixture.home.join("hold-retries"), b"1").unwrap();
+    let script = write_script(&fixture, "retry-resume.mjs", RETRY_ONCE_SCRIPT);
+    let run_id = start_workflow(&fixture, &script);
+    let before = wait_for_n_steps(&fixture, &run_id, 2);
+    assert_eq!(
+        step_keys(&before),
+        vec!["retry-me", "retry-me~retry1"],
+        "{before}"
+    );
+    kill_driver(&fixture, &run_id);
+    json_output(&run(
+        &fixture.home,
+        &fixture.workspace,
+        &["workflow", "resume", &run_id],
+        &owner_env(),
+    ));
+    thread::sleep(Duration::from_millis(400));
+    let mid = json_output(&run(
+        &fixture.home,
+        &fixture.workspace,
+        &["workflow", "status", &run_id],
+        &owner_env(),
+    ));
+    assert_eq!(
+        step_keys(&mid),
+        vec!["retry-me", "retry-me~retry1"],
+        "resume launched a duplicate: {mid}"
+    );
+    fs::write(fixture.home.join("release-hold"), b"1").unwrap();
+    let status = wait_run_state(&fixture, &run_id, "completed", Duration::from_secs(90));
+    assert_eq!(
+        step_keys(&status),
+        vec!["retry-me", "retry-me~retry1"],
+        "{status}"
+    );
+    let sealed = agent_result(&fixture);
+    assert_eq!(sealed["outcome"], "completed", "{sealed}");
+    assert_eq!(sealed["attempts"], 2, "{sealed}");
+}
+
+#[test]
+fn retries_zero_or_absent_does_not_relaunch_a_failed_step() {
+    require_node();
+    for (name, source) in [
+        ("retry-zero.mjs", RETRY_ZERO_SCRIPT),
+        ("retry-absent.mjs", RETRY_ABSENT_SCRIPT),
+    ] {
+        let fixture = fixture_with_script(FAILING_GJC);
+        init_sdk(&fixture);
+        let script = write_script(&fixture, name, source);
+        let run_id = start_workflow(&fixture, &script);
+        let status = wait_run_state(&fixture, &run_id, "completed", Duration::from_secs(90));
+        assert_eq!(step_keys(&status), vec!["fail-step"], "{status}");
+        let sealed = agent_result(&fixture);
+        assert_eq!(sealed["outcome"], "failed", "{sealed}");
+        assert_eq!(sealed["attempts"], 1, "{sealed}");
+    }
+}
+
+#[test]
+fn a_changed_retries_under_an_existing_step_key_diverges() {
+    require_node();
+    let fixture = fixture_home();
+    init_sdk(&fixture);
+    fs::write(fixture.scripts.join("retries.txt"), "1\n").unwrap();
+    let script = write_script(&fixture, "retry-diverge.mjs", RETRY_DIVERGED_SCRIPT);
+    let run_id = start_workflow(&fixture, &script);
+    let _task = wait_for_first_step(&fixture, &run_id);
+    kill_driver(&fixture, &run_id);
+    fs::write(fixture.scripts.join("retries.txt"), "2\n").unwrap();
+    json_output(&run(
+        &fixture.home,
+        &fixture.workspace,
+        &["workflow", "resume", &run_id],
+        &owner_env(),
+    ));
+    let status = wait_run_state(&fixture, &run_id, "failed", Duration::from_secs(30));
+    assert_eq!(
+        status["steps"].as_array().map(Vec::len),
+        Some(1),
+        "{status}"
+    );
+    let log = workflow_log(&fixture, &run_id);
+    assert!(log.contains("diverged"), "resume did not diverge: {log}");
+}
+
+#[test]
+fn step_retries_is_refused_without_workflow_and_step_and_out_of_range() {
+    let fixture = fixture_home();
+    let refuses = |args: &[&str]| {
+        let output = run(&fixture.home, &fixture.workspace, args, &owner_env());
+        assert!(
+            !output.status.success(),
+            "accepted {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    refuses(&["run", "obj", "--step-retries", "1"]);
+    refuses(&[
+        "run",
+        "obj",
+        "--workflow",
+        "w",
+        "--step",
+        "s",
+        "--step-retries",
+        "4",
+    ]);
+    refuses(&[
+        "run",
+        "obj",
+        "--workflow",
+        "w",
+        "--step",
+        "s",
+        "--step-retries",
+        "-1",
+    ]);
+    refuses(&[
+        "run",
+        "obj",
+        "--workflow",
+        "w",
+        "--step",
+        "s",
+        "--step-retries",
+        "x",
+    ]);
+    refuses(&[
+        "run",
+        "obj",
+        "--workflow",
+        "w",
+        "--step",
+        "s",
+        "--step-retries",
+        "99999999999999999999",
+    ]);
+    let run_id = create_workflow(&fixture, &[]);
+    let accepted = launch_workflow_step_with(
+        &fixture,
+        &run_id,
+        "ok",
+        "BRGR_FIXTURE_OK",
+        &["--step-retries", "1"],
+    );
+    assert!(
+        accepted.status.success(),
+        "--step-retries 1 with --workflow/--step was refused: {}",
+        String::from_utf8_lossy(&accepted.stderr)
+    );
+}
+
+#[test]
+fn a_step_without_retries_keeps_the_same_input_digest() {
+    let fixture = fixture_home();
+    let run_id = create_workflow(&fixture, &[]);
+    let first = launch_workflow_step(&fixture, &run_id, "plain", "BRGR_FIXTURE_OK digest");
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let digest = step_digest(&fixture, &run_id, "plain");
+    let replay = launch_workflow_step(&fixture, &run_id, "plain", "BRGR_FIXTURE_OK digest");
+    assert!(
+        replay.status.success(),
+        "{}",
+        String::from_utf8_lossy(&replay.stderr)
+    );
+    assert_eq!(step_digest(&fixture, &run_id, "plain"), digest);
+    let zero = launch_workflow_step_with(
+        &fixture,
+        &run_id,
+        "plain",
+        "BRGR_FIXTURE_OK digest",
+        &["--step-retries", "0"],
+    );
+    assert!(
+        zero.status.success(),
+        "retries 0 changed the digest: {}",
+        String::from_utf8_lossy(&zero.stderr)
+    );
+    assert_eq!(step_digest(&fixture, &run_id, "plain"), digest);
+    let changed = launch_workflow_step_with(
+        &fixture,
+        &run_id,
+        "plain",
+        "BRGR_FIXTURE_OK digest",
+        &["--step-retries", "1"],
+    );
+    assert!(
+        !changed.status.success(),
+        "retries 1 replayed instead of diverging"
+    );
+    assert!(
+        String::from_utf8_lossy(&changed.stderr).contains("diverged"),
+        "{}",
+        String::from_utf8_lossy(&changed.stderr)
+    );
+    assert_eq!(step_digest(&fixture, &run_id, "plain"), digest);
+}
+
+#[test]
+fn invalid_retries_values_throw_before_any_task_exists() {
+    require_node();
+    let fixture = fixture_home();
+    init_sdk(&fixture);
+    let script = write_script(&fixture, "retries-types.mjs", INVALID_RETRIES_SCRIPT);
+    let run_id = start_workflow(&fixture, &script);
+    let status = wait_run_state(&fixture, &run_id, "completed", Duration::from_secs(30));
+    assert!(
+        step_keys(&status).is_empty(),
+        "invalid retries launched a task: {status}"
+    );
+    assert!(
+        fixture.workspace.join("retries-typeerror-ok").is_file(),
+        "script did not record TypeError coverage"
+    );
+}
+
+#[test]
+fn sdk_retry_argv_does_not_turn_dash_values_into_options() {
+    require_node();
+    let fixture = fixture_home();
+    init_sdk(&fixture);
+    let fake_bin = write_fake_brgr(
+        &fixture,
+        r#"
+task="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+rid="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+now=$(/bin/date +%s)
+n_file="$(dirname "$0")/run-n"
+n=0
+if [ -f "$n_file" ]; then
+  n=$(cat "$n_file")
+fi
+case " $* " in
+  *" run "*)
+    n=$((n + 1))
+    printf '%s\n' "$n" > "$n_file"
+    printf '{"task_id":"%s"}\n' "$task"
+    ;;
+  *" workflow status "*) printf '{"state":"running"}\n';;
+  *" status "*) printf '{"task":{"revision":1},"state":"running","created_at":%s}\n' "$now";;
+  *" wait "*)
+    if [ "$(cat "$n_file")" -eq 1 ]; then
+      printf '{"task_id":"%s","result_id":"%s","outcome":"failed","revision":1}\n' "$task" "$rid"
+    else
+      printf '{"task_id":"%s","result_id":"%s","outcome":"candidate","revision":1}\n' "$task" "$rid"
+    fi
+    ;;
+  *" result "*)
+    if [ "$(cat "$n_file")" -eq 1 ]; then
+      printf '{"result":{"outcome":"failed","revision":1,"result_id":"%s"},"artifacts":[]}\n' "$rid"
+    else
+      printf '{"result":{"outcome":"candidate","revision":1,"result_id":"%s"},"artifacts":[{"text":"ok"}]}\n' "$rid"
+    fi
+    ;;
+  *) printf '{"ok":true}\n';;
+esac
+"#,
+    );
+    let script = write_script(&fixture, "retry-dash.mjs", RETRY_DASH_SCRIPT);
+    let output = run_sdk_script(&fixture, &fake_bin, &script);
+    assert!(
+        output.status.success(),
+        "sdk script failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let log = fake_argv_log(&fixture);
+    assert!(
+        log.contains("-- --workspace /etc"),
+        "task text was not protected by -- : {log}"
+    );
+    assert!(
+        log.contains("--step=--help"),
+        "step key was not passed with = : {log}"
+    );
+    assert!(
+        log.contains("--step=--help~retry1"),
+        "retry key was not passed with = : {log}"
+    );
+    assert!(
+        log.contains("--step-retries=1"),
+        "retries was not passed with = : {log}"
+    );
+}
+
+fn failed_launch(output: &std::process::Output) -> String {
+    assert!(
+        !output.status.success(),
+        "launch succeeded: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    String::from_utf8_lossy(&output.stderr).into_owned()
+}
+
+fn refuse_retry_step(fixture: &Fixture, run_id: &str, step: &str, extra: &[&str], needle: &str) {
+    let output = launch_workflow_step_with(fixture, run_id, step, "BRGR_FIXTURE_OK", extra);
+    let stderr = failed_launch(&output);
+    assert!(stderr.contains(needle), "{stderr}");
+}
+
+#[test]
+fn a_retry_suffix_is_bounded_and_needs_a_failed_predecessor() {
+    let fixture = fixture_home();
+    let run_id = create_workflow(&fixture, &[]);
+    refuse_retry_step(
+        &fixture,
+        &run_id,
+        "plain~retry4",
+        &["--step-retries", "3"],
+        "invalid",
+    );
+    refuse_retry_step(
+        &fixture,
+        &run_id,
+        "plain~retry2",
+        &["--step-retries", "1"],
+        "step-retries",
+    );
+    refuse_retry_step(
+        &fixture,
+        &run_id,
+        "plain~retry1",
+        &["--step-retries", "1"],
+        "predecessor",
+    );
+}
+
+#[test]
+fn a_retry_cannot_overwrite_a_step_or_attach_to_another_run() {
+    let fixture = fixture_home();
+    let run_id = create_workflow(&fixture, &[]);
+    let other = create_workflow(&fixture, &[]);
+    let first = launch_workflow_step_with(
+        &fixture,
+        &run_id,
+        "plain",
+        "BRGR_FIXTURE_OK digest-plain",
+        &["--step-retries", "1"],
+    );
+    let first_id = json_output(&first)["task_id"].as_str().unwrap().to_owned();
+    let digest = step_digest(&fixture, &run_id, "plain");
+    assert!(
+        wait_until(Duration::from_secs(90), || {
+            run(
+                &fixture.home,
+                &fixture.workspace,
+                &["result", &first_id],
+                &owner_env(),
+            )
+            .status
+            .success()
+        }),
+        "base step never sealed"
+    );
+    refuse_retry_step(
+        &fixture,
+        &run_id,
+        "plain~retry1",
+        &["--step-retries", "1"],
+        "predecessor",
+    );
+    let listed = json_output(&run(
+        &fixture.home,
+        &fixture.workspace,
+        &["workflow", "status", &run_id],
+        &owner_env(),
+    ));
+    assert_eq!(step_keys(&listed), vec!["plain"], "{listed}");
+    assert_eq!(listed["steps"][0]["task_id"], first_id, "{listed}");
+    assert_eq!(step_digest(&fixture, &run_id, "plain"), digest);
+    refuse_retry_step(
+        &fixture,
+        &other,
+        "plain~retry1",
+        &["--step-retries", "1"],
+        "predecessor",
+    );
+    let other_status = json_output(&run(
+        &fixture.home,
+        &fixture.workspace,
+        &["workflow", "status", &other],
+        &owner_env(),
+    ));
+    assert!(
+        step_keys(&other_status).is_empty(),
+        "retry attached to another run: {other_status}"
     );
 }
