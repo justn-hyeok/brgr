@@ -149,6 +149,12 @@ impl WorkflowRunState {
         )
     }
 
+    /// A run that can still admit or replay a step: not terminal.
+    #[must_use]
+    pub fn is_active(self) -> bool {
+        matches!(self, Self::Running | Self::Blocked)
+    }
+
     /// `running <-> blocked`, and `running|blocked -> completed|failed|cancelled`.
     #[must_use]
     pub fn allows(self, to: Self) -> bool {
@@ -269,8 +275,8 @@ impl Store {
     /// # Errors
     ///
     /// Returns [`StoreError::WorkflowRunNotFound`] or
-    /// [`StoreError::WorkflowRunNotRunning`] when the run cannot accept a
-    /// step, [`StoreError::WorkflowStepDiverged`] when the key is reused with
+    /// [`StoreError::WorkflowRunNotRunning`] when the run is missing or
+    /// terminal, [`StoreError::WorkflowStepDiverged`] when the key is reused with
     /// a different digest, [`StoreError::WorkflowParallelLimit`] when too many
     /// steps still lack a terminal result, or the same errors as recording a
     /// task.
@@ -500,7 +506,7 @@ fn record_step_in_transaction(
     request_digest: &str,
 ) -> Result<WorkflowStepOutcome, StoreError> {
     let run = load_run(transaction, run_id)?;
-    if run.state != WorkflowRunState::Running {
+    if !run.state.is_active() {
         return Err(StoreError::WorkflowRunNotRunning(run_id.clone()));
     }
     if task.owner_id != run.owner_id {
@@ -855,6 +861,11 @@ mod tests {
         assert!(WorkflowRunState::Cancelled.is_terminal());
         assert!(!WorkflowRunState::Running.is_terminal());
         assert!(!WorkflowRunState::Blocked.is_terminal());
+        assert!(WorkflowRunState::Running.is_active());
+        assert!(WorkflowRunState::Blocked.is_active());
+        assert!(!WorkflowRunState::Completed.is_active());
+        assert!(!WorkflowRunState::Failed.is_active());
+        assert!(!WorkflowRunState::Cancelled.is_active());
         assert!(!WorkflowRunState::Running.notifies_owner());
         assert!(WorkflowRunState::Blocked.notifies_owner());
         assert!(WorkflowRunState::Completed.notifies_owner());

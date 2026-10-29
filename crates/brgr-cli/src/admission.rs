@@ -26,9 +26,7 @@ use brgr_protocol::{
 };
 use brgr_registry::{ActivationReceipt, Health, Registry};
 use brgr_runner::HarnessManifest;
-use brgr_store::{
-    Store, StoreError, WorkflowRunId, WorkflowRunState, WorkflowStepKey, WorkflowStepOutcome,
-};
+use brgr_store::{Store, StoreError, WorkflowRunId, WorkflowStepKey, WorkflowStepOutcome};
 use config::Config;
 use serde::Serialize;
 use serde_json::json;
@@ -996,7 +994,7 @@ fn replay_existing_workflow_step(
     if run.owner_id != spec.owner_id {
         bail!("workflow run {} belongs to another owner", workflow.run_id);
     }
-    if run.state != WorkflowRunState::Running {
+    if !run.state.is_active() {
         bail!("workflow run {} is not running", workflow.run_id);
     }
     let Some(existing) = store

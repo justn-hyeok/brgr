@@ -41,7 +41,7 @@ pub(crate) enum WorkflowCommand {
     Resume { run: String },
     /// Stop the driver and every unfinished step of a run.
     Cancel { run: String },
-    /// Write the JavaScript SDK and an example script into a directory.
+    /// Write the JavaScript SDK, TypeScript declarations, and an example.
     Init {
         #[arg(value_name = "DIR")]
         dir: Option<std::path::PathBuf>,

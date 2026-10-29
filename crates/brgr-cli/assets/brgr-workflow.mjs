@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
@@ -9,10 +10,44 @@ const BACKOFF_CAP_MS = 15000;
 const MAX_OUTPUT = 16 * 1024 * 1024;
 const MAX_DEADLINE_SECONDS = 86400;
 const MAX_RETRIES = 3;
+const MAX_PIPELINE_STAGES = 64;
+const pipelineStore = new AsyncLocalStorage();
 const WAIT_TIMEOUT_NEEDLE = "did not produce a terminal result before the wait timeout";
 const ALREADY_TERMINAL_NEEDLE = "is already terminal";
 
 let agentsStarted = 0;
+let parallelDepth = 0;
+
+function bumpAgentCounter() {
+  if (agentsStarted >= Number.MAX_SAFE_INTEGER) {
+    throw new TypeError("agent() automatic key counter overflowed");
+  }
+  agentsStarted += 1;
+}
+
+function reserveAutoKeys(count) {
+  if (agentsStarted > Number.MAX_SAFE_INTEGER - count) {
+    throw new TypeError("agent() automatic key counter overflowed");
+  }
+  const keys = [];
+  for (let i = 0; i < count; i += 1) {
+    keys.push(String(agentsStarted));
+    agentsStarted += 1;
+  }
+  return keys;
+}
+
+function takeAutoKey() {
+  const slot = pipelineStore.getStore();
+  if (slot && slot.index < slot.keys.length && typeof slot.keys[slot.index] === "string") {
+    const key = slot.keys[slot.index];
+    slot.keys[slot.index] = null;
+    return key;
+  }
+  const key = String(agentsStarted);
+  bumpAgentCounter();
+  return key;
+}
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -179,13 +214,6 @@ async function invoke(args) {
   }
 }
 
-async function requireRunning(runId) {
-  const status = parseJson((await invoke(["workflow", "status", runId])).stdout, "workflow status");
-  if (status.state !== "running") {
-    throw new Error(`workflow run ${runId} is ${status.state}`);
-  }
-}
-
 async function requireActive(runId) {
   const status = parseJson((await invoke(["workflow", "status", runId])).stdout, "workflow status");
   if (status.state !== "running" && status.state !== "blocked") {
@@ -200,7 +228,7 @@ async function launchStep(args, runId, mode) {
       return await execBrgr([...sourcePanePrefix(mode), "run", ...args]);
     } catch (error) {
       if (error && error.code === TEMPFAIL) {
-        await requireRunning(runId);
+        await requireActive(runId);
         await sleep(delay);
         delay = Math.min(delay * 2, BACKOFF_CAP_MS);
         continue;
@@ -433,8 +461,10 @@ export async function agent(options) {
   if (!runId) {
     throw new Error("BRGR_WORKFLOW_RUN is not set");
   }
-  const baseKey = Object.hasOwn(options, "key") ? options.key : String(agentsStarted);
-  agentsStarted += 1;
+  const baseKey = Object.hasOwn(options, "key") ? options.key : takeAutoKey();
+  if (Object.hasOwn(options, "key")) {
+    bumpAgentCounter();
+  }
   let sealed;
   let attempts = 0;
   for (let attempt = 1; attempt <= retries + 1; attempt += 1) {
@@ -452,12 +482,84 @@ export async function parallel(thunks) {
   if (!Array.isArray(thunks)) {
     throw new TypeError("parallel() requires an array of thunks");
   }
-  const started = [];
   for (const thunk of thunks) {
     if (typeof thunk !== "function") {
       throw new TypeError("parallel() thunks must be functions");
     }
-    started.push(thunk());
   }
-  return Promise.all(started);
+  parallelDepth += 1;
+  try {
+    const started = [];
+    for (const thunk of thunks) {
+      started.push(thunk());
+    }
+    return await Promise.all(started);
+  } finally {
+    parallelDepth -= 1;
+  }
+}
+
+function validatePipeline(stages, options) {
+  if (!Array.isArray(stages)) {
+    throw new TypeError("pipeline() requires an array of stages");
+  }
+  if (stages.length === 0) {
+    throw new TypeError("pipeline() requires a non-empty array of stages");
+  }
+  if (stages.length > MAX_PIPELINE_STAGES) {
+    throw new TypeError("pipeline() supports at most 64 stages");
+  }
+  for (const stage of stages) {
+    if (typeof stage !== "function") {
+      throw new TypeError("pipeline() stages must be functions");
+    }
+  }
+  if (options === undefined) {
+    return;
+  }
+  if (options === null || typeof options !== "object" || Array.isArray(options)) {
+    throw new TypeError("pipeline() options must be an object");
+  }
+  walk(options, new WeakSet());
+  if (Object.hasOwn(options, "key")) {
+    if (typeof options.key !== "string" || options.key.length === 0) {
+      throw new TypeError("pipeline() key must be a string");
+    }
+    if (options.key.includes("~")) {
+      throw new TypeError("pipeline() key must not contain '~'");
+    }
+  }
+}
+
+function pipelineKeys(stages, options) {
+  if (options && Object.hasOwn(options, "key")) {
+    return stages.map((_, index) => `${options.key}-${index}`);
+  }
+  return reserveAutoKeys(stages.length);
+}
+
+export async function pipeline(stages, options) {
+  validatePipeline(stages, options);
+  if (parallelDepth > 0 && !(options && Object.hasOwn(options, "key"))) {
+    throw new TypeError("pipeline() inside parallel() requires a key prefix");
+  }
+  const keys = pipelineKeys(stages, options);
+  const called = stages.map(() => false);
+  return pipelineStore.run({ keys, index: 0 }, async () => {
+    const results = [];
+    for (let i = 0; i < stages.length; i += 1) {
+      if (called[i]) {
+        throw new Error("pipeline() stage called twice");
+      }
+      called[i] = true;
+      pipelineStore.getStore().index = i;
+      const previous = i === 0 ? undefined : results[i - 1];
+      const result = await stages[i](previous);
+      results.push(result);
+      if (!result || result.outcome !== "completed") {
+        return { results, stopped_at: i };
+      }
+    }
+    return { results, stopped_at: null };
+  });
 }

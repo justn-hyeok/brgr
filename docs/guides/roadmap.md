@@ -13,11 +13,10 @@ brgr을 못 칠 때 들어오는 세션이 인계를 시작하고 지휘권을 �
 `brgr head handoff|take|exit`는 v2.15.2에 있다: 현재 Head가 새 Herdr pane을 열어
 새 Head를 시작하고, 새 Head가 `take`로 승계하며, `--exit-old`를 승인한 경우
 검증된 `retire` 뒤에 이전 Head의 pane만 닫는다.
-`config set-handoff-condition`은 v2.15.5에 있다: Head의 컨텍스트나 플랜 사용량이
-한도를 넘으면 brgr이 Head에게 `head handoff` 명령을 알리고, `--auto`를 켜면 Head의
-다음 brgr 명령 끝에서 같은 인계를 직접 실행한다. Claude Code, Codex, Cursor가
-신호를 낸다(Cursor는 컨텍스트만). 이것으로 2.6까지 갖췄다. Workflow Runtime은
-향후 계획이다.
+`config set-handoff-condition`은 v2.15.7에서 플랜 사용량만 본다.
+`--quota-percent`가 필요하고 `--context-percent`는 받지 않는다. `--auto`를 켜면
+Head의 다음 brgr 명령 끝에서 같은 인계를 직접 실행한다. Claude Code, Codex,
+Cursor가 신호를 낸다. 이것으로 2.6까지 갖췄다.
 
 모든 단계는 v2.x로 낸다. 메이저 버전은 올리지 않는다.
 
@@ -179,7 +178,8 @@ stale Head의 결정 시도, 기존 Head 종료 실패, 나가는 Head가 침묵
 
 ## Phase 3. Dynamic Workflows
 
-릴리스 방향: Head Migration 다음의 별도 마이너 · 상태: 첫 버전 구현 (agent/parallel, 저널, 드라이버, SDK)
+릴리스 방향: 패치로 쌓아 출시 · 상태: Phase 3 완료 (`agent` / `parallel` /
+`pipeline`, 저널, 드라이버, SDK, 선언 파일)
 
 작은 Workflow Runtime을 추가하고 기존 brgr 위임 계약을 실행 백엔드로 사용한다.
 `six-ddc/codex-dynamic-workflows`는 참고 후보이며 그대로 이식하기로 결정한
@@ -190,13 +190,13 @@ stale Head의 결정 시도, 기존 Head 종료 실패, 나가는 Head가 침묵
 `brgr workflow resume RUN`, `brgr workflow cancel RUN`, `brgr workflow init`,
 `brgr run OBJECTIVE --workflow RUN --step KEY` (병렬 한도에 걸리면 종료 코드 75),
 분리된 node 드라이버, 런 상태 변화당 owner 알림 하나, 의존성 없는
-JavaScript SDK (`agent()`, `parallel()`), 그리고 단계별 기한 (`agent()`의
-`deadline`, 결과의 `timed_out`). SDK는 accept/reject/apply/land를 노출하지
+JavaScript SDK (`agent()`, `parallel()`, `pipeline()`), `brgr-workflow.d.ts`,
+단계별 기한 (`agent()`의 `deadline`, 결과의 `timed_out`), 단계 재시도
+(`retries`, `KEY~retryN`). SDK는 accept/reject/apply/land를 노출하지
 않는다. 완료 조건은 실행 도중의 **관찰한** 결과를 바탕으로 처음에는 존재하지
 않았던 작업을 새로 생성하는 것이다. SDK가 돌려준 값은 승인된 변경이 아니다.
 
-아직 없는 것: `pipeline()`, 재시도 정책, TypeScript 도구,
-실행 중인 런의 Head 이전.
+아직 없는 것: 실행 중인 런의 Head 이전.
 
 첫 버전의 실행 표현은 네 가지로 제한한다.
 
@@ -204,23 +204,19 @@ JavaScript SDK (`agent()`, `parallel()`), 그리고 단계별 기한 (`agent()`�
 | --- | --- | --- |
 | `agent()` | 기존 brgr 경로로 bounded 작업을 위임한다 | 있음 |
 | `parallel()` | 독립 작업을 병렬 실행하고 각각의 결과를 회수한다 | 있음 |
-| `pipeline()` | 앞 단계의 기록된 결과를 다음 단계 입력으로 연결한다 | 없음 |
+| `pipeline()` | 앞 단계의 기록된 결과를 다음 단계 입력으로 연결한다 | 있음 |
 | 일반 JS 조건문·반복문 | 관찰한 결과에 따라 동적으로 분기하고 새 작업을 생성한다 | 있음 |
 
-아래는 현재 `agent()` / `parallel()` 형태다. 반환값의 수신과 owner의
-accept/reject는 별도 절차다.
+아래는 현재 `pipeline()` 형태다. 반환값의 수신과 owner의 accept/reject는
+별도 절차다.
 
 ```javascript
-import { agent, parallel } from "./brgr-workflow.mjs";
+import { agent, pipeline } from "./brgr-workflow.mjs";
 
-const reviews = await parallel([
+const { results, stopped_at } = await pipeline([
   () => agent({ task: "Review security" }),
-  () => agent({ task: "Review architecture" }),
+  (prev) => agent({ task: `Fix issues from: ${prev.report}` }),
 ]);
-
-if (reviews.some((review) => review.report.includes("critical"))) {
-  await agent({ task: "Reproduce and fix verified issues" });
-}
 ```
 
 완료 조건은 실행 도중의 결과를 바탕으로 **처음에는 존재하지 않았던 작업을 새로
@@ -307,7 +303,7 @@ pane 화면을 읽지 않는 Codex owner 식별은 기존 호출 동작을 바�
 | --- | --- | --- | --- |
 | 공통 Continuity 기반 | 5 | 3 | store/CLI는 v2.14.2. `claim`은 v2.15.0 |
 | Head Migration | 5 | 4 | 수동 인계, 자동 퇴장, 사용량 조건부 인계(알림과 `--auto`)까지 출시 |
-| Dynamic Workflows | 5 | 5 | 그다음 마이너. 실행 모델을 확장하므로 따로 낸다 |
+| Dynamic Workflows | 5 | 5 | Phase 3 완료. 패치로 쌓여 출시한다 |
 | 하네스 중립 전달 경로 | 4 | 2 | 패치. Unified Continuity의 선행 조건이며 Herdr 분리의 절반 |
 | 하네스 호환성 | 4 | 2 | 매일의 경험이며 전부 패치다 |
 | 계층 탭·위성 UI | 2 | 3 | 현재 로드맵에서 제외한다 |
@@ -316,8 +312,8 @@ pane 화면을 읽지 않는 Codex owner 식별은 기존 호출 동작을 바�
 
 | 릴리스 | 내는 때 |
 | --- | --- |
-| v2.x 패치 | 대형 기능이 아닌 모든 것. 현행 경험, 호환, 버그, 작은 명령, 소유자 알림 구멍 |
-| v2.x 마이너 | Head Migration, Dynamic Workflows, Unified Continuity가 각각의 출시 게이트를 통과했을 때뿐 |
+| v2.x 패치 | 기본. 현행 경험, 호환, 버그, 작은 명령, 소유자 알림 구멍, 대형 기능을 슬라이스로 쌓는 일 |
+| v2.x 마이너 | 대형 기능이 실제로 출시 게이트를 통과한 뒤에만. v3·v4를 미리 계획하지 않는다 |
 
 대형 기능은 실제 사용과 복구 게이트를 충족했을 때 마이너로 낸다. 그 전에 쌓인
 작은 수정은 패치로 먼저 낸다.

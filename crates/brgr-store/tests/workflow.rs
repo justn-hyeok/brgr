@@ -306,29 +306,9 @@ fn a_run_that_is_not_running_refuses_new_steps() {
         "a step was recorded against a run that does not exist"
     );
 
-    let run_id = run_id("run-blocked");
+    let run_id = run_id("run-completed");
     store
         .create_workflow_run(&run_id, &owner_id, "digest-script", 2)
-        .unwrap();
-    store
-        .set_workflow_run_state(&run_id, WorkflowRunState::Blocked)
-        .unwrap();
-    assert!(
-        matches!(
-            store.record_workflow_step(
-                &run_id,
-                &step_key("fetch"),
-                "digest-in",
-                &task,
-                "digest-req"
-            ),
-            Err(StoreError::WorkflowRunNotRunning(_))
-        ),
-        "a blocked run accepted a new step"
-    );
-
-    store
-        .set_workflow_run_state(&run_id, WorkflowRunState::Running)
         .unwrap();
     store
         .set_workflow_run_state(&run_id, WorkflowRunState::Completed)
@@ -348,6 +328,67 @@ fn a_run_that_is_not_running_refuses_new_steps() {
     );
     assert_eq!(count_table(root.path(), "workflow_steps"), 0);
     assert_eq!(count_table(root.path(), "tasks"), 0);
+}
+
+#[test]
+fn a_blocked_run_admits_a_step_under_the_cap_and_hits_the_parallel_limit() {
+    let root = TempDir::new().unwrap();
+    let mut store = Store::open(root.path()).unwrap();
+    let owner_id = owner();
+    let under = run_id("run-blocked-under");
+    store
+        .create_workflow_run(&under, &owner_id, "digest-script", 2)
+        .unwrap();
+    store
+        .set_workflow_run_state(&under, WorkflowRunState::Blocked)
+        .unwrap();
+    let admitted = spec(&owner_id, TaskId::new());
+    let created = store
+        .record_workflow_step(
+            &under,
+            &step_key("fetch"),
+            "digest-in",
+            &admitted,
+            "digest-req",
+        )
+        .unwrap();
+    assert!(
+        matches!(
+            created,
+            WorkflowStepOutcome::Created { task_id, .. } if task_id == admitted.task_id
+        ),
+        "a blocked run under the cap refused a step: {created:?}"
+    );
+
+    let capped = run_id("run-blocked-cap");
+    store
+        .create_workflow_run(&capped, &owner_id, "digest-script", 1)
+        .unwrap();
+    let first = spec(&owner_id, TaskId::new());
+    store
+        .record_workflow_step(
+            &capped,
+            &step_key("one"),
+            "digest-in-1",
+            &first,
+            "digest-req-1",
+        )
+        .unwrap();
+    store
+        .set_workflow_run_state(&capped, WorkflowRunState::Blocked)
+        .unwrap();
+    let second = spec(&owner_id, TaskId::new());
+    let refused = store.record_workflow_step(
+        &capped,
+        &step_key("two"),
+        "digest-in-2",
+        &second,
+        "digest-req-2",
+    );
+    assert!(
+        matches!(refused, Err(StoreError::WorkflowParallelLimit)),
+        "a blocked run at the cap was not retryable: {refused:?}"
+    );
 }
 
 #[test]

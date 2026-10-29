@@ -96,6 +96,23 @@ import { agent } from "./brgr-workflow.mjs";
 await agent({ task: "ASK which token", mode: "headless", key: "ask" });
 "#;
 
+const CAP_WHILE_BLOCKED_SCRIPT: &str = r#"
+import { existsSync, writeFileSync } from "node:fs";
+import { agent, parallel } from "./brgr-workflow.mjs";
+
+await parallel([
+  () => agent({ task: "ASK which token", mode: "headless", key: "ask" }),
+  async () => {
+    writeFileSync(process.env.BRGR_HOME + "/second-ready", "1");
+    while (!existsSync(process.env.BRGR_HOME + "/release-second")) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    writeFileSync(process.env.BRGR_HOME + "/second-launching", "1");
+    return agent({ task: "BRGR_FIXTURE_OK second", mode: "headless", key: "second" });
+  },
+]);
+"#;
+
 const DIVERGED_SCRIPT: &str = r#"
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -377,6 +394,182 @@ const sealed = await agent({
   mode: "headless",
 });
 writeFileSync(process.env.BRGR_HOME + "/agent-result.json", JSON.stringify(sealed));
+"#;
+
+const PIPELINE_PASS_SCRIPT: &str = r#"
+import { writeFileSync } from "node:fs";
+import { agent, pipeline } from "./brgr-workflow.mjs";
+
+const { results, stopped_at } = await pipeline([
+  () => agent({ task: "BRGR_FIXTURE_OK first-stage", mode: "headless" }),
+  (prev) => agent({ task: "BRGR_FIXTURE_OK uses " + prev.report, mode: "headless" }),
+  (prev) => agent({ task: "BRGR_FIXTURE_OK third " + prev.report, mode: "headless" }),
+]);
+writeFileSync(
+  process.env.BRGR_HOME + "/pipeline-result.json",
+  JSON.stringify({ results, stopped_at }),
+);
+"#;
+
+const PIPELINE_FAIL_SCRIPT: &str = r#"
+import { writeFileSync } from "node:fs";
+import { agent, pipeline } from "./brgr-workflow.mjs";
+
+const { results, stopped_at } = await pipeline([
+  () => agent({ task: "BRGR_FIXTURE_OK first-stage", mode: "headless" }),
+  () => agent({ task: "FAIL middle", mode: "headless" }),
+  () => agent({ task: "BRGR_FIXTURE_OK third-stage", mode: "headless" }),
+]);
+writeFileSync(
+  process.env.BRGR_HOME + "/pipeline-result.json",
+  JSON.stringify({ results, stopped_at }),
+);
+"#;
+
+const PIPELINE_RESUME_SCRIPT: &str = r#"
+import { appendFileSync, existsSync, writeFileSync } from "node:fs";
+import { agent, pipeline } from "./brgr-workflow.mjs";
+
+const home = process.env.BRGR_HOME;
+function note(stage) {
+  appendFileSync(home + "/stage-calls", stage + "\n");
+}
+
+await pipeline([
+  async () => {
+    note("0");
+    const sealed = await agent({ task: "BRGR_FIXTURE_OK first", mode: "headless" });
+    writeFileSync(home + "/stage0-done", "1");
+    return sealed;
+  },
+  async (prev) => {
+    note("1");
+    while (existsSync(home + "/pause-before-1")) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    return agent({ task: "BRGR_FIXTURE_OK second " + prev.report, mode: "headless" });
+  },
+  () => {
+    note("2");
+    return agent({ task: "BRGR_FIXTURE_OK third", mode: "headless" });
+  },
+]);
+"#;
+
+const PIPELINE_INVALID_SCRIPT: &str = r#"
+import { writeFileSync } from "node:fs";
+import { pipeline } from "./brgr-workflow.mjs";
+
+const tooMany = Array.from({ length: 65 }, () => () => {});
+const cases = [null, "nope", [], [() => {}, "x"], tooMany, undefined];
+for (const stages of cases) {
+  try {
+    await pipeline(stages);
+    throw new Error("expected TypeError for " + String(stages));
+  } catch (error) {
+    if (!(error instanceof TypeError)) {
+      throw error;
+    }
+  }
+}
+try {
+  await pipeline([() => {}], "prefix");
+  throw new Error("expected TypeError for options");
+} catch (error) {
+  if (!(error instanceof TypeError)) {
+    throw error;
+  }
+}
+writeFileSync("pipeline-typeerror-ok", "1");
+"#;
+
+const PIPELINE_THROW_SCRIPT: &str = r#"
+import { writeFileSync } from "node:fs";
+import { agent, pipeline } from "./brgr-workflow.mjs";
+
+try {
+  await pipeline([
+    () => agent({ task: "BRGR_FIXTURE_OK first", mode: "headless" }),
+    () => {
+      throw new Error("stage-boom");
+    },
+    () => agent({ task: "BRGR_FIXTURE_OK third", mode: "headless" }),
+  ]);
+  throw new Error("pipeline should have rejected");
+} catch (error) {
+  writeFileSync(
+    process.env.BRGR_HOME + "/pipeline-throw.txt",
+    String(error && error.message),
+  );
+  throw error;
+}
+"#;
+
+const PIPELINE_PARALLEL_TYPEERROR_SCRIPT: &str = r#"
+import { writeFileSync } from "node:fs";
+import { agent, parallel, pipeline } from "./brgr-workflow.mjs";
+
+try {
+  await parallel([
+    () => pipeline([() => agent({ task: "BRGR_FIXTURE_OK", mode: "headless" })]),
+  ]);
+  throw new Error("expected TypeError");
+} catch (error) {
+  if (!(error instanceof TypeError)) {
+    throw error;
+  }
+}
+writeFileSync("pipeline-parallel-typeerror-ok", "1");
+"#;
+
+const PIPELINE_DASH_SCRIPT: &str = r#"
+import { writeFileSync } from "node:fs";
+import { agent, pipeline } from "./brgr-workflow.mjs";
+
+await pipeline([
+  () => agent({ task: "first", mode: "headless" }),
+  (prev) =>
+    agent({
+      task: prev.report,
+      deadline: 60,
+      retries: 1,
+      mode: "headless",
+    }),
+]);
+writeFileSync(process.env.BRGR_HOME + "/pipeline-dash-ok", "1");
+"#;
+
+const RESULT_FIELDS_SCRIPT: &str = r#"
+import { writeFileSync } from "node:fs";
+import { agent } from "./brgr-workflow.mjs";
+
+const sealed = await agent({ task: "BRGR_FIXTURE_OK fields", mode: "headless", key: "fields" });
+writeFileSync(process.env.BRGR_HOME + "/agent-result.json", JSON.stringify(sealed));
+"#;
+
+const PIPELINE_PARALLEL_KEYS_SCRIPT: &str = r#"
+import { writeFileSync } from "node:fs";
+import { agent, parallel, pipeline } from "./brgr-workflow.mjs";
+
+await parallel([
+  () =>
+    pipeline(
+      [
+        () => agent({ task: "BRGR_FIXTURE_OK left-0", mode: "headless" }),
+        () => agent({ task: "BRGR_FIXTURE_OK left-1", mode: "headless" }),
+      ],
+      { key: "left" },
+    ),
+  () =>
+    pipeline(
+      [
+        () => agent({ task: "BRGR_FIXTURE_OK right-0", mode: "headless" }),
+        () => agent({ task: "BRGR_FIXTURE_OK right-1", mode: "headless" }),
+      ],
+      { key: "right" },
+    ),
+]);
+writeFileSync(process.env.BRGR_HOME + "/pipeline-parallel-ok", "1");
 "#;
 
 const HOLD_REV2_GJC: &str = r#"#!/bin/sh
@@ -1003,9 +1196,45 @@ esac
 }
 
 fn agent_result(fixture: &Fixture) -> Value {
-    let path = fixture.home.join("agent-result.json");
+    json_home_file(fixture, "agent-result.json")
+}
+
+fn json_home_file(fixture: &Fixture, name: &str) -> Value {
+    let path = fixture.home.join(name);
     wait_for_file(&path, Duration::from_secs(90));
     serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap()
+}
+
+fn task_objective(fixture: &Fixture, task: &str) -> String {
+    json_output(&run(
+        &fixture.home,
+        &fixture.workspace,
+        &["status", task],
+        &owner_env(),
+    ))["task"]["objective"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+fn declared_interface_fields(source: &str, name: &str) -> Vec<String> {
+    let header = format!("export interface {name} {{");
+    let start = source
+        .find(&header)
+        .unwrap_or_else(|| panic!("missing interface {name}"));
+    let body = &source[start + header.len()..];
+    let end = body.find('}').unwrap();
+    body[..end]
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('/') || line.starts_with('*') {
+                return None;
+            }
+            let field = line.split(':').next()?.trim();
+            (!field.is_empty()).then(|| field.to_owned())
+        })
+        .collect()
 }
 
 fn release_revision_two(fixture: &Fixture) {
@@ -1226,6 +1455,29 @@ fn a_question_blocks_the_run_until_the_owner_replies() {
         1,
         "{status}"
     );
+}
+
+#[test]
+fn a_launch_that_hits_the_parallel_cap_while_blocked_keeps_waiting() {
+    require_node();
+    let fixture = fixture_with_script(ASKING_GJC);
+    init_sdk(&fixture);
+    let script = write_script(&fixture, "cap-blocked.mjs", CAP_WHILE_BLOCKED_SCRIPT);
+    let run_id = start_workflow_with(&fixture, &script, &["--max-parallel", "1"]);
+    let blocked = wait_run_state(&fixture, &run_id, "blocked", Duration::from_secs(90));
+    wait_for_file(&fixture.home.join("second-ready"), Duration::from_secs(90));
+    fs::write(fixture.home.join("release-second"), b"1").unwrap();
+    wait_for_file(
+        &fixture.home.join("second-launching"),
+        Duration::from_secs(90),
+    );
+    let ask = blocked["steps"][0]["task_id"].as_str().unwrap().to_owned();
+    assert_eq!(step_keys(&blocked), vec!["ask"], "{blocked}");
+    reply_to_worker_question(&fixture, &ask, "token-42");
+    let status = wait_run_state(&fixture, &run_id, "completed", Duration::from_secs(90));
+    let mut keys = step_keys(&status);
+    keys.sort();
+    assert_eq!(keys, vec!["ask", "second"], "{status}");
 }
 
 #[test]
@@ -2405,6 +2657,54 @@ esac
     );
 }
 
+#[test]
+fn pipeline_stage_report_argv_does_not_turn_dash_values_into_options() {
+    require_node();
+    let fixture = fixture_home();
+    init_sdk(&fixture);
+    let fake_bin = write_fake_brgr(
+        &fixture,
+        r#"
+task="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+rid="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+now=$(/bin/date +%s)
+case " $* " in
+  *" run "*) printf '{"task_id":"%s"}\n' "$task";;
+  *" workflow status "*) printf '{"state":"running"}\n';;
+  *" status "*) printf '{"task":{"revision":1},"state":"running","created_at":%s}\n' "$now";;
+  *" wait "*) printf '{"task_id":"%s","result_id":"%s","outcome":"candidate","revision":1}\n' "$task" "$rid";;
+  *" result "*) printf '{"result":{"outcome":"candidate","revision":1,"result_id":"%s"},"artifacts":[{"text":"--workspace /etc"}]}\n' "$rid";;
+  *) printf '{"ok":true}\n';;
+esac
+"#,
+    );
+    let script = write_script(&fixture, "pipeline-dash.mjs", PIPELINE_DASH_SCRIPT);
+    let output = run_sdk_script(&fixture, &fake_bin, &script);
+    assert!(
+        output.status.success(),
+        "sdk script failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let log = fake_argv_log(&fixture);
+    assert!(
+        log.contains("-- --workspace /etc"),
+        "pipeline stage report was not protected by -- : {log}"
+    );
+    assert!(
+        log.contains("--step-deadline=60"),
+        "deadline was not passed with = : {log}"
+    );
+    assert!(
+        log.contains("--step-retries=1"),
+        "retries was not passed with = : {log}"
+    );
+    wait_for_file(
+        &fixture.home.join("pipeline-dash-ok"),
+        Duration::from_secs(5),
+    );
+}
+
 fn failed_launch(output: &std::process::Output) -> String {
     assert!(
         !output.status.success(),
@@ -2506,5 +2806,187 @@ fn a_retry_cannot_overwrite_a_step_or_attach_to_another_run() {
     assert!(
         step_keys(&other_status).is_empty(),
         "retry attached to another run: {other_status}"
+    );
+}
+
+#[test]
+fn a_three_stage_pipeline_passes_each_result_to_the_next_stage() {
+    require_node();
+    let fixture = fixture_home();
+    init_sdk(&fixture);
+    let script = write_script(&fixture, "pipeline-pass.mjs", PIPELINE_PASS_SCRIPT);
+    let run_id = start_workflow(&fixture, &script);
+    let status = wait_run_state(&fixture, &run_id, "completed", Duration::from_secs(90));
+    assert_eq!(step_keys(&status), vec!["0", "1", "2"], "{status}");
+    let sealed = json_home_file(&fixture, "pipeline-result.json");
+    assert_eq!(sealed["stopped_at"], Value::Null, "{sealed}");
+    assert_eq!(
+        sealed["results"].as_array().map(Vec::len),
+        Some(3),
+        "{sealed}"
+    );
+    assert_eq!(sealed["results"][0]["outcome"], "completed", "{sealed}");
+    let second = status["steps"][1]["task_id"].as_str().unwrap();
+    let objective = task_objective(&fixture, second);
+    assert!(
+        objective.contains("BRGR_FIXTURE_OK"),
+        "second stage task did not include the first report: {objective}"
+    );
+}
+
+#[test]
+fn a_failed_pipeline_stage_stops_and_does_not_journal_later_stages() {
+    require_node();
+    let fixture = fixture_with_script(FAILING_GJC);
+    init_sdk(&fixture);
+    let script = write_script(&fixture, "pipeline-fail.mjs", PIPELINE_FAIL_SCRIPT);
+    let run_id = start_workflow(&fixture, &script);
+    let status = wait_run_state(&fixture, &run_id, "completed", Duration::from_secs(90));
+    assert_eq!(step_keys(&status), vec!["0", "1"], "{status}");
+    let sealed = json_home_file(&fixture, "pipeline-result.json");
+    assert_eq!(sealed["stopped_at"], 1, "{sealed}");
+    assert_eq!(
+        sealed["results"].as_array().map(Vec::len),
+        Some(2),
+        "{sealed}"
+    );
+    assert_eq!(sealed["results"][1]["outcome"], "failed", "{sealed}");
+}
+
+#[test]
+fn resume_mid_pipeline_does_not_duplicate_or_relaunch_earlier_stages() {
+    require_node();
+    let fixture = fixture_home();
+    init_sdk(&fixture);
+    fs::write(fixture.home.join("pause-before-1"), b"1").unwrap();
+    let script = write_script(&fixture, "pipeline-resume.mjs", PIPELINE_RESUME_SCRIPT);
+    let run_id = start_workflow(&fixture, &script);
+    wait_for_file(&fixture.home.join("stage0-done"), Duration::from_secs(90));
+    let before = json_output(&run(
+        &fixture.home,
+        &fixture.workspace,
+        &["workflow", "status", &run_id],
+        &owner_env(),
+    ));
+    assert_eq!(step_keys(&before), vec!["0"], "{before}");
+    let first_id = before["steps"][0]["task_id"].as_str().unwrap().to_owned();
+    kill_driver(&fixture, &run_id);
+    fs::remove_file(fixture.home.join("pause-before-1")).unwrap();
+    json_output(&run(
+        &fixture.home,
+        &fixture.workspace,
+        &["workflow", "resume", &run_id],
+        &owner_env(),
+    ));
+    let status = wait_run_state(&fixture, &run_id, "completed", Duration::from_secs(90));
+    assert_eq!(step_keys(&status), vec!["0", "1", "2"], "{status}");
+    assert_eq!(status["steps"][0]["task_id"], first_id, "{status}");
+}
+
+#[test]
+fn invalid_pipeline_arguments_throw_before_any_task_exists() {
+    require_node();
+    let fixture = fixture_home();
+    init_sdk(&fixture);
+    let script = write_script(&fixture, "pipeline-types.mjs", PIPELINE_INVALID_SCRIPT);
+    let run_id = start_workflow(&fixture, &script);
+    let status = wait_run_state(&fixture, &run_id, "completed", Duration::from_secs(30));
+    assert!(
+        step_keys(&status).is_empty(),
+        "invalid pipeline launched a task: {status}"
+    );
+    assert!(
+        fixture.workspace.join("pipeline-typeerror-ok").is_file(),
+        "script did not record TypeError coverage"
+    );
+}
+
+#[test]
+fn a_throwing_pipeline_stage_rejects_and_does_not_launch_later_stages() {
+    require_node();
+    let fixture = fixture_home();
+    init_sdk(&fixture);
+    let script = write_script(&fixture, "pipeline-throw.mjs", PIPELINE_THROW_SCRIPT);
+    let run_id = start_workflow(&fixture, &script);
+    let status = wait_run_state(&fixture, &run_id, "failed", Duration::from_secs(90));
+    assert_eq!(step_keys(&status), vec!["0"], "{status}");
+    wait_for_file(
+        &fixture.home.join("pipeline-throw.txt"),
+        Duration::from_secs(5),
+    );
+    let message = fs::read_to_string(fixture.home.join("pipeline-throw.txt")).unwrap();
+    assert!(
+        message.contains("stage-boom"),
+        "pipeline did not reject with the stage error: {message}"
+    );
+}
+
+#[test]
+fn pipeline_inside_parallel_requires_a_key_prefix_before_launch() {
+    require_node();
+    let fixture = fixture_home();
+    init_sdk(&fixture);
+    let script = write_script(
+        &fixture,
+        "pipeline-parallel-type.mjs",
+        PIPELINE_PARALLEL_TYPEERROR_SCRIPT,
+    );
+    let run_id = start_workflow(&fixture, &script);
+    let status = wait_run_state(&fixture, &run_id, "completed", Duration::from_secs(30));
+    assert!(
+        step_keys(&status).is_empty(),
+        "pipeline inside parallel launched without a key: {status}"
+    );
+    assert!(
+        fixture
+            .workspace
+            .join("pipeline-parallel-typeerror-ok")
+            .is_file(),
+        "script did not record the parallel key TypeError"
+    );
+}
+
+#[test]
+fn pipeline_inside_parallel_uses_the_key_prefix_for_deterministic_keys() {
+    require_node();
+    let fixture = fixture_home();
+    init_sdk(&fixture);
+    let script = write_script(
+        &fixture,
+        "pipeline-parallel-keys.mjs",
+        PIPELINE_PARALLEL_KEYS_SCRIPT,
+    );
+    let run_id = start_workflow(&fixture, &script);
+    let status = wait_run_state(&fixture, &run_id, "completed", Duration::from_secs(90));
+    let mut keys = step_keys(&status);
+    keys.sort();
+    assert_eq!(
+        keys,
+        vec!["left-0", "left-1", "right-0", "right-1"],
+        "{status}"
+    );
+    wait_for_file(
+        &fixture.home.join("pipeline-parallel-ok"),
+        Duration::from_secs(5),
+    );
+}
+
+#[test]
+fn declared_agent_result_fields_match_a_real_run_result() {
+    require_node();
+    let fixture = fixture_home();
+    init_sdk(&fixture);
+    let dts = fs::read_to_string(fixture.scripts.join("brgr-workflow.d.ts")).unwrap();
+    let mut declared = declared_interface_fields(&dts, "AgentResult");
+    declared.sort();
+    let script = write_script(&fixture, "result-fields.mjs", RESULT_FIELDS_SCRIPT);
+    let run_id = start_workflow(&fixture, &script);
+    wait_run_state(&fixture, &run_id, "completed", Duration::from_secs(90));
+    let sealed = agent_result(&fixture);
+    let mut actual: Vec<String> = sealed.as_object().unwrap().keys().cloned().collect();
+    actual.sort();
+    assert_eq!(
+        actual, declared,
+        "result JSON keys {actual:?} != declared AgentResult {declared:?} payload={sealed}"
     );
 }

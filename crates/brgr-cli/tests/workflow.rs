@@ -511,6 +511,7 @@ fn the_host_bridge_allows_workflow_init_inside_the_workspace() {
         String::from_utf8_lossy(&allowed.stderr)
     );
     assert!(fixture.workspace.join("brgr-workflow.mjs").is_file());
+    assert!(fixture.workspace.join("brgr-workflow.d.ts").is_file());
     assert!(fixture.workspace.join("example.mjs").is_file());
 }
 
@@ -548,14 +549,33 @@ fn the_host_bridge_refuses_workflow_init_outside_the_workspace() {
 fn workflow_init_writes_the_sdk_and_refuses_a_different_existing_file() {
     let fixture = fixture_home();
     let dir = fixture.workspace.to_str().unwrap();
-    json_output(&run(&fixture.home, &["workflow", "init", dir], &[]));
+    let written = json_output(&run(&fixture.home, &["workflow", "init", dir], &[]));
     let sdk = fixture.workspace.join("brgr-workflow.mjs");
+    let dts = fixture.workspace.join("brgr-workflow.d.ts");
     let example = fixture.workspace.join("example.mjs");
     assert!(sdk.is_file(), "init did not write brgr-workflow.mjs");
+    assert!(dts.is_file(), "init did not write brgr-workflow.d.ts");
     assert!(example.is_file(), "init did not write example.mjs");
+    assert!(
+        written["dts"]
+            .as_str()
+            .is_some_and(|path| path.ends_with("brgr-workflow.d.ts")),
+        "init JSON omitted dts: {written}"
+    );
+    assert!(
+        written["sdk"]
+            .as_str()
+            .is_some_and(|path| path.ends_with("brgr-workflow.mjs")),
+        "init JSON omitted sdk: {written}"
+    );
     let sdk_text = fs::read_to_string(&sdk).unwrap();
+    let dts_text = fs::read_to_string(&dts).unwrap();
     assert!(sdk_text.contains("export async function agent"));
     assert!(sdk_text.contains("export async function parallel"));
+    assert!(sdk_text.contains("export async function pipeline"));
+    assert!(dts_text.contains("export function agent"));
+    assert!(dts_text.contains("export function parallel"));
+    assert!(dts_text.contains("export function pipeline"));
     assert!(!sdk_text.contains("export async function accept"));
     assert!(!sdk_text.contains("export async function reject"));
     fs::write(&sdk, "not the sdk\n").unwrap();
@@ -564,15 +584,21 @@ fn workflow_init_writes_the_sdk_and_refuses_a_different_existing_file() {
         !refused.status.success(),
         "init overwrote a different file without --force"
     );
+    fs::write(&dts, "not the dts\n").unwrap();
     json_output(&run(
         &fixture.home,
         &["workflow", "init", dir, "--force"],
         &[],
     ));
     let restored = fs::read_to_string(&sdk).unwrap();
+    let restored_dts = fs::read_to_string(&dts).unwrap();
     assert!(
         restored.contains("export async function agent"),
         "--force did not restore the SDK"
+    );
+    assert!(
+        restored_dts.contains("export function pipeline"),
+        "--force did not restore the declarations"
     );
 }
 

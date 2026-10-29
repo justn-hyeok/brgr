@@ -592,32 +592,47 @@ after the owner replies.
 Steps open TUI worker panes beside the head's pane when `brgr workflow run SCRIPT`
 was started from a verified Herdr pane. Otherwise use `mode: "headless"`.
 
-A script imports the local module and uses `agent()` and `parallel()`:
+A script imports the local module and uses `agent()`, `parallel()`, and
+`pipeline()`. `brgr workflow init` also writes `brgr-workflow.d.ts` next to the
+SDK, with the same refuse-different/`--force` behavior; there is no build step.
 
 ```javascript
-import { agent, parallel } from "./brgr-workflow.mjs";
+import { agent, pipeline } from "./brgr-workflow.mjs";
 
-const reviews = await parallel([
+const { results, stopped_at } = await pipeline([
   () => agent({ task: "Review security", deadline: 600 }),
-  () => agent({ task: "Review architecture" }),
+  (prev) => agent({ task: `Fix issues from: ${prev.report}` }),
 ]);
-
-if (reviews.some((review) => review.report.includes("critical"))) {
-  await agent({ task: "Reproduce and fix verified issues" });
-}
 ```
 
 `agent()` launches `brgr run OBJECTIVE --workflow RUN --step KEY` with an argv
 array, never a shell. Exit code 75 means the run is at its parallel limit; the
-SDK retries with bounded backoff until the run is no longer running. A sealed
-`candidate` is returned as `completed`. `failed`, `cancelled`, and `lost` are
-returned, not thrown. Automatic step keys are the number of `agent()` calls
-started so far in that script run. A step whose task has been revised is
-finished only when that newest revision is sealed. `agent()` also returns
-`attempts`, the number of attempts made for that call.
+SDK retries with bounded backoff while the run is `running` or `blocked`. A
+sealed `candidate` is returned as `completed`. `failed`, `cancelled`, and
+`lost` are returned, not thrown. Automatic step keys are the number of
+`agent()` calls started so far in that script run. A step whose task has been
+revised is finished only when that newest revision is sealed. `agent()` also
+returns `attempts`, the number of attempts made for that call.
 
 `parallel()` starts every thunk in array order synchronously so those automatic
 keys are assigned in array order, then awaits them and preserves that order.
+
+`pipeline(stages)` takes a non-empty array of at most 64 functions. Stage `i`
+is called with the recorded result of stage `i-1` (`undefined` for the first)
+and returns an `agent()` promise. Stages run strictly one after another. If a
+stage result's `outcome` is not `completed`, later stages are not launched and
+not journaled, and `pipeline()` resolves with `{ results, stopped_at }` where
+`stopped_at` is that stage's index, or `null` when every stage completed. A
+stage that throws rejects the pipeline with that error. Each stage function is
+called at most once per `pipeline()` invocation in a process; a resumed script
+replays journaled stages through `agent()` and does not launch a duplicate.
+
+A pipeline reserves automatic keys from the same counter `agent()` uses, in
+stage order, before it awaits. Inside `parallel()`, that reservation can still
+depend on which thunk calls `pipeline()` first after an `await`, so
+`pipeline(stages, { key })` is required there: stage `i` uses `key-i`. Without
+a prefix, `pipeline()` inside `parallel()` throws a `TypeError` before any
+launch.
 
 `agent()` accepts an optional `deadline`, a positive integer number of seconds
 at most 86400. The SDK measures remaining wall-clock time from when the step's
@@ -644,9 +659,8 @@ changed deadline does. A deadline applies per attempt: each attempt gets the
 full deadline from its own first-attempt clock. Retries share the run's
 `max_parallel` cap and stop if the run is no longer running or blocked.
 
-This version does not include `pipeline()`, TypeScript tooling, or
-head migration during a run. `brgr workflow create` still records a run
-without a driver when a caller needs only the journal.
+This version does not include head migration during a run. `brgr workflow create`
+still records a run without a driver when a caller needs only the journal.
 
 ## Development
 
