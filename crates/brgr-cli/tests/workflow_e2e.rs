@@ -522,6 +522,14 @@ try {
 writeFileSync("pipeline-parallel-typeerror-ok", "1");
 "#;
 
+const RESULT_FIELDS_SCRIPT: &str = r#"
+import { writeFileSync } from "node:fs";
+import { agent } from "./brgr-workflow.mjs";
+
+const sealed = await agent({ task: "BRGR_FIXTURE_OK fields", mode: "headless", key: "fields" });
+writeFileSync(process.env.BRGR_HOME + "/agent-result.json", JSON.stringify(sealed));
+"#;
+
 const PIPELINE_PARALLEL_KEYS_SCRIPT: &str = r#"
 import { writeFileSync } from "node:fs";
 import { agent, parallel, pipeline } from "./brgr-workflow.mjs";
@@ -1190,6 +1198,26 @@ fn task_objective(fixture: &Fixture, task: &str) -> String {
         .as_str()
         .unwrap()
         .to_owned()
+}
+
+fn declared_interface_fields(source: &str, name: &str) -> Vec<String> {
+    let header = format!("export interface {name} {{");
+    let start = source
+        .find(&header)
+        .unwrap_or_else(|| panic!("missing interface {name}"));
+    let body = &source[start + header.len()..];
+    let end = body.find('}').unwrap();
+    body[..end]
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('/') || line.starts_with('*') {
+                return None;
+            }
+            let field = line.split(':').next()?.trim();
+            (!field.is_empty()).then(|| field.to_owned())
+        })
+        .collect()
 }
 
 fn release_revision_two(fixture: &Fixture) {
@@ -2875,5 +2903,25 @@ fn pipeline_inside_parallel_uses_the_key_prefix_for_deterministic_keys() {
     wait_for_file(
         &fixture.home.join("pipeline-parallel-ok"),
         Duration::from_secs(5),
+    );
+}
+
+#[test]
+fn declared_agent_result_fields_match_a_real_run_result() {
+    require_node();
+    let fixture = fixture_home();
+    init_sdk(&fixture);
+    let dts = fs::read_to_string(fixture.scripts.join("brgr-workflow.d.ts")).unwrap();
+    let mut declared = declared_interface_fields(&dts, "AgentResult");
+    declared.sort();
+    let script = write_script(&fixture, "result-fields.mjs", RESULT_FIELDS_SCRIPT);
+    let run_id = start_workflow(&fixture, &script);
+    wait_run_state(&fixture, &run_id, "completed", Duration::from_secs(90));
+    let sealed = agent_result(&fixture);
+    let mut actual: Vec<String> = sealed.as_object().unwrap().keys().cloned().collect();
+    actual.sort();
+    assert_eq!(
+        actual, declared,
+        "result JSON keys {actual:?} != declared AgentResult {declared:?} payload={sealed}"
     );
 }
