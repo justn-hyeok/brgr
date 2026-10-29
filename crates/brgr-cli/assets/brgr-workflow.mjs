@@ -179,13 +179,6 @@ async function invoke(args) {
   }
 }
 
-async function requireRunning(runId) {
-  const status = parseJson((await invoke(["workflow", "status", runId])).stdout, "workflow status");
-  if (status.state !== "running") {
-    throw new Error(`workflow run ${runId} is ${status.state}`);
-  }
-}
-
 async function requireActive(runId) {
   const status = parseJson((await invoke(["workflow", "status", runId])).stdout, "workflow status");
   if (status.state !== "running" && status.state !== "blocked") {
@@ -200,7 +193,7 @@ async function launchStep(args, runId, mode) {
       return await execBrgr([...sourcePanePrefix(mode), "run", ...args]);
     } catch (error) {
       if (error && error.code === TEMPFAIL) {
-        await requireRunning(runId);
+        await requireActive(runId);
         await sleep(delay);
         delay = Math.min(delay * 2, BACKOFF_CAP_MS);
         continue;

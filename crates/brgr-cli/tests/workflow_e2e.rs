@@ -96,6 +96,23 @@ import { agent } from "./brgr-workflow.mjs";
 await agent({ task: "ASK which token", mode: "headless", key: "ask" });
 "#;
 
+const CAP_WHILE_BLOCKED_SCRIPT: &str = r#"
+import { existsSync, writeFileSync } from "node:fs";
+import { agent, parallel } from "./brgr-workflow.mjs";
+
+await parallel([
+  () => agent({ task: "ASK which token", mode: "headless", key: "ask" }),
+  async () => {
+    writeFileSync(process.env.BRGR_HOME + "/second-ready", "1");
+    while (!existsSync(process.env.BRGR_HOME + "/release-second")) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    writeFileSync(process.env.BRGR_HOME + "/second-launching", "1");
+    return agent({ task: "BRGR_FIXTURE_OK second", mode: "headless", key: "second" });
+  },
+]);
+"#;
+
 const DIVERGED_SCRIPT: &str = r#"
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -1226,6 +1243,29 @@ fn a_question_blocks_the_run_until_the_owner_replies() {
         1,
         "{status}"
     );
+}
+
+#[test]
+fn a_launch_that_hits_the_parallel_cap_while_blocked_keeps_waiting() {
+    require_node();
+    let fixture = fixture_with_script(ASKING_GJC);
+    init_sdk(&fixture);
+    let script = write_script(&fixture, "cap-blocked.mjs", CAP_WHILE_BLOCKED_SCRIPT);
+    let run_id = start_workflow_with(&fixture, &script, &["--max-parallel", "1"]);
+    let blocked = wait_run_state(&fixture, &run_id, "blocked", Duration::from_secs(90));
+    wait_for_file(&fixture.home.join("second-ready"), Duration::from_secs(90));
+    fs::write(fixture.home.join("release-second"), b"1").unwrap();
+    wait_for_file(
+        &fixture.home.join("second-launching"),
+        Duration::from_secs(90),
+    );
+    let ask = blocked["steps"][0]["task_id"].as_str().unwrap().to_owned();
+    assert_eq!(step_keys(&blocked), vec!["ask"], "{blocked}");
+    reply_to_worker_question(&fixture, &ask, "token-42");
+    let status = wait_run_state(&fixture, &run_id, "completed", Duration::from_secs(90));
+    let mut keys = step_keys(&status);
+    keys.sort();
+    assert_eq!(keys, vec!["ask", "second"], "{status}");
 }
 
 #[test]
