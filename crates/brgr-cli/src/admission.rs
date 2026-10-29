@@ -26,9 +26,7 @@ use brgr_protocol::{
 };
 use brgr_registry::{ActivationReceipt, Health, Registry};
 use brgr_runner::HarnessManifest;
-use brgr_store::{
-    Store, StoreError, WorkflowRunId, WorkflowStepKey, WorkflowStepOutcome,
-};
+use brgr_store::{Store, StoreError, WorkflowRunId, WorkflowStepKey, WorkflowStepOutcome};
 use config::Config;
 use serde::Serialize;
 use serde_json::json;
