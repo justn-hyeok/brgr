@@ -643,10 +643,14 @@ resume or a revise neither resets nor loses it. That clock lives in the store,
 not in launch-file timestamps. Until an attempt has started, `created_at` is
 null and the SDK waits for it: the deadline measures execution, not admission.
 A worker question does not extend the clock; it only suspends enforcement
-while the task is `awaiting_input`. On expiry the SDK cancels the step and
-returns the sealed outcome with `timed_out: true`; every other result has
-`timed_out: false`. A deadline never fails the run; the script decides what
-to do with `timed_out`.
+while the task is `awaiting_input`. On expiry this SDK call cancels the step.
+`timed_out` is true only when that call's cancel succeeded and the sealed
+outcome is `cancelled`. An owner `brgr cancel TASK` after the deadline, or a seal
+that is not that cancel (the worker finishing in the same instant), is
+`timed_out: false`. The store's `cancellation_intents` row has no actor or
+reason, so a resume after the driver died between the deadline cancel and the
+sealed read cannot recover who cancelled and reports `timed_out: false`. A
+deadline never fails the run; the script decides what to do with `timed_out`.
 
 `agent()` accepts an optional `retries`, an integer from 0 to 3 inclusive,
 default 0. Nothing is retried unless the script sets it. A retry happens only
