@@ -1,6 +1,14 @@
 # Changelog
 
-## Unreleased
+## 2.15.10 — 2026-10-29
+
+Dynamic Workflows ships: a node script drives workers with a journaled, resumable run.
+
+- Start with `brgr workflow init` (writes the SDK, TypeScript declarations and an
+  example) and `brgr workflow run`. The SDK has `agent()`, `parallel()` and
+  `pipeline()`, per-step `deadline` and `retries`. Every result is a sealed
+  candidate; nothing is accepted for you. Details are in the entries below and in
+  `docs/guides/reference.md`.
 
 - Task objectives are capped at 256 KiB (`MAX_OBJECTIVE_BYTES`). `brgr run`
   and `TaskSpec::validate` refuse a longer objective without quoting it;
