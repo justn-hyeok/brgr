@@ -2976,7 +2976,7 @@ fn declared_agent_result_fields_match_a_real_run_result() {
     require_node();
     let fixture = fixture_home();
     init_sdk(&fixture);
-    let dts = fs::read_to_string(fixture.scripts.join("brgr-workflow.d.ts")).unwrap();
+    let dts = fs::read_to_string(fixture.scripts.join("brgr-workflow.d.mts")).unwrap();
     let mut declared = declared_interface_fields(&dts, "AgentResult");
     declared.sort();
     let script = write_script(&fixture, "result-fields.mjs", RESULT_FIELDS_SCRIPT);
