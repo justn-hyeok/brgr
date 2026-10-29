@@ -645,7 +645,7 @@ null and the SDK waits for it: the deadline measures execution, not admission.
 A worker question does not extend the clock; it only suspends enforcement
 while the task is `awaiting_input`. On expiry this SDK call cancels the step.
 `timed_out` is true only when that call's cancel succeeded and the sealed
-outcome is `cancelled`. An owner `brgr cancel` after the deadline, or a seal
+outcome is `cancelled`. An owner `brgr cancel TASK` after the deadline, or a seal
 that is not that cancel (the worker finishing in the same instant), is
 `timed_out: false`. The store's `cancellation_intents` row has no actor or
 reason, so a resume after the driver died between the deadline cancel and the
