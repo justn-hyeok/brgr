@@ -2086,7 +2086,9 @@ fn sdk_script_command(fixture: &Fixture, fake_bin: &Path, script: &Path) -> Comm
 }
 
 fn run_sdk_script(fixture: &Fixture, fake_bin: &Path, script: &Path) -> std::process::Output {
-    sdk_script_command(fixture, fake_bin, script).output().unwrap()
+    sdk_script_command(fixture, fake_bin, script)
+        .output()
+        .unwrap()
 }
 
 fn spawn_sdk_script(fixture: &Fixture, fake_bin: &Path, script: &Path) -> std::process::Child {
@@ -2553,9 +2555,7 @@ esac
         "cancel targeted another task id: {log}"
     );
     assert_eq!(
-        log.lines()
-            .filter(|line| line.contains(" cancel "))
-            .count(),
+        log.lines().filter(|line| line.contains(" cancel ")).count(),
         1,
         "cancelled more than the launched task: {log}"
     );
@@ -2566,7 +2566,10 @@ fn a_foreign_owner_cannot_cancel_a_workflow_step() {
     let fixture = fixture_with_script(HOLD_GJC);
     let run_id = create_workflow(&fixture, &[]);
     let launched = launch_workflow_step(&fixture, &run_id, "hold", "HOLD until release");
-    let task = json_output(&launched)["task_id"].as_str().unwrap().to_owned();
+    let task = json_output(&launched)["task_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
     wait_until_running(&fixture, &task);
     let foreign = [
         ("BRGR_OWNER_ID", "codex:someone-else"),
