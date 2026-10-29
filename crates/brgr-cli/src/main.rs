@@ -952,6 +952,17 @@ mod tests {
             "--step",
             "s",
             "--step-deadline",
+            "-1",
+        ]);
+        refuses(&[
+            "brgr",
+            "run",
+            "obj",
+            "--workflow",
+            "w",
+            "--step",
+            "s",
+            "--step-deadline",
             "86401",
         ]);
         refuses(&[

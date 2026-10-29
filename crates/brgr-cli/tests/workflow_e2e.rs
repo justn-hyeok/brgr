@@ -2434,6 +2434,176 @@ esac
 }
 
 #[test]
+fn a_distant_past_created_at_does_not_overflow_the_wait_timeout() {
+    require_node();
+    let fixture = fixture_home();
+    init_sdk(&fixture);
+    let fake_bin = write_fake_brgr(
+        &fixture,
+        r#"
+task="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+rid="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+dir="$(dirname "$0")"
+case " $* " in
+  *" run "*) printf '{"task_id":"%s"}\n' "$task";;
+  *" workflow status "*) printf '{"state":"running"}\n';;
+  *" status "*) printf '{"task":{"revision":1},"state":"running","created_at":1}\n';;
+  *" wait "*)
+    if [ -f "$dir/cancelled" ]; then
+      printf '{"task_id":"%s","result_id":"%s","outcome":"cancelled","revision":1}\n' "$task" "$rid"
+    else
+      printf 'Error: task %s did not produce a terminal result before the wait timeout\n' "$task" >&2
+      exit 1
+    fi
+    ;;
+  *" result "*) printf '{"result":{"outcome":"cancelled","revision":1,"result_id":"%s"},"artifacts":[]}\n' "$rid";;
+  *" cancel "*)
+    printf '1\n' > "$dir/cancelled"
+    printf '{"task_id":"%s","state":"cancel_requested"}\n' "$task"
+    ;;
+  *) printf '{"ok":true}\n';;
+esac
+"#,
+    );
+    let script = write_script(&fixture, "distant-past.mjs", ALREADY_CANCELLED_SCRIPT);
+    let output = run_sdk_script(&fixture, &fake_bin, &script);
+    assert!(
+        output.status.success(),
+        "sdk script failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let log = fake_argv_log(&fixture);
+    let wait_line = log
+        .lines()
+        .find(|line| line.contains("wait "))
+        .unwrap_or("");
+    let parsed = wait_line
+        .split("--timeout-seconds")
+        .nth(1)
+        .and_then(|rest| {
+            rest.trim_start_matches('=')
+                .split_whitespace()
+                .next()
+                .and_then(|value| value.parse::<u64>().ok())
+        });
+    assert!(
+        parsed == Some(1),
+        "distant-past wait timeout was {parsed:?} from {wait_line}"
+    );
+    let sealed = agent_result(&fixture);
+    assert_eq!(sealed["outcome"], "cancelled", "{sealed}");
+    assert_eq!(sealed["timed_out"], true, "{sealed}");
+}
+
+#[test]
+fn deadline_cancel_uses_only_the_launched_task_id() {
+    require_node();
+    let fixture = fixture_home();
+    init_sdk(&fixture);
+    let fake_bin = write_fake_brgr(
+        &fixture,
+        r#"
+task="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+other="cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+rid="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+now=$(/bin/date +%s)
+past=$((now - 10))
+dir="$(dirname "$0")"
+case " $* " in
+  *" run "*) printf '{"task_id":"%s"}\n' "$task";;
+  *" workflow status "*) printf '{"state":"running"}\n';;
+  *" status "*) printf '{"task":{"revision":1},"state":"running","created_at":%s}\n' "$past";;
+  *" wait "*)
+    if [ -f "$dir/cancelled" ]; then
+      printf '{"task_id":"%s","result_id":"%s","outcome":"cancelled","revision":1}\n' "$other" "$rid"
+    else
+      printf 'Error: task %s did not produce a terminal result before the wait timeout\n' "$task" >&2
+      exit 1
+    fi
+    ;;
+  *" result "*) printf '{"result":{"outcome":"cancelled","revision":1,"result_id":"%s"},"artifacts":[]}\n' "$rid";;
+  *" cancel "*)
+    printf '1\n' > "$dir/cancelled"
+    printf '{"task_id":"%s","state":"cancel_requested"}\n' "$task"
+    ;;
+  *) printf '{"ok":true}\n';;
+esac
+"#,
+    );
+    let script = write_script(&fixture, "cancel-launched.mjs", ALREADY_CANCELLED_SCRIPT);
+    let output = run_sdk_script(&fixture, &fake_bin, &script);
+    assert!(
+        output.status.success(),
+        "sdk script failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let log = fake_argv_log(&fixture);
+    let cancel_line = log
+        .lines()
+        .find(|line| line.contains(" cancel "))
+        .unwrap_or("");
+    assert!(
+        cancel_line.contains("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+        "cancel did not target the launched task: {log}"
+    );
+    assert!(
+        !cancel_line.contains("cccccccc-cccc-4ccc-8ccc-cccccccccccc"),
+        "cancel targeted another task id: {log}"
+    );
+    assert_eq!(
+        log.lines()
+            .filter(|line| line.contains(" cancel "))
+            .count(),
+        1,
+        "cancelled more than the launched task: {log}"
+    );
+}
+
+#[test]
+fn a_foreign_owner_cannot_cancel_a_workflow_step() {
+    let fixture = fixture_with_script(HOLD_GJC);
+    let run_id = create_workflow(&fixture, &[]);
+    let launched = launch_workflow_step(&fixture, &run_id, "hold", "HOLD until release");
+    let task = json_output(&launched)["task_id"].as_str().unwrap().to_owned();
+    wait_until_running(&fixture, &task);
+    let foreign = [
+        ("BRGR_OWNER_ID", "codex:someone-else"),
+        ("BRGR_SESSION_ID", "other-session"),
+    ];
+    let refused = run(
+        &fixture.home,
+        &fixture.workspace,
+        &["cancel", &task],
+        &foreign,
+    );
+    assert!(
+        !refused.status.success(),
+        "a different owner cancelled the step: {}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("BRGR_OWNER_ID differs"),
+        "{}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    let still = json_output(&run(
+        &fixture.home,
+        &fixture.workspace,
+        &["status", &task],
+        &owner_env(),
+    ));
+    assert_ne!(still["state"], "terminal", "{still}");
+    json_output(&run(
+        &fixture.home,
+        &fixture.workspace,
+        &["cancel", &task],
+        &owner_env(),
+    ));
+}
+
+#[test]
 fn a_deadline_timeout_cancel_is_not_retried() {
     require_node();
     let fixture = fixture_home();
@@ -2717,6 +2887,93 @@ fn a_changed_retries_under_an_existing_step_key_diverges() {
     );
     let log = workflow_log(&fixture, &run_id);
     assert!(log.contains("diverged"), "resume did not diverge: {log}");
+}
+
+#[test]
+fn step_deadline_is_refused_without_workflow_and_step_and_out_of_range() {
+    let fixture = fixture_home();
+    let refuses = |args: &[&str]| {
+        let output = run(&fixture.home, &fixture.workspace, args, &owner_env());
+        assert!(
+            !output.status.success(),
+            "accepted {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    refuses(&["run", "obj", "--step-deadline", "30"]);
+    refuses(&[
+        "run",
+        "obj",
+        "--workflow",
+        "w",
+        "--step",
+        "s",
+        "--step-deadline",
+        "0",
+    ]);
+    refuses(&[
+        "run",
+        "obj",
+        "--workflow",
+        "w",
+        "--step",
+        "s",
+        "--step-deadline",
+        "-1",
+    ]);
+    refuses(&[
+        "run",
+        "obj",
+        "--workflow",
+        "w",
+        "--step",
+        "s",
+        "--step-deadline",
+        "86401",
+    ]);
+    refuses(&[
+        "run",
+        "obj",
+        "--workflow",
+        "w",
+        "--step",
+        "s",
+        "--step-deadline",
+        "1.5",
+    ]);
+    refuses(&[
+        "run",
+        "obj",
+        "--workflow",
+        "w",
+        "--step",
+        "s",
+        "--step-deadline",
+        "nope",
+    ]);
+    refuses(&[
+        "run",
+        "obj",
+        "--workflow",
+        "w",
+        "--step",
+        "s",
+        "--step-deadline",
+        "18446744073709551616",
+    ]);
+    let run_id = create_workflow(&fixture, &[]);
+    let accepted = launch_workflow_step_with(
+        &fixture,
+        &run_id,
+        "ok",
+        "BRGR_FIXTURE_OK",
+        &["--step-deadline", "30"],
+    );
+    assert!(
+        accepted.status.success(),
+        "--step-deadline 30 with --workflow/--step was refused: {}",
+        String::from_utf8_lossy(&accepted.stderr)
+    );
 }
 
 #[test]
