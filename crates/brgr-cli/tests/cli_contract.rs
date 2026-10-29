@@ -1,4 +1,5 @@
 use std::{
+    fmt::Write as _,
     fs,
     io::Write as _,
     os::unix::fs::PermissionsExt,
@@ -988,6 +989,134 @@ impl PaneFixture {
     }
 }
 
+/// Bounded leftovers so a rare `.brgr` survival after accept names the files
+/// and the supervisor process instead of only `exists()`.
+fn leftover_brgr_debug(workspace: &Path, home: &Path, task: &str) -> String {
+    const LIMIT: usize = 4096;
+    let mut out = String::new();
+    out.push_str(".brgr listing:\n");
+    list_tree(&mut out, &workspace.join(".brgr"), 0);
+    out.push_str("supervisor:\n");
+    describe_supervisor_processes(&mut out, home, task);
+    if out.len() > LIMIT {
+        out.truncate(LIMIT);
+        out.push_str("\ntruncated");
+    }
+    out
+}
+
+fn clipped(text: &str, max: usize) -> String {
+    let text = text.trim();
+    match text.char_indices().nth(max) {
+        None => text.to_owned(),
+        Some((idx, _)) => format!("{}…", &text[..idx]),
+    }
+}
+
+fn list_tree(out: &mut String, path: &Path, depth: usize) {
+    const MAX_DEPTH: usize = 6;
+    const MAX_ENTRIES: usize = 32;
+    if depth > MAX_DEPTH {
+        out.push_str("  …\n");
+        return;
+    }
+    let Ok(meta) = fs::symlink_metadata(path) else {
+        let _ = writeln!(out, "  missing {}", path.display());
+        return;
+    };
+    let kind = if meta.file_type().is_symlink() {
+        "symlink"
+    } else if meta.is_dir() {
+        "dir"
+    } else {
+        "file"
+    };
+    let _ = writeln!(
+        out,
+        "{:indent$}{kind} {} {}",
+        "",
+        path.file_name().unwrap_or_default().to_string_lossy(),
+        meta.len(),
+        indent = depth.saturating_mul(2)
+    );
+    if !meta.is_dir() {
+        return;
+    }
+    let Ok(entries) = fs::read_dir(path) else {
+        out.push_str("  unreadable\n");
+        return;
+    };
+    for (index, entry) in entries.filter_map(Result::ok).take(MAX_ENTRIES).enumerate() {
+        if index + 1 == MAX_ENTRIES {
+            out.push_str("  …\n");
+            break;
+        }
+        list_tree(out, &entry.path(), depth + 1);
+    }
+}
+
+fn describe_supervisor_processes(out: &mut String, home: &Path, task: &str) {
+    let pid_path = home.join("runs").join(format!("{task}.pid"));
+    let receipt_path = home.join("runs").join(format!("{task}.supervisor.json"));
+    match fs::read_to_string(&pid_path) {
+        Ok(text) => {
+            let _ = writeln!(out, "pid-file: {}", clipped(&text, 128));
+        }
+        Err(_) => out.push_str("pid-file: absent\n"),
+    }
+    match fs::read_to_string(&receipt_path) {
+        Ok(text) => {
+            let _ = writeln!(out, "supervisor.json: {}", clipped(&text, 512));
+        }
+        Err(_) => out.push_str("supervisor.json: absent\n"),
+    }
+    let mut pids = Vec::new();
+    if let Ok(text) = fs::read_to_string(&pid_path)
+        && let Ok(pid) = text.trim().parse::<u32>()
+        && pid > 1
+    {
+        pids.push(pid.to_string());
+    }
+    if let Ok(bytes) = fs::read(&receipt_path)
+        && let Ok(value) = serde_json::from_slice::<Value>(&bytes)
+        && let Some(handle) = value.pointer("/identity/handle").and_then(Value::as_str)
+        && let Ok(pid) = handle.parse::<u32>()
+        && pid > 1
+        && !pids.iter().any(|seen| seen == handle)
+    {
+        pids.push(handle.to_owned());
+    }
+    if pids.is_empty() {
+        out.push_str("ps: no supervisor pid recorded\n");
+        return;
+    }
+    let output = Command::new("/bin/ps")
+        .args([
+            "-ww",
+            "-p",
+            &pids.join(","),
+            "-o",
+            "pid=,ppid=,stat=,lstart=,command=",
+        ])
+        .output();
+    match output {
+        Ok(output) => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let _ = writeln!(
+                out,
+                "ps status={}: {}\n{}",
+                output.status.code().unwrap_or(-1),
+                clipped(&stdout, 1024),
+                clipped(&stderr, 256)
+            );
+        }
+        Err(error) => {
+            let _ = writeln!(out, "ps: {error}");
+        }
+    }
+}
+
 /// The rendered name follows the split, before anything is sent to the agent.
 #[test]
 fn pane_mode_names_the_worker_pane_after_it_opens() {
@@ -1173,7 +1302,11 @@ fn pane_mode_runs_the_agent_in_a_pane_and_seals_its_report() {
         &["accept", task],
         &[("BRGR_OWNER_ID", "codex:pane-test")],
     ));
-    assert!(!fixture.workspace.join(".brgr").exists());
+    assert!(
+        !fixture.workspace.join(".brgr").exists(),
+        "{}",
+        leftover_brgr_debug(&fixture.workspace, &fixture.home, task)
+    );
     assert_eq!(fixture.state("closed").trim(), "closed");
 }
 
