@@ -2401,3 +2401,51 @@ fn a_withdrawn_question_no_longer_holds_the_result_or_gets_pushed() {
     assert_eq!(notices.len(), 1);
     assert_eq!(notices[0].message_id, note.message_id);
 }
+
+#[test]
+fn an_older_over_limit_task_still_loads() {
+    let root = TempDir::new().unwrap();
+    let store = Store::open(root.path()).unwrap();
+    let mut item = task();
+    item.objective = "x".repeat(brgr_protocol::MAX_OBJECTIVE_BYTES + 1);
+    let spec_json = serde_json::to_string(&item).unwrap();
+    store
+        .connection
+        .execute(
+            "INSERT INTO tasks
+             (task_id, revision, owner_id, create_request_id, request_digest, spec_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![
+                item.task_id.to_string(),
+                item.revision,
+                item.owner_id.as_str(),
+                item.create_request_id,
+                "legacy-over-limit",
+                spec_json,
+            ],
+        )
+        .unwrap();
+    let loaded = store.task(item.task_id).unwrap();
+    assert_eq!(
+        loaded.objective.len(),
+        brgr_protocol::MAX_OBJECTIVE_BYTES + 1
+    );
+    assert_eq!(loaded.objective, item.objective);
+}
+
+#[test]
+fn record_task_refuses_a_new_over_limit_objective() {
+    let root = TempDir::new().unwrap();
+    let mut store = Store::open(root.path()).unwrap();
+    let mut item = task();
+    item.objective = "x".repeat(brgr_protocol::MAX_OBJECTIVE_BYTES + 1);
+    let error = store
+        .record_task(&item, "new-over-limit")
+        .expect_err("store admitted an over-long objective");
+    let shown = error.to_string();
+    assert!(
+        shown.contains("262144"),
+        "error must name the limit: {shown}"
+    );
+    assert!(!shown.contains(&item.objective), "{shown}");
+}

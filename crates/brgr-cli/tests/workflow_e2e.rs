@@ -80,6 +80,42 @@ for (const options of cases) {
 writeFileSync("typeerror-ok", "1");
 "#;
 
+const OVERLONG_TASK_SCRIPT: &str = r#"
+import { writeFileSync } from "node:fs";
+import { agent } from "./brgr-workflow.mjs";
+
+const limit = 262144;
+const over = "x".repeat(limit + 1);
+try {
+  await agent({ task: over, mode: "headless", key: "overlong" });
+  writeFileSync(process.env.BRGR_HOME + "/agent-error.txt", "agent() returned");
+} catch (error) {
+  if (!(error instanceof TypeError)) {
+    throw error;
+  }
+  const message = String(error.message);
+  if (message.includes(over) || message.includes("xxx")) {
+    throw new Error("TypeError quoted the task: " + message.slice(0, 200));
+  }
+  if (!message.includes(String(limit))) {
+    throw new Error("TypeError must name the limit: " + message);
+  }
+  writeFileSync(process.env.BRGR_HOME + "/agent-error.txt", message);
+}
+"#;
+
+const EXACT_LIMIT_TASK_SCRIPT: &str = r#"
+import { writeFileSync } from "node:fs";
+import { agent } from "./brgr-workflow.mjs";
+
+const sealed = await agent({
+  task: "x".repeat(262144),
+  mode: "headless",
+  key: "at-limit",
+});
+writeFileSync(process.env.BRGR_HOME + "/agent-result.json", JSON.stringify(sealed));
+"#;
+
 const FAILED_SCRIPT: &str = r#"
 import { agent } from "./brgr-workflow.mjs";
 
@@ -2177,6 +2213,72 @@ esac
         log.contains("--step-deadline=60"),
         "deadline was not passed with = : {log}"
     );
+}
+
+#[test]
+fn sdk_refuses_an_over_long_task_before_launching() {
+    require_node();
+    let fixture = fixture_home();
+    init_sdk(&fixture);
+    let fake_bin = write_fake_brgr(
+        &fixture,
+        r#"
+printf '%s\n' "unexpected launch" >&2
+exit 1
+"#,
+    );
+    let script = write_script(&fixture, "overlong.mjs", OVERLONG_TASK_SCRIPT);
+    let output = run_sdk_script(&fixture, &fake_bin, &script);
+    assert!(
+        output.status.success(),
+        "sdk script failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let log = fake_argv_log(&fixture);
+    assert!(
+        !log.contains(" run "),
+        "over-long task launched brgr run: {log}"
+    );
+    let message = fs::read_to_string(fixture.home.join("agent-error.txt")).unwrap();
+    assert!(
+        message.contains("262144"),
+        "TypeError must name the limit: {message}"
+    );
+    assert!(!message.contains(&"x".repeat(20)), "{message}");
+}
+
+#[test]
+fn sdk_accepts_a_256_kib_task_and_launches() {
+    require_node();
+    let fixture = fixture_home();
+    init_sdk(&fixture);
+    let fake_bin = write_fake_brgr(
+        &fixture,
+        r#"
+task="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+rid="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+now=$(/bin/date +%s)
+case " $* " in
+  *" run "*) printf '{"task_id":"%s"}\n' "$task";;
+  *" workflow status "*) printf '{"state":"running"}\n';;
+  *" status "*) printf '{"task":{"revision":1},"state":"running","created_at":%s}\n' "$now";;
+  *" wait "*) printf '{"task_id":"%s","result_id":"%s","outcome":"candidate","revision":1}\n' "$task" "$rid";;
+  *" result "*) printf '{"result":{"outcome":"candidate","revision":1,"result_id":"%s"},"artifacts":[{"text":"ok"}]}\n' "$rid";;
+  *) printf '{"ok":true}\n';;
+esac
+"#,
+    );
+    let script = write_script(&fixture, "at-limit.mjs", EXACT_LIMIT_TASK_SCRIPT);
+    let output = run_sdk_script(&fixture, &fake_bin, &script);
+    assert!(
+        output.status.success(),
+        "sdk script failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let log = fake_argv_log(&fixture);
+    assert!(log.contains(" run "), "256 KiB task did not launch: {log}");
 }
 
 #[test]

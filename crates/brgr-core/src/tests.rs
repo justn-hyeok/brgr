@@ -740,6 +740,16 @@ fn attempt_number_is_bounded_by_frozen_revision() {
 }
 
 #[test]
+fn an_over_limit_stored_spec_can_still_form_a_revision() {
+    let mut spec = task_spec(TaskId::new(), 1);
+    spec.objective = "x".repeat(brgr_protocol::MAX_OBJECTIVE_BYTES + 1);
+    spec.acceptance_criteria = vec!["y".repeat(brgr_protocol::MAX_CRITERION_BYTES + 1)];
+    TaskRevision::new(spec).expect(
+        "an older stored task over the admission size limits must still wrap as a revision",
+    );
+}
+
+#[test]
 fn revision_replacement_is_sequential_and_preserves_original() {
     let task_id = TaskId::new();
     let original = TaskRevision::new(task_spec(task_id, 1)).unwrap();

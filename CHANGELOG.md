@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Task objectives are capped at 256 KiB (`MAX_OBJECTIVE_BYTES`). `brgr run`
+  and `TaskSpec::validate` refuse a longer objective without quoting it;
+  `agent()` throws a `TypeError` before launching. JSON Schema `maxLength` on
+  `objective` is 262144 characters (not bytes); the Rust byte check is the
+  authority. The default acceptance criterion no longer copies an objective
+  longer than 512 bytes. Each `--criterion` is at most 4096 bytes, at most 32
+  criteria, 65536 bytes in total. Existing stored tasks over the limit still
+  load: size limits apply at admission (`validate`), not when wrapping a
+  stored spec (`validate_stored`).
 - Workflow `agent()` `timed_out` is true only when this SDK call issued the
   deadline cancel and the sealed outcome is `cancelled`. An owner `brgr cancel`
   after the deadline, a seal that is not that cancel, and a resume that cannot

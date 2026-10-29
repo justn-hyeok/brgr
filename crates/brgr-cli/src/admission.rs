@@ -34,11 +34,21 @@ use sha2::{Digest, Sha256};
 
 use crate::workflow::{self, diverged_error};
 
+/// Quotes the objective in the default criterion only when the whole string
+/// fits in 512 UTF-8 bytes. Longer objectives get a fixed criterion so a large
+/// prompt is not doubled into `acceptance_criteria`. A valid `str` is already
+/// on a char boundary at `len()`; this path never slices inside a code point.
+const DEFAULT_CRITERION_OBJECTIVE_BYTES: usize = 512;
+const DEFAULT_CRITERION_WITHOUT_OBJECTIVE: &str = "Objective achieved";
+
 pub(crate) fn acceptance_criteria(objective: &str, criteria: Vec<String>) -> Vec<String> {
-    if criteria.is_empty() {
-        vec![format!("Objective achieved: {objective}")]
+    if !criteria.is_empty() {
+        return criteria;
+    }
+    if objective.len() > DEFAULT_CRITERION_OBJECTIVE_BYTES {
+        vec![DEFAULT_CRITERION_WITHOUT_OBJECTIVE.to_owned()]
     } else {
-        criteria
+        vec![format!("Objective achieved: {objective}")]
     }
 }
 
@@ -1478,6 +1488,74 @@ mod instruction_tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("BRGR.md"), "{error}");
+    }
+}
+
+#[cfg(test)]
+mod criterion_bound_tests {
+    use super::acceptance_criteria;
+
+    #[test]
+    fn a_short_objective_is_quoted_in_the_default_criterion() {
+        let criteria = acceptance_criteria("ship the patch", Vec::new());
+        assert_eq!(
+            criteria,
+            vec!["Objective achieved: ship the patch".to_owned()]
+        );
+    }
+
+    #[test]
+    fn a_512_byte_objective_is_quoted_and_a_longer_one_is_not() {
+        let at_limit = "b".repeat(512);
+        let quoted = acceptance_criteria(&at_limit, Vec::new());
+        assert_eq!(quoted, vec![format!("Objective achieved: {at_limit}")]);
+
+        let over = "c".repeat(513);
+        let bounded = acceptance_criteria(&over, Vec::new());
+        assert_eq!(bounded, vec!["Objective achieved".to_owned()]);
+        assert!(!bounded[0].contains(&over));
+        assert!(bounded[0].len() < 64, "{}", bounded[0].len());
+    }
+
+    #[test]
+    fn a_100_kib_objective_gets_a_small_default_criterion() {
+        let objective = "d".repeat(100 * 1024);
+        let criteria = acceptance_criteria(&objective, Vec::new());
+        assert_eq!(criteria.len(), 1);
+        assert!(
+            criteria[0].len() < 64,
+            "default criterion copied the objective: {} bytes",
+            criteria[0].len()
+        );
+        assert!(!criteria[0].contains(&objective));
+        assert_eq!(criteria[0], "Objective achieved");
+    }
+
+    #[test]
+    fn default_criterion_cut_does_not_split_a_multibyte_character() {
+        // 511 ASCII bytes plus U+00E9 (2 bytes) is 513 bytes, so the objective
+        // is not quoted. The criterion is valid UTF-8 either way.
+        let mut objective = "e".repeat(511);
+        objective.push('é');
+        assert_eq!(objective.len(), 513);
+        assert!(!objective.is_char_boundary(512));
+        let criteria = acceptance_criteria(&objective, Vec::new());
+        assert_eq!(criteria, vec!["Objective achieved".to_owned()]);
+        assert!(criteria[0].is_char_boundary(criteria[0].len()));
+
+        let hangul = "가".repeat(171);
+        assert_eq!(hangul.len(), 513);
+        let criteria = acceptance_criteria(&hangul, Vec::new());
+        assert_eq!(criteria, vec!["Objective achieved".to_owned()]);
+    }
+
+    #[test]
+    fn explicit_criteria_are_left_alone() {
+        let given = vec!["tests pass".to_owned()];
+        assert_eq!(
+            acceptance_criteria(&"x".repeat(100 * 1024), given.clone()),
+            given
+        );
     }
 }
 
