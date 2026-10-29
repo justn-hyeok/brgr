@@ -8766,3 +8766,128 @@ fn the_incoming_session_records_the_next_revision_through_the_guard() {
         "a recorded revision did not resume the handoff"
     );
 }
+
+#[test]
+fn a_256_kib_objective_is_admitted_by_brgr_run() {
+    let (_temp, home, workspace) = gjc_home();
+    let objective = "a".repeat(brgr_protocol::MAX_OBJECTIVE_BYTES);
+    let launched = json_output(&run(
+        &home,
+        &[
+            "run",
+            &objective,
+            "--workspace",
+            workspace.to_str().unwrap(),
+        ],
+        &[("BRGR_OWNER_ID", "codex:objective-limit")],
+    ));
+    let task = launched["task_id"].as_str().unwrap();
+    let stored = store_task(&home, task);
+    assert_eq!(stored.objective.len(), brgr_protocol::MAX_OBJECTIVE_BYTES);
+    let _ = run(
+        &home,
+        &["cancel", task],
+        &[("BRGR_OWNER_ID", "codex:objective-limit")],
+    );
+}
+
+#[test]
+fn a_256_kib_plus_one_objective_is_refused_by_brgr_run_without_creating_a_task() {
+    let (_temp, home, workspace) = gjc_home();
+    let objective = "a".repeat(brgr_protocol::MAX_OBJECTIVE_BYTES + 1);
+    let output = run(
+        &home,
+        &[
+            "run",
+            &objective,
+            "--workspace",
+            workspace.to_str().unwrap(),
+        ],
+        &[("BRGR_OWNER_ID", "codex:objective-limit")],
+    );
+    assert!(
+        !output.status.success(),
+        "over-long objective was admitted: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(&brgr_protocol::MAX_OBJECTIVE_BYTES.to_string()),
+        "error must name the limit: {stderr}"
+    );
+    assert!(!stderr.contains(&objective), "error quoted the objective");
+    let store = brgr_store::Store::open(home.join("store")).unwrap();
+    assert!(
+        store.tasks(100).unwrap().is_empty(),
+        "an over-long run created a task"
+    );
+}
+
+#[test]
+fn default_criterion_for_a_100_kib_objective_stays_small() {
+    let (_temp, home, workspace) = gjc_home();
+    let objective = "b".repeat(100 * 1024);
+    let launched = json_output(&run(
+        &home,
+        &[
+            "run",
+            &objective,
+            "--workspace",
+            workspace.to_str().unwrap(),
+        ],
+        &[("BRGR_OWNER_ID", "codex:criterion-bound")],
+    ));
+    let task = launched["task_id"].as_str().unwrap();
+    let stored = store_task(&home, task);
+    assert_eq!(stored.acceptance_criteria.len(), 1);
+    assert!(
+        stored.acceptance_criteria[0].len() < 64,
+        "default criterion copied the objective: {:?}",
+        stored.acceptance_criteria[0].len()
+    );
+    assert!(!stored.acceptance_criteria[0].contains(&objective));
+    let _ = run(
+        &home,
+        &["cancel", task],
+        &[("BRGR_OWNER_ID", "codex:criterion-bound")],
+    );
+}
+
+#[test]
+fn an_older_stored_over_limit_task_still_reads_through_status() {
+    let (_temp, home, workspace) = gjc_home();
+    let created = json_output(&run(
+        &home,
+        &[
+            "run",
+            "BRGR_FIXTURE_OK",
+            "--workspace",
+            workspace.to_str().unwrap(),
+            "--foreground",
+        ],
+        &[("BRGR_OWNER_ID", "codex:legacy-objective")],
+    ));
+    let task = created["task_id"].as_str().unwrap();
+    let over = "z".repeat(brgr_protocol::MAX_OBJECTIVE_BYTES + 1);
+    {
+        let spec = store_task(&home, task);
+        let mut value = serde_json::to_value(&spec).unwrap();
+        value["objective"] = json!(over);
+        let conn = rusqlite::Connection::open(home.join("store").join("brgr.sqlite3")).unwrap();
+        conn.execute(
+            "UPDATE tasks SET spec_json = ?1 WHERE task_id = ?2 AND revision = ?3",
+            rusqlite::params![value.to_string(), task, spec.revision],
+        )
+        .unwrap();
+    }
+    let listed = json_output(&run(
+        &home,
+        &["status", task, "--observe"],
+        &[("BRGR_OWNER_ID", "codex:legacy-objective")],
+    ));
+    assert_eq!(
+        listed["task"]["objective"].as_str().unwrap().len(),
+        over.len()
+    );
+    assert_eq!(listed["task"]["objective"], over);
+}

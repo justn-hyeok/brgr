@@ -17,12 +17,15 @@ pub struct TaskRevision {
 impl TaskRevision {
     /// Validates and freezes a task specification.
     ///
+    /// Uses [`TaskSpec::validate_stored`] so an older over-limit spec still
+    /// wraps; new admissions apply size limits through [`TaskSpec::validate`].
+    ///
     /// # Errors
     ///
     /// Returns [`CoreError::InvalidRevision`] for revision zero, or forwards a
     /// protocol validation error for an invalid task contract.
     pub fn new(spec: TaskSpec) -> Result<Self, CoreError> {
-        spec.validate()?;
+        spec.validate_stored()?;
         if spec.revision == 0 {
             return Err(CoreError::InvalidRevision(0));
         }

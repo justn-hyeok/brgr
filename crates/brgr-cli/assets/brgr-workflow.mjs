@@ -9,6 +9,7 @@ const BACKOFF_START_MS = 1000;
 const BACKOFF_CAP_MS = 15000;
 const MAX_OUTPUT = 16 * 1024 * 1024;
 const MAX_DEADLINE_SECONDS = 86400;
+const MAX_OBJECTIVE_BYTES = 262144;
 const MAX_RETRIES = 3;
 const MAX_PIPELINE_STAGES = 64;
 const pipelineStore = new AsyncLocalStorage();
@@ -103,6 +104,9 @@ function validateOptions(options) {
   }
   walk(options, new WeakSet());
   requireString(options, "task", true);
+  if (Buffer.byteLength(options.task) > MAX_OBJECTIVE_BYTES) {
+    throw new TypeError(`agent() task must be at most ${MAX_OBJECTIVE_BYTES} bytes`);
+  }
   requireString(options, "harness", false);
   requireString(options, "model", false);
   requireString(options, "effort", false);

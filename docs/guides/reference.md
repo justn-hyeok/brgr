@@ -237,6 +237,12 @@ brgr result TASK
 brgr accept TASK --reason "criteria verified"
 ```
 
+A task objective is at most 256 KiB (UTF-8 bytes). `brgr run` and the workflow
+SDK `agent()` refuse a longer one before creating a task. Omit `--criterion`
+only for a short objective: longer than 512 bytes, the default criterion is
+the fixed text `Objective achieved` and does not quote the prompt. Each
+`--criterion` is at most 4096 bytes, at most 32 criteria, 65536 bytes in total.
+
 If a candidate misses the criteria, use `brgr reject TASK --reason "..."` and
 `brgr revise TASK "Corrected request" --criterion "new observable check"`.
 The old result and decision remain intact. `brgr result TASK --ack` acknowledges

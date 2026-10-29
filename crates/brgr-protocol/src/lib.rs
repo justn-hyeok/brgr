@@ -70,6 +70,18 @@ use uuid::Uuid;
 
 pub const SCHEMA_V1: &str = "brgr/v1";
 
+/// Maximum UTF-8 byte length of a task objective at admission.
+///
+/// JSON Schema `maxLength` on `objective` is 262144 characters, not bytes.
+/// [`TaskSpec::validate`] is the authority and counts bytes.
+pub const MAX_OBJECTIVE_BYTES: usize = 262_144;
+/// Maximum number of acceptance criteria on a newly admitted task.
+pub const MAX_ACCEPTANCE_CRITERIA: usize = 32;
+/// Maximum UTF-8 byte length of a single acceptance criterion.
+pub const MAX_CRITERION_BYTES: usize = 4_096;
+/// Maximum combined UTF-8 byte length of all acceptance criteria.
+pub const MAX_CRITERIA_TOTAL_BYTES: usize = 65_536;
+
 macro_rules! uuid_id {
     ($name:ident) => {
         #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
@@ -267,13 +279,35 @@ pub struct TaskSpec {
 }
 
 impl TaskSpec {
-    /// Validates the bounded v1 task contract.
+    /// Validates the bounded v1 task contract for a **new** admission.
+    ///
+    /// Includes [`MAX_OBJECTIVE_BYTES`] and the acceptance-criteria size
+    /// limits. Loading a stored task deserializes without calling this;
+    /// wrapping a stored spec uses [`Self::validate_stored`].
     ///
     /// # Errors
     ///
     /// Returns a [`ProtocolError`] when a required field or execution bound is
     /// invalid.
     pub fn validate(&self) -> Result<(), ProtocolError> {
+        self.validate_stored()?;
+        if self.objective.len() > MAX_OBJECTIVE_BYTES {
+            return Err(ProtocolError::ObjectiveTooLong);
+        }
+        if acceptance_criteria_exceed_size(&self.acceptance_criteria) {
+            return Err(ProtocolError::AcceptanceCriteriaTooLarge);
+        }
+        Ok(())
+    }
+
+    /// Shape checks that stored v1 tasks still satisfy, including those
+    /// admitted before objective and criteria size limits existed.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`ProtocolError`] when a required field or execution bound is
+    /// invalid.
+    pub fn validate_stored(&self) -> Result<(), ProtocolError> {
         if self.schema != SCHEMA_V1 {
             return Err(ProtocolError::UnsupportedSchema(self.schema.clone()));
         }
@@ -355,6 +389,17 @@ impl TaskSpec {
         }
         Ok(())
     }
+}
+
+fn acceptance_criteria_exceed_size(criteria: &[String]) -> bool {
+    let total = criteria
+        .iter()
+        .fold(0usize, |sum, criterion| sum.saturating_add(criterion.len()));
+    criteria.len() > MAX_ACCEPTANCE_CRITERIA
+        || criteria
+            .iter()
+            .any(|criterion| criterion.len() > MAX_CRITERION_BYTES)
+        || total > MAX_CRITERIA_TOTAL_BYTES
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -491,6 +536,15 @@ pub enum ProtocolError {
     UnsupportedSchema(String),
     #[error("objective must not be empty")]
     EmptyObjective,
+    #[error("objective must be at most {} bytes", MAX_OBJECTIVE_BYTES)]
+    ObjectiveTooLong,
+    #[error(
+        "acceptance criteria must be at most {} entries, each at most {} bytes, totaling at most {} bytes",
+        MAX_ACCEPTANCE_CRITERIA,
+        MAX_CRITERION_BYTES,
+        MAX_CRITERIA_TOTAL_BYTES
+    )]
+    AcceptanceCriteriaTooLarge,
     #[error("workspace must not be empty")]
     EmptyWorkspace,
     #[error("harness id must not be empty")]
@@ -514,6 +568,152 @@ pub enum ProtocolError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sample_task() -> TaskSpec {
+        TaskSpec {
+            schema: SCHEMA_V1.to_owned(),
+            task_id: TaskId::new(),
+            revision: 1,
+            create_request_id: "request-1".to_owned(),
+            owner_id: OwnerId::new("codex:thread-1").unwrap(),
+            objective: "Review".to_owned(),
+            workspace: "/tmp/worktree".to_owned(),
+            route: Route {
+                harness_id: "local.synthetic".to_owned(),
+                requested_model: None,
+                requested_effort: None,
+            },
+            required_capabilities: vec![],
+            artifact_contract: ArtifactContract {
+                media_type: "text/plain".to_owned(),
+                max_bytes: 1,
+            },
+            acceptance_criteria: vec!["reviewed result".to_owned()],
+            budget: AttemptBudget {
+                deadline_seconds: 1,
+                max_attempts: 2,
+            },
+            instructions: TaskInstructions::default(),
+            evidence: EvidenceSpec::default(),
+            max_concurrent_children: None,
+            permission: None,
+        }
+    }
+
+    #[test]
+    fn validate_stored_accepts_an_over_limit_objective_that_admission_refuses() {
+        let mut task = sample_task();
+        task.objective = "a".repeat(MAX_OBJECTIVE_BYTES + 1);
+        task.validate_stored().unwrap();
+        assert_eq!(task.validate(), Err(ProtocolError::ObjectiveTooLong));
+        task.objective = "ok".to_owned();
+        task.acceptance_criteria = vec!["y".repeat(MAX_CRITERION_BYTES + 1)];
+        task.validate_stored().unwrap();
+        assert_eq!(
+            task.validate(),
+            Err(ProtocolError::AcceptanceCriteriaTooLarge)
+        );
+    }
+
+    #[test]
+    fn a_256_kib_objective_is_accepted() {
+        let mut task = sample_task();
+        task.objective = "a".repeat(MAX_OBJECTIVE_BYTES);
+        assert_eq!(task.objective.len(), MAX_OBJECTIVE_BYTES);
+        task.validate().unwrap();
+    }
+
+    #[test]
+    fn a_256_kib_plus_one_objective_is_refused_without_quoting_it() {
+        let mut task = sample_task();
+        task.objective = "a".repeat(MAX_OBJECTIVE_BYTES + 1);
+        let error = task
+            .validate()
+            .expect_err("over-long objective was accepted");
+        assert_eq!(error, ProtocolError::ObjectiveTooLong);
+        let shown = error.to_string();
+        assert!(
+            shown.contains(&MAX_OBJECTIVE_BYTES.to_string()),
+            "error must name the limit: {shown}"
+        );
+        assert!(
+            !shown.contains(&task.objective),
+            "error quoted the objective"
+        );
+        assert!(
+            !shown.contains("aaa"),
+            "error leaked objective text: {shown}"
+        );
+    }
+
+    #[test]
+    fn objective_limit_counts_utf8_bytes_not_characters() {
+        let mut task = sample_task();
+        // 262143 ASCII bytes + one 2-byte character: 262144 characters, 262145 bytes.
+        // JSON Schema maxLength would accept this; the byte check is the authority.
+        let mut objective = "a".repeat(MAX_OBJECTIVE_BYTES - 1);
+        objective.push('é');
+        assert_eq!(objective.len(), MAX_OBJECTIVE_BYTES + 1);
+        assert_eq!(objective.chars().count(), MAX_OBJECTIVE_BYTES);
+        task.objective = objective.clone();
+        let error = task
+            .validate()
+            .expect_err("multibyte over-long objective was accepted");
+        assert_eq!(error, ProtocolError::ObjectiveTooLong);
+        assert!(!error.to_string().contains(&objective));
+
+        task.objective = "가".repeat(MAX_OBJECTIVE_BYTES / 3);
+        assert_eq!(task.objective.len(), (MAX_OBJECTIVE_BYTES / 3) * 3);
+        task.validate().unwrap();
+    }
+
+    #[test]
+    fn acceptance_criteria_are_bounded_by_count_and_bytes() {
+        let mut task = sample_task();
+        task.acceptance_criteria = vec!["x".repeat(MAX_CRITERION_BYTES)];
+        task.validate().unwrap();
+        task.acceptance_criteria = vec!["x".repeat(MAX_CRITERION_BYTES + 1)];
+        assert_eq!(
+            task.validate(),
+            Err(ProtocolError::AcceptanceCriteriaTooLarge)
+        );
+
+        task.acceptance_criteria = vec!["c".to_owned(); MAX_ACCEPTANCE_CRITERIA];
+        task.validate().unwrap();
+        task.acceptance_criteria = vec!["c".to_owned(); MAX_ACCEPTANCE_CRITERIA + 1];
+        assert_eq!(
+            task.validate(),
+            Err(ProtocolError::AcceptanceCriteriaTooLarge)
+        );
+
+        let piece = "y".repeat(MAX_CRITERION_BYTES);
+        let n = MAX_CRITERIA_TOTAL_BYTES / MAX_CRITERION_BYTES;
+        task.acceptance_criteria = vec![piece.clone(); n];
+        assert_eq!(
+            task.acceptance_criteria
+                .iter()
+                .map(String::len)
+                .sum::<usize>(),
+            n * MAX_CRITERION_BYTES
+        );
+        task.validate().unwrap();
+        task.acceptance_criteria.push("z".to_owned());
+        assert_eq!(
+            task.validate(),
+            Err(ProtocolError::AcceptanceCriteriaTooLarge)
+        );
+        let shown = ProtocolError::AcceptanceCriteriaTooLarge.to_string();
+        assert!(
+            shown.contains(&MAX_ACCEPTANCE_CRITERIA.to_string()),
+            "{shown}"
+        );
+        assert!(shown.contains(&MAX_CRITERION_BYTES.to_string()), "{shown}");
+        assert!(
+            shown.contains(&MAX_CRITERIA_TOTAL_BYTES.to_string()),
+            "{shown}"
+        );
+        assert!(!shown.contains(&piece));
+    }
 
     #[test]
     fn task_spec_round_trips_without_losing_typed_ids() {

@@ -26,6 +26,30 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 
 #[test]
+fn task_schema_mirrors_the_objective_and_criteria_admission_bounds() {
+    let schema = load_schema("task-v1.json");
+    let objective = &schema["properties"]["objective"];
+    assert_eq!(objective["minLength"], 1);
+    assert_eq!(
+        objective["maxLength"],
+        brgr_protocol::MAX_OBJECTIVE_BYTES,
+        "schemas/task-v1.json maxLength must stay aligned with MAX_OBJECTIVE_BYTES (characters vs bytes: see $comment)"
+    );
+    let comment = objective["$comment"].as_str().unwrap_or("");
+    assert!(
+        comment.contains("byte") && comment.contains("character"),
+        "schema must state the maxLength character vs byte gap: {comment}"
+    );
+    let criteria = &schema["properties"]["acceptance_criteria"];
+    assert_eq!(criteria["minItems"], 1);
+    assert_eq!(criteria["maxItems"], brgr_protocol::MAX_ACCEPTANCE_CRITERIA);
+    assert_eq!(
+        criteria["items"]["maxLength"],
+        brgr_protocol::MAX_CRITERION_BYTES
+    );
+}
+
+#[test]
 fn task_schema_describes_a_serialized_task_spec() {
     let task = TaskSpec {
         schema: SCHEMA_V1.to_owned(),
