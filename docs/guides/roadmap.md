@@ -190,7 +190,7 @@ stale Head의 결정 시도, 기존 Head 종료 실패, 나가는 Head가 침묵
 `brgr workflow resume RUN`, `brgr workflow cancel RUN`, `brgr workflow init`,
 `brgr run OBJECTIVE --workflow RUN --step KEY` (병렬 한도에 걸리면 종료 코드 75),
 분리된 node 드라이버, 런 상태 변화당 owner 알림 하나, 의존성 없는
-JavaScript SDK (`agent()`, `parallel()`, `pipeline()`), `brgr-workflow.d.ts`,
+JavaScript SDK (`agent()`, `parallel()`, `pipeline()`), `brgr-workflow.d.mts`,
 단계별 기한 (`agent()`의 `deadline`, 결과의 `timed_out`), 단계 재시도
 (`retries`, `KEY~retryN`). SDK는 accept/reject/apply/land를 노출하지
 않는다. 완료 조건은 실행 도중의 **관찰한** 결과를 바탕으로 처음에는 존재하지

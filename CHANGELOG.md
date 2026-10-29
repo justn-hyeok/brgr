@@ -7,8 +7,11 @@
   outcome with `{ results, stopped_at }`. Automatic keys come from the same
   counter as `agent()`; inside `parallel()` a `key` prefix is required so
   resume keys do not depend on interleaving.
-- `brgr workflow init` writes `brgr-workflow.d.ts` next to the SDK (no build
+- `brgr workflow init` writes `brgr-workflow.d.mts` next to the SDK (no build
   step), with the same refuse-different/`--force` behavior as the other files.
+  It is a `.d.mts` file because TypeScript pairs `./brgr-workflow.mjs` with
+  `.d.mts`; a `.d.ts` was not picked up (checked with `tsc --strict` under
+  nodenext and bundler resolution).
 - A workflow launch that hits the parallel cap (exit 75) while the run is
   `blocked` waits instead of throwing. A blocked run still admits a step under
   the cap and returns 75 at the cap.

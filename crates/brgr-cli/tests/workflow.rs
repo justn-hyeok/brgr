@@ -511,7 +511,7 @@ fn the_host_bridge_allows_workflow_init_inside_the_workspace() {
         String::from_utf8_lossy(&allowed.stderr)
     );
     assert!(fixture.workspace.join("brgr-workflow.mjs").is_file());
-    assert!(fixture.workspace.join("brgr-workflow.d.ts").is_file());
+    assert!(fixture.workspace.join("brgr-workflow.d.mts").is_file());
     assert!(fixture.workspace.join("example.mjs").is_file());
 }
 
@@ -551,15 +551,15 @@ fn workflow_init_writes_the_sdk_and_refuses_a_different_existing_file() {
     let dir = fixture.workspace.to_str().unwrap();
     let written = json_output(&run(&fixture.home, &["workflow", "init", dir], &[]));
     let sdk = fixture.workspace.join("brgr-workflow.mjs");
-    let dts = fixture.workspace.join("brgr-workflow.d.ts");
+    let dts = fixture.workspace.join("brgr-workflow.d.mts");
     let example = fixture.workspace.join("example.mjs");
     assert!(sdk.is_file(), "init did not write brgr-workflow.mjs");
-    assert!(dts.is_file(), "init did not write brgr-workflow.d.ts");
+    assert!(dts.is_file(), "init did not write brgr-workflow.d.mts");
     assert!(example.is_file(), "init did not write example.mjs");
     assert!(
         written["dts"]
             .as_str()
-            .is_some_and(|path| path.ends_with("brgr-workflow.d.ts")),
+            .is_some_and(|path| path.ends_with("brgr-workflow.d.mts")),
         "init JSON omitted dts: {written}"
     );
     assert!(

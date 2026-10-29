@@ -8,7 +8,7 @@ use serde_json::json;
 use crate::print_value;
 
 const SDK: &str = include_str!("../../assets/brgr-workflow.mjs");
-const DTS: &str = include_str!("../../assets/brgr-workflow.d.ts");
+const DTS: &str = include_str!("../../assets/brgr-workflow.d.mts");
 const EXAMPLE: &str = r#"import { agent, pipeline } from "./brgr-workflow.mjs";
 
 const { results, stopped_at } = await pipeline([
@@ -24,7 +24,7 @@ pub(super) fn write_sdk(dir: Option<&Path>, force: bool, json_output: bool) -> R
     };
     fs::create_dir_all(&dir).with_context(|| format!("could not create {}", dir.display()))?;
     let sdk_path = dir.join("brgr-workflow.mjs");
-    let dts_path = dir.join("brgr-workflow.d.ts");
+    let dts_path = dir.join("brgr-workflow.d.mts");
     let example_path = dir.join("example.mjs");
     write_if_allowed(&sdk_path, SDK, force)?;
     write_if_allowed(&dts_path, DTS, force)?;

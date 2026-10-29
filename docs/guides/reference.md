@@ -593,8 +593,10 @@ Steps open TUI worker panes beside the head's pane when `brgr workflow run SCRIP
 was started from a verified Herdr pane. Otherwise use `mode: "headless"`.
 
 A script imports the local module and uses `agent()`, `parallel()`, and
-`pipeline()`. `brgr workflow init` also writes `brgr-workflow.d.ts` next to the
+`pipeline()`. `brgr workflow init` also writes `brgr-workflow.d.mts` next to the
 SDK, with the same refuse-different/`--force` behavior; there is no build step.
+The declarations use the `.d.mts` extension because TypeScript pairs
+`./brgr-workflow.mjs` with `brgr-workflow.d.mts`, not `.d.ts`.
 
 ```javascript
 import { agent, pipeline } from "./brgr-workflow.mjs";
