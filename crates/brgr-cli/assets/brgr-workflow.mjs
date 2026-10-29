@@ -292,12 +292,8 @@ function waitTimeoutSeconds(remaining) {
   return Math.min(MAX_DEADLINE_SECONDS, Math.max(1, Math.ceil(remaining)));
 }
 
-function deadlineTimedOut(createdAt, deadlineSeconds, outcome) {
-  return (
-    outcome === "cancelled" &&
-    createdAt != null &&
-    remainingSeconds(createdAt, deadlineSeconds) <= 0
-  );
+function deadlineCancelTimedOut(issuedCancel, outcome) {
+  return issuedCancel === true && outcome === "cancelled";
 }
 
 function isWaitTimeout(error) {
@@ -362,9 +358,11 @@ async function sealedIfCurrent(taskId, waited) {
   return sealedFrom(waited, detailed);
 }
 
-async function cancelAndWait(taskId, runId, createdAt, deadlineSeconds) {
+async function cancelAndWait(taskId, runId) {
+  let issuedCancel = false;
   try {
     await invoke(["cancel", "--", taskId]);
+    issuedCancel = true;
   } catch (error) {
     if (!isAlreadyTerminal(error)) {
       throw error;
@@ -373,7 +371,7 @@ async function cancelAndWait(taskId, runId, createdAt, deadlineSeconds) {
   const sealed = await waitForSealed(taskId, runId);
   return {
     ...sealed,
-    timed_out: deadlineTimedOut(createdAt, deadlineSeconds, sealed.outcome),
+    timed_out: deadlineCancelTimedOut(issuedCancel, sealed.outcome),
   };
 }
 
@@ -396,16 +394,13 @@ async function waitForSealed(taskId, runId, deadlineSeconds) {
     if (waited && waited.result_id) {
       const sealed = await sealedIfCurrent(taskId, waited);
       if (sealed) {
-        return {
-          ...sealed,
-          timed_out: deadlineTimedOut(createdAt, deadlineSeconds, sealed.outcome),
-        };
+        return sealed;
       }
       await sleep(WAIT_POLL_MS);
       continue;
     }
     if (timedOut && remaining != null && remainingSeconds(createdAt, deadlineSeconds) <= 0) {
-      return cancelAndWait(taskId, runId, createdAt, deadlineSeconds);
+      return cancelAndWait(taskId, runId);
     }
     if (timedOut && remaining != null) {
       continue;

@@ -260,6 +260,33 @@ const sealed = await agent({
 writeFileSync(process.env.BRGR_HOME + "/agent-result.json", JSON.stringify(sealed));
 "#;
 
+const OWNER_CANCEL_AFTER_DEADLINE_SCRIPT: &str = r#"
+import { writeFileSync } from "node:fs";
+import { agent } from "./brgr-workflow.mjs";
+
+const sealed = await agent({
+  task: "HOLD until release",
+  key: "late",
+  deadline: 60,
+  mode: "headless",
+});
+writeFileSync(process.env.BRGR_HOME + "/agent-result.json", JSON.stringify(sealed));
+"#;
+
+const DEADLINE_RETRY_SCRIPT: &str = r#"
+import { writeFileSync } from "node:fs";
+import { agent } from "./brgr-workflow.mjs";
+
+const sealed = await agent({
+  task: "SLOW keep going",
+  key: "slow",
+  deadline: 2,
+  retries: 2,
+  mode: "headless",
+});
+writeFileSync(process.env.BRGR_HOME + "/agent-result.json", JSON.stringify(sealed));
+"#;
+
 const CANCELLED_RUN_SCRIPT: &str = r#"
 import { writeFileSync } from "node:fs";
 import { agent } from "./brgr-workflow.mjs";
@@ -2040,8 +2067,9 @@ fn write_fake_brgr(fixture: &Fixture, body: &str) -> PathBuf {
     fake_bin
 }
 
-fn run_sdk_script(fixture: &Fixture, fake_bin: &Path, script: &Path) -> std::process::Output {
-    Command::new("node")
+fn sdk_script_command(fixture: &Fixture, fake_bin: &Path, script: &Path) -> Command {
+    let mut command = Command::new("node");
+    command
         .arg(script)
         .current_dir(&fixture.scripts)
         .env("BRGR_BIN", fake_bin)
@@ -2053,9 +2081,32 @@ fn run_sdk_script(fixture: &Fixture, fake_bin: &Path, script: &Path) -> std::pro
         .env_remove("BRGR_PARENT_ATTEMPT_ID")
         .env_remove("CODEX_THREAD_ID")
         .env_remove("CLAUDE_CODE_SESSION_ID")
-        .env_remove("CURSOR_CONVERSATION_ID")
-        .output()
+        .env_remove("CURSOR_CONVERSATION_ID");
+    command
+}
+
+fn run_sdk_script(fixture: &Fixture, fake_bin: &Path, script: &Path) -> std::process::Output {
+    sdk_script_command(fixture, fake_bin, script).output().unwrap()
+}
+
+fn spawn_sdk_script(fixture: &Fixture, fake_bin: &Path, script: &Path) -> std::process::Child {
+    sdk_script_command(fixture, fake_bin, script)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .unwrap()
+}
+
+fn unix_seconds_ago(seconds: u64) -> i64 {
+    i64::try_from(
+        SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            .saturating_sub(seconds),
+    )
+    .unwrap()
 }
 
 fn fake_argv_log(fixture: &Fixture) -> String {
@@ -2181,7 +2232,7 @@ esac
 }
 
 #[test]
-fn a_cancelled_seal_past_the_deadline_is_reported_as_timed_out() {
+fn an_owner_cancel_after_the_deadline_is_not_timed_out() {
     require_node();
     let fixture = fixture_home();
     init_sdk(&fixture);
@@ -2211,11 +2262,226 @@ esac
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+    let log = fake_argv_log(&fixture);
+    assert!(
+        !log.contains(" cancel "),
+        "sdk issued cancel for an owner-cancelled seal: {log}"
+    );
     let sealed: Value =
         serde_json::from_str(&fs::read_to_string(fixture.home.join("agent-result.json")).unwrap())
             .unwrap();
     assert_eq!(sealed["outcome"], "cancelled", "{sealed}");
+    assert_eq!(sealed["timed_out"], false, "{sealed}");
+}
+
+#[test]
+fn owner_cancel_after_the_deadline_on_resume_is_not_timed_out() {
+    require_node();
+    let fixture = fixture_with_script(HOLD_GJC);
+    init_sdk(&fixture);
+    let script = write_script(
+        &fixture,
+        "owner-cancel-after-deadline.mjs",
+        OWNER_CANCEL_AFTER_DEADLINE_SCRIPT,
+    );
+    let run_id = start_workflow(&fixture, &script);
+    let task = wait_for_first_step(&fixture, &run_id);
+    wait_for_step_running(&fixture, &run_id, &task);
+    kill_driver(&fixture, &run_id);
+    set_task_attempt_clocks(&fixture, &task, unix_seconds_ago(120));
+    json_output(&run(
+        &fixture.home,
+        &fixture.workspace,
+        &["cancel", &task],
+        &owner_env(),
+    ));
+    json_output(&run(
+        &fixture.home,
+        &fixture.workspace,
+        &["workflow", "resume", &run_id],
+        &owner_env(),
+    ));
+    let status = wait_run_state(&fixture, &run_id, "completed", Duration::from_secs(90));
+    assert_eq!(step_keys(&status), vec!["late"], "{status}");
+    let sealed = agent_result(&fixture);
+    assert_eq!(sealed["outcome"], "cancelled", "{sealed}");
+    assert_eq!(sealed["timed_out"], false, "{sealed}");
+    assert_eq!(sealed_outcome(&fixture, &task), "cancelled");
+}
+
+#[test]
+fn a_deadline_cancel_that_seals_as_something_else_is_not_timed_out() {
+    require_node();
+    let fixture = fixture_home();
+    init_sdk(&fixture);
+    let fake_bin = write_fake_brgr(
+        &fixture,
+        r#"
+task="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+rid="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+now=$(/bin/date +%s)
+past=$((now - 10))
+dir="$(dirname "$0")"
+case " $* " in
+  *" run "*) printf '{"task_id":"%s"}\n' "$task";;
+  *" workflow status "*) printf '{"state":"running"}\n';;
+  *" status "*) printf '{"task":{"revision":1},"state":"running","created_at":%s}\n' "$past";;
+  *" wait "*)
+    if [ -f "$dir/cancelled" ]; then
+      printf '{"task_id":"%s","result_id":"%s","outcome":"candidate","revision":1}\n' "$task" "$rid"
+    else
+      printf 'Error: task %s did not produce a terminal result before the wait timeout\n' "$task" >&2
+      exit 1
+    fi
+    ;;
+  *" result "*) printf '{"result":{"outcome":"candidate","revision":1,"result_id":"%s"},"artifacts":[{"text":"ok"}]}\n' "$rid";;
+  *" cancel "*)
+    printf '1\n' > "$dir/cancelled"
+    printf '{"task_id":"%s","state":"cancel_requested"}\n' "$task"
+    ;;
+  *) printf '{"ok":true}\n';;
+esac
+"#,
+    );
+    let script = write_script(&fixture, "deadline-race.mjs", ALREADY_CANCELLED_SCRIPT);
+    let output = run_sdk_script(&fixture, &fake_bin, &script);
+    assert!(
+        output.status.success(),
+        "sdk script failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let log = fake_argv_log(&fixture);
+    let runs = log.lines().filter(|line| line.contains(" run ")).count();
+    assert_eq!(runs, 1, "race launched a second task: {log}");
+    assert!(log.contains(" cancel "), "sdk did not issue cancel: {log}");
+    let sealed = agent_result(&fixture);
+    assert_eq!(sealed["outcome"], "completed", "{sealed}");
+    assert_eq!(sealed["timed_out"], false, "{sealed}");
+}
+
+#[test]
+fn resume_after_driver_dies_between_deadline_cancel_and_read_is_not_timed_out() {
+    require_node();
+    let fixture = fixture_home();
+    init_sdk(&fixture);
+    let fake_bin = write_fake_brgr(
+        &fixture,
+        r#"
+task="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+rid="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+now=$(/bin/date +%s)
+past=$((now - 10))
+dir="$(dirname "$0")"
+case " $* " in
+  *" run "*) printf '{"task_id":"%s"}\n' "$task";;
+  *" workflow status "*) printf '{"state":"running"}\n';;
+  *" status "*) printf '{"task":{"revision":1},"state":"running","created_at":%s}\n' "$past";;
+  *" wait "*)
+    if [ -f "$dir/resume" ]; then
+      printf '{"task_id":"%s","result_id":"%s","outcome":"cancelled","revision":1}\n' "$task" "$rid"
+    elif [ -f "$dir/cancelled" ]; then
+      while [ ! -f "$dir/resume" ]; do
+        /bin/sleep 0.05
+      done
+      printf '{"task_id":"%s","result_id":"%s","outcome":"cancelled","revision":1}\n' "$task" "$rid"
+    else
+      printf 'Error: task %s did not produce a terminal result before the wait timeout\n' "$task" >&2
+      exit 1
+    fi
+    ;;
+  *" result "*) printf '{"result":{"outcome":"cancelled","revision":1,"result_id":"%s"},"artifacts":[]}\n' "$rid";;
+  *" cancel "*)
+    printf '1\n' > "$dir/cancelled"
+    printf '{"task_id":"%s","state":"cancel_requested"}\n' "$task"
+    ;;
+  *) printf '{"ok":true}\n';;
+esac
+"#,
+    );
+    let script = write_script(
+        &fixture,
+        "deadline-resume-gap.mjs",
+        ALREADY_CANCELLED_SCRIPT,
+    );
+    let mut first = spawn_sdk_script(&fixture, &fake_bin, &script);
+    assert!(
+        wait_until(Duration::from_secs(10), || fixture
+            .scripts
+            .join("cancelled")
+            .is_file()),
+        "first driver never issued cancel: log={}",
+        fake_argv_log(&fixture)
+    );
+    let _ = first.kill();
+    let _ = first.wait();
+    fs::write(fixture.scripts.join("resume"), b"1").unwrap();
+    let output = run_sdk_script(&fixture, &fake_bin, &script);
+    assert!(
+        output.status.success(),
+        "resume sdk script failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let log = fake_argv_log(&fixture);
+    let cancels = log.lines().filter(|line| line.contains(" cancel ")).count();
+    let runs = log.lines().filter(|line| line.contains(" run ")).count();
+    assert_eq!(cancels, 1, "resume issued a second cancel: {log}");
+    assert_eq!(runs, 2, "resume lost or duplicated the task: {log}");
+    let sealed = agent_result(&fixture);
+    assert_eq!(sealed["outcome"], "cancelled", "{sealed}");
+    assert_eq!(sealed["timed_out"], false, "{sealed}");
+}
+
+#[test]
+fn a_deadline_timeout_cancel_is_not_retried() {
+    require_node();
+    let fixture = fixture_home();
+    init_sdk(&fixture);
+    let fake_bin = write_fake_brgr(
+        &fixture,
+        r#"
+task="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+rid="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+now=$(/bin/date +%s)
+past=$((now - 10))
+dir="$(dirname "$0")"
+case " $* " in
+  *" run "*) printf '{"task_id":"%s"}\n' "$task";;
+  *" workflow status "*) printf '{"state":"running"}\n';;
+  *" status "*) printf '{"task":{"revision":1},"state":"running","created_at":%s}\n' "$past";;
+  *" wait "*)
+    if [ -f "$dir/cancelled" ]; then
+      printf '{"task_id":"%s","result_id":"%s","outcome":"cancelled","revision":1}\n' "$task" "$rid"
+    else
+      printf 'Error: task %s did not produce a terminal result before the wait timeout\n' "$task" >&2
+      exit 1
+    fi
+    ;;
+  *" result "*) printf '{"result":{"outcome":"cancelled","revision":1,"result_id":"%s"},"artifacts":[]}\n' "$rid";;
+  *" cancel "*)
+    printf '1\n' > "$dir/cancelled"
+    printf '{"task_id":"%s","state":"cancel_requested"}\n' "$task"
+    ;;
+  *) printf '{"ok":true}\n';;
+esac
+"#,
+    );
+    let script = write_script(&fixture, "deadline-retry.mjs", DEADLINE_RETRY_SCRIPT);
+    let output = run_sdk_script(&fixture, &fake_bin, &script);
+    assert!(
+        output.status.success(),
+        "sdk script failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let log = fake_argv_log(&fixture);
+    let runs = log.lines().filter(|line| line.contains(" run ")).count();
+    assert_eq!(runs, 1, "timed_out cancel was retried: {log}");
+    let sealed = agent_result(&fixture);
+    assert_eq!(sealed["outcome"], "cancelled", "{sealed}");
     assert_eq!(sealed["timed_out"], true, "{sealed}");
+    assert_eq!(sealed["attempts"], 1, "{sealed}");
 }
 
 #[test]
