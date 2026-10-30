@@ -95,3 +95,99 @@ fn status_verbose_on_a_pipe_is_the_pretty_json_byte_for_byte() {
     assert_piped_output_is_the_pretty_json(&home, &["status", "--verbose"], &[]);
     assert_piped_output_is_the_pretty_json(&home, &["status", &task, "--verbose"], &[]);
 }
+
+#[test]
+fn foreground_run_on_a_pipe_is_the_result_receipt_byte_for_byte() {
+    let (temp, home, workspace) = fixture_home();
+    let workspace_arg = workspace.to_str().unwrap();
+    let compact = json_output(&run(
+        &home,
+        &[
+            "--json",
+            "run",
+            "BRGR_FIXTURE_OK",
+            "--foreground",
+            "--workspace",
+            workspace_arg,
+        ],
+        &[],
+    ));
+    let workspace_arg = temp_workspace(&temp);
+    let piped = run(
+        &home,
+        &[
+            "run",
+            "BRGR_FIXTURE_OK",
+            "--foreground",
+            "--workspace",
+            &workspace_arg,
+        ],
+        &[],
+    );
+    assert!(
+        piped.status.success(),
+        "command failed: {}",
+        String::from_utf8_lossy(&piped.stderr)
+    );
+    let parsed: Value = serde_json::from_slice(&piped.stdout)
+        .unwrap_or_else(|_| panic!("not JSON: {}", String::from_utf8_lossy(&piped.stdout)));
+    // The receipt differs only in its ids: same shape, same outcome.
+    assert_eq!(parsed["outcome"], compact["outcome"]);
+    assert_eq!(parsed["schema"], compact["schema"]);
+    assert!(parsed["task_id"].as_str().unwrap().len() == 36);
+    assert_eq!(String::from_utf8_lossy(&piped.stdout), pretty(&parsed));
+}
+
+#[test]
+fn detached_run_on_a_pipe_is_the_launch_receipt_byte_for_byte() {
+    let (temp, home, _workspace) = fixture_home();
+    let piped = run(
+        &home,
+        &[
+            "run",
+            "BRGR_FIXTURE_OK",
+            "--workspace",
+            &temp_workspace(&temp),
+        ],
+        &[],
+    );
+    assert!(
+        piped.status.success(),
+        "command failed: {}",
+        String::from_utf8_lossy(&piped.stderr)
+    );
+    let parsed: Value = serde_json::from_slice(&piped.stdout)
+        .unwrap_or_else(|_| panic!("not JSON: {}", String::from_utf8_lossy(&piped.stdout)));
+    assert_eq!(parsed["state"], "starting");
+    assert_eq!(String::from_utf8_lossy(&piped.stdout), pretty(&parsed));
+    // `--json` on a second launch receipt has the same shape.
+    let compact = json_output(&run(
+        &home,
+        &[
+            "--json",
+            "run",
+            "BRGR_FIXTURE_OK",
+            "--workspace",
+            &temp_workspace(&temp),
+        ],
+        &[],
+    ));
+    assert_eq!(compact["state"], "starting");
+    assert_eq!(compact["schema"], parsed["schema"]);
+}
+
+/// A fresh directory for a run's `--workspace`; each run takes its own.
+fn temp_workspace(temp: &TempDir) -> String {
+    let workspace = temp.path().join(format!("work-{}", uuid_suffix()));
+    fs::create_dir_all(&workspace).unwrap();
+    workspace.to_str().unwrap().to_owned()
+}
+
+fn uuid_suffix() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    format!("{nanos:x}")
+}

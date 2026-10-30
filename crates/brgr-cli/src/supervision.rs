@@ -11,9 +11,7 @@ use std::{
 };
 
 use crate::omp_adapter::omp_process_manifest;
-use crate::{
-    Claimant, LaunchEnvelope, Paths, ProcessReceipt, print_value, workspace, write_json_atomic,
-};
+use crate::{Claimant, LaunchEnvelope, Paths, ProcessReceipt, workspace, write_json_atomic};
 use anyhow::{Context, Result, bail};
 use brgr_core::{ExecutionObservation, Supervisor};
 use brgr_protocol::{
@@ -95,6 +93,7 @@ async fn supervise_inner(
     write_json_atomic(&paths.supervisor(launch.spec.task_id), &receipt)?;
     let (task_id, revision) = (launch.spec.task_id, launch.spec.revision);
     let harness = launch.spec.route.harness_id.clone();
+    let task_workspace = launch.spec.workspace.clone();
     let result = supervisor
         .run_fresh_controlled(
             launch.spec,
@@ -115,6 +114,20 @@ async fn supervise_inner(
     crate::error_memo::record_result(paths, &harness, &result);
     let _ = fs::remove_file(cancel_path);
     let _ = fs::remove_file(paths.supervisor(result.task_id));
+    print_supervised_receipt(result, mode, json_output, harness, task_workspace, task_id)
+}
+
+/// The end of a supervised run: mode fields folded into the sealed receipt,
+/// then the human or JSON form for the current stdout.
+fn print_supervised_receipt(
+    result: ResultEnvelope,
+    mode: Option<(crate::execution_mode::ResolvedMode, &str)>,
+    json_output: bool,
+    harness: String,
+    workspace: String,
+    task_id: brgr_protocol::TaskId,
+) -> Result<()> {
+    let outcome = format!("{:?}", result.outcome).to_lowercase();
     let mut receipt = serde_json::to_value(result)?;
     if let Some((mode, reason)) = mode {
         let object = receipt
@@ -135,7 +148,17 @@ async fn supervise_inner(
             serde_json::Value::String(reason.to_owned()),
         );
     }
-    print_value(&receipt, json_output);
+    crate::human::print_run_receipt(
+        &receipt,
+        &crate::human::RunReceipt {
+            state: "terminal".to_owned(),
+            outcome: Some(outcome),
+            harness,
+            workspace,
+            task_id: task_id.to_string(),
+        },
+        json_output,
+    );
     Ok(())
 }
 

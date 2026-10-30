@@ -295,7 +295,7 @@ async fn plugin_command(paths: &Paths, command: PluginCommand) -> Result<()> {
 async fn execute(paths: &Paths, command: Command, json_output: bool) -> Result<()> {
     match command {
         Command::Run(args) => run_task(paths, args, json_output).await,
-        Command::Revise(args) => revise_task(paths, args, json_output).await,
+        Command::Revise(args) => Box::pin(revise_task(paths, args, json_output)).await,
         Command::Artifact { command } => evidence::artifact_command(paths, command, json_output),
         Command::Wait {
             task,

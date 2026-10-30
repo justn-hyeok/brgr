@@ -15,7 +15,7 @@ use crate::harness_commands::{
 use crate::supervision::{record_unstarted_terminal, spawn_supervisor};
 use crate::{
     Claimant, LaunchEnvelope, Paths, config, current_session, delegation_parent_from_environment,
-    notification, owner_from_environment, print_value, require_owner, workspace, write_json_atomic,
+    notification, owner_from_environment, require_owner, workspace, write_json_atomic,
     write_json_new,
 };
 use anyhow::{Context, Result, bail};
@@ -1147,14 +1147,22 @@ fn print_existing_task_receipt(
         );
         return Ok(());
     }
-    print_value(
-        &json!({
-            "task_id": spec.task_id,
-            "state": "starting",
-            "workspace": spec.workspace,
-            "harness": spec.route.harness_id,
-            "revision": spec.revision,
-        }),
+    let receipt = json!({
+        "task_id": spec.task_id,
+        "state": "starting",
+        "workspace": spec.workspace,
+        "harness": spec.route.harness_id,
+        "revision": spec.revision,
+    });
+    crate::human::print_run_receipt(
+        &receipt,
+        &crate::human::RunReceipt {
+            state: "starting".to_owned(),
+            outcome: None,
+            harness: spec.route.harness_id.clone(),
+            workspace: spec.workspace.clone(),
+            task_id: spec.task_id.to_string(),
+        },
         json_output,
     );
     Ok(())
@@ -1243,7 +1251,17 @@ fn print_launch_receipt(
         "source_pane": launch.source_pane,
         "instructions_digest": launch.instructions_digest,
     });
-    print_value(&receipt, json_output);
+    crate::human::print_run_receipt(
+        &receipt,
+        &crate::human::RunReceipt {
+            state: "starting".to_owned(),
+            outcome: None,
+            harness: launch.harness_id.clone(),
+            workspace: workspace.to_string_lossy().into_owned(),
+            task_id: launch.spec.task_id.to_string(),
+        },
+        json_output,
+    );
 }
 
 /// One role entry may hold at most 2,048 bytes and a task at most 16 entries, so

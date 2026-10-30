@@ -118,6 +118,16 @@ pub(crate) struct TaskDetail {
     pub questions: Option<u64>,
 }
 
+/// What `brgr run` reports, from the same receipt the JSON form prints.
+pub(crate) struct RunReceipt {
+    pub state: String,
+    /// The sealed outcome once a foreground run has finished.
+    pub outcome: Option<String>,
+    pub harness: String,
+    pub workspace: String,
+    pub task_id: String,
+}
+
 /// A display cell is capped so one hostile or huge field cannot stretch a
 /// line forever.
 const CELL_MAX: usize = 60;
@@ -212,6 +222,34 @@ pub(crate) fn task_detail(detail: &TaskDetail, now: u64) -> String {
         line("questions", &questions.to_string());
     }
     let _ = writeln!(output, "full detail: brgr status {} --json", detail.task_id);
+    output
+}
+
+/// Prints a `brgr run` receipt in the right form for the current stdout:
+/// the human block on a terminal, the JSON envelope everywhere else.
+pub(crate) fn print_run_receipt(
+    receipt: &serde_json::Value,
+    human: &RunReceipt,
+    json_output: bool,
+) {
+    if use_human_output(json_output, stdout_is_terminal()) {
+        print!("{}", run_receipt(human));
+    } else {
+        crate::print_value(receipt, json_output);
+    }
+}
+
+/// The `brgr run` receipt: a few key lines, ending with `task: <full id>`.
+pub(crate) fn run_receipt(receipt: &RunReceipt) -> String {
+    let mut output = String::new();
+    let _ = writeln!(output, "state: {}", safe_text(&receipt.state));
+    if let Some(outcome) = &receipt.outcome {
+        let _ = writeln!(output, "outcome: {}", safe_text(outcome));
+    }
+    let _ = writeln!(output, "harness: {}", safe_text(&receipt.harness));
+    let _ = writeln!(output, "workspace: {}", safe_text(&receipt.workspace));
+    // The last line is the machine-detectable id: `task: <full task id>`.
+    let _ = writeln!(output, "task: {}", receipt.task_id);
     output
 }
 
@@ -430,5 +468,56 @@ mod tests {
         assert!(!text.contains('\u{1b}'), "{text:?}");
         assert!(text.contains("harness: local.gjc [31m"));
         assert!(text.contains("workspace: /tmp/work /etc"));
+    }
+
+    #[test]
+    fn run_receipt_ends_with_the_full_task_id() {
+        let receipt = RunReceipt {
+            state: "starting".to_owned(),
+            outcome: None,
+            harness: "local.gjc".to_owned(),
+            workspace: "/tmp/work".to_owned(),
+            task_id: "2b2c279a-b8e1-43a8-846c-cb8344a301d7".to_owned(),
+        };
+        let text = run_receipt(&receipt);
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines[0], "state: starting");
+        assert_eq!(lines[1], "harness: local.gjc");
+        assert_eq!(lines[2], "workspace: /tmp/work");
+        assert_eq!(
+            lines.last(),
+            Some(&"task: 2b2c279a-b8e1-43a8-846c-cb8344a301d7")
+        );
+    }
+
+    #[test]
+    fn run_receipt_shows_a_finished_runs_outcome() {
+        let receipt = RunReceipt {
+            state: "terminal".to_owned(),
+            outcome: Some("candidate".to_owned()),
+            harness: "local.gjc".to_owned(),
+            workspace: "/tmp/work".to_owned(),
+            task_id: "2b2c279a-b8e1-43a8-846c-cb8344a301d7".to_owned(),
+        };
+        let text = run_receipt(&receipt);
+        assert!(text.contains("outcome: candidate"), "{text}");
+        assert!(text.ends_with("task: 2b2c279a-b8e1-43a8-846c-cb8344a301d7\n"));
+    }
+
+    #[test]
+    fn run_receipt_sanitizes_workspace_and_harness() {
+        let receipt = RunReceipt {
+            state: "starting".to_owned(),
+            outcome: None,
+            harness: "bad\u{1b}[31m".to_owned(),
+            workspace: "/tmp/a\u{202e}b".to_owned(),
+            task_id: "2b2c279a-b8e1-43a8-846c-cb8344a301d7".to_owned(),
+        };
+        let text = run_receipt(&receipt);
+        assert!(!text.contains('\u{1b}'), "{text:?}");
+        assert!(!text.contains('\u{202e}'), "{text:?}");
+        assert!(text.contains("harness: bad [31m"), "{text}");
+        assert!(text.contains("workspace: /tmp/a b"), "{text}");
+        assert!(text.ends_with("task: 2b2c279a-b8e1-43a8-846c-cb8344a301d7\n"));
     }
 }
