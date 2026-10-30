@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 2.15.11 — 2026-10-31
+
+A terminal-readable release: status, run and doctor say what matters first; `watch --all`; Devin model selection.
+
 - `brgr watch --all` follows this owner's unfinished tasks as of that
   invocation and does not add tasks created later. `--help` and the shipped
   skill show `brgr watch A B C` and `brgr watch --all`. Watch still does not
@@ -21,6 +25,8 @@
   configured default. An older Devin whose help has no `--model` still drafts with
   `model_select` unsupported and the same configured-default error. Model names are
   passed through; `devin models` is not parsed.
+- Tests only: a load flake in `agent_stops_waiting_when_the_workflow_run_is_no_longer_running`
+  now has a wider wait and prints node's stderr if it recurs.
 
 ## 2.15.10 — 2026-10-29
 
