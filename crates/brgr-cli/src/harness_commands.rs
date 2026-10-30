@@ -10,6 +10,7 @@ use crate::cli::{
     AddHarnessArgs, ClaudeCommand, CleanupCommand, CodexCommand, CursorCommand, HarnessCommand,
     IntegrateCommand,
 };
+use crate::human::{self, DoctorProblem};
 use crate::supervision::reconcile_pending;
 use crate::{
     Paths, codex_integration, pane_cleanup, print_value, require_owner, statusline_install,
@@ -300,49 +301,29 @@ pub(crate) async fn doctor(paths: &Paths, json_output: bool) -> Result<()> {
     let store_ok = Store::open(&paths.store).is_ok();
     let registry = Registry::open_with_control_home(&paths.registry, &paths.home);
     let registry_ok = registry.is_ok();
-    let mut harnesses = Vec::new();
-    if let Ok(registry) = registry {
-        match registry.registered_harness_ids() {
-            Ok(ids) => {
-                for id in ids {
-                    let health = match registry.health_probed(&id).await {
-                        Ok(status) => {
-                            let action = registry
-                                .recertify_action_for(&id)
-                                .unwrap_or_else(|_| recertify_action_fallback());
-                            doctor_harness_value(&id, status, &action)
-                        }
-                        Err(error) => json!({
-                            "id": id,
-                            "health": "unhealthy",
-                            "action": recertify_action_fallback(),
-                            "reason": error.to_string(),
-                        }),
-                    };
-                    harnesses.push(health);
-                }
-            }
-            Err(error) => harnesses.push(json!({
-                "health": "unhealthy",
-                "reason": error.to_string(),
-            })),
-        }
-    }
+    let harnesses = match registry {
+        Ok(registry) => doctor_harnesses(&registry).await,
+        Err(_) => Vec::new(),
+    };
     let integration = codex_integration::status(&paths.home)?;
     let claude_integration = codex_integration::claude_status(&paths.home)?;
+    let trace = crate::caller_pane::codex_trace_status();
     let healthy_harnesses = !harnesses.is_empty()
         && harnesses
             .iter()
             .all(|harness| harness["health"] == "healthy");
     // Either owner is enough; one that is installed must be current.
-    let integrations = [&integration, &claude_integration];
-    let integrated = integrations
-        .iter()
-        .any(|status| status["status"] == "installed")
-        && integrations
-            .iter()
-            .all(|status| status["status"] != "drifted");
+    let integrated = doctor_integrations_current(&integration, &claude_integration);
     let healthy = store_ok && registry_ok && healthy_harnesses && integrated;
+    let problems = doctor_problems(
+        store_ok,
+        registry_ok,
+        &harnesses,
+        &integration,
+        &claude_integration,
+        &trace,
+        healthy,
+    );
     let value = json!({
         "status": if healthy { "ok" } else { "needs_attention" },
         "store": store_ok,
@@ -350,14 +331,199 @@ pub(crate) async fn doctor(paths: &Paths, json_output: bool) -> Result<()> {
         "harnesses": harnesses,
         "codex_integration": integration,
         "claude_integration": claude_integration,
-        "codex_trace": crate::caller_pane::codex_trace_status(),
+        "codex_trace": trace,
+        "problems": problems.iter().map(problem_json).collect::<Vec<_>>(),
     });
-    print_value(&value, json_output);
+    human::print_doctor(&value, &problems, json_output);
     if healthy {
         Ok(())
     } else {
-        bail!("brgr doctor found an unavailable personal-use path")
+        bail!("{}", unavailable_path_error(&problems))
     }
+}
+
+async fn doctor_harnesses(registry: &Registry) -> Vec<serde_json::Value> {
+    let mut harnesses = Vec::new();
+    match registry.registered_harness_ids() {
+        Ok(ids) => {
+            for id in ids {
+                let health = match registry.health_probed(&id).await {
+                    Ok(status) => {
+                        let action = registry
+                            .recertify_action_for(&id)
+                            .unwrap_or_else(|_| recertify_action_fallback());
+                        doctor_harness_value(&id, status, &action)
+                    }
+                    Err(error) => json!({
+                        "id": id,
+                        "health": "unhealthy",
+                        "action": recertify_action_fallback(),
+                        "reason": error.to_string(),
+                    }),
+                };
+                harnesses.push(health);
+            }
+        }
+        Err(error) => harnesses.push(json!({
+            "health": "unhealthy",
+            "reason": error.to_string(),
+        })),
+    }
+    harnesses
+}
+
+fn doctor_integrations_current(
+    integration: &serde_json::Value,
+    claude: &serde_json::Value,
+) -> bool {
+    let integrations = [integration, claude];
+    integrations
+        .iter()
+        .any(|status| status["status"] == "installed")
+        && integrations
+            .iter()
+            .all(|status| status["status"] != "drifted")
+}
+
+fn doctor_problems(
+    store_ok: bool,
+    registry_ok: bool,
+    harnesses: &[serde_json::Value],
+    integration: &serde_json::Value,
+    claude_integration: &serde_json::Value,
+    trace: &serde_json::Value,
+    healthy: bool,
+) -> Vec<DoctorProblem> {
+    let mut problems = Vec::new();
+    if !store_ok {
+        problems.push(named_problem("store", "unavailable"));
+    }
+    if !registry_ok {
+        problems.push(named_problem("registry", "unavailable"));
+    }
+    if harnesses.is_empty() {
+        problems.push(named_problem("harnesses", "none registered"));
+    }
+    for harness in harnesses {
+        if let Some(problem) = harness_problem(harness) {
+            problems.push(problem);
+        }
+    }
+    push_integration_problems(&mut problems, integration, claude_integration);
+    if !healthy && let Some(problem) = trace_problem(trace) {
+        problems.push(problem);
+    }
+    problems
+}
+
+fn push_integration_problems(
+    problems: &mut Vec<DoctorProblem>,
+    integration: &serde_json::Value,
+    claude_integration: &serde_json::Value,
+) {
+    if integration["status"] == "drifted" {
+        problems.push(named_problem("codex_integration", "drifted"));
+    }
+    if claude_integration["status"] == "drifted" {
+        problems.push(named_problem("claude_integration", "drifted"));
+    }
+    if integration["status"] == "installed" || claude_integration["status"] == "installed" {
+        return;
+    }
+    if integration["status"] == "not_installed" {
+        problems.push(named_problem("codex_integration", "not_installed"));
+    }
+    if claude_integration["status"] == "not_installed" {
+        problems.push(named_problem("claude_integration", "not_installed"));
+    }
+}
+
+fn harness_problem(harness: &serde_json::Value) -> Option<DoctorProblem> {
+    if harness["health"] == "healthy" {
+        return None;
+    }
+    let name = harness["id"].as_str().unwrap_or("harnesses").to_owned();
+    let action = harness["action"].as_str();
+    let command = action.and_then(backtick_command).map(str::to_owned);
+    let recertify =
+        action.is_some_and(|text| text.contains("re-certify") || text.contains("recertify"));
+    let reason = if recertify {
+        "recertify".to_owned()
+    } else if let Some(reason) = harness["reason"].as_str() {
+        reason.to_owned()
+    } else if let Some(health) = harness["health"].as_str() {
+        health.to_owned()
+    } else {
+        "unhealthy".to_owned()
+    };
+    Some(DoctorProblem {
+        name,
+        reason,
+        command,
+    })
+}
+
+fn trace_problem(trace: &serde_json::Value) -> Option<DoctorProblem> {
+    if trace["verified"] == true {
+        return None;
+    }
+    let reason = match (trace["codex"].as_str(), trace["verified_with"].as_str()) {
+        (Some(version), Some(baseline)) => {
+            format!("not verified: {version}, verified baseline {baseline}")
+        }
+        (None, Some(baseline)) => format!("not verified: verified baseline {baseline}"),
+        (Some(version), None) => format!("not verified: {version}"),
+        (None, None) => "not verified".to_owned(),
+    };
+    Some(DoctorProblem {
+        name: "codex_trace".to_owned(),
+        reason,
+        command: None,
+    })
+}
+
+fn named_problem(name: &str, reason: &str) -> DoctorProblem {
+    DoctorProblem {
+        name: name.to_owned(),
+        reason: reason.to_owned(),
+        command: None,
+    }
+}
+
+fn backtick_command(text: &str) -> Option<&str> {
+    let start = text.find('`')?;
+    let inner = text.get(start + 1..)?;
+    let end = inner.find('`')?;
+    let command = inner.get(..end)?.trim();
+    (!command.is_empty()).then_some(command)
+}
+
+fn problem_json(problem: &DoctorProblem) -> serde_json::Value {
+    match &problem.command {
+        Some(command) => json!({
+            "name": problem.name,
+            "reason": problem.reason,
+            "command": command,
+        }),
+        None => json!({
+            "name": problem.name,
+            "reason": problem.reason,
+        }),
+    }
+}
+
+fn unavailable_path_error(problems: &[DoctorProblem]) -> String {
+    if problems.is_empty() {
+        return "brgr doctor found an unavailable personal-use path".to_owned();
+    }
+    let mut names = String::new();
+    for (index, problem) in problems.iter().enumerate() {
+        if index > 0 {
+            names.push_str(", ");
+        }
+        names.push_str(&problem.name);
+    }
+    format!("brgr doctor found an unavailable personal-use path: {names}")
 }
 
 /// The harness a call uses when it names none: the configured default, else

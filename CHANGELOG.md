@@ -6,6 +6,10 @@
   invocation and does not add tasks created later. `--help` and the shipped
   skill show `brgr watch A B C` and `brgr watch --all`. Watch still does not
   decide, approve, or reply.
+- `brgr doctor` on a terminal starts with `ok` or one `needs_attention` line
+  per problem, naming the item and the next command doctor already has. The
+  exit error names the items. `--json` and a pipe keep every existing field;
+  a top-level `problems` array is added.
 - `brgr status` and `brgr run` print a human form when stdout is a terminal and
   `--json` is not given: a one-line-per-task table or a short key block for
   `status`, and a compact receipt ending in `task: <id>` for `run`. Piped,
