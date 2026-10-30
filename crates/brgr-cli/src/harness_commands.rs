@@ -422,19 +422,28 @@ fn push_integration_problems(
     claude_integration: &serde_json::Value,
 ) {
     if integration["status"] == "drifted" {
-        problems.push(named_problem("codex_integration", "drifted"));
+        problems.push(integration_problem("codex", "drifted"));
     }
     if claude_integration["status"] == "drifted" {
-        problems.push(named_problem("claude_integration", "drifted"));
+        problems.push(integration_problem("claude", "drifted"));
     }
     if integration["status"] == "installed" || claude_integration["status"] == "installed" {
         return;
     }
     if integration["status"] == "not_installed" {
-        problems.push(named_problem("codex_integration", "not_installed"));
+        problems.push(integration_problem("codex", "not_installed"));
     }
     if claude_integration["status"] == "not_installed" {
-        problems.push(named_problem("claude_integration", "not_installed"));
+        problems.push(integration_problem("claude", "not_installed"));
+    }
+}
+
+/// A drifted or missing integration is fixed by installing it again.
+fn integration_problem(owner: &str, reason: &str) -> DoctorProblem {
+    DoctorProblem {
+        name: format!("{owner}_integration"),
+        reason: reason.to_owned(),
+        command: Some(format!("brgr integrate {owner} install")),
     }
 }
 
@@ -607,4 +616,58 @@ pub(crate) fn cleanup(paths: &Paths, command: CleanupCommand, json_output: bool)
     };
     print_value(&json!({"task_id": task, "cleanup": status}), json_output);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::push_integration_problems;
+
+    fn problems_for(codex: &str, claude: &str) -> Vec<(String, Option<String>)> {
+        let mut problems = Vec::new();
+        push_integration_problems(
+            &mut problems,
+            &json!({"status": codex}),
+            &json!({"status": claude}),
+        );
+        problems
+            .into_iter()
+            .map(|problem| (problem.name, problem.command))
+            .collect()
+    }
+
+    #[test]
+    fn a_drifted_integration_names_the_command_that_reinstalls_it() {
+        assert_eq!(
+            problems_for("drifted", "drifted"),
+            vec![
+                (
+                    "codex_integration".to_owned(),
+                    Some("brgr integrate codex install".to_owned())
+                ),
+                (
+                    "claude_integration".to_owned(),
+                    Some("brgr integrate claude install".to_owned())
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_missing_integration_names_the_command_that_installs_it() {
+        assert_eq!(
+            problems_for("not_installed", "not_installed"),
+            vec![
+                (
+                    "codex_integration".to_owned(),
+                    Some("brgr integrate codex install".to_owned())
+                ),
+                (
+                    "claude_integration".to_owned(),
+                    Some("brgr integrate claude install".to_owned())
+                ),
+            ]
+        );
+    }
 }
