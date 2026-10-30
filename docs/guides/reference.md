@@ -68,11 +68,15 @@ headless. The separate `local.omp-herdr` route retains its legacy
 | Resume, in-flight steering, provider-side undo | Deferred; unsupported requests must fail rather than silently fall back |
 
 `local.devin` runs `devin` in documented prompt-file print mode with smart
-permissions and the non-interactive workspace-trust override. It uses the model
-already selected in Devin CLI. Run `/model` once in an interactive Devin session
-if that configured default is stale. Devin's current JSON catalog exceeds
-brgr's bounded probe limit, so `brgr run OBJECTIVE --model MODEL` and `--effort` intentionally
-fail for this route instead of guessing a family variant. See the
+permissions and the non-interactive workspace-trust override. When the installed
+CLI documents `--model <MODEL>`, `brgr run OBJECTIVE --model MODEL` passes that
+name through as `--model=VALUE` in print mode and in the pane; the CLI checks
+the name itself. There is no parser for `devin models`: that listing is grouped
+by family and has exceeded brgr's bounded catalog probe, so the selector is not
+certified against a list. Without `--model`, Devin keeps the model already
+selected in its own settings. An older Devin whose help has no `--model` still
+refuses the flag and says to change that setting. `--effort` remains unsupported.
+See the
 [v2.0.2 live receipt](../evidence/live-devin-cli-v2.0.2-2026-09-15.md).
 
 `local.opencode` passes `--standalone` when `opencode run --help` documents it
@@ -376,10 +380,11 @@ is given). `brgr config set-auto-recertify true` lets a new run or a revision do
 that themselves, in an empty temporary directory, and print a
 warning each time. It is off by default because each re-certification is a paid
 run that trusts the changed binary; any other health, and a re-certification
-that fails, still stop the run. A harness that takes no model per run (Cline,
-Devin) refuses `--model` and says how to change its own setting; a successful
+that fails, still stop the run. A harness that takes no model per run (Cline)
+refuses `--model` and says how to change its own setting; a successful
 run records the model its settings name, as `harness_config` rather than an
-observation from the run.
+observation from the run. Devin passes `--model` when the installed CLI
+documents it; an older Devin without that flag is refused the same way as Cline.
 
 On macOS, `run` and `revise` hold an idle-sleep assertion (`caffeinate -i -w`, tied to
 the brgr process, so it ends with it) while they start a task; a machine that sleeps

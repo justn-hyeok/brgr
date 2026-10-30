@@ -40,6 +40,11 @@ pub(crate) struct Recipe {
     pub(crate) effort_argv: &'static [&'static str],
     /// When set, effort is offered only if the help text documents this flag.
     pub(crate) effort_requires: Option<&'static str>,
+    /// When set, model is offered only if the help text documents this flag.
+    /// Absent `--model` in `required_flags` would refuse an old CLI entirely;
+    /// this keeps a draft with `model_select` unsupported, as `effort_requires`
+    /// does for effort.
+    pub(crate) model_requires: Option<&'static str>,
     /// A flag that keeps the run in a process of its own, appended to both the
     /// one-shot and the interactive arguments when the help documents it, so
     /// that stopping the process stops the work.
@@ -114,6 +119,7 @@ pub(crate) const GENERIC: Recipe = Recipe {
     model_argv: &[],
     effort_argv: &[],
     effort_requires: None,
+    model_requires: None,
     own_process: None,
     env_allow: &["HOME", "PATH", "LANG"],
     source: Source::Stdout,
@@ -298,6 +304,13 @@ pub(crate) const RECIPES: &[Recipe] = &[
             "${input.prompt_file}",
             "-p",
         ],
+        // Combined form so a value that begins with `-` cannot become a flag.
+        // The shared two-argument MODEL pattern does not guarantee that.
+        model_argv: &["--model=${route.model}"],
+        model_requires: Some("--model <MODEL>"),
+        // Family-grouped `devin models` output is not a bounded catalog; the
+        // CLI refuses an unknown name, so the selector is passed through.
+        catalog: Some((&[], Catalog::CliValidated)),
         env_allow: &BASE_ENV,
         capabilities: &[
             PROCESS_CAPS[0],
@@ -305,7 +318,7 @@ pub(crate) const RECIPES: &[Recipe] = &[
                 "completion",
                 Cap::Supported("print_mode_process_exit_with_nonempty_stdout"),
             ),
-            ("model_select", Cap::Unsupported("configured_default_only")),
+            ("model_select", Cap::Supported("--model")),
             ("effort_select", Cap::Unsupported("not_observed")),
         ],
         full: Some(&["--permission-mode", "dangerous"]),
@@ -716,9 +729,8 @@ pub(crate) fn draft(
     help: &str,
 ) -> HarnessManifest {
     let strings = |values: &[&str]| values.iter().map(|value| (*value).to_owned()).collect();
-    let effort = recipe
-        .effort_requires
-        .is_none_or(|flag| documents(help, flag));
+    let effort = offered(recipe.effort_requires, help);
+    let model = offered(recipe.model_requires, help);
     let own_process: &[&str] = match recipe.own_process {
         Some(flag) if documents(help, flag) => &[flag],
         _ => &[],
@@ -738,23 +750,22 @@ pub(crate) fn draft(
         probe: ProbeSpec {
             version_argv: vec![recipe.version_argv.to_owned()],
             help_argv: strings(recipe.help_argv),
-            model_catalog: recipe.catalog.map(|(argv, format)| ModelCatalogSpec {
-                argv: strings(argv),
-                format: match format {
-                    Catalog::ProviderTable => ModelCatalogFormat::CanonicalProviderTable,
-                    Catalog::OmpSelectors => ModelCatalogFormat::JsonSelectors {
-                        pointer: "/models".to_owned(),
-                        field: "selector".to_owned(),
-                    },
-                    Catalog::DashSeparated => ModelCatalogFormat::DashSeparated,
-                    Catalog::FirstColumn => ModelCatalogFormat::FirstColumn,
-                    Catalog::CliValidated => ModelCatalogFormat::CliValidated,
-                },
-            }),
+            model_catalog: if model {
+                recipe.catalog.map(|(argv, format)| ModelCatalogSpec {
+                    argv: strings(argv),
+                    format: catalog_format(format),
+                })
+            } else {
+                None
+            },
         },
         launch: LaunchSpec {
             argv: with_own_process(recipe.argv),
-            model_argv: strings(recipe.model_argv),
+            model_argv: if model {
+                strings(recipe.model_argv)
+            } else {
+                vec![]
+            },
             effort_argv: if effort {
                 strings(recipe.effort_argv)
             } else {
@@ -794,6 +805,9 @@ pub(crate) fn draft(
             .iter()
             .map(|&(name, cap)| {
                 let cap = match cap {
+                    Cap::Supported(_) if name == "model_select" && !model => {
+                        unsupported("configured_default_only")
+                    }
                     Cap::Supported(_) if name == "effort_select" && !effort => {
                         unsupported("not_observed")
                     }
@@ -809,6 +823,23 @@ pub(crate) fn draft(
                 (name.to_owned(), cap)
             })
             .collect(),
+    }
+}
+
+fn offered(requires: Option<&str>, help: &str) -> bool {
+    requires.is_none_or(|flag| documents(help, flag))
+}
+
+fn catalog_format(format: Catalog) -> ModelCatalogFormat {
+    match format {
+        Catalog::ProviderTable => ModelCatalogFormat::CanonicalProviderTable,
+        Catalog::OmpSelectors => ModelCatalogFormat::JsonSelectors {
+            pointer: "/models".to_owned(),
+            field: "selector".to_owned(),
+        },
+        Catalog::DashSeparated => ModelCatalogFormat::DashSeparated,
+        Catalog::FirstColumn => ModelCatalogFormat::FirstColumn,
+        Catalog::CliValidated => ModelCatalogFormat::CliValidated,
     }
 }
 
