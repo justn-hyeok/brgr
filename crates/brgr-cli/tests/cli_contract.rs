@@ -132,6 +132,40 @@ prompt_file=
 print_mode=0
 full_mode=0
 trust_bypassed=0
+model=
+while test "$#" -gt 0; do
+  case "$1" in
+    --prompt-file) shift; prompt_file=$1;;
+    -p|--print) print_mode=1;;
+    --permission-mode) shift; test "$1" = dangerous || exit 3; full_mode=1;;
+    --respect-workspace-trust) shift; test "$1" = false || exit 4; trust_bypassed=1;;
+    --model) shift; model=$1;;
+    --model=*) model=${1#--model=};;
+    *) exit 5;;
+  esac
+  shift
+done
+test "$print_mode" = 1 || exit 6
+test "$full_mode" = 1 || exit 7
+test "$trust_bypassed" = 1 || exit 8
+test -f "$prompt_file" || exit 10
+/bin/cat "$prompt_file"
+if test -n "$model"; then
+  printf 'MODEL=%s\n' "$model"
+fi
+"#;
+
+const DEVIN_OLD_FIXTURE: &str = r#"#!/bin/sh
+case "$1" in
+  --version) echo 'devin 3000.old'; exit 0;;
+  --help)
+    printf '%s\n' '--prompt-file <FILE>' '-p, --print [<PROMPT>]' '--permission-mode <PERMISSION_MODE>' '--respect-workspace-trust [<RESPECT_WORKSPACE_TRUST>]'
+    exit 0;;
+esac
+prompt_file=
+print_mode=0
+full_mode=0
+trust_bypassed=0
 while test "$#" -gt 0; do
   case "$1" in
     --prompt-file) shift; prompt_file=$1;;
@@ -5849,24 +5883,6 @@ fn devin_process_recipe_reaches_owner_acceptance_without_shell_interpolation() {
     assert_eq!(health["health"], "healthy");
 
     let owner = [("BRGR_OWNER_ID", "codex:devin-owner")];
-    let explicit_model = run(
-        &home,
-        &[
-            "run",
-            "must not start",
-            "--harness",
-            "local.devin",
-            "--model",
-            "swe-1.6",
-            "--workspace",
-            workspace.to_str().unwrap(),
-        ],
-        &owner,
-    );
-    assert!(!explicit_model.status.success());
-    assert!(String::from_utf8_lossy(&explicit_model.stderr).contains("model_select"));
-    assert_eq!(fs::read_dir(home.join("launches")).unwrap().count(), 0);
-
     let result = json_output(&run(
         &home,
         &[
@@ -5894,6 +5910,110 @@ fn devin_process_recipe_reaches_owner_acceptance_without_shell_interpolation() {
         &owner,
     ));
     assert_eq!(accepted["verdict"], "accepted");
+}
+
+#[test]
+fn devin_print_run_passes_the_requested_model() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("brgr");
+    let workspace = temp.path().join("work");
+    let scratch = temp.path().join("scratch");
+    fs::create_dir_all(&workspace).unwrap();
+    fs::create_dir_all(&scratch).unwrap();
+    let executable = temp.path().join("devin");
+    write_devin_fixture(&executable);
+
+    json_output(&run(
+        &home,
+        &[
+            "harness",
+            "add",
+            executable.to_str().unwrap(),
+            "--workspace",
+            scratch.to_str().unwrap(),
+            "--prompt",
+            "DEVIN_SCRATCH_OK",
+        ],
+        &[],
+    ));
+
+    let owner = [("BRGR_OWNER_ID", "codex:devin-model")];
+    let result = json_output(&run(
+        &home,
+        &[
+            "run",
+            "DEVIN_PROCESS_OK",
+            "--harness",
+            "local.devin",
+            "--model",
+            "swe-2-high",
+            "--workspace",
+            workspace.to_str().unwrap(),
+            "--foreground",
+        ],
+        &owner,
+    ));
+    assert_eq!(result["outcome"], "candidate");
+    let task = result["task_id"].as_str().unwrap();
+    let detail = json_output(&run(&home, &["result", task], &owner));
+    let text = detail["artifacts"][0]["text"].as_str().unwrap();
+    assert_worker_prompt(text, "DEVIN_PROCESS_OK");
+    assert!(
+        text.contains("MODEL=swe-2-high"),
+        "model missing from fixture output: {text}"
+    );
+}
+
+#[test]
+fn old_devin_without_model_flag_keeps_the_configured_default_error() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("brgr");
+    let workspace = temp.path().join("work");
+    let scratch = temp.path().join("scratch");
+    fs::create_dir_all(&workspace).unwrap();
+    fs::create_dir_all(&scratch).unwrap();
+    let executable = temp.path().join("devin");
+    fs::write(&executable, DEVIN_OLD_FIXTURE).unwrap();
+    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+
+    json_output(&run(
+        &home,
+        &[
+            "harness",
+            "add",
+            executable.to_str().unwrap(),
+            "--workspace",
+            scratch.to_str().unwrap(),
+            "--prompt",
+            "DEVIN_SCRATCH_OK",
+        ],
+        &[],
+    ));
+
+    let owner = [("BRGR_OWNER_ID", "codex:devin-old")];
+    let explicit_model = run(
+        &home,
+        &[
+            "run",
+            "must not start",
+            "--harness",
+            "local.devin",
+            "--model",
+            "swe-1.6",
+            "--workspace",
+            workspace.to_str().unwrap(),
+        ],
+        &owner,
+    );
+    assert!(!explicit_model.status.success());
+    let stderr = String::from_utf8_lossy(&explicit_model.stderr);
+    assert!(
+        stderr.contains(
+            "harness local.devin does not support required capability: model_select; it runs only the model set in its own configuration, so change it in that CLI's own settings, then run without --model"
+        ),
+        "{stderr}"
+    );
+    assert_eq!(fs::read_dir(home.join("launches")).unwrap().count(), 0);
 }
 
 /// A harness an agent authored a manifest for is certified again from that

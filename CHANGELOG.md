@@ -7,6 +7,12 @@
   `status`, and a compact receipt ending in `task: <id>` for `run`. Piped,
   redirected and `--json` output is byte-for-byte unchanged. `brgr status`
   gains `--verbose` to keep the full pretty JSON on a terminal.
+- `local.devin` passes `--model` when the installed CLI documents `--model <MODEL>`.
+  Print mode and the pane both get `--model=VALUE`, so a name that begins with `-`
+  stays one argument. Without `--model` the argv is unchanged and Devin keeps its
+  configured default. An older Devin whose help has no `--model` still drafts with
+  `model_select` unsupported and the same configured-default error. Model names are
+  passed through; `devin models` is not parsed.
 
 ## 2.15.10 — 2026-10-29
 

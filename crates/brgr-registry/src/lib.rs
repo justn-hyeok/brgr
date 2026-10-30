@@ -2083,9 +2083,12 @@ mod tests {
         }
     }
 
+    const DEVIN_REQUIRED_HELP: &str = "--prompt-file <FILE> -p, --print [<PROMPT>] --permission-mode <PERMISSION_MODE> --respect-workspace-trust [<RESPECT_WORKSPACE_TRUST>]";
+    const DEVIN_HELP: &str = "--prompt-file <FILE> -p, --print [<PROMPT>] --permission-mode <PERMISSION_MODE> --respect-workspace-trust [<RESPECT_WORKSPACE_TRUST>] --model <MODEL>";
+
     #[test]
     fn devin_recipe_uses_print_mode_at_the_full_level() {
-        let help = "--prompt-file <FILE> -p, --print [<PROMPT>] --permission-mode <PERMISSION_MODE> --respect-workspace-trust [<RESPECT_WORKSPACE_TRUST>] --model <MODEL>";
+        let help = DEVIN_HELP;
         let devin = generate_manifest("devin", PathBuf::from("/bin/echo"), help).unwrap();
         assert_eq!(devin.id, "local.devin");
         assert_eq!(
@@ -2108,19 +2111,146 @@ mod tests {
                 ["--permission-mode", mode]
             );
         }
-        assert!(devin.launch.model_argv.is_empty());
+        assert_eq!(devin.launch.model_argv, ["--model=${route.model}"]);
         assert!(devin.launch.effort_argv.is_empty());
-        assert!(devin.probe.model_catalog.is_none());
+        assert_eq!(
+            devin.probe.model_catalog.as_ref().unwrap().format,
+            ModelCatalogFormat::CliValidated
+        );
         assert_eq!(
             devin.capabilities["model_select"].status,
-            CapabilityStatus::Unsupported
+            CapabilityStatus::Supported
         );
+        assert_eq!(devin.capabilities["model_select"].semantics, "--model");
         assert_eq!(
             devin.capabilities["effort_select"].status,
             CapabilityStatus::Unsupported
         );
         assert!(
             generate_manifest("devin", PathBuf::from("/bin/echo"), "--prompt-file <FILE>").is_err()
+        );
+    }
+
+    /// Print-mode argv as `render_argv` builds it: base launch, then permission,
+    /// then the model template with `${route.model}` replaced. The prompt-file
+    /// placeholder stays so the comparison is stable under load.
+    fn print_argv(manifest: &HarnessManifest, model: Option<&str>) -> Vec<String> {
+        let mut argv = manifest.launch.argv.clone();
+        argv.extend(manifest.permission_arguments(None).unwrap().iter().cloned());
+        if let Some(model) = model {
+            argv.extend(
+                manifest
+                    .launch
+                    .model_argv
+                    .iter()
+                    .map(|argument| argument.replace("${route.model}", model)),
+            );
+        }
+        argv
+    }
+
+    #[test]
+    fn drafted_devin_passes_a_model_in_print_mode_when_help_lists_it() {
+        let manifest = generate_manifest("devin", PathBuf::from("/bin/echo"), DEVIN_HELP).unwrap();
+        assert_eq!(
+            manifest.capabilities["model_select"].status,
+            CapabilityStatus::Supported
+        );
+        assert_eq!(manifest.launch.model_argv, ["--model=${route.model}"]);
+        assert!(
+            !manifest
+                .launch
+                .interactive
+                .as_ref()
+                .unwrap()
+                .model_print_only
+        );
+        assert!(
+            !manifest
+                .launch
+                .env_allow
+                .iter()
+                .any(|name| name == "DEVIN_MODEL"),
+            "{:?}",
+            manifest.launch.env_allow
+        );
+        let with_model = print_argv(&manifest, Some("swe-2-high"));
+        assert!(
+            with_model.iter().any(|arg| arg == "--model=swe-2-high"),
+            "{with_model:?}"
+        );
+        assert!(
+            !with_model.iter().any(|arg| arg == "--model"),
+            "model must not be a separate option: {with_model:?}"
+        );
+
+        let without_model = print_argv(&manifest, None);
+        assert_eq!(
+            without_model,
+            [
+                "--respect-workspace-trust",
+                "false",
+                "--prompt-file",
+                "${input.prompt_file}",
+                "-p",
+                "--permission-mode",
+                "dangerous",
+            ]
+        );
+    }
+
+    #[test]
+    fn drafted_devin_keeps_a_dash_leading_model_as_one_option_value() {
+        let manifest = generate_manifest("devin", PathBuf::from("/bin/echo"), DEVIN_HELP).unwrap();
+        for model in ["--help", "--workspace /etc", "swe 2\nhigh"] {
+            let argv = print_argv(&manifest, Some(model));
+            let expected = format!("--model={model}");
+            assert_eq!(argv.last().map(String::as_str), Some(expected.as_str()));
+            assert!(
+                !argv.iter().any(|arg| arg == model),
+                "model {model:?} became its own argument: {argv:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn old_devin_help_without_model_stays_configured_default_only() {
+        let old =
+            generate_manifest("devin", PathBuf::from("/bin/echo"), DEVIN_REQUIRED_HELP).unwrap();
+        assert_eq!(old.id, "local.devin");
+        assert!(old.launch.model_argv.is_empty());
+        assert!(old.probe.model_catalog.is_none());
+        assert_eq!(
+            old.capabilities["model_select"].status,
+            CapabilityStatus::Unsupported
+        );
+        assert_eq!(
+            old.capabilities["model_select"].semantics,
+            "configured_default_only"
+        );
+        let hint = old.configured_model_hint().unwrap();
+        assert_eq!(
+            hint,
+            "change it in that CLI's own settings, then run without --model"
+        );
+        let message = RegistryError::ConfiguredModelOnly {
+            harness: old.id.clone(),
+            hint,
+        }
+        .to_string();
+        assert_eq!(
+            message,
+            "harness local.devin does not support required capability: model_select; it runs only the model set in its own configuration, so change it in that CLI's own settings, then run without --model"
+        );
+        assert_eq!(
+            old.launch.argv,
+            [
+                "--respect-workspace-trust",
+                "false",
+                "--prompt-file",
+                "${input.prompt_file}",
+                "-p",
+            ]
         );
     }
 

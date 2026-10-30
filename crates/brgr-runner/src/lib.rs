@@ -696,6 +696,40 @@ mod tests {
     }
 
     #[test]
+    fn a_dash_leading_model_stays_one_option_value() {
+        let workspace = tempfile::tempdir().unwrap();
+        let prompt_path = workspace.path().join("prompt.txt");
+        let mut manifest = echo_manifest(4_096);
+        manifest.launch.argv = vec!["--print".to_owned()];
+        manifest.launch.model_argv = vec!["--model=${route.model}".to_owned()];
+        for model in ["--help", "--workspace /etc", "swe 2\nhigh"] {
+            let request = RunRequest {
+                workspace: workspace.path(),
+                prompt: "prompt",
+                criteria: None,
+                instructions: None,
+                model: Some(model),
+                effort: None,
+                permission: None,
+                deadline: Duration::from_secs(1),
+                cancel_path: None,
+                pid_path: None,
+            };
+            let substitutions = Substitutions {
+                prompt_file: &prompt_path,
+                prompt: "prompt",
+                workspace: workspace.path(),
+                model: Some(model),
+                effort: None,
+            };
+            assert_eq!(
+                render_argv(&manifest, &request, &substitutions).unwrap(),
+                ["--print", &format!("--model={model}")]
+            );
+        }
+    }
+
+    #[test]
     fn unsupported_route_is_rejected_before_process_execution() {
         let mut manifest = echo_manifest(4_096);
         manifest.id = "local.synthetic".to_owned();

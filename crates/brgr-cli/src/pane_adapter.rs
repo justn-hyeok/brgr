@@ -1306,3 +1306,110 @@ mod lifecycle_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod interactive_model_tests {
+    use super::*;
+    use brgr_runner::{InteractiveSpec, PermissionArgv};
+    use std::collections::BTreeMap;
+
+    fn devin_activated(model_argv: &[&str]) -> HarnessManifest {
+        HarnessManifest {
+            schema: MANIFEST_SCHEMA_V1.to_owned(),
+            id: "local.devin".to_owned(),
+            adapter: PROCESS_ADAPTER_V1.to_owned(),
+            executable: PathBuf::from("/bin/echo"),
+            probe: ProbeSpec {
+                version_argv: vec!["--version".to_owned()],
+                help_argv: vec!["--help".to_owned()],
+                model_catalog: None,
+            },
+            launch: LaunchSpec {
+                argv: vec![
+                    "--respect-workspace-trust".to_owned(),
+                    "false".to_owned(),
+                    "--prompt-file".to_owned(),
+                    "${input.prompt_file}".to_owned(),
+                    "-p".to_owned(),
+                ],
+                model_argv: model_argv.iter().map(|value| (*value).to_owned()).collect(),
+                effort_argv: vec![],
+                env_allow: ["HOME", "PATH", "LANG", "TMPDIR"]
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect(),
+                mode: ExecutionMode::OneShot,
+                permission_argv: PermissionArgv {
+                    full: Some(vec!["--permission-mode".to_owned(), "dangerous".to_owned()]),
+                    edits: None,
+                    read_only: None,
+                },
+                interactive: Some(InteractiveSpec {
+                    herdr_kind: "devin".to_owned(),
+                    argv: vec!["--respect-workspace-trust".to_owned(), "false".to_owned()],
+                    effort_print_only: false,
+                    model_print_only: false,
+                    native_host: true,
+                }),
+            },
+            result: ResultSpec {
+                source: ResultSource::Stdout,
+                media_type: "text/plain".to_owned(),
+                max_bytes: 1_048_576,
+                success_exit_codes: vec![0],
+            },
+            capabilities: BTreeMap::new(),
+        }
+    }
+
+    fn pane_args(model: Option<&str>, model_argv: &[&str]) -> Vec<String> {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = Paths::new(Some(temp.path().join("home"))).unwrap();
+        let task = TaskId::new();
+        let mut route = serde_json::json!({"harness_id":"local.devin"});
+        if let Some(model) = model {
+            route["requested_model"] = serde_json::json!(model);
+        }
+        let launch: LaunchEnvelope = serde_json::from_value(serde_json::json!({
+            "spec":{
+                "schema":"brgr/v1",
+                "task_id":task,
+                "revision":1,
+                "create_request_id":format!("devin-model-{task}"),
+                "owner_id":"codex:devin-model",
+                "objective":"run",
+                "workspace":temp.path(),
+                "route":route,
+                "required_capabilities":[],
+                "artifact_contract":{"media_type":"text/plain","max_bytes":4096},
+                "acceptance_criteria":["ok"],
+                "budget":{"deadline_seconds":60,"max_attempts":1}
+            },
+            "harness_id":"local.devin",
+            "protocol_generation":"brgr-v1",
+            "keep_pane":false,
+            "pane_mode":true
+        }))
+        .unwrap();
+        pane_process_manifest(&paths, &launch, &devin_activated(model_argv))
+            .unwrap()
+            .launch
+            .argv
+    }
+
+    #[test]
+    fn a_devin_pane_launch_forwards_the_combined_model_flag() {
+        let with_model = pane_args(Some("swe-2-high"), &["--model=${route.model}"]);
+        assert!(
+            with_model
+                .iter()
+                .any(|arg| arg == "--agent-arg=--model=${route.model}"),
+            "{with_model:?}"
+        );
+        let without_model = pane_args(None, &["--model=${route.model}"]);
+        assert!(
+            !without_model.iter().any(|arg| arg.contains("--model")),
+            "{without_model:?}"
+        );
+    }
+}
