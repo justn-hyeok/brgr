@@ -36,7 +36,7 @@ brgr hands bounded work to registered coding agents and seals what they return f
 ## The loop
 
 1. Start: `brgr run "<objective>" --harness <id> --criterion "<observable check>"`. Add `--capture-diff` when you will keep code changes. It returns a task id at once.
-2. Wait: do not poll and do not block. Run `brgr watch TASK` as a background command (in Claude Code, in Monitor) and keep talking to the user: it prints one JSON line per event (`question`, `result`) and `done`. A `FROM BRGR` notice also arrives when you are idle. `brgr wait TASK` blocks; avoid it.
+2. Wait: do not poll and do not block. Run `brgr watch A B C` or `brgr watch --all` as a background command (in Claude Code, in Monitor) and keep talking to the user: it prints one JSON line per event (`question`, `result`) and `done`. Watch never decides, approves, or replies. A `FROM BRGR` notice also arrives when you are idle. `brgr wait TASK` blocks; avoid it.
 3. Read: `brgr result TASK`, and for code `brgr diff TASK --stat` then `brgr diff TASK`.
 4. Decide: `brgr accept TASK --reason "<why>"` or `brgr reject TASK --reason "<why>"`. To try again, `brgr revise TASK "<corrected objective>"`.
 5. Integrate: `brgr apply TASK --workspace <repo>` checks the sealed diff; add `--execute` after accepting, and `--3way` to merge with the repository's own changes. Or `brgr land TASK --workspace <repo> --reason "<why>"` to check, accept and apply in one step. Use the brgr-diff-review skill for code you keep.
@@ -72,7 +72,7 @@ Siblings talk directly only when the user asks for a **debate**: `brgr debate st
 - Housekeeping: `brgr errors` lists recorded failures. A worktree a decision kept (it holds work found nowhere else) stays until `brgr prune --apply`; `brgr prune` first reports what would go and why the rest stays.
 - Head: `brgr head claim TASK --abandoned --goal TEXT` takes an abandoned head. A live head uses `brgr head request TASK --to SESSION`.
 - Registration: `brgr harness draft <executable>`, `brgr harness add <executable> --workspace <scratch> --prompt "<probe>"`, `brgr harness status <id>`, `brgr doctor`. Each harness keeps its own login and configuration.
-- Owners: Codex sessions, Claude Code sessions (`claude:<CLAUDE_CODE_SESSION_ID>`), and Cursor sessions (`cursor:<CURSOR_CONVERSATION_ID>` in a Cursor Herdr pane) receive notices. Other Herdr owner kinds are told that `FROM BRGR` will not arrive; use `brgr watch TASK`.
+- Owners: Codex sessions, Claude Code sessions (`claude:<CLAUDE_CODE_SESSION_ID>`), and Cursor sessions (`cursor:<CURSOR_CONVERSATION_ID>` in a Cursor Herdr pane) receive notices. Other Herdr owner kinds are told that `FROM BRGR` will not arrive; use `brgr watch A B C` or `brgr watch --all`.
 "#;
 
 #[derive(Debug, Serialize, Deserialize)]

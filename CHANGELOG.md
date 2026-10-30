@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- `brgr watch --all` follows this owner's unfinished tasks as of that
+  invocation and does not add tasks created later. `--help` and the shipped
+  skill show `brgr watch A B C` and `brgr watch --all`. Watch still does not
+  decide, approve, or reply.
 - `brgr status` and `brgr run` print a human form when stdout is a terminal and
   `--json` is not given: a one-line-per-task table or a short key block for
   `status`, and a compact receipt ending in `task: <id>` for `run`. Piped,

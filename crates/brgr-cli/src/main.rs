@@ -301,10 +301,7 @@ async fn execute(paths: &Paths, command: Command, json_output: bool) -> Result<(
             task,
             timeout_seconds,
         } => wait_for_result(paths, task, timeout_seconds, json_output).await,
-        Command::Watch {
-            tasks,
-            timeout_seconds,
-        } => watch::watch(paths, tasks, timeout_seconds).await,
+        command @ Command::Watch { .. } => watch::from_cli(paths, command).await,
         Command::Message { command } => message::run(paths, command, json_output).await,
         Command::Debate { command } => debate::run(paths, command, json_output).await,
         Command::Workflow { command } => crate::workflow::run(paths, command, json_output),

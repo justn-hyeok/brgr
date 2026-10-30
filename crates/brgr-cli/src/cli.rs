@@ -76,12 +76,22 @@ pub(crate) enum Command {
         timeout_seconds: u64,
     },
     /// Print one JSON line per state change, question, or result, then exit.
+    /// `brgr watch A B C`
+    /// `brgr watch --all`
     ///
     /// Reads only. It does not decide, acknowledge, or answer.
     Watch {
         /// Tasks to follow. A repeated id is watched once.
-        #[arg(required = true, num_args = 1.., value_name = "TASK")]
+        #[arg(
+            required_unless_present = "all",
+            num_args = 1..,
+            value_name = "TASK",
+            conflicts_with = "all"
+        )]
         tasks: Vec<TaskId>,
+        /// This owner's unfinished tasks as of this invocation. Later tasks are not added.
+        #[arg(long, conflicts_with = "tasks")]
+        all: bool,
         #[arg(long, default_value_t = 3_600)]
         timeout_seconds: u64,
     },
