@@ -2790,10 +2790,18 @@ esac
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    let status = wait_for_child(&mut child, Duration::from_secs(5));
+    // The normal path returns at once; the window only has to outlast a slow
+    // first start of node and of a freshly written script on a loaded machine.
+    let status = wait_for_child(&mut child, Duration::from_secs(30));
+    let mut node_stderr = String::new();
+    if status.is_none()
+        && let Some(mut pipe) = child.stderr.take()
+    {
+        let _ = std::io::Read::read_to_string(&mut pipe, &mut node_stderr);
+    }
     assert!(
         status.is_some(),
-        "agent() kept polling after the run was cancelled: log={}",
+        "agent() kept polling after the run was cancelled: log={} node stderr={node_stderr}",
         fake_argv_log(&fixture)
     );
     wait_for_file(
