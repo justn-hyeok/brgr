@@ -2,6 +2,7 @@
 
 use std::{
     fs,
+    io::{BufRead, BufReader, Read},
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -37,7 +38,7 @@ fn brgr_command() -> Command {
     command
 }
 
-fn run(home: &Path, args: &[&str], envs: &[(&str, &str)]) -> std::process::Output {
+fn isolated_brgr(home: &Path, args: &[&str], envs: &[(&str, &str)]) -> Command {
     let mut command = brgr_command();
     command.arg("--home").arg(home).arg("--json").args(args);
     if matches!(args.first(), Some(&"run" | &"revise")) {
@@ -66,7 +67,11 @@ fn run(home: &Path, args: &[&str], envs: &[(&str, &str)]) -> std::process::Outpu
     for (name, value) in envs {
         command.env(name, value);
     }
-    command.output().unwrap()
+    command
+}
+
+fn run(home: &Path, args: &[&str], envs: &[(&str, &str)]) -> std::process::Output {
+    isolated_brgr(home, args, envs).output().unwrap()
 }
 
 fn json_output(output: &std::process::Output) -> Value {
@@ -448,4 +453,162 @@ fn watch_does_not_write_decisions_messages_or_inbox_acknowledgements() {
     );
     assert!(!timed_out.status.success());
     assert_eq!(store_counts(&home), before_poll);
+}
+
+#[test]
+fn watch_all_includes_only_this_owners_unfinished_tasks() {
+    let (_temp, home, workspace) = watch_home();
+    let finished = start_task(&home, &workspace, "BRGR_FIXTURE_OK", true);
+    let ours = start_task(&home, &workspace, "PAUSE", false);
+    wait_until_running(&home, &ours);
+    let theirs = json_output(&run(
+        &home,
+        &["run", "HOLD", "--workspace", workspace.to_str().unwrap()],
+        &[
+            ("BRGR_OWNER_ID", "codex:someone-else"),
+            ("BRGR_SESSION_ID", "other-session"),
+        ],
+    ))["task_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    wait_until_running(&home, &theirs);
+    let output = run(
+        &home,
+        &["watch", "--all", "--timeout-seconds", "20"],
+        &[("BRGR_OWNER_ID", "codex:watch-test")],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let events = event_lines(&output.stdout);
+    let results: Vec<&str> = events
+        .iter()
+        .filter(|event| event["event"] == "result")
+        .map(|event| event["task_id"].as_str().unwrap())
+        .collect();
+    assert_eq!(results, vec![ours.as_str()]);
+    let mentioned: Vec<&str> = events
+        .iter()
+        .filter_map(|event| event["task_id"].as_str())
+        .collect();
+    assert!(!mentioned.contains(&finished.as_str()));
+    assert!(!mentioned.contains(&theirs.as_str()));
+    assert_eq!(events.last().unwrap()["event"], "done");
+}
+
+#[test]
+fn watch_all_does_not_add_a_task_created_after_it_started() {
+    let (_temp, home, workspace) = watch_home();
+    let first = start_task(&home, &workspace, "PAUSE", false);
+    wait_until_running(&home, &first);
+    let mut child = isolated_brgr(
+        &home,
+        &["watch", "--all", "--timeout-seconds", "20"],
+        &[("BRGR_OWNER_ID", "codex:watch-test")],
+    );
+    child.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = child.spawn().unwrap();
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+    let mut first_line = String::new();
+    stdout.read_line(&mut first_line).unwrap();
+    assert!(
+        !first_line.trim().is_empty(),
+        "watch --all produced no events before a later task was created"
+    );
+    let later = start_task(&home, &workspace, "HOLD", false);
+    wait_until_running(&home, &later);
+    let status = child.wait().unwrap();
+    let mut rest = String::new();
+    stdout.read_to_string(&mut rest).unwrap();
+    let mut stderr = Vec::new();
+    child
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_end(&mut stderr)
+        .unwrap();
+    assert!(status.success(), "{}", String::from_utf8_lossy(&stderr));
+    let mut rendered = first_line;
+    rendered.push_str(&rest);
+    let events = event_lines(rendered.as_bytes());
+    let mentioned: Vec<&str> = events
+        .iter()
+        .filter_map(|event| event["task_id"].as_str())
+        .collect();
+    assert!(mentioned.contains(&first.as_str()));
+    assert!(
+        !mentioned.contains(&later.as_str()),
+        "watch --all picked up a task created after it started"
+    );
+    assert_eq!(events.last().unwrap()["event"], "done");
+}
+
+#[test]
+fn watch_all_with_no_unfinished_tasks_exits_zero_with_a_message() {
+    let (_temp, home, workspace) = watch_home();
+    let finished = start_task(&home, &workspace, "BRGR_FIXTURE_OK", true);
+    let started = Instant::now();
+    let output = run(
+        &home,
+        &["watch", "--all"],
+        &[("BRGR_OWNER_ID", "codex:watch-test")],
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "watch --all waited when this owner had no unfinished tasks"
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("no unfinished tasks for this owner to watch"),
+        "stderr was {stderr}"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains(&finished),
+        "empty --all still streamed a finished task: {stdout}"
+    );
+}
+
+#[test]
+fn watch_all_with_positional_ids_is_a_usage_error() {
+    let (_temp, home, workspace) = watch_home();
+    let task = start_task(&home, &workspace, "BRGR_FIXTURE_OK", true);
+    let output = run(
+        &home,
+        &["watch", "--all", &task],
+        &[("BRGR_OWNER_ID", "codex:watch-test")],
+    );
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("cannot be used with"),
+        "stderr was {stderr}"
+    );
+}
+
+#[test]
+fn watch_help_contains_multi_id_and_all_examples() {
+    let output = brgr_command().args(["watch", "--help"]).output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let help = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        help.contains("brgr watch A B C"),
+        "help missing multi-id example: {help}"
+    );
+    assert!(
+        help.contains("brgr watch --all"),
+        "help missing --all example: {help}"
+    );
 }

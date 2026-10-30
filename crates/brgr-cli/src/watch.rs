@@ -11,14 +11,40 @@ use brgr_protocol::{AttemptState, TaskId};
 use brgr_store::{MessageDirection, Store, StoreError};
 use serde_json::{Value, json};
 
-use crate::{Paths, plugin_bridge, require_owner, supervision::reconcile_pending};
+use crate::{Paths, cli::Command, plugin_bridge, require_owner, supervision::reconcile_pending};
 
-pub(crate) async fn watch(paths: &Paths, tasks: Vec<TaskId>, timeout_seconds: u64) -> Result<()> {
+pub(crate) async fn from_cli(paths: &Paths, command: Command) -> Result<()> {
+    let Command::Watch {
+        tasks,
+        all,
+        timeout_seconds,
+    } = command
+    else {
+        bail!("not a watch command");
+    };
+    watch(paths, tasks, all, timeout_seconds).await
+}
+
+pub(crate) async fn watch(
+    paths: &Paths,
+    tasks: Vec<TaskId>,
+    all: bool,
+    timeout_seconds: u64,
+) -> Result<()> {
     if timeout_seconds == 0 || timeout_seconds > plugin_bridge::MAX_BRIDGE_SECONDS - 120 {
         bail!("watch timeout must be between 1 second and seven days minus the bridge margin");
     }
-    let tasks = unique_tasks(tasks);
     let store = Store::open(&paths.store)?;
+    let tasks = if all {
+        let snapshot = unfinished_owner_tasks(&store)?;
+        if snapshot.is_empty() {
+            eprintln!("no unfinished tasks for this owner to watch");
+            return Ok(());
+        }
+        snapshot
+    } else {
+        unique_tasks(tasks)
+    };
     for task in &tasks {
         let spec = store.task(*task)?;
         require_owner(&store, &spec.owner_id)?;
@@ -73,6 +99,15 @@ fn unique_tasks(tasks: Vec<TaskId>) -> Vec<TaskId> {
         .into_iter()
         .filter(|task| seen.insert(*task))
         .collect()
+}
+
+fn unfinished_owner_tasks(store: &Store) -> Result<Vec<TaskId>> {
+    let owner = crate::owner_from_environment()?;
+    Ok(store
+        .unfinished_tasks_for_owner(&owner)?
+        .into_iter()
+        .map(|spec| spec.task_id)
+        .collect())
 }
 
 fn publish_task(store: &Store, watched: &mut Watched, all_done: &mut bool) -> Result<()> {

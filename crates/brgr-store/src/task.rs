@@ -278,6 +278,30 @@ impl Store {
         rows.map(|row| Ok(serde_json::from_str(&row?)?)).collect()
     }
 
+    /// Latest revisions owned by `owner_id` that do not yet have a terminal result.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid stored data or a database failure.
+    pub fn unfinished_tasks_for_owner(
+        &self,
+        owner_id: &OwnerId,
+    ) -> Result<Vec<TaskSpec>, StoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT t.spec_json FROM tasks t
+             JOIN (SELECT task_id, MAX(revision) AS revision FROM tasks GROUP BY task_id) latest
+               ON latest.task_id = t.task_id AND latest.revision = t.revision
+             WHERE t.owner_id = ?1
+               AND NOT EXISTS (
+                   SELECT 1 FROM results r
+                   WHERE r.task_id = t.task_id AND r.revision = t.revision
+               )
+             ORDER BY t.rowid",
+        )?;
+        let rows = statement.query_map([owner_id.as_str()], |row| row.get::<_, String>(0))?;
+        rows.map(|row| Ok(serde_json::from_str(&row?)?)).collect()
+    }
+
     /// Returns admitted task revisions for which no supervisor ever claimed
     /// an attempt. The caller can reconcile an abandoned launch without guessing
     /// that a model run succeeded.
