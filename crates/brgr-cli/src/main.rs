@@ -17,6 +17,7 @@ mod harness_commands;
 mod head;
 mod herdr_plugin;
 mod hook;
+mod human;
 mod invocation;
 mod message;
 mod native_result;
@@ -573,7 +574,8 @@ fn read_command(paths: &Paths, command: &Command, json_output: bool) -> Result<(
             task,
             tree,
             observe,
-        } => status(paths, task, tree, observe, json_output),
+            verbose,
+        } => status(paths, task, tree, observe, verbose, json_output),
         Command::Result { task, ack, observe } => result(paths, task, ack, observe, json_output),
         Command::Diff {
             task,

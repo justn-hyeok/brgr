@@ -4,7 +4,7 @@ use std::{env, fs, time::Duration};
 
 use crate::supervision::reconcile_pending;
 use crate::{
-    LaunchEnvelope, Paths, current_session, notification, pane_adapter, pane_cleanup,
+    LaunchEnvelope, Paths, current_session, human, notification, pane_adapter, pane_cleanup,
     plugin_bridge, print_value, require_owner, tree_status, workspace,
 };
 use anyhow::{Context, Result, bail};
@@ -15,11 +15,13 @@ use brgr_protocol::{
 use brgr_store::{Store, StoreError, SubtreeNode};
 use serde_json::json;
 
+#[allow(clippy::fn_params_excessive_bools)]
 pub(crate) fn status(
     paths: &Paths,
     task: Option<TaskId>,
     tree: bool,
     observe: bool,
+    verbose: bool,
     json_output: bool,
 ) -> Result<()> {
     // Recovery records dead supervisors' tasks as lost and runs cleanups, which
@@ -34,10 +36,20 @@ pub(crate) fn status(
         check_reader(&store, &spec.owner_id, observe)?;
         return tree_status::show(&store, root, json_output);
     }
+    // The human form is a display layer over the same data; a pipe or --json
+    // gets the JSON below unchanged.
+    let human_display =
+        !verbose && human::use_human_output(json_output, human::stdout_is_terminal());
     if let Some(task_id) = task {
         let spec = store.task(task_id)?;
         check_reader(&store, &spec.owner_id, observe)?;
         let state = attempt_state_name(&store, task_id)?;
+        let created_at = task_created_at(&store, spec.task_id);
+        if human_display {
+            let detail = task_detail(&store, &spec, &state, created_at)?;
+            print!("{}", human::task_detail(&detail, human::unix_now()));
+            return Ok(());
+        }
         let launch = fs::read(paths.launch(task_id, spec.revision))
             .ok()
             .and_then(|bytes| serde_json::from_slice::<LaunchEnvelope>(&bytes).ok());
@@ -52,7 +64,7 @@ pub(crate) fn status(
                 "calling_options": launch.as_ref().and_then(|value|value.calling_options.as_ref()),
                 "source_pane": launch.as_ref().and_then(|value|value.source_pane.as_ref()),
                 "source_session": launch.as_ref().and_then(|value|value.source_session.as_ref()),
-                "created_at": task_created_at(&store, spec.task_id),
+                "created_at": created_at,
             }),
             json_output,
         );
@@ -68,12 +80,78 @@ pub(crate) fn status(
             .into_iter()
             .map(|spec| {
                 let state = store.attempt_state(spec.task_id).ok();
-                json!({"task": spec, "state": state.map(|value| format!("{value:?}").to_lowercase())})
+                (spec, state)
             })
             .collect::<Vec<_>>();
-        print_value(&json!(tasks), json_output);
+        if human_display {
+            let rows = tasks
+                .iter()
+                .map(|(spec, state)| human::StatusRow {
+                    task_id: spec.task_id.to_string(),
+                    state: state.map_or_else(
+                        || "queued".to_owned(),
+                        |value| format!("{value:?}").to_lowercase(),
+                    ),
+                    harness: spec.route.harness_id.clone(),
+                    created_at: task_created_at(&store, spec.task_id),
+                    objective: spec.objective.clone(),
+                })
+                .collect::<Vec<_>>();
+            print!("{}", human::status_table(&rows, human::unix_now()));
+        } else {
+            print_value(
+                &json!(
+                    tasks
+                        .iter()
+                        .map(|(spec, state)| json!({
+                            "task": spec,
+                            "state": state.map(|value| format!("{value:?}").to_lowercase()),
+                        }))
+                        .collect::<Vec<_>>()
+                ),
+                json_output,
+            );
+        }
     }
     Ok(())
+}
+
+/// The store fields the single-task human block adds to what the JSON shows:
+/// a sealed outcome when one exists and a pending-question count when the
+/// worker is waiting on the owner.
+fn task_detail(
+    store: &Store,
+    spec: &TaskSpec,
+    state: &str,
+    created_at: Option<u64>,
+) -> Result<human::TaskDetail> {
+    let outcome = match store.latest_result(spec.task_id) {
+        Ok(result) => Some(format!("{:?}", result.outcome).to_lowercase()),
+        Err(StoreError::TaskNotFound(_)) => None,
+        Err(error) => return Err(error.into()),
+    };
+    Ok(human::TaskDetail {
+        task_id: spec.task_id.to_string(),
+        state: state.to_owned(),
+        harness: spec.route.harness_id.clone(),
+        model: spec.route.requested_model.clone(),
+        workspace: spec.workspace.clone(),
+        created_at,
+        outcome,
+        questions: pending_questions(store, spec.task_id)?,
+    })
+}
+
+/// Questions the task's latest attempt asked that have no reply yet, or
+/// `None` when there is nothing pending (or no attempt at all).
+fn pending_questions(store: &Store, task: TaskId) -> Result<Option<u64>> {
+    let attempt = match store.latest_message_attempt(task) {
+        Ok(attempt) => attempt,
+        Err(StoreError::TaskMessageNotFound(_)) => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let count = store.unsettled_questions(task, attempt)?;
+    Ok((count > 0).then_some(count))
 }
 
 /// Unix seconds when the task's first attempt started, from the store.
