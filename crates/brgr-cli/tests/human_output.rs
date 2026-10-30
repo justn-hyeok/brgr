@@ -1,13 +1,19 @@
-//! `brgr run` and `brgr status` print a human form on a terminal. Stdout is
-//! always a pipe in tests, so these pin the other half of the contract: with
-//! a pipe or `--json` the output is exactly what it was before — the compact
-//! or pretty JSON, byte for byte. The human form itself is covered by unit
-//! tests on the pure render functions, reached through the injectable
+//! `brgr run`, `brgr status`, and `brgr doctor` print a human form on a
+//! terminal. Stdout is always a pipe in tests, so these pin the other half of
+//! the contract: with a pipe or `--json` the output is exactly what it was
+//! before — the compact or pretty JSON, byte for byte — plus doctor's new
+//! top-level `problems` array. The human form itself is covered by unit tests
+//! on the pure render functions, reached through the injectable
 //! `use_human_output` gate.
 
 mod common;
 
-use std::{fs, path::Path};
+use std::{
+    fs,
+    io::Write as _,
+    os::unix::fs::PermissionsExt,
+    path::{Path, PathBuf},
+};
 
 use common::{add_fixture, gjc_fixture, json_output, run};
 use serde_json::Value;
@@ -190,4 +196,148 @@ fn uuid_suffix() -> String {
         .unwrap()
         .as_nanos();
     format!("{nanos:x}")
+}
+
+/// A home with a certified GJC fixture and a current Codex integration, so
+/// `brgr doctor` is healthy until a test drifts the executable.
+fn doctor_fixture() -> (TempDir, PathBuf, PathBuf, PathBuf) {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("brgr");
+    let codex_home = temp.path().join("codex");
+    let executable = temp.path().join("gjc");
+    fs::copy(gjc_fixture(), &executable).unwrap();
+    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+    add_fixture(&home, &executable, &temp.path().join("scratch"));
+    let envs = [("CODEX_HOME", codex_home.to_str().unwrap())];
+    json_output(&run(
+        &home,
+        &["--json", "integrate", "codex", "install"],
+        &envs,
+    ));
+    (temp, home, executable, codex_home)
+}
+
+fn doctor_envs(codex_home: &Path) -> [(&str, &str); 1] {
+    [("CODEX_HOME", codex_home.to_str().unwrap())]
+}
+
+fn drift_harness_executable(executable: &Path) {
+    writeln!(
+        fs::OpenOptions::new()
+            .append(true)
+            .open(executable)
+            .unwrap(),
+        "# drift"
+    )
+    .unwrap();
+}
+
+/// Doctor JSON keys, including the added `problems` array. `serde_json` maps
+/// serialize in sorted order, so this is alphabetical; existing fields stay
+/// in that same relative order around the new key.
+const DOCTOR_JSON_KEYS: [&str; 8] = [
+    "claude_integration",
+    "codex_integration",
+    "codex_trace",
+    "harnesses",
+    "problems",
+    "registry",
+    "status",
+    "store",
+];
+
+/// The keys doctor printed before `problems` was added.
+const DOCTOR_EXISTING_KEYS: [&str; 7] = [
+    "claude_integration",
+    "codex_integration",
+    "codex_trace",
+    "harnesses",
+    "registry",
+    "status",
+    "store",
+];
+
+fn doctor_object_keys(value: &Value) -> Vec<&str> {
+    value
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect()
+}
+
+fn existing_doctor_fields(value: &Value) -> Value {
+    let mut old = value.clone();
+    old.as_object_mut()
+        .unwrap()
+        .retain(|key, _| DOCTOR_EXISTING_KEYS.contains(&key.as_str()));
+    old
+}
+
+#[test]
+fn doctor_exit_error_names_the_unhealthy_harness() {
+    let (_temp, home, executable, codex_home) = doctor_fixture();
+    let envs = doctor_envs(&codex_home);
+    drift_harness_executable(&executable);
+    let changed = run(&home, &["doctor"], &envs);
+    assert!(!changed.status.success(), "{changed:?}");
+    let stderr = String::from_utf8_lossy(&changed.stderr);
+    assert!(
+        stderr.contains("brgr doctor found an unavailable personal-use path: local.gjc"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn doctor_json_keeps_existing_fields_and_adds_problems() {
+    let (_temp, home, executable, codex_home) = doctor_fixture();
+    let envs = doctor_envs(&codex_home);
+    drift_harness_executable(&executable);
+    let changed = run(&home, &["--json", "doctor"], &envs);
+    assert!(!changed.status.success(), "{changed:?}");
+    let report: Value = serde_json::from_slice(&changed.stdout).unwrap();
+    let keys = doctor_object_keys(&report);
+    assert_eq!(
+        keys, DOCTOR_JSON_KEYS,
+        "existing fields keep their names; problems is added: {keys:?}"
+    );
+    assert_eq!(report["status"], "needs_attention");
+    assert_eq!(report["store"], true);
+    assert_eq!(report["registry"], true);
+    assert_eq!(report["harnesses"][0]["id"], "local.gjc");
+    assert_eq!(report["harnesses"][0]["health"], "executable_changed");
+    let problems = report["problems"]
+        .as_array()
+        .expect("problems array is present");
+    assert!(
+        problems.iter().any(|problem| problem["name"] == "local.gjc"
+            && problem["reason"] == "recertify"
+            && problem["command"] == "brgr harness recertify local.gjc"),
+        "{problems:?}"
+    );
+    let old = existing_doctor_fields(&report);
+    assert_eq!(doctor_object_keys(&old), DOCTOR_EXISTING_KEYS);
+    assert_eq!(old["harnesses"][0]["id"], report["harnesses"][0]["id"]);
+    assert_eq!(
+        old["harnesses"][0]["health"],
+        report["harnesses"][0]["health"]
+    );
+    assert!(old.get("problems").is_none());
+}
+
+#[test]
+fn doctor_on_a_pipe_is_the_pretty_json_byte_for_byte() {
+    let (_temp, home, _executable, codex_home) = doctor_fixture();
+    let envs = doctor_envs(&codex_home);
+    assert_piped_output_is_the_pretty_json(&home, &["doctor"], &envs);
+}
+
+#[test]
+fn doctor_healthy_json_has_an_empty_problems_array() {
+    let (_temp, home, _executable, codex_home) = doctor_fixture();
+    let envs = doctor_envs(&codex_home);
+    let report = json_output(&run(&home, &["--json", "doctor"], &envs));
+    assert_eq!(report["status"], "ok");
+    assert_eq!(doctor_object_keys(&report), DOCTOR_JSON_KEYS, "{report}");
+    assert_eq!(report["problems"], serde_json::json!([]));
 }

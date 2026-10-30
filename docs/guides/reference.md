@@ -393,10 +393,14 @@ that fails after the wall clock ran 20 s or more ahead of the monotonic clock sa
 machine was asleep, and its retry waits longer.
 
 `brgr doctor` probes every registered harness as well as the Codex integration
-and store. It exits with `needs_attention` and names an unhealthy harness when
-an executable or recipe has changed; re-add that harness with an authorized
-scratch run before starting new work. JSONL process capture discards repeated
-update events while retaining completed assistant/model evidence. Raw transport
+and store. On a terminal it starts with `ok`, or one `needs_attention` line per
+problem naming the item and, when doctor already has one, the next command
+(for a changed harness, `brgr harness recertify local.gjc`). `brgr doctor --json`
+and a pipe keep the JSON, with a top-level `problems` array. A nonzero exit
+still means something needs attention, and the error names those items. Re-certify
+an unhealthy harness with an authorized scratch run before starting new work.
+JSONL process capture discards repeated update events while retaining completed
+assistant/model evidence. Raw transport
 remains bounded to 64 MiB, and the sealed final answer still obeys its manifest
 artifact limit. Over-limit processes are stopped and produce a failed result.
 

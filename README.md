@@ -77,8 +77,10 @@ brgr harness add "$(command -v claude)" --workspace ~/brgr-scratch --prompt "Rep
 brgr doctor
 ```
 
-`brgr doctor` prints JSON. It is ready when `"status"` is `"ok"` and the worker
-you added shows `"health": "healthy"`. Then start a new Claude Code or Codex
+On a terminal, `brgr doctor` starts with `ok` or one `needs_attention` line per
+problem. `brgr doctor --json` and a pipe keep the JSON, with a `problems` array.
+It is ready when `"status"` is `"ok"` and the worker you added shows
+`"health": "healthy"`. Then start a new Claude Code or Codex
 session inside Herdr: an agent reads its skills when a session starts, so one
 that was already running does not know brgr yet.
 

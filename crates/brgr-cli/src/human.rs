@@ -1,9 +1,9 @@
-//! Human-facing terminal output for `brgr run` and `brgr status`.
+//! Human-facing terminal output for `brgr run`, `brgr status`, and `brgr doctor`.
 //!
 //! Printed only when stdout is a terminal and `--json` was not given; a pipe
 //! or a file gets the same pretty JSON as before, byte for byte. The fields
-//! shown can carry text a worker or a prompt supplied, so every one is
-//! neutralized for a terminal line before it prints.
+//! shown can carry text a worker, a prompt, or a harness manifest supplied, so
+//! every one is neutralized for a terminal line before it prints.
 
 use std::{fmt::Write as _, io::IsTerminal};
 
@@ -128,6 +128,14 @@ pub(crate) struct RunReceipt {
     pub task_id: String,
 }
 
+/// One item `brgr doctor` needs the owner to look at. `command` is only set
+/// when doctor already has a concrete next command; it is not invented.
+pub(crate) struct DoctorProblem {
+    pub name: String,
+    pub reason: String,
+    pub command: Option<String>,
+}
+
 /// A display cell is capped so one hostile or huge field cannot stretch a
 /// line forever.
 const CELL_MAX: usize = 60;
@@ -237,6 +245,45 @@ pub(crate) fn print_run_receipt(
     } else {
         crate::print_value(receipt, json_output);
     }
+}
+
+/// Prints a `brgr doctor` report: the human summary on a terminal, then the
+/// JSON envelope a pipe or `--json` already printed.
+pub(crate) fn print_doctor(
+    value: &serde_json::Value,
+    problems: &[DoctorProblem],
+    json_output: bool,
+) {
+    if use_human_output(json_output, stdout_is_terminal()) {
+        print!("{}", doctor_summary(problems));
+    }
+    crate::print_value(value, json_output);
+}
+
+/// The `brgr doctor` summary: `ok`, or one line per problem. The first problem
+/// is prefixed with `needs_attention:`; later lines are the name and reason.
+pub(crate) fn doctor_summary(problems: &[DoctorProblem]) -> String {
+    if problems.is_empty() {
+        return "ok\n".to_owned();
+    }
+    let mut output = String::new();
+    for (index, problem) in problems.iter().enumerate() {
+        if index == 0 {
+            output.push_str("needs_attention: ");
+        }
+        let name = safe_text(&problem.name);
+        let reason = safe_text(&problem.reason);
+        match problem.command.as_deref() {
+            Some(command) => {
+                let command = safe_text(command);
+                let _ = writeln!(output, "{name} ({reason}: {command})");
+            }
+            None => {
+                let _ = writeln!(output, "{name} ({reason})");
+            }
+        }
+    }
+    output
 }
 
 /// The `brgr run` receipt: a few key lines, ending with `task: <full id>`.
@@ -519,5 +566,65 @@ mod tests {
         assert!(text.contains("harness: bad [31m"), "{text}");
         assert!(text.contains("workspace: /tmp/a b"), "{text}");
         assert!(text.ends_with("task: 2b2c279a-b8e1-43a8-846c-cb8344a301d7\n"));
+    }
+
+    #[test]
+    fn doctor_summary_for_one_problem_names_the_item_and_the_fix_command() {
+        let text = doctor_summary(&[DoctorProblem {
+            name: "local.cline".to_owned(),
+            reason: "recertify".to_owned(),
+            command: Some("brgr harness recertify local.cline".to_owned()),
+        }]);
+        let first = text.lines().next().expect("summary has a first line");
+        assert_eq!(
+            first,
+            "needs_attention: local.cline (recertify: brgr harness recertify local.cline)"
+        );
+        assert_eq!(text.lines().count(), 1, "{text}");
+    }
+
+    #[test]
+    fn doctor_summary_when_there_is_no_problem_is_ok() {
+        assert_eq!(doctor_summary(&[]), "ok\n");
+    }
+
+    #[test]
+    fn doctor_summary_lists_each_problem_on_its_own_line() {
+        let text = doctor_summary(&[
+            DoctorProblem {
+                name: "local.cline".to_owned(),
+                reason: "recertify".to_owned(),
+                command: Some("brgr harness recertify local.cline".to_owned()),
+            },
+            DoctorProblem {
+                name: "codex_trace".to_owned(),
+                reason: "not verified: codex-cli 0.162.1, verified baseline 0.160".to_owned(),
+                command: None,
+            },
+        ]);
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(
+            lines[0],
+            "needs_attention: local.cline (recertify: brgr harness recertify local.cline)"
+        );
+        assert_eq!(
+            lines[1],
+            "codex_trace (not verified: codex-cli 0.162.1, verified baseline 0.160)"
+        );
+        assert_eq!(lines.len(), 2, "{text}");
+    }
+
+    #[test]
+    fn doctor_summary_sanitizes_harness_and_manifest_text() {
+        let text = doctor_summary(&[DoctorProblem {
+            name: "local.bad\u{1b}[31m".to_owned(),
+            reason: "recertify\nnow".to_owned(),
+            command: Some("brgr harness recertify local.bad\u{202e}".to_owned()),
+        }]);
+        assert!(!text.contains('\u{1b}'), "{text:?}");
+        assert!(!text.contains('\u{202e}'), "{text:?}");
+        assert_eq!(text.lines().count(), 1, "{text}");
+        assert!(text.contains("local.bad [31m"), "{text}");
+        assert!(text.contains("recertify now"), "{text}");
     }
 }
