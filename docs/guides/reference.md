@@ -215,6 +215,15 @@ not accept or reject a sealed result; an already-terminal task only closes a
 leftover pane brgr recorded as its own. See [the completion loop plan](completion-loop-plan.md)
 for the current scope and limits.
 
+`brgr status` and `brgr run OBJECTIVE` have two output forms. On a terminal without
+`--json` they print a human form: `status` prints one line per task (short id,
+state, harness, elapsed, objective) or, for one task, a key block that ends with
+`full detail: brgr status TASK --json`; `run` prints a few key lines whose last
+line is `task: <full task id>`. `status --verbose` keeps the terminal on the
+full pretty JSON. When stdout is a pipe or file, or `--json` is given, the
+output is the JSON receipt exactly as before: scripts and `jq` pipelines see
+no change.
+
 Install the local binary and Codex integration, then start a new Codex session:
 
 ```bash

@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- `brgr status` and `brgr run` print a human form when stdout is a terminal and
+  `--json` is not given: a one-line-per-task table or a short key block for
+  `status`, and a compact receipt ending in `task: <id>` for `run`. Piped,
+  redirected and `--json` output is byte-for-byte unchanged. `brgr status`
+  gains `--verbose` to keep the full pretty JSON on a terminal.
+
 ## 2.15.10 — 2026-10-29
 
 Dynamic Workflows ships: a node script drives workers with a journaled, resumable run.
