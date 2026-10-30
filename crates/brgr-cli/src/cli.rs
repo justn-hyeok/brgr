@@ -49,6 +49,10 @@ pub(crate) enum Command {
         /// changes nothing. It never decides, acknowledges, or applies.
         #[arg(long)]
         observe: bool,
+        /// Print the full JSON detail even on a terminal, instead of the
+        /// summary table.
+        #[arg(long)]
+        verbose: bool,
     },
     /// Show a task's sealed result, optionally acknowledging a failed one.
     Result {

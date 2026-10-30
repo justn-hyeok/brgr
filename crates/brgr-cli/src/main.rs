@@ -17,6 +17,7 @@ mod harness_commands;
 mod head;
 mod herdr_plugin;
 mod hook;
+mod human;
 mod invocation;
 mod message;
 mod native_result;
@@ -294,7 +295,7 @@ async fn plugin_command(paths: &Paths, command: PluginCommand) -> Result<()> {
 async fn execute(paths: &Paths, command: Command, json_output: bool) -> Result<()> {
     match command {
         Command::Run(args) => run_task(paths, args, json_output).await,
-        Command::Revise(args) => revise_task(paths, args, json_output).await,
+        Command::Revise(args) => Box::pin(revise_task(paths, args, json_output)).await,
         Command::Artifact { command } => evidence::artifact_command(paths, command, json_output),
         Command::Wait {
             task,
@@ -573,7 +574,8 @@ fn read_command(paths: &Paths, command: &Command, json_output: bool) -> Result<(
             task,
             tree,
             observe,
-        } => status(paths, task, tree, observe, json_output),
+            verbose,
+        } => status(paths, task, tree, observe, verbose, json_output),
         Command::Result { task, ack, observe } => result(paths, task, ack, observe, json_output),
         Command::Diff {
             task,
