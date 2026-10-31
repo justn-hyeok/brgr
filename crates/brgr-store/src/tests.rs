@@ -28,8 +28,8 @@ const SCANNED: [(&str, &str); 19] = [
 
 use super::contention::{BUSY_RETRY_BACKOFF, is_lock_contention};
 use brgr_protocol::{
-    ArtifactContract, DecisionId, DecisionVerdict, EventId, EventKind, ObservationSource, OwnerId,
-    SCHEMA_V1, TaskId, TerminalOutcome,
+    ArtifactContract, DecisionId, DecisionVerdict, Event, EventId, EventKind, ObservationSource,
+    OwnerId, SCHEMA_V1, TaskId, TerminalOutcome,
 };
 use tempfile::TempDir;
 
@@ -136,6 +136,39 @@ fn event_sequence_and_owner_binding_are_idempotent() {
         store.bind_owner(&task.owner_id, "session-a", 100),
         Err(StoreError::OwnerBindingConflict)
     ));
+}
+
+#[test]
+fn latest_event_is_the_highest_producer_seq_on_the_latest_attempt() {
+    let root = TempDir::new().unwrap();
+    let mut store = Store::open(root.path()).unwrap();
+    let task = task();
+    let attempt_id = AttemptId::new();
+    store.record_task(&task, "digest-event").unwrap();
+    assert!(store.latest_event(task.task_id).unwrap().is_none());
+    store
+        .create_attempt(task.task_id, task.revision, attempt_id)
+        .unwrap();
+    let first = Event {
+        schema: SCHEMA_V1.to_owned(),
+        event_id: EventId::new(),
+        attempt_id,
+        producer: "fixture".to_owned(),
+        producer_seq: 1,
+        kind: EventKind::Starting,
+        payload: serde_json::json!({}),
+    };
+    let second = Event {
+        event_id: EventId::new(),
+        producer_seq: 2,
+        kind: EventKind::Running,
+        ..first.clone()
+    };
+    store.record_event(&first).unwrap();
+    store.record_event(&second).unwrap();
+    let latest = store.latest_event(task.task_id).unwrap().unwrap();
+    assert_eq!(latest.kind, EventKind::Running);
+    assert_eq!(latest.producer_seq, 2);
 }
 
 #[test]

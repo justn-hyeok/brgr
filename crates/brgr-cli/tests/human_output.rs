@@ -55,12 +55,16 @@ fn fixture_home() -> (TempDir, std::path::PathBuf, std::path::PathBuf) {
 
 /// A task that ran to a sealed result, for `status` to list.
 fn completed_task(home: &Path, workspace: &Path) -> String {
+    completed_task_with_objective(home, workspace, "BRGR_FIXTURE_OK")
+}
+
+fn completed_task_with_objective(home: &Path, workspace: &Path, objective: &str) -> String {
     let receipt = json_output(&run(
         home,
         &[
             "--json",
             "run",
-            "BRGR_FIXTURE_OK",
+            objective,
             "--foreground",
             "--workspace",
             workspace.to_str().unwrap(),
@@ -100,6 +104,294 @@ fn status_verbose_on_a_pipe_is_the_pretty_json_byte_for_byte() {
     assert_piped_output_is_the_pretty_json(&home, &["status"], &[]);
     assert_piped_output_is_the_pretty_json(&home, &["status", "--verbose"], &[]);
     assert_piped_output_is_the_pretty_json(&home, &["status", &task, "--verbose"], &[]);
+}
+
+/// Top-level keys `brgr status TASK` printed before `--brief`, in the
+/// order `serde_json::Value` emits without `preserve_order` (alphabetical).
+/// A new field here is a pipe-contract change; `--brief` must not add one.
+const STATUS_TASK_JSON_KEYS: [&str; 10] = [
+    "base_commit",
+    "calling_options",
+    "created_at",
+    "session",
+    "source_pane",
+    "source_session",
+    "state",
+    "task",
+    "workspace",
+    "workspace_present",
+];
+
+const BRIEF_JSON_KEYS: [&str; 5] = [
+    "task_id",
+    "state",
+    "harness",
+    "elapsed_seconds",
+    "objective_head",
+];
+
+fn object_keys(value: &Value) -> Vec<&str> {
+    value
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect()
+}
+
+fn compact_json_bytes(value: &Value) -> String {
+    format!("{value}\n")
+}
+
+/// (1) Twenty tasks: `--brief` is one line each and at most 5% of the
+/// current piped pretty JSON.
+#[test]
+fn brief_status_of_twenty_tasks_is_one_line_each_and_at_most_five_percent_of_piped() {
+    let (_temp, home, workspace) = fixture_home();
+    // Real tasks carry a long objective in the pretty JSON; brief only prints
+    // the bounded head, which is why the 5% cap holds.
+    let objective = format!("BRGR_FIXTURE_OK {}", "x".repeat(2048));
+    let ids: Vec<String> = (0..20)
+        .map(|_| completed_task_with_objective(&home, &workspace, &objective))
+        .collect();
+
+    let piped = run(&home, &["status"], &[]);
+    assert!(
+        piped.status.success(),
+        "status failed: {}",
+        String::from_utf8_lossy(&piped.stderr)
+    );
+    let brief = run(&home, &["status", "--brief"], &[]);
+    assert!(
+        brief.status.success(),
+        "status --brief failed: {}",
+        String::from_utf8_lossy(&brief.stderr)
+    );
+
+    let text = String::from_utf8_lossy(&brief.stdout);
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 20, "{text}");
+    assert!(
+        !brief.stdout.contains(&0x1b),
+        "brief output must not contain ANSI: {text}"
+    );
+    for id in &ids {
+        let hits = lines
+            .iter()
+            .filter(|line| line.contains(id.as_str()))
+            .count();
+        assert_eq!(
+            hits, 1,
+            "{id} should appear on exactly one brief line:\n{text}"
+        );
+    }
+    assert!(
+        brief.stdout.len().saturating_mul(20) <= piped.stdout.len(),
+        "brief {} bytes / piped {} bytes exceeds 5%",
+        brief.stdout.len(),
+        piped.stdout.len()
+    );
+}
+
+/// (2) Without `--brief`, piped and `--json` bytes stay the pre-change
+/// fixture snapshot: pretty vs compact JSON and the same key order.
+#[test]
+fn status_without_brief_keeps_piped_and_json_bytes_of_the_fixture() {
+    let (_temp, home, workspace) = fixture_home();
+    let task = completed_task(&home, &workspace);
+
+    let list_compact = run(&home, &["--json", "status"], &[]);
+    let list: Value = serde_json::from_slice(&list_compact.stdout).unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&list_compact.stdout),
+        compact_json_bytes(&list)
+    );
+    let list_piped = run(&home, &["status"], &[]);
+    assert!(list_piped.status.success());
+    assert_eq!(String::from_utf8_lossy(&list_piped.stdout), pretty(&list));
+    let item = &list.as_array().expect("status list is an array")[0];
+    assert_eq!(object_keys(item), ["state", "task"], "{item}");
+
+    let task_compact = run(&home, &["--json", "status", &task], &[]);
+    let detail: Value = serde_json::from_slice(&task_compact.stdout).unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&task_compact.stdout),
+        compact_json_bytes(&detail)
+    );
+    let task_piped = run(&home, &["status", &task], &[]);
+    assert!(task_piped.status.success());
+    assert_eq!(String::from_utf8_lossy(&task_piped.stdout), pretty(&detail));
+    assert_eq!(object_keys(&detail), STATUS_TASK_JSON_KEYS, "{detail}");
+}
+
+/// (3) `--brief --json` is a compact array whose object keys are this
+/// set, in this order.
+#[test]
+fn brief_json_uses_the_fixed_key_set_and_order() {
+    let (_temp, home, workspace) = fixture_home();
+    completed_task(&home, &workspace);
+    let output = run(&home, &["--json", "status", "--brief"], &[]);
+    assert!(
+        output.status.success(),
+        "status --brief --json failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        text.ends_with('\n') && text.lines().count() == 1,
+        "brief JSON must be one compact line: {text}"
+    );
+    assert!(
+        !text.contains("  "),
+        "brief JSON must not be pretty-printed: {text}"
+    );
+    let parsed: Value =
+        serde_json::from_slice(&output.stdout).unwrap_or_else(|_| panic!("not JSON: {text}"));
+    let rows = parsed.as_array().expect("brief JSON is an array");
+    assert_eq!(rows.len(), 1, "{parsed}");
+    let keys: std::collections::BTreeSet<&str> = rows[0]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(
+        keys,
+        BRIEF_JSON_KEYS.iter().copied().collect(),
+        "{}",
+        rows[0]
+    );
+    assert_eq!(
+        first_object_key_order(&text),
+        BRIEF_JSON_KEYS
+            .iter()
+            .map(|key| (*key).to_owned())
+            .collect::<Vec<_>>(),
+        "key order in compact bytes: {text}"
+    );
+    assert!(rows[0]["task_id"].as_str().unwrap().len() == 36);
+    assert!(rows[0]["elapsed_seconds"].as_u64().is_some() || rows[0]["elapsed_seconds"].is_null());
+    assert!(rows[0]["objective_head"].as_str().is_some());
+}
+
+/// Keys of the first JSON object, in the order they appear in `json`.
+/// Brief objects are flat, so the first `{`…`}` is the row.
+fn first_object_key_order(json: &str) -> Vec<String> {
+    let start = json.find('{').expect("object");
+    let end = start + json[start..].find('}').expect("object end");
+    let object = &json[start..=end];
+    let mut keys = Vec::new();
+    let mut at = 0;
+    while let Some(quote) = object[at..].find('"') {
+        let from = at + quote + 1;
+        let Some(close) = object[from..].find('"') else {
+            break;
+        };
+        let key = &object[from..from + close];
+        let after = from + close + 1;
+        if object[after..].trim_start().starts_with(':') {
+            keys.push(key.to_owned());
+        }
+        at = after;
+    }
+    keys
+}
+
+/// (4) The objective head is `safe_text`: control, bidi and zero-width
+/// characters become spaces, and the row stays one line.
+#[test]
+fn brief_objective_head_strips_control_bidi_and_zero_width_and_stays_one_line() {
+    let (_temp, home, workspace) = fixture_home();
+    let objective = "BRGR_FIXTURE_OK \n\u{1b}[31m\u{202e}\u{200b}hidden";
+    let receipt = json_output(&run(
+        &home,
+        &[
+            "--json",
+            "run",
+            objective,
+            "--foreground",
+            "--workspace",
+            workspace.to_str().unwrap(),
+        ],
+        &[],
+    ));
+    let task = receipt["task_id"].as_str().unwrap();
+    let brief = run(&home, &["status", "--brief"], &[]);
+    assert!(
+        brief.status.success(),
+        "status --brief failed: {}",
+        String::from_utf8_lossy(&brief.stderr)
+    );
+    let text = String::from_utf8_lossy(&brief.stdout);
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 1, "{text:?}");
+    assert!(!text.contains('\u{1b}'), "{text:?}");
+    assert!(!text.contains('\u{202e}'), "{text:?}");
+    assert!(!text.contains('\u{200b}'), "{text:?}");
+    assert!(!lines[0].contains('\n'), "{text:?}");
+    assert!(lines[0].contains(task), "{text}");
+    assert!(lines[0].contains("hidden"), "{text}");
+
+    let json_out = run(&home, &["--json", "status", "--brief"], &[]);
+    let parsed: Value = serde_json::from_slice(&json_out.stdout).unwrap();
+    let head = parsed[0]["objective_head"].as_str().unwrap();
+    assert!(!head.contains('\u{1b}'));
+    assert!(!head.contains('\u{202e}'));
+    assert!(!head.contains('\u{200b}'));
+    assert!(!head.contains('\n'));
+    assert!(head.contains("hidden"), "{head}");
+}
+
+/// (5) `status TASK --brief` is a few lines: state, last event, whether a
+/// result exists, whether a decision exists.
+#[test]
+fn status_task_brief_shows_state_last_event_result_and_decision() {
+    let (_temp, home, workspace) = fixture_home();
+    let task = completed_task(&home, &workspace);
+    let brief = run(&home, &["status", &task, "--brief"], &[]);
+    assert!(
+        brief.status.success(),
+        "status TASK --brief failed: {}",
+        String::from_utf8_lossy(&brief.stderr)
+    );
+    let text = String::from_utf8_lossy(&brief.stdout);
+    let lines: Vec<&str> = text.lines().collect();
+    assert!(
+        lines.len() <= 6,
+        "a few lines, got {}:\n{text}",
+        lines.len()
+    );
+    assert!(text.contains("state:"), "{text}");
+    assert!(text.contains("last_event:"), "{text}");
+    assert!(text.contains("result: yes"), "{text}");
+    assert!(text.contains("decision: no"), "{text}");
+    assert!(!brief.stdout.contains(&0x1b), "{text}");
+
+    json_output(&run(
+        &home,
+        &["--json", "accept", &task, "--reason", "fixture verified"],
+        &[],
+    ));
+    let decided = run(&home, &["status", &task, "--brief"], &[]);
+    let decided_text = String::from_utf8_lossy(&decided.stdout);
+    assert!(decided_text.contains("decision: yes"), "{decided_text}");
+}
+
+#[test]
+fn status_help_teaches_brief() {
+    let temp = TempDir::new().unwrap();
+    let help = run(temp.path(), &["status", "--help"], &[]);
+    assert!(
+        help.status.success(),
+        "status --help failed: {}",
+        String::from_utf8_lossy(&help.stderr)
+    );
+    let text = String::from_utf8_lossy(&help.stdout);
+    let first = text.split("Usage:").next().unwrap_or(&text);
+    assert!(
+        first.contains("brgr status --brief"),
+        "first paragraph of status --help must teach brgr status --brief:\n{text}"
+    );
 }
 
 #[test]

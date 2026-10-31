@@ -711,6 +711,33 @@ impl Store {
         Ok(WriteOutcome::Inserted)
     }
 
+    /// The latest producer event on the task's latest attempt, if any.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when stored event JSON is invalid or the database fails.
+    pub fn latest_event(&self, task_id: TaskId) -> Result<Option<Event>, StoreError> {
+        let json: Option<String> = self
+            .connection
+            .query_row(
+                "SELECT e.event_json FROM events e
+                 WHERE e.attempt_id = (
+                     SELECT a.attempt_id FROM attempts a
+                     WHERE a.task_id = ?1
+                       AND a.revision = (SELECT MAX(revision) FROM tasks WHERE task_id = ?1)
+                     ORDER BY a.rowid DESC
+                     LIMIT 1
+                 )
+                 ORDER BY e.producer_seq DESC, e.rowid DESC
+                 LIMIT 1",
+                [task_id.to_string()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        json.map(|value| serde_json::from_str(&value).map_err(StoreError::from))
+            .transpose()
+    }
+
     /// Returns the most recent attempt state for a task.
     ///
     /// # Errors

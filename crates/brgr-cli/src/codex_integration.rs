@@ -67,7 +67,7 @@ Siblings talk directly only when the user asks for a **debate**: `brgr debate st
 - Parallel attempts: start the same objective on several harnesses, compare with `brgr diff TASK --stat`, accept the best and reject the rest so every pane closes.
 - Child tasks: `--enable-delegation` lets a worker start its own workers, and `--max-children <n>` caps them.
 - Workspace: a clean Git repository gets a task worktree. `--snapshot-path <file>` carries chosen uncommitted files; `--evidence-file <file>` and `--capture-logs` add artifacts.
-- Status: `brgr status`, `brgr status TASK --tree`, `brgr cancel TASK --tree`. A different session stops a worker with `brgr cancel TASK --force` without deciding the result.
+- Status: `brgr status --brief`, `brgr status TASK --tree`, `brgr cancel TASK --tree`. A different session stops a worker with `brgr cancel TASK --force` without deciding the result.
 - Config: `brgr config init`, `brgr config show`, `brgr config set model <name> --harness <id>`, `brgr config set worker-placement tab`, `brgr config check`. User instructions live in `$BRGR_HOME/BRGR.md`.
 - Housekeeping: `brgr errors` lists recorded failures. A worktree a decision kept (it holds work found nowhere else) stays until `brgr prune --apply`; `brgr prune` first reports what would go and why the rest stays.
 - Head: `brgr head claim TASK --abandoned --goal TEXT` takes an abandoned head. A live head uses `brgr head request TASK --to SESSION`.
@@ -614,6 +614,14 @@ mod tests {
             assert!(SKILL_TEXT.contains(rule), "skill no longer mentions {rule}");
         }
         assert!(!SKILL_TEXT.contains("without a pane"));
+    }
+
+    #[test]
+    fn skill_teaches_status_brief() {
+        assert!(
+            SKILL_TEXT.contains("`brgr status --brief`"),
+            "skill must teach brgr status --brief"
+        );
     }
 
     #[test]

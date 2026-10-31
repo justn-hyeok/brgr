@@ -1,9 +1,10 @@
 //! Human-facing terminal output for `brgr run`, `brgr status`, and `brgr doctor`.
 //!
 //! Printed only when stdout is a terminal and `--json` was not given; a pipe
-//! or a file gets the same pretty JSON as before, byte for byte. The fields
-//! shown can carry text a worker, a prompt, or a harness manifest supplied, so
-//! every one is neutralized for a terminal line before it prints.
+//! or a file gets the same pretty JSON as before, byte for byte. `status --brief`
+//! is the exception: the same text on a terminal and in a pipe, with no ANSI.
+//! The fields shown can carry text a worker, a prompt, or a harness manifest
+//! supplied, so every one is neutralized for a terminal line before it prints.
 
 use std::{fmt::Write as _, io::IsTerminal};
 
@@ -72,6 +73,17 @@ pub(crate) fn cell(text: &str, max_chars: usize) -> String {
     }
 }
 
+/// Seconds since the first attempt started; `None` without a clock. A clock
+/// change that puts the start in the future clamps to zero.
+pub(crate) fn elapsed_seconds(created_at: Option<u64>, now: u64) -> Option<u64> {
+    created_at.map(|started| now.saturating_sub(started))
+}
+
+/// The objective head on a brief status line: `safe_text`, one line, bounded.
+pub(crate) fn objective_head(text: &str) -> String {
+    cell(text, CELL_MAX)
+}
+
 /// `12s` / `4m` / `2h` since the first attempt started; `-` without a clock.
 /// A clock change can put the start in the future: it clamps to `0s`, the
 /// same convention the remaining-time column in `status --tree` uses.
@@ -102,6 +114,15 @@ pub(crate) struct StatusRow {
     /// First attempt start in Unix seconds; `None` until an attempt exists.
     pub created_at: Option<u64>,
     pub objective: String,
+}
+
+/// The `brgr status TASK --brief` block: state, last event, result and
+/// decision presence.
+pub(crate) struct BriefDetail {
+    pub state: String,
+    pub last_event: Option<String>,
+    pub result: bool,
+    pub decision: bool,
 }
 
 /// The `brgr status TASK` block, already read from the store.
@@ -203,6 +224,41 @@ pub(crate) fn status_table(rows: &[StatusRow], now: u64) -> String {
         output.push('\n');
     }
     output
+}
+
+/// `brgr status --brief`: one unpadded line per task, full id, no ANSI.
+pub(crate) fn brief_table(rows: &[StatusRow], now: u64) -> String {
+    if rows.is_empty() {
+        return "no tasks\n".to_owned();
+    }
+    let mut output = String::new();
+    for row in rows {
+        let _ = writeln!(
+            output,
+            "{}  {}  {}  {}  {}",
+            row.task_id,
+            cell(&row.state, CELL_MAX),
+            cell(&row.harness, CELL_MAX),
+            elapsed_text(row.created_at, now),
+            objective_head(&row.objective),
+        );
+    }
+    output
+}
+
+/// `brgr status TASK --brief`: a few lines, no ANSI.
+pub(crate) fn brief_task(detail: &BriefDetail) -> String {
+    let last_event = detail
+        .last_event
+        .as_deref()
+        .map_or_else(|| "-".to_owned(), safe_text);
+    format!(
+        "state: {}\nlast_event: {}\nresult: {}\ndecision: {}\n",
+        safe_text(&detail.state),
+        last_event,
+        if detail.result { "yes" } else { "no" },
+        if detail.decision { "yes" } else { "no" },
+    )
 }
 
 /// The `brgr status TASK` block: key lines plus where to get the full JSON.
@@ -331,6 +387,50 @@ mod tests {
     #[test]
     fn an_empty_status_list_says_no_tasks() {
         assert_eq!(status_table(&[], 1_000), "no tasks\n");
+    }
+
+    #[test]
+    fn brief_table_is_one_line_per_task_with_the_full_id() {
+        let rows = vec![row(
+            "2b2c279a-b8e1-43a8-846c-cb8344a301d7",
+            "terminal",
+            "local.gjc",
+            Some(940),
+            "Review this change",
+        )];
+        let text = brief_table(&rows, 1_000);
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 1, "{text}");
+        assert!(lines[0].starts_with("2b2c279a-b8e1-43a8-846c-cb8344a301d7"));
+        assert!(lines[0].contains("terminal"));
+        assert!(lines[0].contains("local.gjc"));
+        assert!(lines[0].contains("1m"));
+        assert!(lines[0].contains("Review this change"));
+        assert!(!text.contains('\u{1b}'));
+    }
+
+    #[test]
+    fn brief_objective_head_strips_control_bidi_and_zero_width() {
+        let head = objective_head("ok\n\u{1b}[31m\u{202e}\u{200b}hidden");
+        assert!(!head.contains('\n'));
+        assert!(!head.contains('\u{1b}'));
+        assert!(!head.contains('\u{202e}'));
+        assert!(!head.contains('\u{200b}'));
+        assert!(head.contains("hidden"), "{head}");
+    }
+
+    #[test]
+    fn brief_task_lists_state_last_event_result_and_decision() {
+        let text = brief_task(&BriefDetail {
+            state: "terminal".to_owned(),
+            last_event: Some("terminal".to_owned()),
+            result: true,
+            decision: false,
+        });
+        assert_eq!(
+            text,
+            "state: terminal\nlast_event: terminal\nresult: yes\ndecision: no\n"
+        );
     }
 
     #[test]

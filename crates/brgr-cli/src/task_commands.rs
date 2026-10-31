@@ -13,7 +13,25 @@ use brgr_protocol::{
     TerminalOutcome,
 };
 use brgr_store::{Store, StoreError, SubtreeNode};
+use serde::Serialize;
 use serde_json::json;
+
+#[derive(Serialize)]
+struct BriefListItem {
+    task_id: String,
+    state: String,
+    harness: String,
+    elapsed_seconds: Option<u64>,
+    objective_head: String,
+}
+
+#[derive(Serialize)]
+struct BriefTaskItem {
+    state: String,
+    last_event: Option<String>,
+    result: bool,
+    decision: bool,
+}
 
 #[allow(clippy::fn_params_excessive_bools)]
 pub(crate) fn status(
@@ -22,6 +40,7 @@ pub(crate) fn status(
     tree: bool,
     observe: bool,
     verbose: bool,
+    brief: bool,
     json_output: bool,
 ) -> Result<()> {
     // Recovery records dead supervisors' tasks as lost and runs cleanups, which
@@ -35,6 +54,9 @@ pub(crate) fn status(
         let spec = store.task(root)?;
         check_reader(&store, &spec.owner_id, observe)?;
         return tree_status::show(&store, root, json_output);
+    }
+    if brief {
+        return brief_status(&store, task, observe, json_output);
     }
     // The human form is a display layer over the same data; a pipe or --json
     // gets the JSON below unchanged.
@@ -112,6 +134,108 @@ pub(crate) fn status(
                 json_output,
             );
         }
+    }
+    Ok(())
+}
+
+fn brief_status(
+    store: &Store,
+    task: Option<TaskId>,
+    observe: bool,
+    json_output: bool,
+) -> Result<()> {
+    if let Some(task_id) = task {
+        brief_one(store, task_id, observe, json_output)
+    } else {
+        brief_list(store, json_output)
+    }
+}
+
+fn brief_list(store: &Store, json_output: bool) -> Result<()> {
+    let session = current_session()?;
+    let owner = env::var("BRGR_OWNER_ID")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .map(OwnerId::new)
+        .transpose()?;
+    let now = human::unix_now();
+    let rows = store
+        .tasks_for_session(session.as_deref().unwrap_or(""), owner.as_ref(), 20)?
+        .into_iter()
+        .map(|spec| {
+            let state = store.attempt_state(spec.task_id).ok();
+            human::StatusRow {
+                task_id: spec.task_id.to_string(),
+                state: state.map_or_else(
+                    || "queued".to_owned(),
+                    |value| format!("{value:?}").to_lowercase(),
+                ),
+                harness: spec.route.harness_id,
+                created_at: task_created_at(store, spec.task_id),
+                objective: spec.objective,
+            }
+        })
+        .collect::<Vec<_>>();
+    if json_output {
+        let items = rows
+            .iter()
+            .map(|row| BriefListItem {
+                task_id: row.task_id.clone(),
+                state: row.state.clone(),
+                harness: row.harness.clone(),
+                elapsed_seconds: human::elapsed_seconds(row.created_at, now),
+                objective_head: human::objective_head(&row.objective),
+            })
+            .collect::<Vec<_>>();
+        println!("{}", serde_json::to_string(&items)?);
+    } else {
+        print!("{}", human::brief_table(&rows, now));
+    }
+    Ok(())
+}
+
+/// The `snake_case` name the JSON uses for an event kind.
+fn event_kind_name(kind: brgr_protocol::EventKind) -> String {
+    serde_json::to_value(kind)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .unwrap_or_else(|| format!("{kind:?}").to_lowercase())
+}
+
+fn brief_one(store: &Store, task_id: TaskId, observe: bool, json_output: bool) -> Result<()> {
+    let spec = store.task(task_id)?;
+    check_reader(store, &spec.owner_id, observe)?;
+    let state = attempt_state_name(store, task_id)?;
+    let last_event = store
+        .latest_event(task_id)?
+        .map(|event| event_kind_name(event.kind));
+    let result = match store.latest_result(task_id) {
+        Ok(envelope) => Some(envelope),
+        Err(StoreError::TaskNotFound(_)) => None,
+        Err(error) => return Err(error.into()),
+    };
+    let decision = match &result {
+        Some(envelope) => store.decision_for_result(envelope.result_id)?.is_some(),
+        None => false,
+    };
+    let item = BriefTaskItem {
+        state: state.clone(),
+        last_event: last_event.clone(),
+        result: result.is_some(),
+        decision,
+    };
+    if json_output {
+        println!("{}", serde_json::to_string(&item)?);
+    } else {
+        print!(
+            "{}",
+            human::brief_task(&human::BriefDetail {
+                state,
+                last_event,
+                result: item.result,
+                decision,
+            })
+        );
     }
     Ok(())
 }
@@ -609,4 +733,19 @@ pub(crate) fn record_verdict(
     }
     crate::worktree_prune::reclaim_and_report(paths, task, spec.revision);
     Ok(persisted)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::event_kind_name;
+    use brgr_protocol::EventKind;
+
+    #[test]
+    fn an_event_kind_is_named_as_the_json_names_it() {
+        assert_eq!(
+            event_kind_name(EventKind::CancelRequested),
+            "cancel_requested"
+        );
+        assert_eq!(event_kind_name(EventKind::Terminal), "terminal");
+    }
 }
