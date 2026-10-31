@@ -525,9 +525,11 @@ lost result warns that its worker may outlive its supervisor, and while that
 process runs the worktree is kept. The checkout is removed with `git worktree
 remove`, so uncommitted work is kept and reported with git's own reason. It is
 forced only when brgr has shown every change is disposable: each one is an
-untracked harness cache (`.gjc/` or `.commandcode/`, which hold only session
-state; `.claude/` or `.cursor/` also hold project configuration a task may
-write, so they are not caches), or the task sealed a diff with
+untracked worker tool-state directory (`.gjc`, `.commandcode`, `.agent-progress`,
+`.build`, at any depth; the names below that are disposable only when ignored are
+not, since an untracked file inside a directory that merely shares such a name is the
+worker's own work; `.claude/` or `.cursor/` also hold project configuration a
+task may write, so they are not caches), or the task sealed a diff with
 `--capture-diff`, the worktree's patch is byte-for-byte that diff, and each
 `--evidence-file` still has the digest of its sealed copy. A repository nested in
 the worktree, which a patch records as one commit id, and a `.brgr/` report
@@ -543,12 +545,16 @@ git is not the only check. Its clean test does not look at ignored files, so
 credential, or a build cache — the things a task worktree is most likely to
 hold. Those worktrees are kept and their ignored paths listed; pass
 `--include-ignored` to remove them anyway. An ignored directory a tool owns
-and recreates in full (`node_modules`, `target`, `.next`, `.turbo`,
-`__pycache__`, `.pytest_cache`, `.mypy_cache`, `.venv`, `.gradle`) does not keep
-a worktree when git reports the directory itself as ignored. Generic output
-directories such as `dist` or `build` do: when the directory matches an ignore
-pattern git never lists what is inside, and a file put there by hand would go
-with it. A symlink, a directory git has not
+(`node_modules`, `target`, `.next`, `.turbo`, `__pycache__`, `.pytest_cache`,
+`.mypy_cache`, `.venv`, `.gradle`, `.gjc`, `.commandcode`, `.agent-progress`,
+`.build`) does not keep a worktree when git reports the directory itself as
+ignored. The four worker tool-state names (`.gjc`, `.commandcode`, `.agent-progress`,
+`.build`) are also disposable when git reports them as untracked; the package
+managers' and compilers' names are not.
+Generic output directories such as `dist` or `build` do keep it: when the
+directory matches an ignore pattern git never lists what is inside, and a file
+put there by hand would go with it. `.build` (SwiftPM) is a tool-owned name;
+`build` is not. A symlink, a directory git has not
 registered as a worktree, one git has locked, a name the layout could not have
 produced, and the directory prune is running in are all refused.
 
