@@ -128,7 +128,7 @@ Head 자동 종료는 남아 있다.
 
 ## Phase 2. Head Migration
 
-릴리스 방향: v2.15.0 · 상태: 2.1~2.6 출시. 실사용 검증은 Claude·Codex·Cursor 각각이 Head인 경우
+릴리스 방향: v2.15.0 · 상태: 2.1~2.6 출시. 실사용 확인은 Claude Head 한 조합(`--exit-old` 포함)뿐이다. Codex Head는 [#240](https://github.com/justn-hyeok/brgr/issues/240)에서 막혀 있고 Cursor Head와 실제 신호로 하는 조건부 인계는 확인하지 못했다([기록](../evidence/verification-debt-2026-11-01.md))
 
 지휘권을 다른 세션으로 옮기고 기존 worker와 미처리 결과를 승계한다. 인계 성공은
 새 Head가 실제 작업을 이어서 수행했을 때 입증한다. 특정 하네스 전용이 아니다.
