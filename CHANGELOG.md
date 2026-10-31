@@ -2,13 +2,17 @@
 
 ## Unreleased
 
+## 2.15.15 — 2026-11-01
+
+A Codex session on a shared Codex daemon that a worker started is recorded under its own owner.
+
 - `--as SESSION` (and `--owner-session`) also ignores `BRGR_OWNER_ID` when `BRGR_SESSION_ID`
   names a different session. A shared Codex daemon keeps the owner of the worker
   that started it, so a Codex session's `brgr run` was recorded under that dead
   worker (and failed with `default TUI execution needs an exact Herdr source`,
   because that check needs a `codex:` owner). The owner is now `codex:SESSION`
-  for the session `--as` names. Not checked on a Codex release that runs a
-  command and shows it afterwards: the later pane lookup was not exercised live.
+  for the session `--as` names.
+
 ## 2.15.14 — 2026-11-01
 
 A Codex session that shares a daemon started by a worker is no longer refused by brgr for that worker's identity.
