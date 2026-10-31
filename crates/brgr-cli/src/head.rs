@@ -691,7 +691,7 @@ fn incoming_brgr(paths: &Paths, owner_id: &OwnerId) -> String {
                 .map_or_else(|_| "brgr".to_owned(), |exe| exe.display().to_string())
         });
     format!(
-        "env BRGR_OWNER_ID={} BRGR_HOME={} {brgr}",
+        "env -u BRGR_SESSION_ID -u BRGR_PARENT_TASK_ID -u BRGR_PARENT_ATTEMPT_ID BRGR_OWNER_ID={} BRGR_HOME={} {brgr}",
         shell_quote(owner_id.as_str()),
         shell_quote(&paths.home.display().to_string()),
     )
@@ -770,8 +770,9 @@ fn open_handoff(
     let path = offer_path(paths, &key)?;
     write_json_atomic(&path, &offer)?;
     // The pane env is not enough: a shared Codex daemon runs tool calls with its
-    // own environment, which can carry another worker's `BRGR_OWNER_ID` and not
-    // this control home. Each command states both itself.
+    // own environment, which can carry another worker's `BRGR_OWNER_ID`, parent
+    // identity, and not this control home. Each command unsets those identities
+    // and states the owner and home.
     let brgr = incoming_brgr(paths, &owner_id);
     let prompt = incoming_head_prompt(&owner_id, &brgr, task, &key, &args.goal);
     let workspace = std::env::current_dir()?;

@@ -506,10 +506,49 @@ fn owner_from_environment() -> Result<OwnerId> {
 }
 
 fn delegation_parent_from_environment() -> Result<Option<(TaskId, AttemptId)>> {
-    match (
-        env::var("BRGR_PARENT_TASK_ID").ok(),
-        env::var("BRGR_PARENT_ATTEMPT_ID").ok(),
-    ) {
+    let explicit = invocation::current().session.clone();
+    let env_session = env::var("BRGR_SESSION_ID").ok();
+    let parent_task = env::var("BRGR_PARENT_TASK_ID").ok();
+    let parent_attempt = env::var("BRGR_PARENT_ATTEMPT_ID").ok();
+    if foreign_parent_identity(explicit.as_deref(), env_session.as_deref()) {
+        if parent_task.is_some() || parent_attempt.is_some() {
+            eprintln!(
+                "brgr: ignoring the parent worker identity of another session (BRGR_SESSION_ID differs from --as)"
+            );
+        }
+        return Ok(None);
+    }
+    inherited_delegation_parent(
+        explicit.as_deref(),
+        env_session.as_deref(),
+        parent_task.as_deref(),
+        parent_attempt.as_deref(),
+    )
+}
+
+/// `--as` named one session and `BRGR_SESSION_ID` names a different one: the
+/// parent variables in the environment belong to that other session.
+fn foreign_parent_identity(explicit_session: Option<&str>, env_session: Option<&str>) -> bool {
+    let env_session = env_session.filter(|value| !value.trim().is_empty());
+    explicit_session.is_some() && env_session.is_some() && explicit_session != env_session
+}
+
+/// Parent attempt inherited from the worker environment.
+///
+/// When `--as` names a session and `BRGR_SESSION_ID` names a different one, the
+/// `BRGR_PARENT_TASK_ID` and `BRGR_PARENT_ATTEMPT_ID` values belong to that other
+/// session and are ignored. Every other case is the stored parent identity, or
+/// the existing incomplete-identity error when only one parent variable is set.
+fn inherited_delegation_parent(
+    explicit_session: Option<&str>,
+    env_session: Option<&str>,
+    parent_task: Option<&str>,
+    parent_attempt: Option<&str>,
+) -> Result<Option<(TaskId, AttemptId)>> {
+    if foreign_parent_identity(explicit_session, env_session) {
+        return Ok(None);
+    }
+    match (parent_task, parent_attempt) {
         (None, None) => Ok(None),
         (Some(task), Some(attempt)) => Ok(Some((
             task.parse().context("BRGR_PARENT_TASK_ID is invalid")?,
@@ -1130,6 +1169,40 @@ mod tests {
         Cli::try_parse_from(["brgr", "wait", "--timeout-seconds=1", "--", task]).unwrap();
         Cli::try_parse_from(["brgr", "cancel", "--", task]).unwrap();
         Cli::try_parse_from(["brgr", "result", "--", task]).unwrap();
+    }
+
+    #[test]
+    fn inherited_parent_is_dropped_when_explicit_session_differs() {
+        let task = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+        let attempt = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+        let ids = || (task.parse().unwrap(), attempt.parse().unwrap());
+
+        let dropped =
+            inherited_delegation_parent(Some("mine"), Some("other"), Some(task), Some(attempt))
+                .unwrap();
+        assert_eq!(dropped, None);
+
+        let equal =
+            inherited_delegation_parent(Some("other"), Some("other"), Some(task), Some(attempt))
+                .unwrap();
+        assert_eq!(equal, Some(ids()));
+
+        let no_explicit =
+            inherited_delegation_parent(None, Some("other"), Some(task), Some(attempt)).unwrap();
+        assert_eq!(no_explicit, Some(ids()));
+
+        let unset_session =
+            inherited_delegation_parent(Some("mine"), None, Some(task), Some(attempt)).unwrap();
+        assert_eq!(unset_session, Some(ids()));
+
+        let incomplete =
+            inherited_delegation_parent(None, Some("other"), Some(task), None).unwrap_err();
+        assert!(
+            incomplete
+                .to_string()
+                .contains("brgr worker parent identity is incomplete"),
+            "{incomplete}"
+        );
     }
 
     #[test]

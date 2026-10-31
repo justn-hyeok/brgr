@@ -189,6 +189,15 @@ fn incoming_session() -> [(&'static str, &'static str); 2] {
     ]
 }
 
+/// The incoming prompt unsets `BRGR_SESSION_ID`; the session then comes from
+/// `CLAUDE_CODE_SESSION_ID` (or `CODEX_THREAD_ID`).
+fn incoming_session_without_brgr_session() -> [(&'static str, &'static str); 2] {
+    [
+        ("BRGR_OWNER_ID", "codex:head-takeover"),
+        ("CLAUDE_CODE_SESSION_ID", "session-incoming"),
+    ]
+}
+
 fn start_handoff(home: &Path, task_id: &str, fake: &Path, dir: &Path, exit_old: bool) -> Value {
     let mut args = vec![
         "head",
@@ -486,8 +495,9 @@ fn a_handoff_without_exit_old_never_closes_a_pane() {
 #[test]
 fn the_incoming_prompt_states_the_owner_and_home_on_every_command() {
     // A shared Codex daemon runs tool calls with its own environment, which can
-    // hold another worker's `BRGR_OWNER_ID` and not this control home. The pane
-    // env cannot be relied on, so each command carries both.
+    // hold another worker's `BRGR_OWNER_ID`, parent identity, and not this
+    // control home. The pane env cannot be relied on, so each command unsets
+    // those identities and carries the owner and home.
     let (temp, home, workspace) = gjc_home();
     let task_id = start_task(&home, &workspace);
     let dir = temp.path().join("fake");
@@ -495,7 +505,7 @@ fn the_incoming_prompt_states_the_owner_and_home_on_every_command() {
     let fake = fake_herdr(&dir);
     start_handoff(&home, &task_id, &fake, &dir, false);
     let log = calls(&dir);
-    let prefix = "env BRGR_OWNER_ID='codex:head-takeover' BRGR_HOME='";
+    let prefix = "env -u BRGR_SESSION_ID -u BRGR_PARENT_TASK_ID -u BRGR_PARENT_ATTEMPT_ID BRGR_OWNER_ID='codex:head-takeover' BRGR_HOME='";
     for command in ["head take", "status", "result", "head retire", "head exit"] {
         let at = log
             .find(&format!("{command} "))
@@ -510,6 +520,44 @@ fn the_incoming_prompt_states_the_owner_and_home_on_every_command() {
             "`{command}` lacks the owner and home prefix: {log}"
         );
     }
+}
+
+#[test]
+fn incoming_head_take_status_result_retire_work_without_brgr_session_id() {
+    let (temp, home, workspace) = gjc_home();
+    let task_id = start_task(&home, &workspace);
+    let dir = temp.path().join("fake");
+    fs::create_dir_all(&dir).unwrap();
+    let fake = fake_herdr(&dir);
+    let key = offer_key(&start_handoff(&home, &task_id, &fake, &dir, false));
+    let herdr = herdr_env(&fake, &dir, "p-new");
+    let incoming = incoming_session_without_brgr_session();
+    let taken = json_output(&run_with(
+        &home,
+        &["head", "take", &task_id, "--offer", &key],
+        &incoming,
+        &herdr,
+    ));
+    json_output(&run_with(
+        &home,
+        &["status", &task_id, "--tree"],
+        &incoming,
+        &herdr,
+    ));
+    json_output(&run_with(&home, &["result", &task_id], &incoming, &herdr));
+    json_output(&run_with(
+        &home,
+        &["accept", &task_id, "--reason", "incoming head acted"],
+        &incoming,
+        &herdr,
+    ));
+    let takeover_id = taken["takeover"]["takeover_id"].as_str().unwrap();
+    json_output(&run_with(
+        &home,
+        &["head", "retire", takeover_id],
+        &incoming,
+        &herdr,
+    ));
 }
 
 fn surface_pane(home: &Path, owner: &str) -> Option<(String, String)> {

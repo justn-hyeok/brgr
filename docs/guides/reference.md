@@ -142,7 +142,13 @@ Headless is only ever an explicit per-call choice through `--headless`,
 available and reports that choice. Read-only scope, an unsupported effort,
 and legacy `prefer_print_mode` settings never select it. Use
 `--owner-session SESSION --source-pane PANE` for a positively verified source
-when the caller is a shared daemon. See the [orchestration guide](orchestration.md)
+when the caller is a shared daemon. `--as SESSION` (the short form) is the
+session in the calling context; Codex owners are identified by what the panes
+show, not by a shared daemon's environment. When `--as` names a session and
+`BRGR_SESSION_ID` names a different one, `BRGR_PARENT_TASK_ID` and
+`BRGR_PARENT_ATTEMPT_ID` belong to that other session and are ignored. A
+delegated child that passes `--as` with its own `BRGR_SESSION_ID` is still
+checked against the stored parent. See the [orchestration guide](orchestration.md)
 for config, instructions, debate, and the current verification limits.
 
 ### Recursive workers
@@ -310,9 +316,13 @@ approves closing this pane after retire, and `--agent-arg ARG` is passed through
 It records an offer under `$BRGR_HOME/handoffs/`, opens a new pane beside the head,
 starts the agent there (answering the screens the rule table covers), and submits
 one prompt telling it to run `brgr head take TASK --offer KEY`, or
-`brgr head take --offer KEY` when TASK was omitted. The incoming pane
-does not inherit this session's `BRGR_SESSION_ID`. Opening the pane moves
-nothing: this head stays the head until the incoming session runs `take`.
+`brgr head take --offer KEY` when TASK was omitted. Every command in that prompt
+starts with `env -u BRGR_SESSION_ID -u BRGR_PARENT_TASK_ID -u BRGR_PARENT_ATTEMPT_ID
+BRGR_OWNER_ID=… BRGR_HOME=… brgr`, so a shared Codex daemon does not keep a stale
+worker identity; `current_session` then falls back to `CODEX_THREAD_ID` or
+`CLAUDE_CODE_SESSION_ID`. The incoming pane does not inherit this session's
+`BRGR_SESSION_ID`. Opening the pane moves nothing: this head stays the head until
+the incoming session runs `take`.
 
 `take` is `claim` for a cooperating head. It refuses the outgoing session, an
 unknown offer, and an offer for another owner, and refuses when the binding has
