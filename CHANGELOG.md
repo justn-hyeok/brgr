@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 2.15.13 — 2026-11-01
+
+An agent-readable status, a task-less Head handoff, and a Linux safety fix for group kills.
+
 - Every group kill passes `--` before the negative pid (`kill -KILL -- -<pgid>`). Linux's `kill` read a bare `-<pgid>` as an option and signalled every process of the user (`kill(-1)`); macOS was unaffected. A source scan test keeps a bare `-<pgid>` from coming back. Not checked on Linux: only the form was verified on macOS (#235).
 - `brgr head handoff` no longer requires a TASK. Omit it to hand off the calling
   owner's open tasks, or none: a session with no brgr work still opens the new
