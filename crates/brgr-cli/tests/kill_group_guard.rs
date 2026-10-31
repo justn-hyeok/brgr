@@ -32,7 +32,7 @@ fn unseparated_group_kills(source: &str) -> Vec<usize> {
         let window = &lines[index..lines.len().min(index + WINDOW_LINES)];
         let end = window
             .iter()
-            .position(|line| line.contains(';') || line.trim_end().ends_with(".await"))
+            .position(|line| line.contains(';') || line.trim_end().ends_with("await"))
             .map_or(window.len(), |end| end + 1);
         let call = window[..end].join("\n");
         if call.contains(&negative) && !call.contains("\"--\"") {
