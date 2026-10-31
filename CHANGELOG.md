@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- `brgr prune` and decision-time reclaim treat worker tool-state directories
+  (`.agent-progress/`, `.build/`, `.commandcode/`, `.gjc/`) as disposable when
+  git reports them as ignored, using the same name list as untracked caches.
+  Generic names such as `dist/` or `build/` still keep the worktree unless
+  `--include-ignored` is given.
+
 ## 2.15.11 — 2026-10-31
 
 A terminal-readable release: status, run and doctor say what matters first; `watch --all`; Devin model selection.

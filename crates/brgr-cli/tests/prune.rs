@@ -1164,6 +1164,154 @@ fn installed_dependencies_do_not_keep_the_worktree_but_a_dotenv_does() {
     assert!(fixture.worktree(&secret).join(".env").is_file());
 }
 
+/// Worker tool-state directories git reports as ignored used to keep a settled
+/// worktree unless `--include-ignored` was given. They are disposable: the same
+/// names are already accepted when git reports them as untracked.
+#[test]
+fn ignored_tool_state_directories_do_not_keep_the_worktree() {
+    let fixture = Fixture::new();
+    let exclude = fixture.repository.join(".git/info/exclude");
+    fs::write(&exclude, b".agent-progress/\n.build/\n.commandcode/\n").unwrap();
+    let task = fixture.run_with("clean", &[]);
+    let worktree = fixture.worktree(&task);
+    for name in [".agent-progress", ".build", ".commandcode"] {
+        let dir = worktree.join(name);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("state.json"), b"{}\n").unwrap();
+    }
+    fixture.accept(&task);
+    assert!(
+        !worktree.exists(),
+        "ignored tool-state directories kept the worktree"
+    );
+}
+
+/// An ignored `.env` still keeps a worktree that also holds disposable tool
+/// state: only the tool-state directories became disposable, not every ignored
+/// path beside them.
+#[test]
+fn an_ignored_dotenv_among_tool_state_directories_keeps_the_worktree() {
+    let fixture = Fixture::new();
+    let exclude = fixture.repository.join(".git/info/exclude");
+    fs::write(&exclude, b".agent-progress/\n.build/\n.commandcode/\n").unwrap();
+    let task = fixture.run_with("clean", &[]);
+    let worktree = fixture.worktree(&task);
+    for name in [".agent-progress", ".build", ".commandcode"] {
+        let dir = worktree.join(name);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("state.json"), b"{}\n").unwrap();
+    }
+    fs::write(worktree.join(".env"), b"TOKEN=secret\n").unwrap();
+    fixture.accept(&task);
+    assert!(
+        worktree.join(".env").is_file(),
+        "an ignored .env among tool-state directories was deleted"
+    );
+}
+
+/// Prefix lookalikes of `.build`, generic `dist/`, and a file that only shares
+/// the name must still keep the worktree: the disposable list is exact directory
+/// names, not prefixes, and never files.
+#[test]
+fn lookalike_and_generic_ignored_paths_keep_the_worktree() {
+    let fixture = Fixture::new();
+    let exclude = fixture.repository.join(".git/info/exclude");
+    fs::write(&exclude, b".build-notes.txt\n.buildx/\ndist/\n.build\n").unwrap();
+    let notes = fixture.run_with("clean", &[]);
+    let extra = fixture.run_with("clean", &[]);
+    let dist = fixture.run_with("clean", &[]);
+    let file = fixture.run_with("clean", &[]);
+
+    fs::write(
+        fixture.worktree(&notes).join(".build-notes.txt"),
+        b"notes\n",
+    )
+    .unwrap();
+    let buildx = fixture.worktree(&extra).join(".buildx");
+    fs::create_dir_all(&buildx).unwrap();
+    fs::write(buildx.join("out"), b"x\n").unwrap();
+    let dist_dir = fixture.worktree(&dist).join("dist");
+    fs::create_dir_all(&dist_dir).unwrap();
+    fs::write(dist_dir.join("index.html"), b"<html></html>\n").unwrap();
+    fs::write(fixture.worktree(&file).join(".build"), b"not a directory\n").unwrap();
+
+    fixture.accept(&notes);
+    fixture.accept(&extra);
+    fixture.accept(&dist);
+    fixture.accept(&file);
+    assert!(
+        fixture.worktree(&notes).join(".build-notes.txt").is_file(),
+        ".build-notes.txt was treated as disposable .build/"
+    );
+    assert!(
+        buildx.join("out").is_file(),
+        ".buildx/ was treated as disposable .build/"
+    );
+    assert!(
+        dist_dir.join("index.html").is_file(),
+        "ignored dist/ was treated as disposable"
+    );
+    assert!(
+        fixture.worktree(&file).join(".build").is_file(),
+        "a file named .build was treated as a disposable directory"
+    );
+}
+
+/// git reporting `.agent-progress/` as untracked (`??`) or ignored (`!!`) must
+/// not change the verdict: both are disposable tool state.
+#[test]
+fn untracked_and_ignored_agent_progress_get_the_same_verdict() {
+    let fixture = Fixture::new();
+    let untracked = fixture.run_with("clean", &[]);
+    let exclude = fixture.repository.join(".git/info/exclude");
+    fs::write(&exclude, b".agent-progress/\n").unwrap();
+    let ignored = fixture.run_with("clean", &[]);
+
+    for task in [&untracked, &ignored] {
+        let dir = fixture.worktree(task).join(".agent-progress");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("state.json"), b"{}\n").unwrap();
+    }
+    fixture.accept(&untracked);
+    fixture.accept(&ignored);
+    assert!(
+        !fixture.worktree(&untracked).exists(),
+        "untracked .agent-progress/ kept the worktree"
+    );
+    assert!(
+        !fixture.worktree(&ignored).exists(),
+        "ignored .agent-progress/ kept the worktree"
+    );
+}
+
+/// `brgr prune` uses the same disposable list as decision-time reclaim, so a
+/// kept-then-settled worktree holding only ignored tool state is removable
+/// without `--include-ignored`.
+#[test]
+fn prune_reclaims_ignored_tool_state_directories_without_include_ignored() {
+    let fixture = Fixture::new();
+    let exclude = fixture.repository.join(".git/info/exclude");
+    fs::write(&exclude, b".agent-progress/\n.build/\n.commandcode/\n").unwrap();
+    let task = fixture.run_task("tools");
+    let worktree = fixture.worktree(&task);
+    for name in [".agent-progress", ".build", ".commandcode"] {
+        let dir = worktree.join(name);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("state.json"), b"{}\n").unwrap();
+    }
+    fixture.accept(&task);
+    assert!(
+        worktree.is_dir(),
+        "keep-worktree did not leave the checkout"
+    );
+
+    let report = fixture.prune(&[]);
+    assert_eq!(report["removable"], 1, "{report}");
+    let applied = fixture.prune(&["--apply"]);
+    assert_eq!(applied["removed"], 1, "{applied}");
+    assert!(!worktree.exists(), "prune left ignored tool-state behind");
+}
+
 struct Fixture {
     /// Held so the tree outlives the fixture, and used for scratch files.
     temp: TempDir,

@@ -7,9 +7,10 @@
 //! git is used for the two removals, but it is deliberately **not** trusted as
 //! the only safety authority. `git worktree remove` refuses a worktree with
 //! modified or untracked files, and is forced only when brgr has shown every
-//! such change is disposable: an untracked harness cache (`.gjc/`, `.claude/`
-//! and the like), or a worktree whose patch is byte-for-byte the diff the store
-//! sealed with the result. A task branch goes only
+//! such change is disposable: an untracked tool-state or cache directory
+//! (`.gjc/`, `.commandcode/`, `.agent-progress/`, `.build/` and the like), or a
+//! worktree whose patch is byte-for-byte the diff the store sealed with the
+//! result. A task branch goes only
 //! when every commit on it survives elsewhere: in `HEAD`, or on another branch
 //! or remote-tracking branch — a task started from a feature branch carries that
 //! branch's commits, which `git branch -d` would count as unmerged forever. A
@@ -19,8 +20,9 @@
 //! silently. A task worktree is exactly where an agent has been working, which
 //! makes it the most likely place in a repository to hold such a file. This
 //! module therefore checks the ignored set itself and keeps the worktree unless
-//! the caller opts in, or every ignored path lies in a directory a build or a
-//! package manager recreates (`node_modules`, `target`, `.next` and the like).
+//! the caller opts in, or every ignored path is a directory a tool owns
+//! (`node_modules`, `target`, `.next`, `.agent-progress`, `.build`,
+//! `.commandcode` and the like), judged by the same names as an untracked cache.
 //!
 //! Every candidate must also be a real directory (not a symlink), a worktree git
 //! itself has registered for its repository and has not locked, a name
@@ -680,42 +682,62 @@ fn unsealable(worktree: &Path, status_line: &str) -> bool {
     path == ".brgr" || path.starts_with(".brgr/") || worktree.join(path).join(".git").exists()
 }
 
-/// An untracked directory a worker harness keeps only its own session state
-/// in. Only an untracked entry counts: a change to a tracked file under one of
-/// these names is the repository's own content. Directories such as `.claude/`
-/// or `.cursor/` are not here: they also hold project configuration a task may
-/// be asked to write (`.claude/commands/`, `.cursor/rules/`), and git reports
+/// Directory names that never keep a worktree, whether git reports them as
+/// ignored (`!!`) or untracked (`??`). Package-manager and compiler caches,
+/// plus worker tool-state directories. A file is never disposable, even when
+/// it shares a name with one of these. Generic names such as `dist`, `build`
+/// or `out` are not here: people keep their own files under those.
+const DISPOSABLE: [&str; 13] = [
+    "node_modules",
+    "target",
+    ".next",
+    ".turbo",
+    "__pycache__",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".venv",
+    ".gradle",
+    ".gjc",
+    ".commandcode",
+    ".agent-progress",
+    ".build",
+];
+
+/// An untracked directory a tool owns, or a file git listed inside one.
+/// `--untracked-files=all` reports files, not the enclosing untracked
+/// directory, so a path under a [`DISPOSABLE`] name counts as well. Only an
+/// untracked entry counts: a change to a tracked file under one of these names
+/// is the repository's own content. Directories such as `.claude/` or
+/// `.cursor/` are not here: they also hold project configuration a task may be
+/// asked to write (`.claude/commands/`, `.cursor/rules/`), and git reports
 /// either as the bare directory.
 fn harness_cache(status_line: &str) -> bool {
-    const CACHES: [&str; 2] = [".gjc/", ".commandcode/"];
-    status_line
-        .strip_prefix("?? ")
-        .is_some_and(|path| CACHES.iter().any(|cache| path.starts_with(cache)))
+    let Some(path) = status_line.strip_prefix("?? ") else {
+        return false;
+    };
+    if regenerable(path) {
+        return true;
+    }
+    let Some((parent, _)) = path.rsplit_once('/') else {
+        return false;
+    };
+    parent
+        .split('/')
+        .any(|component| DISPOSABLE.contains(&component))
 }
 
-/// An ignored directory a tool owns and recreates in full: an entry git
-/// reported as a directory whose own name is a package manager's, compiler's or
-/// test runner's. A file is never regenerable, wherever it sits.
+/// An ignored directory a tool owns: an entry git reported as a directory
+/// whose own name is in [`DISPOSABLE`]. A file is never regenerable, wherever
+/// it sits, including a nested `.env` git reported on its own.
 ///
 /// When the directory itself matches an ignore pattern, git reports only the
 /// directory and never what is inside, so a file put there by hand would go
 /// with it. Generic names such as `dist`, `build` or `out` are therefore not
-/// here: people keep their own files under those.
+/// in [`DISPOSABLE`]: people keep their own files under those.
 fn regenerable(path: &str) -> bool {
-    const REGENERABLE: [&str; 9] = [
-        "node_modules",
-        "target",
-        ".next",
-        ".turbo",
-        "__pycache__",
-        ".pytest_cache",
-        ".mypy_cache",
-        ".venv",
-        ".gradle",
-    ];
     path.strip_suffix('/')
         .map(|directory| directory.rsplit('/').next().unwrap_or(directory))
-        .is_some_and(|name| REGENERABLE.contains(&name))
+        .is_some_and(|name| DISPOSABLE.contains(&name))
 }
 
 /// Whether the worktree's changes are exactly what the store sealed with the
@@ -1422,11 +1444,18 @@ mod tests {
     fn only_an_untracked_harness_directory_is_a_cache() {
         assert!(harness_cache("?? .gjc/"));
         assert!(harness_cache("?? .commandcode/"));
+        assert!(harness_cache("?? .agent-progress/"));
+        assert!(harness_cache("?? .build/"));
+        assert!(harness_cache("?? .gjc/session.json"));
         assert!(!harness_cache("?? .claude/"));
         assert!(!harness_cache("?? .cursor/"));
         assert!(!harness_cache(" M .gjc/config.json"));
         assert!(!harness_cache("?? src/main.rs"));
         assert!(!harness_cache("?? .gjcx/"));
+        assert!(!harness_cache("?? .build"));
+        assert!(!harness_cache("?? .build-notes.txt"));
+        assert!(!harness_cache("?? .buildx/"));
+        assert!(!harness_cache("?? dist/"));
     }
 
     #[test]
@@ -1434,6 +1463,11 @@ mod tests {
         assert!(regenerable("node_modules/"));
         assert!(regenerable("packages/web/.next/"));
         assert!(regenerable("target/"));
+        assert!(regenerable(".gjc/"));
+        assert!(regenerable(".commandcode/"));
+        assert!(regenerable(".agent-progress/"));
+        assert!(regenerable(".build/"));
+        assert!(regenerable("ios/.build/"));
         // Generic output names may hold files someone put there.
         assert!(!regenerable("dist/"));
         assert!(!regenerable("build/"));
@@ -1445,6 +1479,29 @@ mod tests {
         assert!(!regenerable("build/prod.env"));
         assert!(!regenerable("dist/.env"));
         assert!(!regenerable("node_modules/x/.env"));
+        // Prefix lookalikes and a file that only shares the name are not directories we own.
+        assert!(!regenerable(".build-notes.txt"));
+        assert!(!regenerable(".buildx/"));
+        assert!(!regenerable(".build"));
+    }
+
+    #[test]
+    fn untracked_and_ignored_tool_state_directories_get_the_same_verdict() {
+        for path in [
+            ".agent-progress/",
+            ".build/",
+            ".commandcode/",
+            ".gjc/",
+            "node_modules/",
+            "ios/.build/",
+        ] {
+            assert!(regenerable(path), "{path}");
+            assert!(harness_cache(&format!("?? {path}")), "{path}");
+        }
+        for path in [".build", ".build-notes.txt", ".buildx/", "dist/", "build/"] {
+            assert!(!regenerable(path), "{path}");
+            assert!(!harness_cache(&format!("?? {path}")), "{path}");
+        }
     }
     use crate::adversary::Adversary;
 
