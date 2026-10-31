@@ -293,11 +293,19 @@ runs request, prepare, and commit as the incoming session.
 
 ### Opening the incoming head from the current head
 
-`brgr head handoff TASK --kind claude|codex|... --goal TEXT [--exit-old]
-[--agent-arg ARG]` is the live path, run by the current head inside Herdr. It
-records an offer under `$BRGR_HOME/handoffs/`, opens a new pane beside the head,
+`brgr head handoff TASK --kind claude --goal TEXT` is the live path, run by the
+current head inside Herdr. TASK is a brgr task id as printed by `brgr status`.
+Omit it (`brgr head handoff --kind claude --goal TEXT`) to hand off all of this
+owner's open tasks; if the owner has none, the manifest still holds the goal and
+notes with an empty task list, and the new head pane opens the same way. A
+malformed TASK keeps clap's uuid error and adds a hint to run `brgr status`.
+`--kind` is the incoming agent (claude, codex, and the others), `--exit-old`
+approves closing this pane after retire, and `--agent-arg ARG` is passed through.
+
+It records an offer under `$BRGR_HOME/handoffs/`, opens a new pane beside the head,
 starts the agent there (answering the screens the rule table covers), and submits
-one prompt telling it to run `brgr head take TASK --offer KEY`. The incoming pane
+one prompt telling it to run `brgr head take TASK --offer KEY`, or
+`brgr head take --offer KEY` when TASK was omitted. The incoming pane
 does not inherit this session's `BRGR_SESSION_ID`. Opening the pane moves
 nothing: this head stays the head until the incoming session runs `take`.
 

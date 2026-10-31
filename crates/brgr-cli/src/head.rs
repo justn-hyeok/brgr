@@ -5,7 +5,7 @@
 
 use std::{env, fs, path::PathBuf};
 
-use anyhow::{Context as _, Result, bail};
+use anyhow::{Context as _, Result, anyhow, bail};
 use brgr_protocol::{OwnerId, TaskId};
 use brgr_store::{
     HandoffManifest, RetireOutcome, Store, StoreError, Takeover, TakeoverId, TakeoverState,
@@ -74,7 +74,10 @@ pub(crate) enum HeadCommand {
     },
     /// Open a new head in a Herdr pane and offer it this head's command.
     Handoff {
-        task: TaskId,
+        /// A brgr task id as printed by `brgr status`. Omit to hand off all of
+        /// this owner's open tasks.
+        #[arg(value_name = "TASK", value_parser = parse_handoff_task)]
+        task: Option<TaskId>,
         /// Herdr agent kind of the incoming head, for example claude or codex.
         #[arg(long)]
         kind: String,
@@ -92,7 +95,10 @@ pub(crate) enum HeadCommand {
     },
     /// Incoming head takes the command that `head handoff` offered.
     Take {
-        task: TaskId,
+        /// A brgr task id as printed by `brgr status`. Omit when the offer
+        /// already names the owner.
+        #[arg(value_name = "TASK")]
+        task: Option<TaskId>,
         #[arg(long)]
         offer: String,
     },
@@ -106,6 +112,13 @@ pub(crate) struct IncomingHead {
     pub(crate) session: String,
     /// The pane `head handoff` opened for it, when it took command with `take`.
     pub(crate) offered: Option<OfferedPane>,
+}
+
+/// Parse a handoff TASK, keeping clap's uuid error and adding where to find one.
+fn parse_handoff_task(value: &str) -> Result<TaskId, String> {
+    value
+        .parse()
+        .map_err(|error: uuid::Error| format!("{error}; run `brgr status` to find a task id"))
 }
 
 /// The pane a handoff opened for the incoming head, from the stored offer.
@@ -124,31 +137,7 @@ pub(crate) fn run(
     json_output: bool,
 ) -> Result<Option<IncomingHead>> {
     let store = Store::open(&paths.store)?;
-    let incoming = match &command {
-        HeadCommand::Commit { takeover } => store.takeover(*takeover)?.map(|record| IncomingHead {
-            owner: record.owner_id,
-            session: record.to_session,
-            offered: None,
-        }),
-        HeadCommand::Claim { task, .. } => {
-            let owner = store.task(*task)?.owner_id;
-            crate::current_session()?.map(|session| IncomingHead {
-                owner,
-                session,
-                offered: None,
-            })
-        }
-        HeadCommand::Take { task, offer } => {
-            let owner = store.task(*task)?.owner_id;
-            let offered = offered_pane(paths, offer);
-            crate::current_session()?.map(|session| IncomingHead {
-                owner,
-                session,
-                offered,
-            })
-        }
-        _ => None,
-    };
+    let incoming = incoming_head(paths, &store, &command)?;
     match command {
         HeadCommand::Request { task, to, key } => {
             request(&store, task, &to, key, json_output)?;
@@ -216,6 +205,41 @@ pub(crate) fn run(
         HeadCommand::Exit { takeover } => exit_outgoing(paths, &store, takeover, json_output)?,
     }
     Ok(incoming)
+}
+
+fn incoming_head(
+    paths: &Paths,
+    store: &Store,
+    command: &HeadCommand,
+) -> Result<Option<IncomingHead>> {
+    Ok(match command {
+        HeadCommand::Commit { takeover } => store.takeover(*takeover)?.map(|record| IncomingHead {
+            owner: record.owner_id,
+            session: record.to_session,
+            offered: None,
+        }),
+        HeadCommand::Claim { task, .. } => {
+            let owner = store.task(*task)?.owner_id;
+            crate::current_session()?.map(|session| IncomingHead {
+                owner,
+                session,
+                offered: None,
+            })
+        }
+        HeadCommand::Take { task, offer } => {
+            let owner = match task {
+                Some(task) => store.task(*task)?.owner_id,
+                None => offer_owner(paths, offer)?,
+            };
+            let offered = offered_pane(paths, offer);
+            crate::current_session()?.map(|session| IncomingHead {
+                owner,
+                session,
+                offered,
+            })
+        }
+        _ => None,
+    })
 }
 
 fn request(
@@ -564,7 +588,8 @@ fn takeover_json(takeover: &Takeover) -> Value {
 /// outgoing head's pane is.
 #[derive(Clone, Serialize, Deserialize)]
 struct Offer {
-    task: TaskId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    task: Option<TaskId>,
     owner_id: String,
     key: String,
     from_session: String,
@@ -635,7 +660,7 @@ fn departure_path(paths: &Paths, takeover: TakeoverId) -> Result<PathBuf> {
 fn handoff(
     paths: &Paths,
     store: &Store,
-    task: TaskId,
+    task: Option<TaskId>,
     args: &HandoffArgs,
     json_output: bool,
 ) -> Result<()> {
@@ -644,10 +669,71 @@ fn handoff(
     Ok(())
 }
 
+/// The owner a taskless handoff names: this session, bound if it was not yet.
+fn handoff_owner(store: &Store, task: Option<TaskId>) -> Result<(OwnerId, u32)> {
+    if let Some(task) = task {
+        let spec = store.task(task)?;
+        return Ok((spec.owner_id, spec.revision));
+    }
+    let owner = crate::owner_from_environment()?;
+    if store.owner_binding(&owner)?.is_none() {
+        crate::admission::bind_owner_session(store, &owner, crate::current_session()?.as_deref())?;
+    }
+    Ok((owner, 0))
+}
+
+fn incoming_brgr(paths: &Paths, owner_id: &OwnerId) -> String {
+    let brgr = std::env::var("BRGR_BIN")
+        .ok()
+        .filter(|path| !path.is_empty())
+        .unwrap_or_else(|| {
+            std::env::current_exe()
+                .map_or_else(|_| "brgr".to_owned(), |exe| exe.display().to_string())
+        });
+    format!(
+        "env BRGR_OWNER_ID={} BRGR_HOME={} {brgr}",
+        shell_quote(owner_id.as_str()),
+        shell_quote(&paths.home.display().to_string()),
+    )
+}
+
+fn incoming_head_prompt(
+    owner_id: &OwnerId,
+    brgr: &str,
+    task: Option<TaskId>,
+    key: &str,
+    goal: &str,
+) -> String {
+    let take = match task {
+        Some(task) => format!("head take {task} --offer {key}"),
+        None => format!("head take --offer {key}"),
+    };
+    let status = match task {
+        Some(task) => format!("status {task} --tree"),
+        None => "status".to_owned(),
+    };
+    format!(
+        "You are the incoming brgr head for owner {owner_id}. The outgoing head offered you its command. \
+         Start every brgr command with exactly the prefix shown, `{brgr}`; do not drop the `env` part, \
+         because your shell may carry another identity or control home. \
+         1) Run `{brgr} {take}`; it prints the handoff manifest. \
+         2) Read the open tasks with `{brgr} {status}`. \
+         3) Goal to finish: {goal}. Resume it: decide pending results with `{brgr} result` (accept or reject), \
+         answer worker questions, or take the next action on the open tasks. Do not restart workers. \
+         4) Once you have done that, run `{brgr} head retire TAKEOVER` with the takeover id from step 1. \
+         5) If the retire output says `outgoing_head.closed` is false, the previous head was still \
+         working: when it is idle, run `{brgr} head exit TAKEOVER` once; never close its pane by hand."
+    )
+}
+
 /// Records the offer and opens the incoming head's pane; returns the receipt.
-fn open_handoff(paths: &Paths, store: &Store, task: TaskId, args: &HandoffArgs) -> Result<Value> {
-    let spec = store.task(task)?;
-    let owner_id = spec.owner_id;
+fn open_handoff(
+    paths: &Paths,
+    store: &Store,
+    task: Option<TaskId>,
+    args: &HandoffArgs,
+) -> Result<Value> {
+    let (owner_id, revision) = handoff_owner(store, task)?;
     let (session, epoch) = require_owner(store, &owner_id)?;
     let caller = crate::caller_pane::verified()
         .context("`head handoff` opens a pane beside this head, so it needs a verified Herdr pane; use `head request` outside Herdr")?;
@@ -659,6 +745,12 @@ fn open_handoff(paths: &Paths, store: &Store, task: TaskId, args: &HandoffArgs) 
         bail!("owner {owner_id} already has an open handoff; finish or abort it first");
     }
     let key = Uuid::new_v4().to_string();
+    let pane_task = match task {
+        Some(task) => task,
+        None => key
+            .parse()
+            .map_err(|error| anyhow!("offer key is not a task id: {error}"))?,
+    };
     let offer = Offer {
         task,
         owner_id: owner_id.as_str().to_owned(),
@@ -677,43 +769,18 @@ fn open_handoff(paths: &Paths, store: &Store, task: TaskId, args: &HandoffArgs) 
     };
     let path = offer_path(paths, &key)?;
     write_json_atomic(&path, &offer)?;
-    // The incoming pane may not have this brgr on its PATH, and the control home
-    // may have come from `--home`, which a child's environment does not carry.
-    let brgr = std::env::var("BRGR_BIN")
-        .ok()
-        .filter(|path| !path.is_empty())
-        .unwrap_or_else(|| {
-            std::env::current_exe()
-                .map_or_else(|_| "brgr".to_owned(), |exe| exe.display().to_string())
-        });
     // The pane env is not enough: a shared Codex daemon runs tool calls with its
     // own environment, which can carry another worker's `BRGR_OWNER_ID` and not
     // this control home. Each command states both itself.
-    let brgr = format!(
-        "env BRGR_OWNER_ID={} BRGR_HOME={} {brgr}",
-        shell_quote(owner_id.as_str()),
-        shell_quote(&paths.home.display().to_string()),
-    );
-    let prompt = format!(
-        "You are the incoming brgr head for owner {owner_id}. The outgoing head offered you its command. \
-         Start every brgr command with exactly the prefix shown, `{brgr}`; do not drop the `env` part, \
-         because your shell may carry another identity or control home. \
-         1) Run `{brgr} head take {task} --offer {key}`; it prints the handoff manifest. \
-         2) Read the open tasks with `{brgr} status {task} --tree`. \
-         3) Goal to finish: {goal}. Resume it: decide pending results with `{brgr} result` (accept or reject), \
-         answer worker questions, or take the next action on the open tasks. Do not restart workers. \
-         4) Once you have done that, run `{brgr} head retire TAKEOVER` with the takeover id from step 1. \
-         5) If the retire output says `outgoing_head.closed` is false, the previous head was still \
-         working: when it is idle, run `{brgr} head exit TAKEOVER` once; never close its pane by hand.",
-        goal = args.goal,
-    );
+    let brgr = incoming_brgr(paths, &owner_id);
+    let prompt = incoming_head_prompt(&owner_id, &brgr, task, &key, &args.goal);
     let workspace = std::env::current_dir()?;
     let opened = head_pane::open_incoming(
         paths,
         &head_pane::IncomingSpec {
             caller: &caller,
-            task,
-            revision: spec.revision,
+            task: pane_task,
+            revision,
             workspace: &workspace,
             kind: &args.kind,
             agent_args: &args.agent_args,
@@ -766,14 +833,13 @@ pub(crate) fn auto_handoff(
         .kind
         .clone()
         .context("no handoff target is configured")?;
-    // Any task the owner has names the owner's binding; the newest is the least
-    // likely to be gone.
+    // A named task keeps the incoming prompt pointing at one id; without one
+    // the same handoff covers the owner's open work, or none.
     let task = store
         .tasks(100)?
         .into_iter()
         .find(|spec| &spec.owner_id == owner)
-        .context("the owner has no recent task to hand off from; run `brgr head handoff` yourself")?
-        .task_id;
+        .map(|spec| spec.task_id);
     open_handoff(
         paths,
         store,
@@ -797,15 +863,36 @@ fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
-fn take(paths: &Paths, store: &Store, task: TaskId, key: &str, json_output: bool) -> Result<()> {
-    let offer: Offer = serde_json::from_slice(
+fn read_offer(paths: &Paths, key: &str) -> Result<Offer> {
+    serde_json::from_slice(
         &fs::read(offer_path(paths, key)?)
             .context("no such offer; the outgoing head makes one with `brgr head handoff`")?,
-    )?;
-    let owner_id = store.task(task)?.owner_id;
-    if owner_id.as_str() != offer.owner_id {
-        bail!("this offer is for owner {}, not {owner_id}", offer.owner_id);
-    }
+    )
+    .map_err(Into::into)
+}
+
+fn offer_owner(paths: &Paths, key: &str) -> Result<OwnerId> {
+    OwnerId::new(read_offer(paths, key)?.owner_id).map_err(|_| anyhow!("offer owner id is invalid"))
+}
+
+fn take(
+    paths: &Paths,
+    store: &Store,
+    task: Option<TaskId>,
+    key: &str,
+    json_output: bool,
+) -> Result<()> {
+    let offer = read_offer(paths, key)?;
+    let owner_id = match task {
+        Some(task) => {
+            let owner_id = store.task(task)?.owner_id;
+            if owner_id.as_str() != offer.owner_id {
+                bail!("this offer is for owner {}, not {owner_id}", offer.owner_id);
+            }
+            owner_id
+        }
+        None => OwnerId::new(&offer.owner_id).map_err(|_| anyhow!("offer owner id is invalid"))?,
+    };
     let session = crate::current_session()?.context("a session is required")?;
     if let Some((bound, epoch)) = store.owner_binding(&owner_id)?
         && bound != session
