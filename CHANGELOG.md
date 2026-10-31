@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Every group kill passes `--` before the negative pid (`kill -KILL -- -<pgid>`). Linux's `kill` read a bare `-<pgid>` as an option and signalled every process of the user (`kill(-1)`); macOS was unaffected. A source scan test keeps a bare `-<pgid>` from coming back. Not checked on Linux: only the form was verified on macOS (#235).
 ## 2.15.12 — 2026-10-31
 
 Settled workers leave fewer worktrees and branches behind.

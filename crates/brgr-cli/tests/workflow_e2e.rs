@@ -1360,7 +1360,7 @@ fn kill_driver(fixture: &Fixture, run_id: &str) {
         .parse()
         .unwrap();
     let killed = Command::new("/bin/kill")
-        .args(["-KILL", &format!("-{pid}")])
+        .args(["-KILL", "--", &format!("-{pid}")])
         .status()
         .unwrap();
     assert!(killed.success(), "failed to kill driver group {pid}");

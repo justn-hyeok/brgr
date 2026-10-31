@@ -290,7 +290,7 @@ fn collect(
 
 fn stop(child: &mut Child) {
     let _ = Command::new("/bin/kill")
-        .args(["-KILL", &format!("-{}", child.id())])
+        .args(["-KILL", "--", &format!("-{}", child.id())])
         .status();
     let _ = child.kill();
     let _ = child.wait();
