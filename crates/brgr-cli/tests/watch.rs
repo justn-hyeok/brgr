@@ -1,9 +1,12 @@
 //! `brgr watch` streams read-only task events, one compact JSON line each.
 
+mod common;
+
+use common::write_fast_script;
+
 use std::{
     fs,
     io::{BufRead, BufReader, Read},
-    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     process::{Command, Stdio},
     thread,
@@ -133,8 +136,7 @@ fn watch_home() -> (TempDir, PathBuf, PathBuf) {
     let workspace = temp.path().join("work");
     fs::create_dir_all(&workspace).unwrap();
     let executable = temp.path().join("gjc");
-    fs::write(&executable, WATCH_FIXTURE).unwrap();
-    fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+    write_fast_script(&executable, WATCH_FIXTURE);
     add_fixture(&home, &executable, &temp.path().join("scratch"));
     (temp, home, workspace)
 }

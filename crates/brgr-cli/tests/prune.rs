@@ -6,6 +6,10 @@
 //! pin that split, and pin every refusal: what git declines, what git would
 //! happily destroy but must not, and what is not a brgr worktree at all.
 
+mod common;
+
+use common::write_fast_script;
+
 use std::{
     fs,
     os::unix::fs::PermissionsExt as _,
@@ -926,15 +930,13 @@ fn a_decision_reads_only_its_own_repository() {
     let shim = fixture.temp.path().join("shim");
     fs::create_dir_all(&shim).unwrap();
     let log = fixture.temp.path().join("git.log");
-    fs::write(
-        shim.join("git"),
-        format!(
+    write_fast_script(
+        &shim.join("git"),
+        &format!(
             "#!/bin/sh\necho \"$*\" >> '{}'\nexec /usr/bin/git \"$@\"\n",
             log.display()
         ),
-    )
-    .unwrap();
-    fs::set_permissions(shim.join("git"), fs::Permissions::from_mode(0o755)).unwrap();
+    );
     let path = format!("{}:{}", shim.display(), std::env::var("PATH").unwrap());
     let output = fixture
         .command()
@@ -1688,15 +1690,13 @@ impl Fixture {
         let log = self.temp.path().join("git-calls.log");
         // Truncated per run, so a later sweep does not inherit an earlier tally.
         let _ = fs::remove_file(&log);
-        fs::write(
-            shim.join("git"),
-            format!(
+        write_fast_script(
+            &shim.join("git"),
+            &format!(
                 "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {}\nexec /usr/bin/git \"$@\"\n",
                 log.display()
             ),
-        )
-        .unwrap();
-        fs::set_permissions(shim.join("git"), fs::Permissions::from_mode(0o755)).unwrap();
+        );
         let path = format!(
             "{}:{}",
             shim.display(),

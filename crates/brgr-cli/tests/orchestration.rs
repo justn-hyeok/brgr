@@ -1,4 +1,8 @@
-use std::{fs, os::unix::fs::PermissionsExt as _, path::Path, process::Command};
+mod common;
+
+use common::write_fast_script;
+
+use std::{fs, path::Path, process::Command};
 
 use serde_json::Value;
 use tempfile::TempDir;
@@ -161,7 +165,9 @@ fn config_init_preserves_user_instructions_and_calls_apply_their_snapshot() {
     let bin = temp.path().join("bin");
     fs::create_dir_all(&bin).unwrap();
     let fixture = bin.join("gjc");
-    fs::write(&fixture,r#"#!/bin/sh
+    write_fast_script(
+        &fixture,
+        r#"#!/bin/sh
 case "$1" in
 --version) echo 'gjc fixture';exit 0;;
 --help) printf '%s\n' '-p, --print' '--mode=<value>' '--no-session' '--no-mcp' '--model' '--thinking';exit 0;;
@@ -173,8 +179,8 @@ text=open(sys.argv[1]).read()
 print(json.dumps({'type':'message_end','message':{'role':'assistant','content':[{'type':'text','text':text}]}}))
 print(json.dumps({'type':'agent_end','stopReason':'completed'}))
 PY
-"#).unwrap();
-    fs::set_permissions(&fixture, fs::Permissions::from_mode(0o700)).unwrap();
+"#,
+    );
     assert!(
         command(&home)
             .args(["harness", "add"])

@@ -1,8 +1,11 @@
 //! Black-box proof that a workflow script creates a later task from an observed result.
 
+mod common;
+
+use common::write_fast_script;
+
 use std::{
     fs,
-    os::unix::fs::PermissionsExt as _,
     path::{Path, PathBuf},
     process::{Command, Stdio},
     thread,
@@ -902,8 +905,7 @@ fn fixture_with_script(source: &str) -> Fixture {
     fs::create_dir_all(&workspace).unwrap();
     fs::create_dir_all(&scripts).unwrap();
     seed_git_repo(&workspace);
-    fs::write(&executable, source).unwrap();
-    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+    write_fast_script(&executable, source);
     add_harness(&home, &executable, &root.join("scratch"));
     Fixture {
         _temp: temp,
@@ -1056,9 +1058,9 @@ fn create_workflow(fixture: &Fixture, extra: &[&str]) -> String {
 
 fn write_wait_gate(fixture: &Fixture) -> PathBuf {
     let path = fixture.scripts.join("wait-gate-brgr");
-    fs::write(
+    write_fast_script(
         &path,
-        format!(
+        &format!(
             r#"#!/bin/sh
 set -eu
 real="{real}"
@@ -1103,9 +1105,7 @@ exec "$real" "$@"
             real = brgr(),
             home = fixture.home.display()
         ),
-    )
-    .unwrap();
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+    );
     path
 }
 
@@ -1732,9 +1732,9 @@ fn wait_for_sealed_keeps_waiting_when_status_shows_a_newer_revision() {
     let argv_log = fixture.scripts.join("fake-brgr.log");
     let wait_count = fixture.scripts.join("wait-count");
     let fake_bin = fixture.scripts.join("fake-brgr");
-    fs::write(
+    write_fast_script(
         &fake_bin,
-        format!(
+        &format!(
             r#"#!/bin/sh
 printf '%s\n' "$*" >> "{log}"
 count_file="{count}"
@@ -1783,9 +1783,7 @@ esac
             log = argv_log.display(),
             count = wait_count.display()
         ),
-    )
-    .unwrap();
-    fs::set_permissions(&fake_bin, fs::Permissions::from_mode(0o700)).unwrap();
+    );
     let script = write_script(&fixture, "stale-wait.mjs", REVISE_SCRIPT);
     let output = Command::new("node")
         .arg(&script)
@@ -2090,16 +2088,14 @@ fn a_step_awaiting_input_is_not_cancelled_by_the_deadline() {
 fn write_fake_brgr(fixture: &Fixture, body: &str) -> PathBuf {
     let log = fixture.scripts.join("fake-brgr.log");
     let fake_bin = fixture.scripts.join("fake-brgr");
-    fs::write(
+    write_fast_script(
         &fake_bin,
-        format!(
+        &format!(
             "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"{log}\"\n{body}\n",
             log = log.display(),
             body = body
         ),
-    )
-    .unwrap();
-    fs::set_permissions(&fake_bin, fs::Permissions::from_mode(0o700)).unwrap();
+    );
     fake_bin
 }
 
