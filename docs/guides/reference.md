@@ -527,7 +527,8 @@ remove`, so uncommitted work is kept and reported with git's own reason. It is
 forced only when brgr has shown every change is disposable: each one is an
 untracked worker tool-state directory (`.gjc`, `.commandcode`, `.agent-progress`,
 `.build`, at any depth; the names below that are disposable only when ignored are
-not, since an untracked `docs/target/plan.md` is the worker's own work; `.claude/` or `.cursor/` also hold project configuration a
+not, since an untracked file inside a directory that merely shares such a name is the
+worker's own work; `.claude/` or `.cursor/` also hold project configuration a
 task may write, so they are not caches), or the task sealed a diff with
 `--capture-diff`, the worktree's patch is byte-for-byte that diff, and each
 `--evidence-file` still has the digest of its sealed copy. A repository nested in

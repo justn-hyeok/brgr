@@ -715,8 +715,8 @@ const TOOL_STATE: [&str; 4] = [".gjc", ".commandcode", ".agent-progress", ".buil
 /// depth. A file that only shares the name does not. Only an untracked entry
 /// counts: a change to a tracked file under one of these names is the
 /// repository's own content. The package managers' and compilers' directories
-/// are deliberately not here: an untracked `docs/target/plan.md` is the
-/// worker's own work, and those names are disposable only when git ignores the
+/// are deliberately not here: an untracked file inside a directory that merely shares
+/// such a name is the worker's own work, and those names are disposable only when git ignores the
 /// directory. `.claude/` and `.cursor/` are not here either: they also hold
 /// project configuration a task may be asked to write (`.claude/commands/`,
 /// `.cursor/rules/`), and git reports either as the bare directory.
@@ -1513,11 +1513,11 @@ mod tests {
 
     /// A package manager's or compiler's directory is only disposable when git
     /// ignores it. An untracked file under a directory that merely shares the
-    /// name (`docs/target/plan.md`) is the worker's own content.
+    /// name (a plan file in a `target` folder) is the worker's own content.
     #[test]
     fn an_untracked_file_under_a_generic_looking_directory_is_not_a_cache() {
         for status in [
-            "?? docs/target/plan.md",
+            "?? work/target/plan.txt",
             "?? node_modules/x.js",
             "?? target/",
             "?? packages/web/.next/page.js",
