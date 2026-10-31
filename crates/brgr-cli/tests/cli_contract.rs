@@ -218,6 +218,84 @@ fn write_devin_fixture(executable: &Path) {
     fs::set_permissions(executable, fs::Permissions::from_mode(0o700)).unwrap();
 }
 
+/// A shared Codex daemon can carry another worker's `BRGR_SESSION_ID` and
+/// `BRGR_PARENT_*`. `--as` names this session; those parent variables belong
+/// to the other one and must not refuse the run. The same environment with
+/// `--as` matching `BRGR_SESSION_ID` is still a delegated child and is still
+/// refused when the parent attempt is missing.
+#[test]
+fn as_session_ignores_another_sessions_stale_parent_identity() {
+    let (_temp, home, workspace) = gjc_home();
+    let parent_task = "11111111-1111-4111-8111-111111111111";
+    let parent_attempt = "22222222-2222-4222-8222-222222222222";
+    let stale = [
+        ("BRGR_SESSION_ID", "other"),
+        ("BRGR_PARENT_TASK_ID", parent_task),
+        ("BRGR_PARENT_ATTEMPT_ID", parent_attempt),
+    ];
+    let mine = run(
+        &home,
+        &[
+            "--as",
+            "mine",
+            "run",
+            "BRGR_FIXTURE_OK",
+            "--harness",
+            "local.gjc",
+            "--workspace",
+            workspace.to_str().unwrap(),
+            "--foreground",
+            "--headless",
+        ],
+        &stale,
+    );
+    assert!(
+        mine.status.success(),
+        "named session should ignore another session's parent: {}",
+        String::from_utf8_lossy(&mine.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&mine.stderr).contains(
+            "brgr: ignoring the parent worker identity of another session (BRGR_SESSION_ID differs from --as)"
+        ),
+        "{}",
+        String::from_utf8_lossy(&mine.stderr)
+    );
+    assert_eq!(json_output(&mine)["outcome"], "candidate");
+
+    let other = run(
+        &home,
+        &[
+            "--as",
+            "other",
+            "run",
+            "BRGR_FIXTURE_OK",
+            "--harness",
+            "local.gjc",
+            "--workspace",
+            workspace.to_str().unwrap(),
+            "--foreground",
+            "--headless",
+        ],
+        &stale,
+    );
+    assert!(
+        !other.status.success(),
+        "matching session should still check the parent: {}",
+        String::from_utf8_lossy(&other.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&other.stderr);
+    assert!(
+        stderr
+            .contains("delegation parent attempt is stale, mismatched, or owned by another worker"),
+        "{stderr}"
+    );
+    assert!(
+        !stderr.contains("ignoring the parent worker identity of another session"),
+        "{stderr}"
+    );
+}
+
 #[test]
 fn plugin_board_shows_candidate_then_explicit_decision_without_prompt_text() {
     let (_temp, home, workspace) = gjc_home();

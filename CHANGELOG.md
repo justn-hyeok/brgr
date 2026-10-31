@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- `--as SESSION` (and `--owner-session`) ignores `BRGR_PARENT_TASK_ID` and
+  `BRGR_PARENT_ATTEMPT_ID` when `BRGR_SESSION_ID` names a different session: a
+  shared Codex daemon can carry a stale worker identity, which is not this
+  caller. A delegated child that passes `--as` with its own `BRGR_SESSION_ID`
+  is still refused when that parent is stale or mismatched. The incoming head
+  prompt now starts each command with `env -u BRGR_SESSION_ID -u BRGR_PARENT_TASK_ID
+  -u BRGR_PARENT_ATTEMPT_ID BRGR_OWNER_ID=… BRGR_HOME=…`, so `current_session`
+  falls back to `CODEX_THREAD_ID` or `CLAUDE_CODE_SESSION_ID`.
+
 ## 2.15.13 — 2026-11-01
 
 An agent-readable status, a task-less Head handoff, and a Linux safety fix for group kills.
