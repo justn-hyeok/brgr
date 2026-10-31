@@ -194,13 +194,21 @@ fn brief_list(store: &Store, json_output: bool) -> Result<()> {
     Ok(())
 }
 
+/// The `snake_case` name the JSON uses for an event kind.
+fn event_kind_name(kind: brgr_protocol::EventKind) -> String {
+    serde_json::to_value(kind)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .unwrap_or_else(|| format!("{kind:?}").to_lowercase())
+}
+
 fn brief_one(store: &Store, task_id: TaskId, observe: bool, json_output: bool) -> Result<()> {
     let spec = store.task(task_id)?;
     check_reader(store, &spec.owner_id, observe)?;
     let state = attempt_state_name(store, task_id)?;
     let last_event = store
         .latest_event(task_id)?
-        .map(|event| format!("{:?}", event.kind).to_lowercase());
+        .map(|event| event_kind_name(event.kind));
     let result = match store.latest_result(task_id) {
         Ok(envelope) => Some(envelope),
         Err(StoreError::TaskNotFound(_)) => None,
@@ -725,4 +733,19 @@ pub(crate) fn record_verdict(
     }
     crate::worktree_prune::reclaim_and_report(paths, task, spec.revision);
     Ok(persisted)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::event_kind_name;
+    use brgr_protocol::EventKind;
+
+    #[test]
+    fn an_event_kind_is_named_as_the_json_names_it() {
+        assert_eq!(
+            event_kind_name(EventKind::CancelRequested),
+            "cancel_requested"
+        );
+        assert_eq!(event_kind_name(EventKind::Terminal), "terminal");
+    }
 }

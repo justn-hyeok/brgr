@@ -39,7 +39,7 @@ pub(crate) enum Command {
     Run(RunArgs),
     /// Start a new revision of a task without rewriting its prior results.
     Revise(ReviseArgs),
-    /// Show managed tasks, or one task's attempt and result state. Status: `brgr status --brief`.
+    /// Show managed tasks, or one task's attempt and result state. Agents: start with `brgr status --brief`.
     Status {
         task: Option<TaskId>,
         /// Include the delegation tree beneath the task.
