@@ -511,9 +511,11 @@ fn delegation_parent_from_environment() -> Result<Option<(TaskId, AttemptId)>> {
     let parent_task = env::var("BRGR_PARENT_TASK_ID").ok();
     let parent_attempt = env::var("BRGR_PARENT_ATTEMPT_ID").ok();
     if foreign_parent_identity(explicit.as_deref(), env_session.as_deref()) {
-        eprintln!(
-            "brgr: ignoring the parent worker identity of another session (BRGR_SESSION_ID differs from --as)"
-        );
+        if parent_task.is_some() || parent_attempt.is_some() {
+            eprintln!(
+                "brgr: ignoring the parent worker identity of another session (BRGR_SESSION_ID differs from --as)"
+            );
+        }
         return Ok(None);
     }
     inherited_delegation_parent(
