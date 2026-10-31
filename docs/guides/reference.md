@@ -525,8 +525,9 @@ lost result warns that its worker may outlive its supervisor, and while that
 process runs the worktree is kept. The checkout is removed with `git worktree
 remove`, so uncommitted work is kept and reported with git's own reason. It is
 forced only when brgr has shown every change is disposable: each one is an
-untracked tool-state or cache directory (the same names as ignored disposable
-directories below; `.claude/` or `.cursor/` also hold project configuration a
+untracked worker tool-state directory (`.gjc`, `.commandcode`, `.agent-progress`,
+`.build`, at any depth; the names below that are disposable only when ignored are
+not, since an untracked `docs/target/plan.md` is the worker's own work; `.claude/` or `.cursor/` also hold project configuration a
 task may write, so they are not caches), or the task sealed a diff with
 `--capture-diff`, the worktree's patch is byte-for-byte that diff, and each
 `--evidence-file` still has the digest of its sealed copy. A repository nested in
@@ -546,7 +547,9 @@ hold. Those worktrees are kept and their ignored paths listed; pass
 (`node_modules`, `target`, `.next`, `.turbo`, `__pycache__`, `.pytest_cache`,
 `.mypy_cache`, `.venv`, `.gradle`, `.gjc`, `.commandcode`, `.agent-progress`,
 `.build`) does not keep a worktree when git reports the directory itself as
-ignored, and the same names are disposable when git reports them as untracked.
+ignored. The four worker tool-state names (`.gjc`, `.commandcode`, `.agent-progress`,
+`.build`) are also disposable when git reports them as untracked; the package
+managers' and compilers' names are not.
 Generic output directories such as `dist` or `build` do keep it: when the
 directory matches an ignore pattern git never lists what is inside, and a file
 put there by hand would go with it. `.build` (SwiftPM) is a tool-owned name;

@@ -22,7 +22,8 @@
 //! module therefore checks the ignored set itself and keeps the worktree unless
 //! the caller opts in, or every ignored path is a directory a tool owns
 //! (`node_modules`, `target`, `.next`, `.agent-progress`, `.build`,
-//! `.commandcode` and the like), judged by the same names as an untracked cache.
+//! `.commandcode` and the like). The four worker tool-state names are also judged
+//! disposable when untracked; the package managers' names are not.
 //!
 //! Every candidate must also be a real directory (not a symlink), a worktree git
 //! itself has registered for its repository and has not locked, a name
@@ -703,27 +704,34 @@ const DISPOSABLE: [&str; 13] = [
     ".build",
 ];
 
-/// An untracked directory a tool owns, or a file git listed inside one.
+/// The worker tool-state directories. Unlike the package managers' and
+/// compilers' directories above, these are disposable even when git lists them
+/// as untracked, because a worker harness writes them and nothing else does.
+const TOOL_STATE: [&str; 4] = [".gjc", ".commandcode", ".agent-progress", ".build"];
+
+/// An untracked directory a worker tool owns, or a file git listed inside one.
 /// `--untracked-files=all` reports files, not the enclosing untracked
-/// directory, so a path under a [`DISPOSABLE`] name counts as well. Only an
-/// untracked entry counts: a change to a tracked file under one of these names
-/// is the repository's own content. Directories such as `.claude/` or
-/// `.cursor/` are not here: they also hold project configuration a task may be
-/// asked to write (`.claude/commands/`, `.cursor/rules/`), and git reports
-/// either as the bare directory.
+/// directory, so a path under a [`TOOL_STATE`] directory counts as well, at any
+/// depth. A file that only shares the name does not. Only an untracked entry
+/// counts: a change to a tracked file under one of these names is the
+/// repository's own content. The package managers' and compilers' directories
+/// are deliberately not here: an untracked `docs/target/plan.md` is the
+/// worker's own work, and those names are disposable only when git ignores the
+/// directory. `.claude/` and `.cursor/` are not here either: they also hold
+/// project configuration a task may be asked to write (`.claude/commands/`,
+/// `.cursor/rules/`), and git reports either as the bare directory.
 fn harness_cache(status_line: &str) -> bool {
     let Some(path) = status_line.strip_prefix("?? ") else {
         return false;
     };
-    if regenerable(path) {
-        return true;
-    }
-    let Some((parent, _)) = path.rsplit_once('/') else {
-        return false;
-    };
-    parent
+    // A trailing slash is a directory entry; otherwise the last component is a
+    // file and only its parents can make it a cache.
+    let directories = path
+        .strip_suffix('/')
+        .unwrap_or_else(|| path.rsplit_once('/').map_or("", |(parent, _)| parent));
+    directories
         .split('/')
-        .any(|component| DISPOSABLE.contains(&component))
+        .any(|component| TOOL_STATE.contains(&component))
 }
 
 /// An ignored directory a tool owns: an entry git reported as a directory
@@ -1492,7 +1500,6 @@ mod tests {
             ".build/",
             ".commandcode/",
             ".gjc/",
-            "node_modules/",
             "ios/.build/",
         ] {
             assert!(regenerable(path), "{path}");
@@ -1501,6 +1508,40 @@ mod tests {
         for path in [".build", ".build-notes.txt", ".buildx/", "dist/", "build/"] {
             assert!(!regenerable(path), "{path}");
             assert!(!harness_cache(&format!("?? {path}")), "{path}");
+        }
+    }
+
+    /// A package manager's or compiler's directory is only disposable when git
+    /// ignores it. An untracked file under a directory that merely shares the
+    /// name (`docs/target/plan.md`) is the worker's own content.
+    #[test]
+    fn an_untracked_file_under_a_generic_looking_directory_is_not_a_cache() {
+        for status in [
+            "?? docs/target/plan.md",
+            "?? node_modules/x.js",
+            "?? target/",
+            "?? packages/web/.next/page.js",
+            "?? .venv/notes.txt",
+        ] {
+            assert!(!harness_cache(status), "{status}");
+        }
+        for status in [
+            "?? vendor/.build/x",
+            "?? .agent-progress/state.json",
+            "?? a/b/.gjc/c",
+        ] {
+            assert!(harness_cache(status), "{status}");
+        }
+        assert!(
+            !harness_cache("?? vendor/.build"),
+            "a file named like the directory"
+        );
+    }
+
+    #[test]
+    fn every_tool_state_name_is_also_disposable_when_ignored() {
+        for name in TOOL_STATE {
+            assert!(DISPOSABLE.contains(&name), "{name}");
         }
     }
     use crate::adversary::Adversary;

@@ -4,7 +4,8 @@
 
 - `brgr prune` and decision-time reclaim treat worker tool-state directories
   (`.agent-progress/`, `.build/`, `.commandcode/`, `.gjc/`) as disposable when
-  git reports them as ignored, using the same name list as untracked caches.
+  git reports them as ignored, and the same four names when untracked. An untracked
+  file under `target/` or `node_modules/` is still treated as the worker's own work.
   Generic names such as `dist/` or `build/` still keep the worktree unless
   `--include-ignored` is given.
 
