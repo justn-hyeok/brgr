@@ -534,14 +534,17 @@ task may write, so they are not caches), or the task sealed a diff with
 `--evidence-file` still has the digest of its sealed copy. A repository nested in
 the worktree, which a patch records as one commit id, and a `.brgr/` report
 directory that was not archived keep the worktree in every case. Its `brgr/task-*` branch goes when every commit on it also lives
-elsewhere: in `HEAD`, or on another branch or remote-tracking branch, or when
-the revision is settled, the result sealed a diff with `--capture-diff`, and
-every changed line of `git diff --binary MERGE_BASE TIP` (MERGE_BASE is
-`git merge-base HEAD TIP`) is also a changed line of that sealed diff. A
-rebase that only drops lines still matches. A missing merge-base, a binary
-patch the comparison cannot prove, a diff over the sealed-artifact size
-limit, or any error keeps the branch. Recover the sealed bytes with
-`brgr diff TASK`. A task
+elsewhere: in `HEAD`, or on another branch or remote-tracking branch. An
+explicit `brgr prune` also removes it when the revision is settled, the result
+sealed a diff with `--capture-diff`, and every change in
+`git diff --binary MERGE_BASE TIP` (MERGE_BASE is `git merge-base HEAD TIP`) is
+also in that sealed diff: each changed line, and each mode change, rename,
+created or deleted file. A rebase that only drops lines still matches. The
+decision itself never removes a branch on that basis, because the branch is how
+you push the work. A missing merge-base, a binary patch the comparison cannot
+prove, a diff over the sealed-artifact size limit, or any error keeps the
+branch. Recover the sealed bytes with `brgr diff TASK`; a branch removed this
+way loses its commit messages and authorship. A task
 started from a feature branch carries that branch's commits, and those are
 safe while the feature branch exists. Other task branches do not count, since
 the same sweep may delete them. A branch holding a commit found nowhere else,

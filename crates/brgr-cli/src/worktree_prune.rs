@@ -13,11 +13,14 @@
 //! result. A task branch goes when every commit on it
 //! survives elsewhere: in `HEAD`, or on another branch or remote-tracking
 //! branch — a task started from a feature branch carries that branch's
-//! commits, which `git branch -d` would count as unmerged forever — or when
-//! the revision is settled, its result sealed a `text/x-diff` (`--capture-diff`),
-//! and every changed line of `git diff --binary MERGE_BASE TIP` is also a
-//! changed line of that sealed diff. `MERGE_BASE` is `git merge-base HEAD TIP`.
-//! A rebase may drop lines; it may not add any. A missing merge-base, a diff
+//! commits, which `git branch -d` would count as unmerged forever — or, for an
+//! explicit `brgr prune` only, when the revision is settled, its result sealed a
+//! `text/x-diff` (`--capture-diff`), and every change in
+//! `git diff --binary MERGE_BASE TIP` (changed lines, and mode changes, renames,
+//! created and deleted files) is also in that sealed diff. `MERGE_BASE` is
+//! `git merge-base HEAD TIP`. The reclaim a decision runs never uses the sealed
+//! rule: the branch is how an owner pushes the work. A rebase may drop lines; it
+//! may not add any. A missing merge-base, a diff
 //! larger than the sealed-artifact limit, a binary patch the comparison cannot
 //! prove, or any error keeps the branch. git's clean check runs
 //! `git status --porcelain` without `--ignored`, so a `.env`, a downloaded
@@ -418,7 +421,7 @@ fn orphan_objection(
                 .to_owned(),
         ));
     }
-    match preservation(&inventory.primary, branch, store, &task) {
+    match preservation(&inventory.primary, branch, store, &task, true) {
         Ok(Some(_)) => Ok(None),
         Ok(None) => Ok(Some(UNPRESERVED.to_owned())),
         Err(reason) => Ok(Some(format!("branch could not be checked: {reason}"))),
@@ -449,7 +452,7 @@ fn reclaim(
             worktree.display()
         ));
     }
-    match delete_task_branch(&inventory.primary, branch, store, &task) {
+    match delete_task_branch(&inventory.primary, branch, store, &task, true) {
         Ok(reason) => Outcome::Removed(reason),
         Err(reason) => Outcome::Kept(reason),
     }
@@ -915,7 +918,13 @@ fn sweep_outcome(
     ) {
         (Some(reason), _, _) => (Outcome::Kept(reason.clone()), false),
         (None, Some(primary), Some(task)) if apply => {
-            match remove(worktree, slug, primary, assessment.force, store, task) {
+            match remove(
+                worktree,
+                slug,
+                primary,
+                assessment.force,
+                (store, task, true),
+            ) {
                 Ok(RemovedWhat::Both { reason }) => (Outcome::Removed(reason), true),
                 Ok(RemovedWhat::CheckoutOnly { reason }) => {
                     (Outcome::RemovedKeepingBranch(reason), true)
@@ -946,8 +955,7 @@ fn remove(
     slug: &str,
     primary: &Path,
     force: bool,
-    store: &Store,
-    task: &TaskSpec,
+    (store, task, allow_sealed): (&Store, &TaskSpec, bool),
 ) -> Result<RemovedWhat, String> {
     let path = lossy(worktree);
     let mut arguments = vec!["worktree", "remove"];
@@ -958,7 +966,7 @@ fn remove(
     git(primary, &arguments)
         .map_err(|error| format!("git declined to remove the worktree: {error}"))?;
     let branch = format!("brgr/task-{slug}");
-    match delete_task_branch(primary, &branch, store, task) {
+    match delete_task_branch(primary, &branch, store, task, allow_sealed) {
         Ok(reason) => Ok(RemovedWhat::Both { reason }),
         Err(reason) => Ok(RemovedWhat::CheckoutOnly {
             reason: format!("checkout removed; branch {branch} kept: {reason}"),
@@ -1098,9 +1106,16 @@ fn preservation(
     branch: &str,
     store: &Store,
     task: &TaskSpec,
+    allow_sealed: bool,
 ) -> Result<Option<(String, Holder)>, String> {
     if let Some((tip, _)) = preserved_elsewhere(primary, branch)? {
         return Ok(Some((tip, Holder::Elsewhere)));
+    }
+    // The task branch is how an owner pushes the work. Only an explicit
+    // `brgr prune` may drop it on the strength of the sealed copy; the
+    // reclaim a decision runs must not.
+    if !allow_sealed {
+        return Ok(None);
     }
     let tip = branch_tip(primary, branch)?;
     Ok(sealed_result_holds_branch(primary, &tip, store, task)
@@ -1190,41 +1205,69 @@ fn counts_are_subset(
         .all(|(key, count)| sealed.get(key).copied().unwrap_or(0) >= *count)
 }
 
-/// Multiset of `(path, changed line including its + or - sign)`. Headers,
-/// hunk headers, index lines, and context are ignored. A binary patch cannot
-/// be proved, so this returns `None`.
+/// Multiset of `(path, changed line including its + or - sign)`, plus the
+/// header lines that carry a change on their own (a mode change, a rename, a
+/// created or deleted file), keyed by the file's new path: a commit that only
+/// chmods a file has no changed line and must still count. Hunk headers, index
+/// lines and context are ignored. Lines inside a hunk are content however they
+/// begin, so a removed SQL comment (`--- old comment`) is a change, not a file
+/// header. A binary patch cannot be proved, so this returns `None`.
 fn changed_line_counts(diff: &[u8]) -> Option<HashMap<(String, String), usize>> {
     let text = std::str::from_utf8(diff).ok()?;
     let mut counts = HashMap::new();
     let mut paths: Option<(String, String)> = None;
+    let mut in_hunk = false;
     for line in text.split('\n') {
         if binary_patch_line(line) {
             return None;
         }
         if let Some(rest) = line.strip_prefix("diff --git ") {
+            in_hunk = false;
             paths = git_diff_paths(rest);
             paths.as_ref()?;
             continue;
         }
-        if diff_metadata(line) {
+        if line.starts_with("@@ ") {
+            in_hunk = true;
             continue;
         }
         let Some(sign) = line.chars().next() else {
             continue;
         };
-        if sign != '+' && sign != '-' {
-            continue;
+        if in_hunk {
+            if sign != '+' && sign != '-' {
+                continue;
+            }
+            let (old, new) = paths.as_ref()?;
+            let path = match sign {
+                '+' if new != "/dev/null" => new,
+                '-' if old != "/dev/null" => old,
+                '+' => old,
+                _ => new,
+            };
+            *counts.entry((path.clone(), line.to_owned())).or_default() += 1;
+        } else if carries_a_change(line) {
+            let (_, new) = paths.as_ref()?;
+            *counts.entry((new.clone(), line.to_owned())).or_default() += 1;
         }
-        let (old, new) = paths.as_ref()?;
-        let path = match sign {
-            '+' if new != "/dev/null" => new,
-            '-' if old != "/dev/null" => old,
-            '+' => old,
-            _ => new,
-        };
-        *counts.entry((path.clone(), line.to_owned())).or_default() += 1;
     }
     Some(counts)
+}
+
+/// A header line that is itself a change to the file.
+fn carries_a_change(line: &str) -> bool {
+    [
+        "new file mode ",
+        "deleted file mode ",
+        "old mode ",
+        "new mode ",
+        "rename from ",
+        "rename to ",
+        "copy from ",
+        "copy to ",
+    ]
+    .iter()
+    .any(|prefix| line.starts_with(prefix))
 }
 
 fn binary_patch_line(line: &str) -> bool {
@@ -1242,24 +1285,6 @@ fn git_diff_paths(rest: &str) -> Option<(String, String)> {
     Some((old.to_owned(), new.to_owned()))
 }
 
-fn diff_metadata(line: &str) -> bool {
-    line.starts_with("index ")
-        || line.starts_with("--- ")
-        || line.starts_with("+++ ")
-        || line.starts_with("@@ ")
-        || line.starts_with("new file mode ")
-        || line.starts_with("deleted file mode ")
-        || line.starts_with("old mode ")
-        || line.starts_with("new mode ")
-        || line.starts_with("similarity index ")
-        || line.starts_with("dissimilarity index ")
-        || line.starts_with("rename from ")
-        || line.starts_with("rename to ")
-        || line.starts_with("copy from ")
-        || line.starts_with("copy to ")
-        || line == "\\ No newline at end of file"
-}
-
 /// Deletes a task branch whose commits all survive elsewhere or in the sealed
 /// result. `Ok(Some(reason))` is the sealed-result note for the prune report.
 ///
@@ -1272,8 +1297,9 @@ fn delete_task_branch(
     branch: &str,
     store: &Store,
     task: &TaskSpec,
+    allow_sealed: bool,
 ) -> Result<Option<String>, String> {
-    let Some((tip, holder)) = preservation(primary, branch, store, task)? else {
+    let Some((tip, holder)) = preservation(primary, branch, store, task, allow_sealed)? else {
         return Err(UNPRESERVED.to_owned());
     };
     restore_if_moved(primary, branch, &tip)?;
@@ -1468,7 +1494,13 @@ pub(crate) fn reclaim_task(paths: &Paths, task: TaskId, revision: u32) -> Option
     match (assessment.blocked, assessment.primary, assessment.task) {
         (Some(reason), _, _) => kept(reason),
         (None, Some(primary), Some(task)) => {
-            match remove(&worktree, &slug, &primary, assessment.force, &store, &task) {
+            match remove(
+                &worktree,
+                &slug,
+                &primary,
+                assessment.force,
+                (&store, &task, false),
+            ) {
                 Ok(RemovedWhat::Both { reason }) => {
                     remove_if_emptied(parent, current_dir.as_deref());
                     Some(match reason {
@@ -1749,6 +1781,31 @@ mod tests {
     fn every_tool_state_name_is_also_disposable_when_ignored() {
         for name in TOOL_STATE {
             assert!(DISPOSABLE.contains(&name), "{name}");
+        }
+    }
+    #[test]
+    fn a_changed_line_that_looks_like_a_diff_header_is_still_counted() {
+        let diff = "diff --git a/q.sql b/q.sql\nindex 111..222 100644\n--- a/q.sql\n+++ b/q.sql\n@@ -1,2 +1,2 @@\n--- old comment\n+++ new\n select 1;\n";
+        let counts = changed_line_counts(diff.as_bytes()).unwrap();
+        let key = |line: &str| ("q.sql".to_owned(), line.to_owned());
+        assert_eq!(counts.get(&key("--- old comment")), Some(&1));
+        assert_eq!(counts.get(&key("+++ new")), Some(&1));
+        assert_eq!(counts.get(&key("--- a/q.sql")), None);
+        assert_eq!(counts.get(&key("+++ b/q.sql")), None);
+    }
+
+    #[test]
+    fn a_change_without_changed_lines_is_still_a_change() {
+        let none = HashMap::new();
+        for diff in [
+            "diff --git a/run.sh b/run.sh\nold mode 100644\nnew mode 100755\n",
+            "diff --git a/a.txt b/b.txt\nsimilarity index 100%\nrename from a.txt\nrename to b.txt\n",
+            "diff --git a/e b/e\nnew file mode 100644\nindex 0000000..e69de29\n",
+            "diff --git a/gone b/gone\ndeleted file mode 100644\nindex e69de29..0000000\n",
+        ] {
+            let counts = changed_line_counts(diff.as_bytes()).unwrap();
+            assert!(!counts_are_subset(&counts, &none), "{diff}");
+            assert!(counts_are_subset(&counts, &counts), "{diff}");
         }
     }
     use crate::adversary::Adversary;

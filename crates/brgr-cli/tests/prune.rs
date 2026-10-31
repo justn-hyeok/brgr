@@ -1807,3 +1807,50 @@ fn harness_fixture() -> PathBuf {
         .canonicalize()
         .unwrap()
 }
+
+/// `brgr accept` reclaims a clean worktree at once. The task branch is how an
+/// owner pushes the work, so a sealed copy in the store must not take it away
+/// at that moment. Only an explicit `brgr prune` may.
+#[test]
+fn accept_keeps_the_task_branch_that_only_the_store_otherwise_holds() {
+    let fixture = Fixture::new();
+    let task = fixture.run_with("WRITE", &["--capture-diff"]);
+    fixture.commit_worktree(&task, "worker output");
+    fixture.accept(&task);
+    let branch = format!("brgr/task-{}", Fixture::slug(&task));
+    assert!(
+        !fixture.worktree(&task).exists(),
+        "the clean worktree should have been reclaimed at accept"
+    );
+    assert!(
+        fixture.branches().contains(&branch),
+        "accept deleted the task branch the owner may still push"
+    );
+    let applied = fixture.prune(&["--apply"]);
+    assert!(
+        !fixture.branches().contains(&branch),
+        "an explicit prune did not remove it: {applied}"
+    );
+}
+
+/// A commit that only changes a file's mode adds no changed line, but it is
+/// still a change the sealed diff does not hold.
+#[test]
+fn prune_keeps_a_branch_whose_extra_commit_only_changes_a_file_mode() {
+    let fixture = Fixture::new();
+    let task = fixture.run_with("WRITE", &["--capture-diff", "--keep-worktree"]);
+    fixture.commit_worktree(&task, "worker output");
+    let file = fixture.worktree(&task).join("AGENT_OUTPUT.txt");
+    let mut permissions = fs::metadata(&file).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&file, permissions).unwrap();
+    fixture.commit_worktree(&task, "make it executable");
+    fixture.accept(&task);
+
+    let applied = fixture.prune(&["--apply"]);
+    let branch = format!("brgr/task-{}", Fixture::slug(&task));
+    assert!(
+        fixture.branches().contains(&branch),
+        "a branch with an unsealed mode change was deleted: {applied}"
+    );
+}
