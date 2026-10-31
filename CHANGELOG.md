@@ -9,6 +9,13 @@
   Generic names such as `dist/` or `build/` still keep the worktree unless
   `--include-ignored` is given.
 
+- `brgr prune` deletes a settled task branch when every changed line of
+  `git diff --binary MERGE_BASE TIP` is also a changed line of the `text/x-diff`
+  the store sealed with the result (`--capture-diff`), even if those commits
+  are not in `HEAD` or on another branch (squash merge, `brgr apply`/`land`).
+  The report names the sealed result id. A missing merge-base, a binary patch,
+  a line the sealed diff does not hold, or any error keeps the branch.
+
 ## 2.15.11 — 2026-10-31
 
 A terminal-readable release: status, run and doctor say what matters first; `watch --all`; Devin model selection.

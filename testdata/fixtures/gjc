@@ -26,6 +26,18 @@ fi
 if [ -n "$prompt_file" ] && /usr/bin/grep -q 'WRITE' "$prompt_file"; then
   printf 'worker output\n' > AGENT_OUTPUT.txt
 fi
+# A worker that edits an existing file, so a later rebase can change context.
+if [ -n "$prompt_file" ] && /usr/bin/grep -q 'EDIT' "$prompt_file"; then
+  printf 'seed\nedited\n' > README
+fi
+# A worker that adds the same line twice, for multiplicity checks.
+if [ -n "$prompt_file" ] && /usr/bin/grep -q 'REPEAT' "$prompt_file"; then
+  printf 'keep\nfoo\nfoo\n' > repeat.txt
+fi
+# A worker that leaves a binary file; git diffs this as a binary patch.
+if [ -n "$prompt_file" ] && /usr/bin/grep -q 'BINARY' "$prompt_file"; then
+  /usr/bin/printf '\000\001\002\377' > image.bin
+fi
 # A worker that starts its own repository inside the task and leaves it dirty.
 if [ -n "$prompt_file" ] && /usr/bin/grep -q 'NESTED' "$prompt_file"; then
   /bin/mkdir -p vendor/lib

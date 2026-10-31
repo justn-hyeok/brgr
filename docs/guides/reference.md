@@ -533,12 +533,19 @@ task may write, so they are not caches), or the task sealed a diff with
 `--capture-diff`, the worktree's patch is byte-for-byte that diff, and each
 `--evidence-file` still has the digest of its sealed copy. A repository nested in
 the worktree, which a patch records as one commit id, and a `.brgr/` report
-directory that was not archived keep the worktree in every case. Its `brgr/task-*` branch goes only when every commit on it also lives
-elsewhere: in `HEAD`, or on another branch or remote-tracking branch. A task
+directory that was not archived keep the worktree in every case. Its `brgr/task-*` branch goes when every commit on it also lives
+elsewhere: in `HEAD`, or on another branch or remote-tracking branch, or when
+the revision is settled, the result sealed a diff with `--capture-diff`, and
+every changed line of `git diff --binary MERGE_BASE TIP` (MERGE_BASE is
+`git merge-base HEAD TIP`) is also a changed line of that sealed diff. A
+rebase that only drops lines still matches. A missing merge-base, a binary
+patch the comparison cannot prove, a diff over the sealed-artifact size
+limit, or any error keeps the branch. Recover the sealed bytes with
+`brgr diff TASK`. A task
 started from a feature branch carries that branch's commits, and those are
 safe while the feature branch exists. Other task branches do not count, since
-the same sweep may delete them. A branch holding a commit found nowhere else is
-kept, with that reason.
+the same sweep may delete them. A branch holding a commit found nowhere else,
+and not held by the sealed result, is kept, with that reason.
 
 git is not the only check. Its clean test does not look at ignored files, so
 `git worktree remove` would silently delete an ignored `.env`, a downloaded
@@ -560,7 +567,8 @@ produced, and the directory prune is running in are all refused.
 
 A sweep also reclaims the `brgr/task-*` branches left behind by worktrees that no
 longer exist, which is what removing one by hand leaves in a repository brgr does
-not own, under the same rule: a commit on no other branch keeps its branch. One
+not own, under the same rule: a commit on no other branch, and not held by the
+sealed result, keeps its branch. One
 unreadable directory is reported rather than ending the sweep.
 
 Sealed results, decisions, artifacts, and task rows are never removed — they
