@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 2.15.14 — 2026-11-01
+
+A Codex session that shares a daemon started by a worker is no longer refused by brgr for that worker's identity.
+
 - `--as SESSION` (and `--owner-session`) ignores `BRGR_PARENT_TASK_ID` and
   `BRGR_PARENT_ATTEMPT_ID` when `BRGR_SESSION_ID` names a different session: a
   shared Codex daemon can carry a stale worker identity, which is not this
