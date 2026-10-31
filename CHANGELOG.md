@@ -3,6 +3,12 @@
 ## Unreleased
 
 - Every group kill passes `--` before the negative pid (`kill -KILL -- -<pgid>`). Linux's `kill` read a bare `-<pgid>` as an option and signalled every process of the user (`kill(-1)`); macOS was unaffected. A source scan test keeps a bare `-<pgid>` from coming back. Not checked on Linux: only the form was verified on macOS (#235).
+- `brgr head handoff` no longer requires a TASK. Omit it to hand off the calling
+  owner's open tasks, or none: a session with no brgr work still opens the new
+  head pane with a manifest of only the goal and notes. `--help` names the task
+  id format (`brgr status`); a malformed id keeps the uuid error and hints at
+  that command. An explicit TASK is unchanged.
+
 ## 2.15.12 — 2026-10-31
 
 Settled workers leave fewer worktrees and branches behind.

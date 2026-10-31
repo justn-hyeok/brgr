@@ -210,6 +210,40 @@ fn start_handoff(home: &Path, task_id: &str, fake: &Path, dir: &Path, exit_old: 
     ))
 }
 
+fn start_owner_handoff(home: &Path, fake: &Path, dir: &Path, notes: Option<&str>) -> Value {
+    let mut args = vec![
+        "head",
+        "handoff",
+        "--kind",
+        "claude",
+        "--goal",
+        "Finish the migration",
+    ];
+    if let Some(notes) = notes {
+        args.extend(["--notes", notes]);
+    }
+    json_output(&run_with(
+        home,
+        &args,
+        &head_pane_env(),
+        &herdr_env(fake, dir, "p-old"),
+    ))
+}
+
+fn take_offer(home: &Path, fake: &Path, dir: &Path, task_id: Option<&str>, key: &str) -> Value {
+    let mut args = vec!["head", "take"];
+    if let Some(task_id) = task_id {
+        args.push(task_id);
+    }
+    args.extend(["--offer", key]);
+    json_output(&run_with(
+        home,
+        &args,
+        &incoming_session(),
+        &herdr_env(fake, dir, "p-new"),
+    ))
+}
+
 #[test]
 fn handoff_opens_a_pane_prompts_it_and_leaves_the_binding_with_the_outgoing_head() {
     let (temp, home, workspace) = gjc_home();
@@ -551,4 +585,105 @@ fn a_new_head_with_nothing_left_to_do_can_still_retire_the_handoff() {
     assert_eq!(retired["state"], "retired");
     assert_eq!(retired["outgoing_head"]["closed"], true);
     assert_eq!(closed_panes(&dir), ["p-old"], "{}", calls(&dir));
+}
+
+#[test]
+fn handoff_without_a_task_and_no_open_work_opens_a_pane_with_an_empty_manifest() {
+    let (temp, home, _workspace) = gjc_home();
+    let dir = temp.path().join("fake");
+    fs::create_dir_all(&dir).unwrap();
+    let fake = fake_herdr(&dir);
+    let handoff = start_owner_handoff(&home, &fake, &dir, Some("Keep the current plan"));
+    assert_eq!(handoff["incoming_pane"], "p-new");
+    let key = offer_key(&handoff);
+    assert!(
+        calls(&dir).contains(&format!("head take --offer {key}")),
+        "{}",
+        calls(&dir)
+    );
+    let taken = take_offer(&home, &fake, &dir, None, &key);
+    let manifest = &taken["manifest"];
+    assert_eq!(manifest["goal"], "Finish the migration");
+    assert_eq!(manifest["decision_notes"], "Keep the current plan");
+    assert_eq!(manifest["tasks"].as_array().map(Vec::len), Some(0));
+}
+
+#[test]
+fn handoff_without_a_task_includes_every_open_task_in_the_manifest() {
+    let (temp, home, workspace) = gjc_home();
+    let first = start_task(&home, &workspace);
+    let second = start_task(&home, &workspace);
+    let dir = temp.path().join("fake");
+    fs::create_dir_all(&dir).unwrap();
+    let fake = fake_herdr(&dir);
+    let handoff = start_owner_handoff(&home, &fake, &dir, None);
+    assert_eq!(handoff["incoming_pane"], "p-new");
+    let taken = take_offer(&home, &fake, &dir, None, &offer_key(&handoff));
+    let tasks: Vec<&str> = taken["manifest"]["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|task| task["task_id"].as_str().unwrap())
+        .collect();
+    assert!(tasks.contains(&first.as_str()), "{tasks:?}");
+    assert!(tasks.contains(&second.as_str()), "{tasks:?}");
+    assert_eq!(tasks.len(), 2, "{tasks:?}");
+}
+
+#[test]
+fn handoff_with_an_explicit_task_still_names_that_task_in_the_take_prompt() {
+    let (temp, home, workspace) = gjc_home();
+    let task_id = start_task(&home, &workspace);
+    let dir = temp.path().join("fake");
+    fs::create_dir_all(&dir).unwrap();
+    let fake = fake_herdr(&dir);
+    let handoff = start_handoff(&home, &task_id, &fake, &dir, false);
+    assert_eq!(handoff["incoming_pane"], "p-new");
+    let key = offer_key(&handoff);
+    assert!(
+        calls(&dir).contains(&format!("head take {task_id} --offer {key}")),
+        "{}",
+        calls(&dir)
+    );
+    assert_eq!(takeover_count(&home), 0);
+}
+
+#[test]
+fn a_malformed_handoff_task_id_hints_at_brgr_status() {
+    let output = brgr_command()
+        .args([
+            "head",
+            "handoff",
+            "wondermove-interview",
+            "--kind",
+            "claude",
+            "--goal",
+            "g",
+        ])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let err = String::from_utf8_lossy(&output.stderr);
+    assert!(err.contains("invalid character"), "{err}");
+    assert!(err.contains("brgr status"), "{err}");
+}
+
+#[test]
+fn handoff_help_names_the_task_id_format() {
+    let output = brgr_command()
+        .args(["head", "handoff", "--help"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let help = String::from_utf8_lossy(&output.stdout);
+    assert!(help.to_ascii_lowercase().contains("task id"), "{help}");
+    assert!(help.contains("brgr status"), "{help}");
+    assert!(
+        help.contains("open") && (help.contains("omit") || help.contains("Omit")),
+        "{help}"
+    );
 }
