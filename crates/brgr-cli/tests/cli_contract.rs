@@ -1,3 +1,7 @@
+mod common;
+
+use common::write_fast_script;
+
 use std::{
     fmt::Write as _,
     fs,
@@ -214,8 +218,7 @@ fn assert_worker_prompt(echoed: &str, objective: &str) {
 }
 
 fn write_devin_fixture(executable: &Path) {
-    fs::write(executable, DEVIN_FIXTURE).unwrap();
-    fs::set_permissions(executable, fs::Permissions::from_mode(0o700)).unwrap();
+    write_fast_script(executable, DEVIN_FIXTURE);
 }
 
 /// A shared Codex daemon can carry another worker's `BRGR_SESSION_ID` and
@@ -398,12 +401,10 @@ fn plugin_codex_bridge_runs_a_fixture_outside_the_codex_process() {
     add_fixture(&home, &fixture, &temp.path().join("scratch"));
 
     let fake_codex = fake_bin.join("codex");
-    fs::write(
+    write_fast_script(
         &fake_codex,
         "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$BRGR_TEST_CODEX_ARGS\"\nexport CODEX_THREAD_ID=bridge-test\n\"$BRGR_BIN\" --json harness add /bin/echo --presentation-only > /dev/null 2> \"$BRGR_TEST_DENIED_HARNESS\"\nprintf '%s\\n' \"$?\" >> \"$BRGR_TEST_DENIED_HARNESS\"\n\"$BRGR_BIN\" --json --headless run ESCAPE --harness local.gjc --workspace \"$BRGR_TEST_OUTSIDE\" --foreground > /dev/null 2> \"$BRGR_TEST_DENIED_WORKSPACE\"\nprintf '%s\\n' \"$?\" >> \"$BRGR_TEST_DENIED_WORKSPACE\"\nexec \"$BRGR_BIN\" --json --headless run BRGR_FIXTURE_OK --harness local.gjc --criterion 'artifact text equals BRGR_FIXTURE_OK' --workspace \"$BRGR_TEST_WORKSPACE\" --foreground > \"$BRGR_TEST_OUTPUT\"\n",
-    )
-    .unwrap();
-    fs::set_permissions(&fake_codex, fs::Permissions::from_mode(0o700)).unwrap();
+    );
     let path = std::env::join_paths(
         std::iter::once(fake_bin.clone())
             .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
@@ -494,12 +495,10 @@ fn plugin_codex_uses_pinned_workspace_not_live_plugin_cwd() {
     fs::create_dir_all(&plugin_checkout).unwrap();
     fs::create_dir_all(&fake_bin).unwrap();
     let fake_codex = fake_bin.join("codex");
-    fs::write(
+    write_fast_script(
         &fake_codex,
         "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$BRGR_TEST_CODEX_ARGS\"\n",
-    )
-    .unwrap();
-    fs::set_permissions(&fake_codex, fs::Permissions::from_mode(0o700)).unwrap();
+    );
     let path = std::env::join_paths(
         std::iter::once(fake_bin.clone())
             .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
@@ -644,8 +643,7 @@ fn asking_home() -> (TempDir, PathBuf, PathBuf) {
     let workspace = temp.path().join("work");
     let executable = temp.path().join("gjc");
     fs::create_dir_all(&workspace).unwrap();
-    fs::write(&executable, ASKING_GJC_FIXTURE).unwrap();
-    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+    write_fast_script(&executable, ASKING_GJC_FIXTURE);
     add_fixture(&home, &executable, &temp.path().join("scratch"));
     (temp, home, workspace)
 }
@@ -1041,8 +1039,7 @@ fn pane_fixture_named(home: &str, workspace: &str) -> PaneFixture {
         ("opencode", OPENCODE_FIXTURE),
         ("herdr", PANE_HERDR_FIXTURE),
     ] {
-        fs::write(bin.join(name), body).unwrap();
-        fs::set_permissions(bin.join(name), fs::Permissions::from_mode(0o700)).unwrap();
+        write_fast_script(&bin.join(name), body);
     }
     add_fixture(&home, &bin.join("claude"), &temp.path().join("scratch"));
     add_fixture(&home, &bin.join("opencode"), &temp.path().join("scratch"));
@@ -1872,7 +1869,7 @@ fn extra_argv_cannot_bypass_a_harness_effort_selector() {
 fn opencode_2_runs_standalone_and_selects_tui_models_through_a_session() {
     let fixture = pane_fixture();
     let opencode = fixture.herdr.with_file_name("opencode");
-    fs::write(&opencode, OPENCODE_2_FIXTURE).unwrap();
+    write_fast_script(&opencode, OPENCODE_2_FIXTURE);
     add_fixture(
         &fixture.home,
         &opencode,
@@ -2142,9 +2139,9 @@ fn any_command_evens_out_an_uneven_worker_column() {
     fs::create_dir_all(&runs).unwrap();
     let calls = temp.path().join("calls.log");
     let herdr = temp.path().join("herdr");
-    fs::write(
+    write_fast_script(
         &herdr,
-        format!(
+        &format!(
             r#"#!/bin/sh
 echo "$*" >> '{calls}'
 case "$1 $2" in
@@ -2161,9 +2158,7 @@ esac
 "#,
             calls = calls.display()
         ),
-    )
-    .unwrap();
-    fs::set_permissions(&herdr, fs::Permissions::from_mode(0o700)).unwrap();
+    );
     for (index, pane) in ["w9:p2", "w9:p3"].into_iter().enumerate() {
         fs::write(
             runs.join(format!(
@@ -2421,8 +2416,7 @@ fn a_worker_can_delegate_twice_and_decide_each_child_before_reporting() {
     let workspace = temp.path().join("work");
     let executable = temp.path().join("gjc");
     fs::create_dir_all(&workspace).unwrap();
-    fs::write(&executable, RECURSIVE_GJC_FIXTURE).unwrap();
-    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+    write_fast_script(&executable, RECURSIVE_GJC_FIXTURE);
     add_fixture(&home, &executable, &temp.path().join("scratch"));
 
     let root = json_output(&run(
@@ -2500,8 +2494,7 @@ fn recursive_worker_uses_sibling_worktrees_from_a_git_parent() {
     let executable = temp.path().join("gjc");
     fs::create_dir_all(&repository).unwrap();
     seed_git_repo(&repository);
-    fs::write(&executable, RECURSIVE_GJC_FIXTURE).unwrap();
-    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+    write_fast_script(&executable, RECURSIVE_GJC_FIXTURE);
     add_fixture(&home, &executable, &temp.path().join("scratch"));
     let root = json_output(&run(
         &home,
@@ -2794,8 +2787,7 @@ fn relative_control_home_is_canonical_before_worker_delegation() {
     let workspace = temp.path().join("work");
     let executable = temp.path().join("gjc");
     fs::create_dir_all(&workspace).unwrap();
-    fs::write(&executable, RECURSIVE_GJC_FIXTURE).unwrap();
-    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+    write_fast_script(&executable, RECURSIVE_GJC_FIXTURE);
     add_fixture(&home, &executable, &temp.path().join("scratch"));
     let output = brgr_command()
         .current_dir(temp.path())
@@ -3152,12 +3144,10 @@ fn worker_receives_criteria_scope_and_role_before_reporting() {
     let workspace = temp.path().join("work");
     let executable = temp.path().join("gjc");
     fs::create_dir_all(&workspace).unwrap();
-    fs::write(
+    write_fast_script(
         &executable,
         "#!/bin/sh\ncase \"$1\" in\n --version) echo 'gjc v-instructions-fixture'; exit 0;;\n --help) printf '%s\\n' '-p, --print' '--mode=<value>' '--no-session' '--no-mcp' '--model' '--thinking'; exit 0;;\nesac\nfor item in \"$@\"; do case \"$item\" in @*) prompt=${item#@};; esac; done\nif /usr/bin/grep -q CHECK_INSTRUCTIONS \"$prompt\"; then\n /usr/bin/grep -q 'snapshot matches' \"$prompt\" || exit 7\n /usr/bin/grep -q 'Only docs' \"$prompt\" || exit 8\n /usr/bin/grep -q 'Act as reviewer' \"$prompt\" || exit 9\nfi\nprintf '%s\\n' '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"INSTRUCTIONS_OK\"}]}}'\nprintf '%s\\n' '{\"type\":\"agent_end\",\"stopReason\":\"completed\"}'\n",
-    )
-    .unwrap();
-    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+    );
     add_fixture(&home, &executable, &temp.path().join("scratch"));
     let result = json_output(&run(
         &home,
@@ -3203,12 +3193,10 @@ fn idle_codex_parent_receives_completion_without_another_user_turn() {
     let prompts = temp.path().join("prompts");
     fs::create_dir_all(&workspace).unwrap();
     fs::write(&agent_state, "working").unwrap();
-    fs::write(
+    write_fast_script(
         &herdr,
         "#!/bin/sh\nif [ \"$1\" = --session ]; then shift 2; fi\ncase \"$1 $2\" in\n 'agent get') state=$(/bin/cat \"$BRGR_TEST_AGENT_STATE\"); printf '{\"result\":{\"agent\":{\"agent\":\"codex\",\"pane_id\":\"w1:p1\",\"agent_status\":\"%s\",\"agent_session\":{\"value\":\"session-a\"}}}}\\n' \"$state\";;\n 'agent prompt') printf '%s\\n' \"$4\" >> \"$BRGR_TEST_PROMPTS\"; printf '{}\\n';;\n *) exit 2;;\nesac\n",
-    )
-    .unwrap();
-    fs::set_permissions(&herdr, fs::Permissions::from_mode(0o700)).unwrap();
+    );
     let fixture = gjc_fixture();
     add_fixture(&home, &fixture, &scratch);
     let envs = [
@@ -3286,15 +3274,15 @@ fn idle_codex_parent_is_told_a_run_failed_with_its_reason() {
     let prompts = temp.path().join("prompts");
     fs::create_dir_all(&workspace).unwrap();
     fs::write(&agent_state, "working").unwrap();
-    fs::write(
+    write_fast_script(
         &herdr,
         "#!/bin/sh\nif [ \"$1\" = --session ]; then shift 2; fi\ncase \"$1 $2\" in\n 'agent get') state=$(/bin/cat \"$BRGR_TEST_AGENT_STATE\"); printf '{\"result\":{\"agent\":{\"agent\":\"codex\",\"pane_id\":\"w1:p1\",\"agent_status\":\"%s\",\"agent_session\":{\"value\":\"session-a\"}}}}\\n' \"$state\";;\n 'agent prompt') printf '%s\\n' \"$4\" >> \"$BRGR_TEST_PROMPTS\"; printf '{}\\n';;\n *) exit 2;;\nesac\n",
-    )
-    .unwrap();
-    fs::set_permissions(&herdr, fs::Permissions::from_mode(0o700)).unwrap();
+    );
     let executable = temp.path().join("gjc");
-    fs::write(&executable, "#!/bin/sh\ncase \"$1\" in\n --version) echo 'gjc v-failed-notice-fixture'; exit 0;;\n --help) printf '%s\\n' '-p, --print' '--mode=<value>' '--no-session' '--no-mcp' '--model' '--thinking'; exit 0;;\nesac\nfor item in \"$@\"; do case \"$item\" in @*) prompt=${item#@};; esac; done\nif /usr/bin/grep -q BRGR_FIXTURE_OK \"$prompt\"; then\n printf '%s\\n' '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"BRGR_FIXTURE_OK\"}]}}'\n printf '%s\\n' '{\"type\":\"agent_end\",\"stopReason\":\"completed\"}'\nelse\n exit 7\nfi\n").unwrap();
-    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+    write_fast_script(
+        &executable,
+        "#!/bin/sh\ncase \"$1\" in\n --version) echo 'gjc v-failed-notice-fixture'; exit 0;;\n --help) printf '%s\\n' '-p, --print' '--mode=<value>' '--no-session' '--no-mcp' '--model' '--thinking'; exit 0;;\nesac\nfor item in \"$@\"; do case \"$item\" in @*) prompt=${item#@};; esac; done\nif /usr/bin/grep -q BRGR_FIXTURE_OK \"$prompt\"; then\n printf '%s\\n' '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"BRGR_FIXTURE_OK\"}]}}'\n printf '%s\\n' '{\"type\":\"agent_end\",\"stopReason\":\"completed\"}'\nelse\n exit 7\nfi\n",
+    );
     add_fixture(&home, &executable, &scratch);
     let envs = [
         ("CODEX_THREAD_ID", "session-a"),
@@ -3353,12 +3341,10 @@ fn idle_cursor_owner_is_told_when_its_task_completes() {
     let prompts = temp.path().join("prompts");
     fs::create_dir_all(&workspace).unwrap();
     fs::write(&agent_state, "idle").unwrap();
-    fs::write(
+    write_fast_script(
         &herdr,
         "#!/bin/sh\nif [ \"$1\" = --session ]; then shift 2; fi\ncase \"$1 $2\" in\n 'agent get') state=$(/bin/cat \"$BRGR_TEST_AGENT_STATE\"); printf '{\"result\":{\"agent\":{\"agent\":\"cursor\",\"pane_id\":\"w1:p1\",\"agent_status\":\"%s\"}}}\\n' \"$state\";;\n 'agent prompt') printf '%s\\n' \"$4\" >> \"$BRGR_TEST_PROMPTS\"; printf '{}\\n';;\n *) exit 2;;\nesac\n",
-    )
-    .unwrap();
-    fs::set_permissions(&herdr, fs::Permissions::from_mode(0o700)).unwrap();
+    );
     add_fixture(&home, &gjc_fixture(), &temp.path().join("scratch"));
     let owner = [
         ("CURSOR_CONVERSATION_ID", "cursor-session"),
@@ -3411,12 +3397,10 @@ fn a_new_head_receives_the_owners_completion_notices_after_a_handoff() {
     let prompts = temp.path().join("prompts");
     fs::create_dir_all(&workspace).unwrap();
     fs::write(&agent_state, "idle").unwrap();
-    fs::write(
+    write_fast_script(
         &herdr,
         "#!/bin/sh\nif [ \"$1\" = --session ]; then shift 2; fi\ncase \"$1 $2\" in\n 'agent get') state=$(/bin/cat \"$BRGR_TEST_AGENT_STATE\"); printf '{\"result\":{\"agent\":{\"agent\":\"cursor\",\"pane_id\":\"%s\",\"agent_status\":\"%s\"}}}\\n' \"$3\" \"$state\";;\n 'agent prompt') printf '%s %s\\n' \"$3\" \"$(printf '%s' \"$4\" | /usr/bin/tr '\\n' ' ')\" >> \"$BRGR_TEST_PROMPTS\"; printf '{}\\n';;\n *) exit 2;;\nesac\n",
-    )
-    .unwrap();
-    fs::set_permissions(&herdr, fs::Permissions::from_mode(0o700)).unwrap();
+    );
     add_fixture(&home, &gjc_fixture(), &temp.path().join("scratch"));
     let head = |session: &'static str, pane: &'static str| {
         vec![
@@ -3485,12 +3469,10 @@ fn a_head_in_another_harness_receives_the_owners_completion_notices_after_a_hand
     let prompts = temp.path().join("prompts");
     fs::create_dir_all(&workspace).unwrap();
     fs::write(&agent_state, "idle").unwrap();
-    fs::write(
+    write_fast_script(
         &herdr,
         "#!/bin/sh\nif [ \"$1\" = --session ]; then shift 2; fi\ncase \"$1 $2\" in\n 'agent get') state=$(/bin/cat \"$BRGR_TEST_AGENT_STATE\"); kind=cursor; [ \"$3\" = w1:p2 ] && kind=claude; printf '{\"result\":{\"agent\":{\"agent\":\"%s\",\"pane_id\":\"%s\",\"agent_status\":\"%s\"}}}\\n' \"$kind\" \"$3\" \"$state\";;\n 'agent prompt') printf '%s %s\\n' \"$3\" \"$(printf '%s' \"$4\" | /usr/bin/tr '\\n' ' ')\" >> \"$BRGR_TEST_PROMPTS\"; printf '{}\\n';;\n *) exit 2;;\nesac\n",
-    )
-    .unwrap();
-    fs::set_permissions(&herdr, fs::Permissions::from_mode(0o700)).unwrap();
+    );
     add_fixture(&home, &gjc_fixture(), &temp.path().join("scratch"));
     let head = |session: &'static str, pane: &'static str| {
         vec![
@@ -3563,12 +3545,10 @@ fn idle_codex_owner_is_told_when_a_worker_asks() {
     let prompts = temp.path().join("prompts");
     fs::create_dir_all(&workspace).unwrap();
     fs::write(&agent_state, "working").unwrap();
-    fs::write(
+    write_fast_script(
         &herdr,
         "#!/bin/sh\nif [ \"$1\" = --session ]; then shift 2; fi\ncase \"$1 $2\" in\n 'agent get') state=$(/bin/cat \"$BRGR_TEST_AGENT_STATE\"); printf '{\"result\":{\"agent\":{\"agent\":\"codex\",\"pane_id\":\"w1:p1\",\"agent_status\":\"%s\",\"agent_session\":{\"value\":\"session-q\"}}}}\\n' \"$state\";;\n 'agent prompt') printf '%s\\n' \"$4\" >> \"$BRGR_TEST_PROMPTS\"; printf '{}\\n';;\n *) exit 2;;\nesac\n",
-    )
-    .unwrap();
-    fs::set_permissions(&herdr, fs::Permissions::from_mode(0o700)).unwrap();
+    );
     add_fixture(&home, &gjc_fixture(), &temp.path().join("scratch"));
     let owner = [
         ("CODEX_THREAD_ID", "session-q"),
@@ -3674,12 +3654,10 @@ fn idle_claude_owner_is_told_when_a_worker_asks() {
     let prompts = temp.path().join("prompts");
     fs::create_dir_all(&workspace).unwrap();
     fs::write(&agent_state, "working").unwrap();
-    fs::write(
+    write_fast_script(
         &herdr,
         "#!/bin/sh\nif [ \"$1\" = --session ]; then shift 2; fi\ncase \"$1 $2\" in\n 'agent get') state=$(/bin/cat \"$BRGR_TEST_AGENT_STATE\"); printf '{\"result\":{\"agent\":{\"agent\":\"claude\",\"pane_id\":\"w1:p1\",\"agent_status\":\"%s\"}}}\\n' \"$state\";;\n 'agent prompt') printf '%s\\n' \"$4\" >> \"$BRGR_TEST_PROMPTS\"; printf '{}\\n';;\n *) exit 2;;\nesac\n",
-    )
-    .unwrap();
-    fs::set_permissions(&herdr, fs::Permissions::from_mode(0o700)).unwrap();
+    );
     add_fixture(&home, &gjc_fixture(), &temp.path().join("scratch"));
     let owner = [
         ("CLAUDE_CODE_SESSION_ID", "session-q"),
@@ -3823,7 +3801,9 @@ fn missing_herdr_codex_session_is_reported_from_exact_bound_pane() {
     let herdr = temp.path().join("herdr");
     let reported = temp.path().join("reported-session");
     fs::create_dir_all(&workspace).unwrap();
-    fs::write(&herdr, r#"#!/bin/sh
+    write_fast_script(
+        &herdr,
+        r#"#!/bin/sh
 case "$1 $2" in
  'agent get')
   if [ -s "$BRGR_TEST_SESSION_FILE" ]; then
@@ -3841,8 +3821,8 @@ case "$1 $2" in
   printf '%s\n' '{}';;
  *) exit 9;;
 esac
-"#).unwrap();
-    fs::set_permissions(&herdr, fs::Permissions::from_mode(0o700)).unwrap();
+"#,
+    );
     let fixture = gjc_fixture();
     add_fixture(&home, &fixture, &temp.path().join("scratch"));
     let envs = [
@@ -3887,7 +3867,9 @@ fn an_unverified_pane_is_never_bound_to_a_codex_session() {
     let herdr = temp.path().join("herdr");
     let reported = temp.path().join("reported-session");
     fs::create_dir_all(&workspace).unwrap();
-    fs::write(&herdr, r#"#!/bin/sh
+    write_fast_script(
+        &herdr,
+        r#"#!/bin/sh
 case "$1 $2" in
  'agent get')
   if [ -s "$BRGR_TEST_SESSION_FILE" ]; then
@@ -3905,8 +3887,8 @@ case "$1 $2" in
   printf '%s\n' '{}';;
  *) exit 9;;
 esac
-"#).unwrap();
-    fs::set_permissions(&herdr, fs::Permissions::from_mode(0o700)).unwrap();
+"#,
+    );
     let fixture = gjc_fixture();
     add_fixture(&home, &fixture, &temp.path().join("scratch"));
     let envs = [
@@ -3949,8 +3931,7 @@ fn unavailable_herdr_does_not_hide_the_codex_inbox_hook() {
     let workspace = temp.path().join("work");
     let herdr = temp.path().join("herdr");
     fs::create_dir_all(&workspace).unwrap();
-    fs::write(&herdr, "#!/bin/sh\nexec /bin/sleep 3\n").unwrap();
-    fs::set_permissions(&herdr, fs::Permissions::from_mode(0o700)).unwrap();
+    write_fast_script(&herdr, "#!/bin/sh\nexec /bin/sleep 3\n");
     let fixture = gjc_fixture();
     add_fixture(&home, &fixture, &temp.path().join("scratch"));
     let owner = [
@@ -4001,7 +3982,9 @@ fn slow_herdr_registration_cannot_leave_an_unclaimed_task() {
     let herdr = temp.path().join("herdr");
     let reported = temp.path().join("reported-session");
     fs::create_dir_all(&workspace).unwrap();
-    fs::write(&herdr, r#"#!/bin/sh
+    write_fast_script(
+        &herdr,
+        r#"#!/bin/sh
 case "$1 $2" in
  'agent get')
   if [ -s "$BRGR_TEST_SESSION_FILE" ]; then
@@ -4019,8 +4002,8 @@ case "$1 $2" in
   printf '%s\n' '{}';;
  *) exit 9;;
 esac
-"#).unwrap();
-    fs::set_permissions(&herdr, fs::Permissions::from_mode(0o700)).unwrap();
+"#,
+    );
     let fixture = gjc_fixture();
     add_fixture(&home, &fixture, &temp.path().join("scratch"));
     let envs = [
@@ -4155,8 +4138,10 @@ fn a_failed_run_is_reported_on_every_owner_command_until_acknowledged() {
     let workspace = temp.path().join("work");
     let executable = temp.path().join("gjc");
     fs::create_dir_all(&workspace).unwrap();
-    fs::write(&executable, "#!/bin/sh\ncase \"$1\" in\n --version) echo 'gjc v-failed-notice-fixture'; exit 0;;\n --help) printf '%s\\n' '-p, --print' '--mode=<value>' '--no-session' '--no-mcp' '--model' '--thinking'; exit 0;;\nesac\nfor item in \"$@\"; do case \"$item\" in @*) prompt=${item#@};; esac; done\nif /usr/bin/grep -q BRGR_FIXTURE_OK \"$prompt\"; then\n printf '%s\\n' '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"BRGR_FIXTURE_OK\"}]}}'\n printf '%s\\n' '{\"type\":\"agent_end\",\"stopReason\":\"completed\"}'\nelse\n exit 7\nfi\n").unwrap();
-    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+    write_fast_script(
+        &executable,
+        "#!/bin/sh\ncase \"$1\" in\n --version) echo 'gjc v-failed-notice-fixture'; exit 0;;\n --help) printf '%s\\n' '-p, --print' '--mode=<value>' '--no-session' '--no-mcp' '--model' '--thinking'; exit 0;;\nesac\nfor item in \"$@\"; do case \"$item\" in @*) prompt=${item#@};; esac; done\nif /usr/bin/grep -q BRGR_FIXTURE_OK \"$prompt\"; then\n printf '%s\\n' '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"BRGR_FIXTURE_OK\"}]}}'\n printf '%s\\n' '{\"type\":\"agent_end\",\"stopReason\":\"completed\"}'\nelse\n exit 7\nfi\n",
+    );
     add_fixture(&home, &executable, &temp.path().join("scratch"));
     let owner = [
         ("BRGR_OWNER_ID", "codex:failed-banner"),
@@ -4201,8 +4186,10 @@ fn final_failed_result_does_not_leave_a_notification_dispatcher_running() {
     let workspace = temp.path().join("work");
     let executable = temp.path().join("gjc");
     fs::create_dir_all(&workspace).unwrap();
-    fs::write(&executable, "#!/bin/sh\ncase \"$1\" in\n --version) echo 'gjc v-failed-notice-fixture'; exit 0;;\n --help) printf '%s\\n' '-p, --print' '--mode=<value>' '--no-session' '--no-mcp' '--model' '--thinking'; exit 0;;\nesac\nfor item in \"$@\"; do case \"$item\" in @*) prompt=${item#@};; esac; done\nif /usr/bin/grep -q BRGR_FIXTURE_OK \"$prompt\"; then\n printf '%s\\n' '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"BRGR_FIXTURE_OK\"}]}}'\n printf '%s\\n' '{\"type\":\"agent_end\",\"stopReason\":\"completed\"}'\nelse\n exit 7\nfi\n").unwrap();
-    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+    write_fast_script(
+        &executable,
+        "#!/bin/sh\ncase \"$1\" in\n --version) echo 'gjc v-failed-notice-fixture'; exit 0;;\n --help) printf '%s\\n' '-p, --print' '--mode=<value>' '--no-session' '--no-mcp' '--model' '--thinking'; exit 0;;\nesac\nfor item in \"$@\"; do case \"$item\" in @*) prompt=${item#@};; esac; done\nif /usr/bin/grep -q BRGR_FIXTURE_OK \"$prompt\"; then\n printf '%s\\n' '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"BRGR_FIXTURE_OK\"}]}}'\n printf '%s\\n' '{\"type\":\"agent_end\",\"stopReason\":\"completed\"}'\nelse\n exit 7\nfi\n",
+    );
     add_fixture(&home, &executable, &temp.path().join("scratch"));
     let owner = [("BRGR_OWNER_ID", "codex:failed-notice")];
     let result = json_output(&run(
@@ -4245,7 +4232,9 @@ fn failed_execution_seals_requested_stderr() {
     let workspace = temp.path().join("work");
     let executable = temp.path().join("gjc");
     fs::create_dir_all(&workspace).unwrap();
-    fs::write(&executable, r#"#!/bin/sh
+    write_fast_script(
+        &executable,
+        r#"#!/bin/sh
 case "$1" in
  --version) echo 'gjc v-failed-log-fixture'; exit 0;;
  --help) printf '%s\n' '-p, --print' '--mode=<value>' '--no-session' '--no-mcp' '--model' '--thinking'; exit 0;;
@@ -4258,8 +4247,8 @@ else
  printf 'failure diagnostic 23\n' >&2
  exit 23
 fi
-"#).unwrap();
-    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+"#,
+    );
     add_fixture(&home, &executable, &temp.path().join("scratch"));
     let owner = [("BRGR_OWNER_ID", "codex:failed-log")];
     let result = json_output(&run(
@@ -4320,12 +4309,10 @@ fn transferred_codex_session_receives_undecided_completion() {
         .as_str()
         .unwrap()
         .to_owned();
-    fs::write(
+    write_fast_script(
         &herdr,
         "#!/bin/sh\nif [ \"$1\" = --session ]; then shift 2; fi\ncase \"$1 $2\" in\n 'agent get') printf '%s\\n' '{\"result\":{\"agent\":{\"agent\":\"codex\",\"pane_id\":\"w1:p2\",\"agent_status\":\"idle\",\"agent_session\":{\"value\":\"session-b\"}}}}';;\n 'agent prompt') printf '%s\\n' \"$4\" >> \"$BRGR_TEST_PROMPTS\"; printf '{}\\n';;\n *) exit 2;;\nesac\n",
-    )
-    .unwrap();
-    fs::set_permissions(&herdr, fs::Permissions::from_mode(0o700)).unwrap();
+    );
     let rebound = json_output(&run(
         &home,
         &["bind", &task, "--session", "session-b"],
@@ -4435,16 +4422,15 @@ fn omp_worker_delegates_to_gjc_then_gjc_without_pair_specific_routing() {
     let gjc = temp.path().join("gjc");
     let omp = temp.path().join("omp");
     fs::create_dir_all(&workspace).unwrap();
-    fs::write(&gjc, RECURSIVE_GJC_FIXTURE).unwrap();
+    write_fast_script(&gjc, RECURSIVE_GJC_FIXTURE);
     let omp_fixture = RECURSIVE_GJC_FIXTURE
         .replace("gjc v-recursive-fixture", "omp/fixture")
         .replace(
             "'--no-mcp' '--model' '--thinking'",
             "'--no-prewalk' '--no-extensions' '--no-title' '--model=<value>' '--thinking=<value>'",
         );
-    fs::write(&omp, omp_fixture).unwrap();
+    write_fast_script(&omp, &omp_fixture);
     for executable in [&gjc, &omp] {
-        fs::set_permissions(executable, fs::Permissions::from_mode(0o700)).unwrap();
         add_fixture(
             &home,
             executable,
@@ -4516,12 +4502,10 @@ fn plugin_codex_uses_configured_executable_with_minimal_herdr_path() {
     let observed_path = temp.path().join("codex-path.txt");
     fs::create_dir_all(&workspace).unwrap();
     fs::create_dir_all(&fake_bin).unwrap();
-    fs::write(
+    write_fast_script(
         &executable,
         "#!/bin/sh\nprintf '%s\\n' \"$PATH\" > \"$BRGR_TEST_CODEX_PATH\"\n/bin/sleep 0.2\n",
-    )
-    .unwrap();
-    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+    );
     let configured = json_output(&run(
         &home,
         &[
@@ -4580,8 +4564,7 @@ fn plugin_open_surfaces_herdr_launch_failure() {
     fs::create_dir_all(&workspace).unwrap();
     fs::create_dir_all(&fake_bin).unwrap();
     let herdr = fake_bin.join("herdr");
-    fs::write(&herdr, "#!/bin/sh\necho 'pane refused' >&2\nexit 7\n").unwrap();
-    fs::set_permissions(&herdr, fs::Permissions::from_mode(0o700)).unwrap();
+    write_fast_script(&herdr, "#!/bin/sh\necho 'pane refused' >&2\nexit 7\n");
     let context = json!({"workspace_id": "w1", "workspace_cwd": workspace});
     let launched = brgr_command()
         .args(["plugin", "open", "--no-focus", "--codex"])
@@ -4940,8 +4923,10 @@ fn append_then_main_edit(main_edit: &str, accept: bool) -> (TempDir, PathBuf, Pa
                 .success()
         );
     }
-    fs::write(&executable, "#!/bin/sh\ncase \"$1\" in\n --version) echo 'gjc v-3way-fixture'; exit 0;;\n --help) printf '%s\\n' '-p, --print' '--mode=<value>' '--no-session' '--no-mcp' '--model' '--thinking'; exit 0;;\nesac\nprintf 'a\\nb\\nc\\nTASK\\n' > docs.md\nprintf '%s\\n' '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"OK\"}]}}'\nprintf '%s\\n' '{\"type\":\"agent_end\",\"stopReason\":\"completed\"}'\n").unwrap();
-    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+    write_fast_script(
+        &executable,
+        "#!/bin/sh\ncase \"$1\" in\n --version) echo 'gjc v-3way-fixture'; exit 0;;\n --help) printf '%s\\n' '-p, --print' '--mode=<value>' '--no-session' '--no-mcp' '--model' '--thinking'; exit 0;;\nesac\nprintf 'a\\nb\\nc\\nTASK\\n' > docs.md\nprintf '%s\\n' '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"OK\"}]}}'\nprintf '%s\\n' '{\"type\":\"agent_end\",\"stopReason\":\"completed\"}'\n",
+    );
     add_fixture(&home, &executable, &temp.path().join("scratch"));
     let owner = [("BRGR_OWNER_ID", "codex:three-way")];
     let result = json_output(&run(
@@ -5051,8 +5036,10 @@ fn candidate_with_conflict_and_dirty_file() -> (TempDir, PathBuf, PathBuf, Strin
                 .success()
         );
     }
-    fs::write(&executable, "#!/bin/sh\ncase \"$1\" in\n --version) echo 'gjc v-mixed-fixture'; exit 0;;\n --help) printf '%s\\n' '-p, --print' '--mode=<value>' '--no-session' '--no-mcp' '--model' '--thinking'; exit 0;;\nesac\nprintf 'task\\n' > a\nprintf 'task\\n' > z\nprintf '%s\\n' '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"OK\"}]}}'\nprintf '%s\\n' '{\"type\":\"agent_end\",\"stopReason\":\"completed\"}'\n").unwrap();
-    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+    write_fast_script(
+        &executable,
+        "#!/bin/sh\ncase \"$1\" in\n --version) echo 'gjc v-mixed-fixture'; exit 0;;\n --help) printf '%s\\n' '-p, --print' '--mode=<value>' '--no-session' '--no-mcp' '--model' '--thinking'; exit 0;;\nesac\nprintf 'task\\n' > a\nprintf 'task\\n' > z\nprintf '%s\\n' '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"OK\"}]}}'\nprintf '%s\\n' '{\"type\":\"agent_end\",\"stopReason\":\"completed\"}'\n",
+    );
     add_fixture(&home, &executable, &temp.path().join("scratch"));
     let owner = [("BRGR_OWNER_ID", "codex:three-way")];
     let result = json_output(&run(
@@ -5129,15 +5116,13 @@ fn git_that_fails_the_real_apply_once(dir: &Path) -> String {
     let bin = dir.join("flaky-bin");
     fs::create_dir_all(&bin).unwrap();
     let marker = dir.join("failed-once");
-    fs::write(
-        bin.join("git"),
-        format!(
+    write_fast_script(
+        &bin.join("git"),
+        &format!(
             "#!/bin/sh\napply=0; check=0\nfor a in \"$@\"; do\n  [ \"$a\" = apply ] && apply=1\n  [ \"$a\" = --check ] && check=1\ndone\nif [ $apply = 1 ] && [ $check = 0 ] && [ ! -e '{marker}' ]; then\n  : > '{marker}'\n  echo 'error: injected transient write failure' >&2\n  exit 1\nfi\nexec /usr/bin/git \"$@\"\n",
             marker = marker.display()
         ),
-    )
-    .unwrap();
-    fs::set_permissions(bin.join("git"), fs::Permissions::from_mode(0o700)).unwrap();
+    );
     format!("{}:{}", bin.display(), std::env::var("PATH").unwrap())
 }
 
@@ -5457,20 +5442,15 @@ fn herdr_unknown_model_stops_before_git_worktree_and_task_admission() {
     fs::create_dir_all(&binaries).unwrap();
     fs::create_dir_all(&repository).unwrap();
     let omp = binaries.join("omp");
-    fs::write(
+    write_fast_script(
         &omp,
         "#!/bin/sh\ncase \"$1\" in models) echo '{\"models\":[]}';; *) exit 2;; esac\n",
-    )
-    .unwrap();
+    );
     let launcher = binaries.join("omp-role");
-    fs::write(
+    write_fast_script(
         &launcher,
         "#!/bin/sh\necho '--expected-report --reuse-worktree-objective --reuse-worktree-owner --model --effort'\n",
-    )
-    .unwrap();
-    for executable in [&omp, &launcher] {
-        fs::set_permissions(executable, fs::Permissions::from_mode(0o700)).unwrap();
-    }
+    );
     let path = format!("{}:/usr/bin:/bin", binaries.display());
     json_output(&run(
         &home,
@@ -5823,12 +5803,10 @@ fn unsupported_model_fails_before_task_admission() {
     let workspace = temp.path().join("work");
     fs::create_dir_all(&workspace).unwrap();
     let executable = temp.path().join("prompt-only");
-    fs::write(
+    write_fast_script(
         &executable,
         "#!/bin/sh\ncase \"$1\" in\n  --version) echo 'prompt-only 1';;\n  --help) echo '  --prompt-file <path>  fresh run';;\n  --prompt-file) /bin/cat \"$2\";;\n  *) exit 2;;\nesac\n",
-    )
-    .unwrap();
-    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+    );
     json_output(&run(
         &home,
         &[
@@ -6051,8 +6029,7 @@ fn old_devin_without_model_flag_keeps_the_configured_default_error() {
     fs::create_dir_all(&workspace).unwrap();
     fs::create_dir_all(&scratch).unwrap();
     let executable = temp.path().join("devin");
-    fs::write(&executable, DEVIN_OLD_FIXTURE).unwrap();
-    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+    write_fast_script(&executable, DEVIN_OLD_FIXTURE);
 
     json_output(&run(
         &home,
@@ -6104,6 +6081,7 @@ fn an_agent_authored_harness_is_recertified_from_its_own_manifest() {
     let scratch = temp.path().join("scratch");
     fs::create_dir_all(&scratch).unwrap();
     let executable = temp.path().join("positional-agent");
+    // Unique inode: this test appends to the file and asserts `executable_changed`.
     fs::write(
         &executable,
         "#!/bin/sh\ncase \"$1\" in\n --version) echo 'positional 1';;\n --help) echo '  -p, --print prompt';;\n -p) printf '%s' \"$2\";;\n *) exit 2;;\nesac\n",
@@ -6203,12 +6181,10 @@ fn authored_manifest_runs_unknown_positional_cli_to_owner_acceptance() {
     let workspace = temp.path().join("work");
     fs::create_dir_all(&workspace).unwrap();
     let executable = temp.path().join("positional-agent");
-    fs::write(
+    write_fast_script(
         &executable,
         "#!/bin/sh\ncase \"$1\" in\n --version) echo 'positional 1';;\n --help) echo '  -p, --print prompt';;\n -p) printf '%s' \"$2\";;\n *) exit 2;;\nesac\n",
-    )
-    .unwrap();
-    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+    );
     let manifest_path = temp.path().join("positional-manifest.json");
     let manifest = json!({
         "schema": "brgr.harness/v1",
@@ -6652,12 +6628,10 @@ fn omp_process_can_cancel_without_a_herdr_pane() {
     let workspace = temp.path().join("work");
     fs::create_dir_all(&workspace).unwrap();
     let executable = temp.path().join("omp");
-    fs::write(
+    write_fast_script(
         &executable,
         "#!/bin/sh\ncase \"$1\" in\n --version) echo 'omp fixture 1'; exit 0;;\n --help) printf '%s\\n' '-p, --print' '--mode=<value>' '--no-session' '--no-prewalk' '--no-extensions' '--no-title' '--model=<value>' '--thinking=<value>'; exit 0;;\nesac\nfor argument in \"$@\"; do case \"$argument\" in @*) prompt_file=${argument#@};; esac; done\nif /usr/bin/grep -q SLOW \"$prompt_file\"; then /bin/sleep 30; fi\nprintf '%s\\n' '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"OMP_FIXTURE_OK\"}]}}' '{\"type\":\"turn_end\",\"message\":{\"role\":\"assistant\"}}' '{\"type\":\"agent_end\"}'\n",
-    )
-    .unwrap();
-    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+    );
     json_output(&run(
         &home,
         &[
@@ -6718,12 +6692,10 @@ fn omp_fallback_model_cannot_be_sealed_as_requested_model() {
     fs::create_dir_all(&workspace).unwrap();
     fs::create_dir_all(&scratch).unwrap();
     let executable = temp.path().join("omp");
-    fs::write(
+    write_fast_script(
         &executable,
         "#!/bin/sh\ncase \"$1\" in\n --version) echo 'omp fixture 1'; exit 0;;\n --help) printf '%s\\n' '-p, --print' '--mode=<value>' '--no-session' '--no-prewalk' '--no-extensions' '--no-title' '--model=<value>' '--thinking=<value>'; exit 0;;\n models) echo '{\"models\":[{\"selector\":\"other/fallback\"},{\"selector\":\"workbuddy/deepseek-v4.1-flash\"}]}'; exit 0;;\nesac\nprintf '%s\\n' '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"provider\":\"other\",\"model\":\"fallback\",\"content\":[{\"type\":\"text\",\"text\":\"SHOULD_NOT_ACCEPT\"}]}}' '{\"type\":\"agent_end\",\"stopReason\":\"completed\"}'\n",
-    )
-    .unwrap();
-    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+    );
     json_output(&run(
         &home,
         &[
@@ -7117,8 +7089,7 @@ fn assert_tree_waits_for_owner_approval(home: &Path, task: &str, owner: &[(&str,
 }
 
 fn configure_misleading_external_diff(repository: &Path, script: &Path) {
-    fs::write(script, "#!/bin/sh\nprintf 'NOT_A_PATCH\\n'\n").unwrap();
-    fs::set_permissions(script, fs::Permissions::from_mode(0o700)).unwrap();
+    write_fast_script(script, "#!/bin/sh\nprintf 'NOT_A_PATCH\\n'\n");
     assert!(
         Command::new("git")
             .arg("-C")
@@ -7155,12 +7126,10 @@ fn sealed_evidence_is_reviewed_before_separate_conflict_checked_integration() {
     fs::create_dir_all(&repository).unwrap();
     seed_git_repo(&repository);
     configure_misleading_external_diff(&repository, &temp.path().join("external-diff"));
-    fs::write(
+    write_fast_script(
         &executable,
         "#!/bin/sh\ncase \"$1\" in\n --version) echo 'gjc v-evidence-fixture'; exit 0;;\n --help) printf '%s\\n' '-p, --print' '--mode=<value>' '--no-session' '--no-mcp' '--model' '--thinking'; exit 0;;\nesac\nfor item in \"$@\"; do case \"$item\" in @*) prompt=${item#@};; esac; done\nif /usr/bin/grep -q EVIDENCE_TASK \"$prompt\"; then\n printf 'changed\\n' > README\n printf 'added\\n' > added.txt\n printf 'report\\n' > report.md\n printf 'PNG_BYTES' > screen.png\n printf 'worker log\\n' >&2\nfi\nprintf '%s\\n' '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"EVIDENCE_OK\"}]}}'\nprintf '%s\\n' '{\"type\":\"agent_end\",\"stopReason\":\"completed\"}'\n",
-    )
-    .unwrap();
-    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+    );
     add_fixture(&home, &executable, &temp.path().join("scratch"));
     let owner = [("BRGR_OWNER_ID", "codex:evidence")];
     let outcome = json_output(&run(
@@ -7277,8 +7246,10 @@ fn selected_input_is_excluded_from_worker_patch_and_source_edit_survives_apply()
     );
     fs::write(repository.join("README"), "selected source edit\n").unwrap();
     fs::write(repository.join("selected.txt"), b"new source file\r\n").unwrap();
-    fs::write(&executable, "#!/bin/sh\ncase \"$1\" in\n --version) echo 'gjc v-snapshot-patch-fixture'; exit 0;;\n --help) printf '%s\\n' '-p, --print' '--mode=<value>' '--no-session' '--no-mcp' '--model' '--thinking'; exit 0;;\nesac\nprintf 'worker edit\\n' > worker.txt\nprintf '%s\\n' '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"OK\"}]}}'\nprintf '%s\\n' '{\"type\":\"agent_end\",\"stopReason\":\"completed\"}'\n").unwrap();
-    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+    write_fast_script(
+        &executable,
+        "#!/bin/sh\ncase \"$1\" in\n --version) echo 'gjc v-snapshot-patch-fixture'; exit 0;;\n --help) printf '%s\\n' '-p, --print' '--mode=<value>' '--no-session' '--no-mcp' '--model' '--thinking'; exit 0;;\nesac\nprintf 'worker edit\\n' > worker.txt\nprintf '%s\\n' '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"OK\"}]}}'\nprintf '%s\\n' '{\"type\":\"agent_end\",\"stopReason\":\"completed\"}'\n",
+    );
     add_fixture(&home, &executable, &temp.path().join("scratch"));
     let owner = [("BRGR_OWNER_ID", "codex:snapshot-patch")];
     let result = json_output(&run(
@@ -7339,8 +7310,10 @@ fn committed_worker_change_uses_the_task_start_commit_for_diff_and_apply() {
     let executable = temp.path().join("gjc");
     fs::create_dir_all(&repository).unwrap();
     seed_git_repo(&repository);
-    fs::write(&executable, "#!/bin/sh\ncase \"$1\" in\n --version) echo 'gjc v-commit-fixture'; exit 0;;\n --help) printf '%s\\n' '-p, --print' '--mode=<value>' '--no-session' '--no-mcp' '--model' '--thinking'; exit 0;;\nesac\nprintf 'committed worker edit\\n' > README\n/usr/bin/git add README\n/usr/bin/git -c user.name=Worker -c user.email=worker@example.test commit -m worker-edit >/dev/null\nprintf '%s\\n' '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"OK\"}]}}'\nprintf '%s\\n' '{\"type\":\"agent_end\",\"stopReason\":\"completed\"}'\n").unwrap();
-    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+    write_fast_script(
+        &executable,
+        "#!/bin/sh\ncase \"$1\" in\n --version) echo 'gjc v-commit-fixture'; exit 0;;\n --help) printf '%s\\n' '-p, --print' '--mode=<value>' '--no-session' '--no-mcp' '--model' '--thinking'; exit 0;;\nesac\nprintf 'committed worker edit\\n' > README\n/usr/bin/git add README\n/usr/bin/git -c user.name=Worker -c user.email=worker@example.test commit -m worker-edit >/dev/null\nprintf '%s\\n' '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"OK\"}]}}'\nprintf '%s\\n' '{\"type\":\"agent_end\",\"stopReason\":\"completed\"}'\n",
+    );
     add_fixture(&home, &executable, &temp.path().join("scratch"));
     let owner = [("BRGR_OWNER_ID", "codex:committed-patch")];
     let result = json_output(&run(
@@ -7421,8 +7394,10 @@ fn subdirectory_snapshot_uses_repository_relative_paths() {
             .success()
     );
     fs::write(subdirectory.join("a"), "selected sub edit\n").unwrap();
-    fs::write(&executable, "#!/bin/sh\ncase \"$1\" in\n --version) echo 'gjc v-subdir-fixture'; exit 0;;\n --help) printf '%s\\n' '-p, --print' '--mode=<value>' '--no-session' '--no-mcp' '--model' '--thinking'; exit 0;;\nesac\nprintf 'worker root edit\\n' > ../README\nprintf '%s\\n' '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"OK\"}]}}'\nprintf '%s\\n' '{\"type\":\"agent_end\",\"stopReason\":\"completed\"}'\n").unwrap();
-    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+    write_fast_script(
+        &executable,
+        "#!/bin/sh\ncase \"$1\" in\n --version) echo 'gjc v-subdir-fixture'; exit 0;;\n --help) printf '%s\\n' '-p, --print' '--mode=<value>' '--no-session' '--no-mcp' '--model' '--thinking'; exit 0;;\nesac\nprintf 'worker root edit\\n' > ../README\nprintf '%s\\n' '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"OK\"}]}}'\nprintf '%s\\n' '{\"type\":\"agent_end\",\"stopReason\":\"completed\"}'\n",
+    );
     add_fixture(&home, &executable, &temp.path().join("scratch"));
     let owner = [("BRGR_OWNER_ID", "codex:subdir-snapshot")];
     let result = json_output(&run(
@@ -7698,12 +7673,10 @@ fn missing_task_worktree_fails_closed_without_recreate_or_new_identity() {
 fn add_slow_prompt_file_harness(home: &Path, root: &Path) {
     fs::create_dir_all(root.join("scratch")).unwrap();
     let executable = root.join("slow-agent");
-    fs::write(
+    write_fast_script(
         &executable,
         "#!/bin/sh\ncase \"$1\" in\n  --version) echo 'slow 1';;\n  --help) echo '  --prompt-file <path>  fresh run';;\n  --prompt-file)\n    if /usr/bin/grep -q SLOW_RUN \"$2\"; then /bin/sleep 4; fi\n    if /usr/bin/grep -q HOLD_RUN \"$2\"; then n=0; while [ ! -e \"${0%/*}/release\" ] && [ $n -lt 600 ]; do /bin/sleep 0.1; n=$((n+1)); done; fi\n    /bin/cat \"$2\";;\n  *) exit 2;;\nesac\n",
-    )
-    .unwrap();
-    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+    );
     json_output(&run(
         home,
         &[
@@ -8019,8 +7992,7 @@ fn announcing_home() -> (TempDir, PathBuf, PathBuf) {
     let workspace = temp.path().join("work");
     let executable = temp.path().join("gjc");
     fs::create_dir_all(&workspace).unwrap();
-    fs::write(&executable, ANNOUNCING_GJC_FIXTURE).unwrap();
-    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+    write_fast_script(&executable, ANNOUNCING_GJC_FIXTURE);
     add_fixture(&home, &executable, &temp.path().join("scratch"));
     (temp, home, workspace)
 }

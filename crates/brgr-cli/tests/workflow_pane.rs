@@ -16,7 +16,7 @@ use std::{
 use serde_json::Value;
 use tempfile::TempDir;
 
-use common::{fake_herdr, herdr_env};
+use common::{fake_herdr, herdr_env, write_fast_script};
 
 fn brgr() -> &'static str {
     env!("CARGO_BIN_EXE_brgr")
@@ -245,8 +245,7 @@ fn fixture_gjc() -> Fixture {
 fn fixture_claude() -> Fixture {
     let (temp, root, home, workspace, scripts) = fixture_dirs();
     let executable = root.join("claude");
-    fs::write(&executable, CLAUDE).unwrap();
-    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+    write_fast_script(&executable, CLAUDE);
     add_harness(&home, &workspace, &executable, &root.join("scratch"));
     Fixture {
         _temp: temp,
@@ -401,8 +400,7 @@ fn dead_herdr_env(fixture: &Fixture) -> Vec<(&'static str, String)> {
     let dir = fixture.root.join("dead-herdr");
     fs::create_dir_all(&dir).unwrap();
     let binary = dir.join("herdr");
-    fs::write(&binary, "#!/bin/sh\nexit 1\n").unwrap();
-    fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
+    write_fast_script(&binary, "#!/bin/sh\nexit 1\n");
     vec![("HERDR_BIN_PATH", binary.to_str().unwrap().to_owned())]
 }
 
@@ -614,9 +612,9 @@ fn the_sdk_does_not_pass_source_pane_for_a_headless_step() {
     init_sdk(&fixture);
     let argv_log = fixture.root.join("sdk-argv.log");
     let fake_bin = fixture.root.join("fake-brgr");
-    fs::write(
+    write_fast_script(
         &fake_bin,
-        format!(
+        &format!(
             r#"#!/bin/sh
 printf '%s\n' "$*" >> "{log}"
 case " $* " in
@@ -630,9 +628,7 @@ esac
 "#,
             log = argv_log.display()
         ),
-    )
-    .unwrap();
-    fs::set_permissions(&fake_bin, fs::Permissions::from_mode(0o700)).unwrap();
+    );
     let script = write_script(&fixture, "sdk-headless.mjs", HEADLESS_SCRIPT);
     let output = Command::new("node")
         .arg(&script)

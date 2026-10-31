@@ -1,8 +1,11 @@
 //! Black-box owner notices for workflow run state changes.
 
+mod common;
+
+use common::write_fast_script;
+
 use std::{
     fs,
-    os::unix::fs::PermissionsExt as _,
     path::{Path, PathBuf},
     process::Command,
     thread,
@@ -150,12 +153,10 @@ fn notice_fixture(initial_state: &str) -> NoticeFixture {
     fs::create_dir_all(&workspace).unwrap();
     seed_git_repo(&workspace);
     fs::write(&agent_state, initial_state).unwrap();
-    fs::write(
+    write_fast_script(
         &herdr,
         "#!/bin/sh\nif [ \"$1\" = --session ]; then shift 2; fi\ncase \"$1 $2\" in\n 'agent get') state=$(/bin/cat \"$BRGR_TEST_AGENT_STATE\"); printf '{\"result\":{\"agent\":{\"agent\":\"codex\",\"pane_id\":\"w1:p1\",\"agent_status\":\"%s\",\"agent_session\":{\"value\":\"session-a\"}}}}\\n' \"$state\";;\n 'agent prompt') printf '%s\\n' \"$4\" >> \"$BRGR_TEST_PROMPTS\"; printf '{}\\n';;\n *) exit 2;;\nesac\n",
-    )
-    .unwrap();
-    fs::set_permissions(&herdr, fs::Permissions::from_mode(0o700)).unwrap();
+    );
     add_fixture(&home, &temp.path().join("scratch"));
     NoticeFixture {
         _temp: temp,

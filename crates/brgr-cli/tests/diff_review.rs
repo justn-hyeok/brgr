@@ -6,9 +6,12 @@
 //! working while a worker runs; a patch that no longer applies is still refused
 //! by `git apply --check` before anything is written.
 
+mod common;
+
+use common::write_fast_script;
+
 use std::{
     fs,
-    os::unix::fs::PermissionsExt as _,
     path::{Path, PathBuf},
     process::{Command, Output},
 };
@@ -196,8 +199,7 @@ impl Fixture {
         let worker = temp.path().join("gjc");
         fs::create_dir_all(&repository).unwrap();
         fs::create_dir_all(&scratch).unwrap();
-        fs::write(&worker, EDITING_WORKER).unwrap();
-        fs::set_permissions(&worker, fs::Permissions::from_mode(0o700)).unwrap();
+        write_fast_script(&worker, EDITING_WORKER);
         git(&repository, &["init", "-q", "-b", "main"]);
         git(&repository, &["config", "user.name", "Fixture"]);
         git(

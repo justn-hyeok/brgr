@@ -10,6 +10,11 @@
   prompt now starts each command with `env -u BRGR_SESSION_ID -u BRGR_PARENT_TASK_ID
   -u BRGR_PARENT_ATTEMPT_ID BRGR_OWNER_ID=… BRGR_HOME=…`, so `current_session`
   falls back to `CODEX_THREAD_ID` or `CLAUDE_CODE_SESSION_ID`.
+- Tests only: fake `#!/bin/sh` executables in `brgr-cli` integration tests
+  (`cli_contract`, `workflow_e2e`, `workflow_pane`, `workflow_notice`, `watch`,
+  `prune`, `orchestration`, `diff_review`, and the shared `fake_herdr`) are
+  hard-links of one warmed trampoline, so they no longer pay macOS's first-exec
+  cost on a new inode (#224).
 
 ## 2.15.13 — 2026-11-01
 
