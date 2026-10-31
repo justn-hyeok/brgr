@@ -502,7 +502,7 @@ fn owner_from_environment() -> Result<OwnerId> {
         explicit.as_deref(),
         env::var("BRGR_SESSION_ID").ok().as_deref(),
         env::var("BRGR_OWNER_ID").ok().as_deref(),
-        owner_kind(),
+        owner_kind,
     )
     .or_else(|| session.map(|id| format!("{}:{id}", owner_kind())))
     .unwrap_or_else(|| "codex:manual".to_owned());
@@ -512,20 +512,22 @@ fn owner_from_environment() -> Result<OwnerId> {
 /// The owner an environment names, unless `--as` names another session: a
 /// shared Codex daemon keeps the owner and session of the worker that started
 /// it, and a call that names its own session is that session's call. Without
-/// an environment owner, the explicit session names it.
+/// an environment owner, the explicit session names it. `kind` is only called
+/// when it is needed: finding it can ask Herdr, which an environment owner never
+/// should wait for.
 fn owner_id_from(
     explicit_session: Option<&str>,
     env_session: Option<&str>,
     env_owner: Option<&str>,
-    kind: &str,
+    kind: impl FnOnce() -> &'static str,
 ) -> Option<String> {
     let env_owner = env_owner.filter(|value| !value.trim().is_empty());
     if foreign_parent_identity(explicit_session, env_session) {
-        return explicit_session.map(|id| format!("{kind}:{id}"));
+        return explicit_session.map(|id| format!("{}:{id}", kind()));
     }
     env_owner
         .map(str::to_owned)
-        .or_else(|| explicit_session.map(|id| format!("{kind}:{id}")))
+        .or_else(|| explicit_session.map(|id| format!("{}:{id}", kind())))
 }
 
 fn delegation_parent_from_environment() -> Result<Option<(TaskId, AttemptId)>> {
@@ -1199,29 +1201,39 @@ mod tests {
         // `--as mine` while the environment belongs to `other`: the environment's
         // owner is not this caller's.
         assert_eq!(
-            owner_id_from(Some("mine"), Some("other"), Some("worker:other"), "codex"),
+            owner_id_from(
+                Some("mine"),
+                Some("other"),
+                Some("worker:other"),
+                || "codex"
+            ),
             Some("codex:mine".to_owned())
         );
         // Same session: the environment's owner is kept.
         assert_eq!(
-            owner_id_from(Some("other"), Some("other"), Some("worker:other"), "codex"),
+            owner_id_from(
+                Some("other"),
+                Some("other"),
+                Some("worker:other"),
+                || "codex"
+            ),
             Some("worker:other".to_owned())
         );
         // No `--as`, or no `BRGR_SESSION_ID`: unchanged.
         assert_eq!(
-            owner_id_from(None, Some("other"), Some("worker:other"), "codex"),
+            owner_id_from(None, Some("other"), Some("worker:other"), || "codex"),
             Some("worker:other".to_owned())
         );
         assert_eq!(
-            owner_id_from(Some("mine"), None, Some("worker:other"), "codex"),
+            owner_id_from(Some("mine"), None, Some("worker:other"), || "codex"),
             Some("worker:other".to_owned())
         );
         // No owner variable: derived from the session as before.
         assert_eq!(
-            owner_id_from(Some("mine"), Some("mine"), None, "claude"),
+            owner_id_from(Some("mine"), Some("mine"), None, || "claude"),
             Some("claude:mine".to_owned())
         );
-        assert_eq!(owner_id_from(None, None, None, "codex"), None);
+        assert_eq!(owner_id_from(None, None, None, || "codex"), None);
     }
 
     #[test]
