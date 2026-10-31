@@ -39,7 +39,7 @@ pub(crate) enum Command {
     Run(RunArgs),
     /// Start a new revision of a task without rewriting its prior results.
     Revise(ReviseArgs),
-    /// Show managed tasks, or one task's attempt and result state.
+    /// Show managed tasks, or one task's attempt and result state. Status: `brgr status --brief`.
     Status {
         task: Option<TaskId>,
         /// Include the delegation tree beneath the task.
@@ -53,6 +53,10 @@ pub(crate) enum Command {
         /// summary table.
         #[arg(long)]
         verbose: bool,
+        /// One line per task, the same on a terminal and in a pipe: full id,
+        /// state, harness, elapsed, objective head. No ANSI.
+        #[arg(long, conflicts_with_all = ["tree", "verbose"])]
+        brief: bool,
     },
     /// Show a task's sealed result, optionally acknowledging a failed one.
     Result {

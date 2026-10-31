@@ -226,7 +226,12 @@ state, harness, elapsed, objective) or, for one task, a key block that ends with
 line is `task: <full task id>`. `status --verbose` keeps the terminal on the
 full pretty JSON. When stdout is a pipe or file, or `--json` is given, the
 output is the JSON receipt exactly as before: scripts and `jq` pipelines see
-no change.
+no change. `brgr status --brief` is the same on a terminal and in a pipe, with
+no ANSI: one line per task (full id, state, harness, elapsed, objective head).
+`brgr status TASK --brief` prints a few lines (state, last event, whether a
+result exists, whether a decision exists). `brgr status --brief --json` is a
+compact array with keys `task_id`, `state`, `harness`, `elapsed_seconds`,
+`objective_head`.
 
 Install the local binary and Codex integration, then start a new Codex session:
 
@@ -245,7 +250,7 @@ hatch for inspection and explicit operations:
 
 ```bash
 brgr run "Review this change" --harness local.gjc --criterion "findings cite changed lines"
-brgr status
+brgr status --brief
 brgr result TASK
 brgr accept TASK --reason "criteria verified"
 ```

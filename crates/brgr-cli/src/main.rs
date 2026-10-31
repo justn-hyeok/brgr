@@ -572,7 +572,8 @@ fn read_command(paths: &Paths, command: &Command, json_output: bool) -> Result<(
             tree,
             observe,
             verbose,
-        } => status(paths, task, tree, observe, verbose, json_output),
+            brief,
+        } => status(paths, task, tree, observe, verbose, brief, json_output),
         Command::Result { task, ack, observe } => result(paths, task, ack, observe, json_output),
         Command::Diff {
             task,

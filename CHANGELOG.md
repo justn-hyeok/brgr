@@ -8,6 +8,11 @@
   head pane with a manifest of only the goal and notes. `--help` names the task
   id format (`brgr status`); a malformed id keeps the uuid error and hints at
   that command. An explicit TASK is unchanged.
+- `brgr status --brief` prints one line per task (full id, state, harness,
+  elapsed, objective head) on a terminal and in a pipe, with no ANSI.
+  `status TASK --brief` prints state, last event, and whether a result and a
+  decision exist. `--brief --json` is a compact array with a fixed key order.
+  Without `--brief`, piped and `--json` output is unchanged.
 
 ## 2.15.12 — 2026-10-31
 
