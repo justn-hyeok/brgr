@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 2.15.12 — 2026-10-31
+
+Settled workers leave fewer worktrees and branches behind.
+
 - `brgr prune` and decision-time reclaim treat worker tool-state directories
   (`.agent-progress/`, `.build/`, `.commandcode/`, `.gjc/`) as disposable when
   git reports them as ignored, and the same four names when untracked. An untracked
