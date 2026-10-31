@@ -9061,3 +9061,52 @@ fn an_older_stored_over_limit_task_still_reads_through_status() {
     );
     assert_eq!(listed["task"]["objective"], over);
 }
+#[test]
+fn as_session_ignores_another_sessions_stale_owner_identity() {
+    // A shared Codex daemon keeps the owner and session of the worker that
+    // started it. A call that names its own session is that session's call.
+    let (_temp, home, workspace) = gjc_home();
+    let stale = [
+        ("BRGR_SESSION_ID", "other"),
+        ("BRGR_OWNER_ID", "worker:other"),
+    ];
+    let launched = run(
+        &home,
+        &[
+            "--as",
+            "mine",
+            "run",
+            "BRGR_FIXTURE_OK",
+            "--harness",
+            "local.gjc",
+            "--workspace",
+            workspace.to_str().unwrap(),
+            "--foreground",
+            "--headless",
+        ],
+        &stale,
+    );
+    assert!(
+        launched.status.success(),
+        "{}",
+        String::from_utf8_lossy(&launched.stderr)
+    );
+    let task = json_output(&launched)["task_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    // `mine` sees the task as its own; a task recorded under `worker:other`
+    // would be invisible to it.
+    let listing = run(&home, &["--as", "mine", "status", "--brief"], &[]);
+    let text = String::from_utf8_lossy(&listing.stdout);
+    assert!(
+        text.contains(&task),
+        "the task was not recorded for `mine`: {text}"
+    );
+    let owned = run(&home, &["--as", "mine", "status", &task, "--verbose"], &[]);
+    assert!(
+        String::from_utf8_lossy(&owned.stdout).contains("codex:mine"),
+        "{}",
+        String::from_utf8_lossy(&owned.stdout)
+    );
+}
