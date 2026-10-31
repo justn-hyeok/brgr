@@ -146,7 +146,9 @@ when the caller is a shared daemon. `--as SESSION` (the short form) is the
 session in the calling context; Codex owners are identified by what the panes
 show, not by a shared daemon's environment. When `--as` names a session and
 `BRGR_SESSION_ID` names a different one, `BRGR_PARENT_TASK_ID` and
-`BRGR_PARENT_ATTEMPT_ID` belong to that other session and are ignored. A
+`BRGR_PARENT_ATTEMPT_ID` belong to that other session and are ignored, and so
+is `BRGR_OWNER_ID`: the call's owner is `codex:SESSION` (or the session's own
+kind) for the session `--as` names. A
 delegated child that passes `--as` with its own `BRGR_SESSION_ID` is still
 checked against the stored parent. See the [orchestration guide](orchestration.md)
 for config, instructions, debate, and the current verification limits.
