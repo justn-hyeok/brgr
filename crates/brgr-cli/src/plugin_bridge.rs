@@ -86,7 +86,7 @@ impl Drop for ProcessGroupGuard {
             && let Some(pid) = self.pid
         {
             let _ = std::process::Command::new("/bin/kill")
-                .args(["-KILL", &format!("-{pid}")])
+                .args(["-KILL", "--", &format!("-{pid}")])
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
@@ -561,7 +561,7 @@ async fn kill_process_group(pid: Option<u32>) {
         return;
     };
     let _ = tokio::process::Command::new("/bin/kill")
-        .args(["-KILL", &format!("-{pid}")])
+        .args(["-KILL", "--", &format!("-{pid}")])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())

@@ -386,7 +386,7 @@ await new Promise((resolve) => setTimeout(resolve, 8000));
     );
     let pid = read_pid(&workflow_pid(&fixture.home, &run_id));
     let killed = Command::new("/bin/kill")
-        .args(["-KILL", &format!("-{pid}")])
+        .args(["-KILL", "--", &format!("-{pid}")])
         .status()
         .unwrap();
     assert!(killed.success(), "failed to kill driver group {pid}");

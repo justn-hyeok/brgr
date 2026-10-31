@@ -471,7 +471,7 @@ fn kill_driver(fixture: &Fixture, run_id: &str) {
     );
     let pid = live_driver_pid(fixture, run_id).unwrap();
     let _ = Command::new("/bin/kill")
-        .args(["-KILL", &format!("-{pid}")])
+        .args(["-KILL", "--", &format!("-{pid}")])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())

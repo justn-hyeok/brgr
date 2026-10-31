@@ -360,7 +360,7 @@ fn stop_driver_group(pid: u32) {
 
 fn signal_group(pid: u32, signal: &str) {
     let _ = ProcessCommand::new("/bin/kill")
-        .args([signal, &format!("-{pid}")])
+        .args([signal, "--", &format!("-{pid}")])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())

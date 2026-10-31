@@ -266,6 +266,7 @@ impl ProcessRunner {
         } else {
             let _ = std::process::Command::new("/bin/kill")
                 .arg("-KILL")
+                .arg("--")
                 .arg(format!("-{process_group_id}"))
                 .output();
             stdout_task.abort();
@@ -494,6 +495,7 @@ async fn wait_for_probe_exit(
 fn kill_probe_group(pid: u32) -> bool {
     std::process::Command::new("/bin/kill")
         .arg("-KILL")
+        .arg("--")
         .arg(format!("-{pid}"))
         .output()
         .is_ok_and(|output| output.status.success())
@@ -543,6 +545,7 @@ async fn stop_process_group(child: &mut tokio::process::Child) -> Result<ExitSta
     let pid = child.id().ok_or(RunnerError::MissingProcessId)?;
     let term = std::process::Command::new("/bin/kill")
         .arg("-TERM")
+        .arg("--")
         .arg(format!("-{pid}"))
         .output()?;
     if !term.status.success() {
@@ -561,6 +564,7 @@ async fn stop_process_group(child: &mut tokio::process::Child) -> Result<ExitSta
     }
     let _ = std::process::Command::new("/bin/kill")
         .arg("-KILL")
+        .arg("--")
         .arg(format!("-{pid}"))
         .status();
     Ok(child.wait().await?)
