@@ -497,12 +497,35 @@ async fn config_command(paths: &Paths, command: &ConfigCommand, json_output: boo
 
 fn owner_from_environment() -> Result<OwnerId> {
     let session = current_session()?;
-    let owner = env::var("BRGR_OWNER_ID")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .or_else(|| session.map(|id| format!("{}:{id}", owner_kind())))
-        .unwrap_or_else(|| "codex:manual".to_owned());
+    let explicit = invocation::current().session.clone();
+    let owner = owner_id_from(
+        explicit.as_deref(),
+        env::var("BRGR_SESSION_ID").ok().as_deref(),
+        env::var("BRGR_OWNER_ID").ok().as_deref(),
+        owner_kind(),
+    )
+    .or_else(|| session.map(|id| format!("{}:{id}", owner_kind())))
+    .unwrap_or_else(|| "codex:manual".to_owned());
     Ok(OwnerId::new(owner)?)
+}
+
+/// The owner an environment names, unless `--as` names another session: a
+/// shared Codex daemon keeps the owner and session of the worker that started
+/// it, and a call that names its own session is that session's call. Without
+/// an environment owner, the explicit session names it.
+fn owner_id_from(
+    explicit_session: Option<&str>,
+    env_session: Option<&str>,
+    env_owner: Option<&str>,
+    kind: &str,
+) -> Option<String> {
+    let env_owner = env_owner.filter(|value| !value.trim().is_empty());
+    if foreign_parent_identity(explicit_session, env_session) {
+        return explicit_session.map(|id| format!("{kind}:{id}"));
+    }
+    env_owner
+        .map(str::to_owned)
+        .or_else(|| explicit_session.map(|id| format!("{kind}:{id}")))
 }
 
 fn delegation_parent_from_environment() -> Result<Option<(TaskId, AttemptId)>> {
@@ -1169,6 +1192,36 @@ mod tests {
         Cli::try_parse_from(["brgr", "wait", "--timeout-seconds=1", "--", task]).unwrap();
         Cli::try_parse_from(["brgr", "cancel", "--", task]).unwrap();
         Cli::try_parse_from(["brgr", "result", "--", task]).unwrap();
+    }
+
+    #[test]
+    fn the_owner_of_a_call_that_names_its_session_is_not_a_foreign_one() {
+        // `--as mine` while the environment belongs to `other`: the environment's
+        // owner is not this caller's.
+        assert_eq!(
+            owner_id_from(Some("mine"), Some("other"), Some("worker:other"), "codex"),
+            Some("codex:mine".to_owned())
+        );
+        // Same session: the environment's owner is kept.
+        assert_eq!(
+            owner_id_from(Some("other"), Some("other"), Some("worker:other"), "codex"),
+            Some("worker:other".to_owned())
+        );
+        // No `--as`, or no `BRGR_SESSION_ID`: unchanged.
+        assert_eq!(
+            owner_id_from(None, Some("other"), Some("worker:other"), "codex"),
+            Some("worker:other".to_owned())
+        );
+        assert_eq!(
+            owner_id_from(Some("mine"), None, Some("worker:other"), "codex"),
+            Some("worker:other".to_owned())
+        );
+        // No owner variable: derived from the session as before.
+        assert_eq!(
+            owner_id_from(Some("mine"), Some("mine"), None, "claude"),
+            Some("claude:mine".to_owned())
+        );
+        assert_eq!(owner_id_from(None, None, None, "codex"), None);
     }
 
     #[test]
