@@ -1312,6 +1312,190 @@ fn prune_reclaims_ignored_tool_state_directories_without_include_ignored() {
     assert!(!worktree.exists(), "prune left ignored tool-state behind");
 }
 
+/// Squash merge / `brgr apply`: the worker's commit lives only on the task
+/// branch, HEAD has the same bytes under a different SHA, and prune still
+/// removes the branch because the sealed diff already holds every change.
+#[test]
+fn prune_removes_a_squashed_branch_whose_changes_the_store_sealed() {
+    let fixture = Fixture::new();
+    let task = fixture.run_with("WRITE", &["--capture-diff", "--keep-worktree"]);
+    fixture.commit_worktree(&task, "worker output");
+    fixture.accept(&task);
+    let contents = fs::read(fixture.worktree(&task).join("AGENT_OUTPUT.txt")).unwrap();
+    fixture.commit_on_main("AGENT_OUTPUT.txt", &contents, "squash");
+    assert!(
+        !fixture.tip_is_ancestor_of_head(&format!("brgr/task-{}", Fixture::slug(&task))),
+        "the squash simulation left the worker commit in HEAD"
+    );
+    let result_id = fixture.result_id(&task);
+
+    let applied = fixture.prune(&["--apply"]);
+    let branch = format!("brgr/task-{}", Fixture::slug(&task));
+    assert!(
+        !fixture.branches().contains(&branch),
+        "squashed sealed branch survived: {applied}"
+    );
+    let reason = reason_of(&applied, "sealed squash", &Fixture::slug(&task));
+    assert!(
+        reason.contains(&result_id),
+        "reason did not name the sealed result {result_id}: {reason}"
+    );
+    assert!(
+        reason.contains("sealed"),
+        "reason did not say the sealed result holds the changes: {reason}"
+    );
+}
+
+/// A commit whose lines are not in the sealed diff keeps the branch, with the
+/// same unpreserved reason as before this rule.
+#[test]
+fn prune_keeps_a_branch_with_changes_outside_the_sealed_diff() {
+    let fixture = Fixture::new();
+    let task = fixture.run_with("WRITE", &["--capture-diff", "--keep-worktree"]);
+    fixture.commit_worktree(&task, "worker output");
+    fixture.commit_in_worktree(&task);
+    fixture.accept(&task);
+
+    let applied = fixture.prune(&["--apply"]);
+    let branch = format!("brgr/task-{}", Fixture::slug(&task));
+    assert!(
+        fixture.branches().contains(&branch),
+        "a branch with extra unsealed commits was deleted: {applied}"
+    );
+    let reason = reason_of(&applied, "extra commit", &Fixture::slug(&task));
+    assert!(reason.contains("no other branch or remote"), "{reason}");
+}
+
+/// Without `--capture-diff` there is no sealed patch to compare, so the
+/// squash shape that the sealed rule would reclaim is kept.
+#[test]
+fn prune_keeps_a_squashed_branch_when_the_task_has_no_sealed_diff() {
+    let fixture = Fixture::new();
+    let task = fixture.run_with("WRITE", &["--keep-worktree"]);
+    fixture.commit_worktree(&task, "worker output");
+    fixture.accept(&task);
+    let contents = fs::read(fixture.worktree(&task).join("AGENT_OUTPUT.txt")).unwrap();
+    fixture.commit_on_main("AGENT_OUTPUT.txt", &contents, "squash");
+
+    let applied = fixture.prune(&["--apply"]);
+    let branch = format!("brgr/task-{}", Fixture::slug(&task));
+    assert!(
+        fixture.branches().contains(&branch),
+        "a branch with no sealed diff was deleted: {applied}"
+    );
+    let reason = reason_of(&applied, "no sealed diff", &Fixture::slug(&task));
+    assert!(reason.contains("no other branch or remote"), "{reason}");
+}
+
+/// The sealed-diff rule is only assessed for a settled revision.
+#[test]
+fn prune_keeps_an_undecided_branch_even_when_its_changes_match_a_sealed_diff() {
+    let fixture = Fixture::new();
+    let task = fixture.run_with("WRITE", &["--capture-diff", "--keep-worktree"]);
+    fixture.commit_worktree(&task, "worker output");
+
+    let applied = fixture.prune(&["--apply"]);
+    assert!(fixture.worktree(&task).is_dir(), "{applied}");
+    assert!(
+        fixture
+            .branches()
+            .contains(&format!("brgr/task-{}", Fixture::slug(&task))),
+        "undecided branch was deleted: {applied}"
+    );
+    let reason = reason_of(&applied, "undecided", &Fixture::slug(&task));
+    assert!(reason.contains("decision"), "{reason}");
+}
+
+/// Context lines can drift under rebase; only changed lines are compared, and
+/// a subset of the sealed diff is enough to remove the branch.
+#[test]
+fn prune_removes_a_rebased_branch_whose_changed_lines_are_a_subset_of_the_sealed_diff() {
+    let fixture = Fixture::new();
+    let task = fixture.run_with("EDIT", &["--capture-diff", "--keep-worktree"]);
+    fixture.commit_worktree(&task, "edit readme");
+    fixture.commit_on_main("README", b"header\nseed\n", "shift context");
+    git(&fixture.worktree(&task), &["rebase", "main"]);
+    fixture.accept(&task);
+    assert!(
+        !fixture.tip_is_ancestor_of_head(&format!("brgr/task-{}", Fixture::slug(&task))),
+        "the rebased tip is already in HEAD"
+    );
+
+    let applied = fixture.prune(&["--apply"]);
+    assert!(
+        !fixture
+            .branches()
+            .contains(&format!("brgr/task-{}", Fixture::slug(&task))),
+        "rebased sealed branch survived: {applied}"
+    );
+    let reason = reason_of(&applied, "rebased subset", &Fixture::slug(&task));
+    assert!(reason.contains("sealed"), "{reason}");
+}
+
+/// A GIT binary patch has no `+`/`-` changed lines the comparison can count,
+/// so containment cannot be proved and the branch is kept.
+#[test]
+fn prune_keeps_a_branch_whose_diff_includes_a_binary_file() {
+    let fixture = Fixture::new();
+    let task = fixture.run_with("BINARY", &["--capture-diff", "--keep-worktree"]);
+    fixture.commit_worktree(&task, "binary");
+    fixture.accept(&task);
+    let contents = fs::read(fixture.worktree(&task).join("image.bin")).unwrap();
+    fixture.commit_on_main("image.bin", &contents, "squash");
+
+    let applied = fixture.prune(&["--apply"]);
+    let branch = format!("brgr/task-{}", Fixture::slug(&task));
+    assert!(
+        fixture.branches().contains(&branch),
+        "a binary-diff branch was deleted without proving containment: {applied}"
+    );
+    let reason = reason_of(&applied, "binary", &Fixture::slug(&task));
+    assert!(reason.contains("no other branch or remote"), "{reason}");
+}
+
+/// Multiplicity is counted, not just presence: extra copies in the sealed
+/// diff are fine, extra copies on the branch are not.
+#[test]
+fn prune_counts_changed_line_multiplicity_against_the_sealed_diff() {
+    let fixture = Fixture::new();
+
+    let fewer = fixture.run_with("REPEAT", &["--capture-diff", "--keep-worktree"]);
+    fixture.commit_worktree(&fewer, "two foos");
+    fs::write(fixture.worktree(&fewer).join("repeat.txt"), b"keep\nfoo\n").unwrap();
+    fixture.commit_worktree(&fewer, "one foo");
+    fixture.accept(&fewer);
+    let fewer_bytes = fs::read(fixture.worktree(&fewer).join("repeat.txt")).unwrap();
+    fixture.commit_on_main("repeat.txt", &fewer_bytes, "squash fewer");
+
+    let extra = fixture.run_with("WRITE", &["--capture-diff", "--keep-worktree"]);
+    fs::write(
+        fixture.worktree(&extra).join("AGENT_OUTPUT.txt"),
+        b"worker output\nworker output\n",
+    )
+    .unwrap();
+    fixture.commit_worktree(&extra, "duplicated line");
+    fixture.accept(&extra);
+
+    let applied = fixture.prune(&["--apply"]);
+    assert!(
+        !fixture
+            .branches()
+            .contains(&format!("brgr/task-{}", Fixture::slug(&fewer))),
+        "a subset of the sealed multiplicity was kept: {applied}"
+    );
+    assert!(
+        fixture
+            .branches()
+            .contains(&format!("brgr/task-{}", Fixture::slug(&extra))),
+        "a branch that added a duplicate line was deleted: {applied}"
+    );
+    let extra_reason = reason_of(&applied, "extra multiplicity", &Fixture::slug(&extra));
+    assert!(
+        extra_reason.contains("no other branch or remote"),
+        "{extra_reason}"
+    );
+}
+
 struct Fixture {
     /// Held so the tree outlives the fixture, and used for scratch files.
     temp: TempDir,
@@ -1412,6 +1596,35 @@ impl Fixture {
         fs::write(worktree.join("AGENT_WORK"), b"produced by the run\n").unwrap();
         git(&worktree, &["add", "-A"]);
         git(&worktree, &["commit", "-m", "agent work"]);
+    }
+
+    fn commit_worktree(&self, task: &str, message: &str) {
+        let worktree = self.worktree(task);
+        git(&worktree, &["add", "-A"]);
+        git(&worktree, &["commit", "-m", message]);
+    }
+
+    fn commit_on_main(&self, relative: &str, contents: &[u8], message: &str) {
+        fs::write(self.repository.join(relative), contents).unwrap();
+        self.git(&["add", relative]);
+        self.git(&["commit", "-q", "-m", message]);
+    }
+
+    fn result_id(&self, task: &str) -> String {
+        self.json(&["result", task])["result"]["result_id"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    }
+
+    fn tip_is_ancestor_of_head(&self, branch: &str) -> bool {
+        Command::new("git")
+            .arg("-C")
+            .arg(&self.repository)
+            .args(["merge-base", "--is-ancestor", branch, "HEAD"])
+            .status()
+            .unwrap()
+            .success()
     }
 
     fn prune(&self, args: &[&str]) -> Value {
@@ -1593,4 +1806,51 @@ fn harness_fixture() -> PathBuf {
         .join("../../testdata/fixtures/gjc")
         .canonicalize()
         .unwrap()
+}
+
+/// `brgr accept` reclaims a clean worktree at once. The task branch is how an
+/// owner pushes the work, so a sealed copy in the store must not take it away
+/// at that moment. Only an explicit `brgr prune` may.
+#[test]
+fn accept_keeps_the_task_branch_that_only_the_store_otherwise_holds() {
+    let fixture = Fixture::new();
+    let task = fixture.run_with("WRITE", &["--capture-diff"]);
+    fixture.commit_worktree(&task, "worker output");
+    fixture.accept(&task);
+    let branch = format!("brgr/task-{}", Fixture::slug(&task));
+    assert!(
+        !fixture.worktree(&task).exists(),
+        "the clean worktree should have been reclaimed at accept"
+    );
+    assert!(
+        fixture.branches().contains(&branch),
+        "accept deleted the task branch the owner may still push"
+    );
+    let applied = fixture.prune(&["--apply"]);
+    assert!(
+        !fixture.branches().contains(&branch),
+        "an explicit prune did not remove it: {applied}"
+    );
+}
+
+/// A commit that only changes a file's mode adds no changed line, but it is
+/// still a change the sealed diff does not hold.
+#[test]
+fn prune_keeps_a_branch_whose_extra_commit_only_changes_a_file_mode() {
+    let fixture = Fixture::new();
+    let task = fixture.run_with("WRITE", &["--capture-diff", "--keep-worktree"]);
+    fixture.commit_worktree(&task, "worker output");
+    let file = fixture.worktree(&task).join("AGENT_OUTPUT.txt");
+    let mut permissions = fs::metadata(&file).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&file, permissions).unwrap();
+    fixture.commit_worktree(&task, "make it executable");
+    fixture.accept(&task);
+
+    let applied = fixture.prune(&["--apply"]);
+    let branch = format!("brgr/task-{}", Fixture::slug(&task));
+    assert!(
+        fixture.branches().contains(&branch),
+        "a branch with an unsealed mode change was deleted: {applied}"
+    );
 }

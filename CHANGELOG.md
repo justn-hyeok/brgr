@@ -8,6 +8,14 @@
   file under `target/` or `node_modules/` is still treated as the worker's own work.
   Generic names such as `dist/` or `build/` still keep the worktree unless
   `--include-ignored` is given.
+- `brgr prune` deletes a settled task branch when every change in
+  `git diff --binary MERGE_BASE TIP` (each changed line, and each mode change,
+  rename, created or deleted file) is also in the `text/x-diff` the store sealed
+  with the result (`--capture-diff`), even if those commits are not in `HEAD` or
+  on another branch (squash merge, `brgr apply`/`land`). The report names the
+  sealed result id. Accepting or rejecting never removes a branch on that basis:
+  the branch is how you push the work. A missing merge-base, a binary patch, a
+  change the sealed diff does not hold, or any error keeps the branch.
 
 ## 2.15.11 — 2026-10-31
 
