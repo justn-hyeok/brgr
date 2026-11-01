@@ -859,6 +859,7 @@ PY
 }
 if [ "$1" = --session ]; then shift 2; fi
 printf '%s\n' "$*" >> "$d/calls.log"
+printf '%s ppid=%s %s\n' "$(/bin/date +%s)" "$PPID" "$*" >> "$d/calls.trace"
 case "$1 $2" in
   'pane split'|'tab create')
     shift 2
@@ -1118,9 +1119,12 @@ fn leftover_brgr_debug_with_herdr(
         let read = |name: &str| fs::read_to_string(state.join(name)).unwrap_or_default();
         let _ = writeln!(out, "fake agent state: {}", clipped(&read("state"), 40));
         let _ = writeln!(out, "closed marker: {:?}", clipped(&read("closed"), 40));
-        let calls = read("calls.log");
-        let tail: Vec<&str> = calls.lines().rev().take(14).collect();
-        let _ = writeln!(out, "last herdr calls (newest first):");
+        let calls = read("calls.trace");
+        let tail: Vec<&str> = calls.lines().rev().take(16).collect();
+        let _ = writeln!(
+            out,
+            "last herdr calls (newest first; time, calling process id, call):"
+        );
         for line in tail {
             let _ = writeln!(out, "  {}", clipped(line, 110));
         }
@@ -1468,7 +1472,8 @@ fn the_pane_cleanup_failure_report_names_the_state_that_decides_it() {
         "supervisor:",
         "fake agent state:",
         "closed marker:",
-        "last herdr calls (newest first):",
+        "last herdr calls (newest first; time, calling process id, call):",
+        "ppid=",
         "pane receipt:",
         "native state:",
         "\"pane\"",
