@@ -1397,7 +1397,10 @@ mod tests {
         let executable = workspace.path().join("oversized-jsonl");
         write_fast_script(
             &executable,
-            "#!/bin/sh\n/usr/bin/awk 'BEGIN { for (i = 0; i < 1200000; i++) printf \"x\" }'\n/bin/sleep 30\n",
+            // One event over the limit, written in an instant (a CPU-bound loop
+            // here took longer than the deadline on a loaded machine), then a
+            // collector that would never finish on its own.
+            "#!/bin/sh\n/usr/bin/head -c 1200000 /dev/zero | /usr/bin/tr '\\0' x\nexec /bin/sleep 600\n",
         );
         let mut manifest = echo_manifest(16);
         manifest.executable = executable;
@@ -1413,7 +1416,7 @@ mod tests {
                 model: None,
                 effort: None,
                 permission: None,
-                deadline: Duration::from_secs(10),
+                deadline: Duration::from_mins(1),
                 cancel_path: None,
                 pid_path: None,
             },
@@ -1423,7 +1426,9 @@ mod tests {
 
         assert!(output.output_truncated);
         assert!(!output.succeeded(&manifest));
-        assert!(started.elapsed() < Duration::from_secs(5));
+        // Stopped by the oversized event, long before the deadline and the
+        // ten-minute sleep.
+        assert!(started.elapsed() < Duration::from_secs(30));
     }
 
     #[tokio::test]

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Tests only: `oversized_jsonl_event_stops_its_process_group_before_deadline` failed once under heavy
+  load (load average 36) with `CaptureDeadlineElapsed`: its fake harness built the oversized event with
+  a 1.2-million-iteration `awk` loop that outran the ten-second deadline. The event is now written in
+  an instant and the deadline is a minute, so only the oversized event can stop the run (issue #224).
 - Tests only: `git_diff::tests::bounded_diff_stops_a_stalled_collector` failed once under load because
   its fake `git` is a new script, and macOS runs the first exec of a new script slowly (the test
   asserted a three-second bound). The fake now sleeps for ten minutes, so only the deadline can end
