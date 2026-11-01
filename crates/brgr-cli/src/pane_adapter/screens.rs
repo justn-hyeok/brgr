@@ -731,6 +731,30 @@ mod tests {
         );
     }
 
+    /// Captured from Codex CLI 0.166.0 in a task worktree: the worktree path has a
+    /// space in it, the root is on two lines, and the second choice is
+    /// `Back to Agent Command Center` (0.160 said `Quit`).
+    const CODEX_0166_WORKTREE_TRUST: &str =
+        include_str!("../../../../testdata/fixtures/screens/codex-0.166-worktree-trust.txt");
+    const CODEX_0166_WORKTREE: &str =
+        "/Users/justn/Library/Application Support/brgr/worktrees/ws/6ca4cbb7";
+    const CODEX_0166_REPOSITORY: &str = "/private/tmp/claude-501/-Users-justn-dev-brgr/2c6e674e-b811-4b53-8577-a4d60a8cc2ab/scratchpad/m226/ws";
+
+    #[test]
+    fn codex_0166_trust_in_a_task_worktree_names_and_accepts_its_repository() {
+        assert_eq!(
+            codex_trust(
+                CODEX_0166_WORKTREE_TRUST,
+                Path::new(CODEX_0166_WORKTREE),
+                || Some(PathBuf::from(CODEX_0166_REPOSITORY))
+            ),
+            Some(Screen::Resolve {
+                rule: "codex-trust",
+                keys: vec!["enter"],
+            })
+        );
+    }
+
     #[test]
     fn codex_trust_for_a_root_that_is_not_the_worktrees_repository_is_refused() {
         for primary in [None, Some("/private/tmp/other-repo"), Some(CODEX_WORKTREE)] {

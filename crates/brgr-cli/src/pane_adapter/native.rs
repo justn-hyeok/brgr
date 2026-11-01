@@ -602,6 +602,38 @@ fn prepare_native_config(run: &PaneRunArgs, paths: &Paths) -> Result<(PathBuf, P
     Ok((state, config))
 }
 
+/// How long a harness must look ready before brgr believes it. A harness can
+/// draw its input box for an instant before a dialog covers it: Codex 0.166
+/// shows its banner and prompt about half a second before the folder prompt,
+/// and a worker started on that frame fails its first prompt when the dialog
+/// arrives.
+const READY_SETTLE: Duration = Duration::from_secs(2);
+
+/// Tracks how long the harness has looked ready without a break.
+#[derive(Default)]
+struct ReadySettle {
+    since: Option<Instant>,
+}
+
+impl ReadySettle {
+    /// Whether it has looked ready for [`READY_SETTLE`] up to `now`. A poll that
+    /// is not ready starts the count again.
+    fn held(&mut self, ready: bool, now: Instant) -> bool {
+        if !ready {
+            self.since = None;
+            return false;
+        }
+        let since = *self.since.get_or_insert(now);
+        now.duration_since(since) >= READY_SETTLE
+    }
+
+    /// Forgets a readiness in progress, for a poll that pressed a key or met a
+    /// screen no rule answers.
+    fn reset(&mut self) {
+        self.since = None;
+    }
+}
+
 pub(super) fn start_native(
     herdr: &Herdr,
     pane: &str,
@@ -638,6 +670,7 @@ pub(super) fn start_native(
     }
     let mut announced = false;
     let mut watch = ScreenWatch::new(&run.kind);
+    let mut settle = ReadySettle::default();
     loop {
         if !crate::tui_host::alive(&state) {
             bail!("native TUI exited before accepting the task");
@@ -646,10 +679,12 @@ pub(super) fn start_native(
         match screens::resolve(herdr, pane, run, paths, status.as_deref())? {
             Screen::Resolve { rule, .. } => {
                 watch.pressed(rule)?;
+                settle.reset();
                 thread::sleep(POLL);
                 continue;
             }
             Screen::Unknown(text) => {
+                settle.reset();
                 if !announced {
                     notices.tell(&run.kind, pane, &format!("The {} agent is on a screen no brgr rule answers: {text}. Use brgr input if it needs a key.", run.kind));
                     announced = true;
@@ -665,13 +700,13 @@ pub(super) fn start_native(
         let prompt = herdr
             .screen(pane)
             .is_some_and(|screen| editor_ready(&screen, &run.kind));
-        if (matches!(status.as_deref(), Some("idle" | "done"))
+        let ready = (matches!(status.as_deref(), Some("idle" | "done"))
             || status.is_none()
             || matches!(status.as_deref(), Some("unknown"))
             || matches!(run.kind.as_str(), "gjc" | "command-code"))
             && (prompt || detected_ready)
-            && !menu_on_screen(herdr, pane)
-        {
+            && !menu_on_screen(herdr, pane);
+        if settle.held(ready, Instant::now()) {
             break;
         }
         if status.as_deref() == Some("blocked") && !announced {
@@ -690,6 +725,45 @@ pub(super) fn start_native(
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn just_before_settled() -> Duration {
+        READY_SETTLE.saturating_sub(Duration::from_millis(1))
+    }
+
+    #[test]
+    fn readiness_counts_only_after_it_has_held_for_the_settle_window() {
+        let start = Instant::now();
+        let mut settle = ReadySettle::default();
+        assert!(!settle.held(true, start));
+        assert!(!settle.held(true, start + Duration::from_millis(500)));
+        assert!(!settle.held(true, start + just_before_settled()));
+        assert!(settle.held(true, start + READY_SETTLE));
+    }
+
+    #[test]
+    fn a_dialog_that_covers_the_input_restarts_the_settle_window() {
+        // Codex 0.166 draws its banner and input box for about half a second
+        // before the folder prompt covers them.
+        let start = Instant::now();
+        let mut settle = ReadySettle::default();
+        assert!(!settle.held(true, start));
+        assert!(!settle.held(false, start + Duration::from_millis(400)));
+        assert!(!settle.held(true, start + Duration::from_millis(800)));
+        assert!(!settle.held(
+            true,
+            start + Duration::from_millis(800) + just_before_settled()
+        ));
+        assert!(settle.held(true, start + Duration::from_millis(800) + READY_SETTLE));
+    }
+
+    #[test]
+    fn an_explicit_reset_forgets_a_readiness_in_progress() {
+        let start = Instant::now();
+        let mut settle = ReadySettle::default();
+        assert!(!settle.held(true, start));
+        settle.reset();
+        assert!(!settle.held(true, start + READY_SETTLE));
+    }
+
     #[test]
     fn opencode_and_claude_launch_with_self_update_disabled() {
         assert_eq!(
