@@ -1097,6 +1097,23 @@ impl PaneFixture {
     fn state(&self, name: &str) -> String {
         fs::read_to_string(self.state.join(name)).unwrap_or_default()
     }
+
+    /// Runs `brgr status` until `done`, for up to twenty seconds. A decision's
+    /// cleanup that finds the agent busy leaves the pane to the next brgr
+    /// command (the fake Herdr reports `working` to one status read and `idle`
+    /// after it, and two brgr processes can run the same cleanup at once), so a
+    /// test looks for the outcome by running a command instead of expecting it
+    /// in the instant the deciding command returns.
+    fn wait_for_cleanup(&self, owner: &[(&str, &str)], done: impl Fn() -> bool) -> bool {
+        (0..40).any(|_| {
+            let _ = run(&self.home, &["status"], owner);
+            let finished = done();
+            if !finished {
+                thread::sleep(Duration::from_millis(500));
+            }
+            finished
+        })
+    }
 }
 
 /// Bounded leftovers so a rare `.brgr` survival after accept names the files, the
@@ -1441,26 +1458,11 @@ fn pane_mode_runs_the_agent_in_a_pane_and_seals_its_report() {
         &["accept", task],
         &[("BRGR_OWNER_ID", "codex:pane-test")],
     ));
-    // The pane closes and the report is archived once the agent shows idle. The
-    // fake Herdr reports `working` to exactly one status read and `idle` after
-    // it, and two brgr processes can run this task's cleanup at the same moment
-    // (the failure report of a loaded run showed two, one reading `working` and
-    // backing off, the other finding nothing left to close). A cleanup that
-    // finds the agent busy is finished by the next brgr command, as it is for a
-    // real pane, so look for the outcome by running a command instead of
-    // expecting it in the very instant `accept` returns.
-    let settled = (0..40).any(|_| {
-        let _ = run(
-            &fixture.home,
-            &["status"],
-            &[("BRGR_OWNER_ID", "codex:pane-test")],
-        );
-        let done =
-            !fixture.workspace.join(".brgr").exists() && fixture.state("closed").trim() == "closed";
-        if !done {
-            thread::sleep(Duration::from_millis(500));
-        }
-        done
+    // The pane closes and the report is archived once the agent shows idle; a
+    // loaded run showed two brgr processes running this cleanup at once, one
+    // reading the fake's single `working` and backing off.
+    let settled = fixture.wait_for_cleanup(&[("BRGR_OWNER_ID", "codex:pane-test")], || {
+        !fixture.workspace.join(".brgr").exists() && fixture.state("closed").trim() == "closed"
     });
     assert!(
         settled,
@@ -1647,7 +1649,12 @@ fn owned_native_editor_accepts_input_before_herdr_registers_the_agent() {
         &["accept", ran["task_id"].as_str().unwrap()],
         &[("BRGR_OWNER_ID", "codex:pane-test")],
     ));
-    assert_eq!(fixture.state("closed").trim(), "closed");
+    assert!(
+        fixture.wait_for_cleanup(&[("BRGR_OWNER_ID", "codex:pane-test")], || {
+            fixture.state("closed").trim() == "closed"
+        }),
+        "the pane was never closed after the decision"
+    );
     let _ = native.kill();
     let _ = native.wait();
 }
@@ -2346,7 +2353,7 @@ fn include_ignored_reaches_the_reclaim_a_pane_cleanup_runs() {
         &env,
     ));
     assert!(
-        !worktree.exists(),
+        fixture.wait_for_cleanup(&env, || !worktree.exists()),
         "--include-ignored did not reach the pane cleanup's reclaim"
     );
 }
