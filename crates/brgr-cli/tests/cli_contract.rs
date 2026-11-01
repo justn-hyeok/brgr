@@ -1098,15 +1098,41 @@ impl PaneFixture {
     }
 }
 
-/// Bounded leftovers so a rare `.brgr` survival after accept names the files
-/// and the supervisor process instead of only `exists()`.
-fn leftover_brgr_debug(workspace: &Path, home: &Path, task: &str) -> String {
-    const LIMIT: usize = 4096;
+/// Bounded leftovers so a rare `.brgr` survival after accept names the files, the
+/// supervisor process, and what decides whether a decision's cleanup may close
+/// the pane: the fake agent's state, the pane receipt, the native host's state
+/// and the last Herdr calls.
+fn leftover_brgr_debug_with_herdr(
+    workspace: &Path,
+    home: &Path,
+    task: &str,
+    herdr_state: Option<&Path>,
+) -> String {
+    const LIMIT: usize = 6144;
     let mut out = String::new();
     out.push_str(".brgr listing:\n");
     list_tree(&mut out, &workspace.join(".brgr"), 0);
     out.push_str("supervisor:\n");
     describe_supervisor_processes(&mut out, home, task);
+    if let Some(state) = herdr_state {
+        let read = |name: &str| fs::read_to_string(state.join(name)).unwrap_or_default();
+        let _ = writeln!(out, "fake agent state: {}", clipped(&read("state"), 40));
+        let _ = writeln!(out, "closed marker: {:?}", clipped(&read("closed"), 40));
+        let calls = read("calls.log");
+        let tail: Vec<&str> = calls.lines().rev().take(14).collect();
+        let _ = writeln!(out, "last herdr calls (newest first):");
+        for line in tail {
+            let _ = writeln!(out, "  {}", clipped(line, 110));
+        }
+    }
+    let runs = home.join("runs");
+    for (label, name) in [
+        ("pane receipt", format!("{task}-r1.pane.json")),
+        ("native state", format!("{task}-r1.native-state.json")),
+    ] {
+        let text = fs::read_to_string(runs.join(name)).unwrap_or_default();
+        let _ = writeln!(out, "{label}: {}", clipped(&text, 520));
+    }
     if out.len() > LIMIT {
         out.truncate(LIMIT);
         out.push_str("\ntruncated");
@@ -1414,9 +1440,41 @@ fn pane_mode_runs_the_agent_in_a_pane_and_seals_its_report() {
     assert!(
         !fixture.workspace.join(".brgr").exists(),
         "{}",
-        leftover_brgr_debug(&fixture.workspace, &fixture.home, task)
+        leftover_brgr_debug_with_herdr(
+            &fixture.workspace,
+            &fixture.home,
+            task,
+            Some(&fixture.state)
+        )
     );
     assert_eq!(fixture.state("closed").trim(), "closed");
+}
+
+/// The failure report of the pane-cleanup test names what decides the cleanup, so
+/// a rare failure under load can be explained instead of only repeated.
+#[test]
+fn the_pane_cleanup_failure_report_names_the_state_that_decides_it() {
+    let fixture = pane_fixture();
+    let ran = fixture.run(&[]);
+    let task = ran["task_id"].as_str().unwrap();
+    let report = leftover_brgr_debug_with_herdr(
+        &fixture.workspace,
+        &fixture.home,
+        task,
+        Some(&fixture.state),
+    );
+    for needle in [
+        ".brgr listing:",
+        "supervisor:",
+        "fake agent state:",
+        "closed marker:",
+        "last herdr calls (newest first):",
+        "pane receipt:",
+        "native state:",
+        "\"pane\"",
+    ] {
+        assert!(report.contains(needle), "missing {needle:?} in:\n{report}");
+    }
 }
 
 /// A pane that has not drawn its shell prompt yet refuses an agent; the runner

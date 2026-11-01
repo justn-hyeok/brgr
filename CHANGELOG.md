@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Tests only: when `pane_mode_runs_the_agent_in_a_pane_and_seals_its_report` fails to find its
+  workspace cleaned after the decision, the failure now also prints the fake agent's state, the
+  pane receipt, the native host state and the last Herdr calls. It failed once in seven full
+  runs under load and its cause is not known yet (issue #224).
 - A Codex worker no longer fails with `native TUI is waiting for input readiness`. Two causes, both
   on Codex 0.166: Codex draws its banner and input box about half a second before the folder
   prompt in a repository it has not trusted yet, which brgr took for a ready agent; and Herdr
