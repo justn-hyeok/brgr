@@ -1,6 +1,5 @@
 use super::*;
 use brgr_protocol::AttemptState;
-use std::os::unix::fs::PermissionsExt as _;
 
 struct Fixture {
     temp: tempfile::TempDir,
@@ -102,7 +101,9 @@ impl Fixture {
         .unwrap();
         write_json_atomic(&paths.launch(task, 1), &launch).unwrap();
         let binary = temp.path().join("herdr");
-        fs::write(&binary, r#"#!/bin/sh
+        crate::fast_script::write_fast_script(
+            &binary,
+            r#"#!/bin/sh
 d=$(/usr/bin/dirname "$0")
 case "$1 $2" in
  'pane get')
@@ -113,8 +114,8 @@ case "$1 $2" in
  'pane close') test ! -e "$d/fail-close" || exit 7; /usr/bin/touch "$d/closed";;
  *) exit 8;;
 esac
-"#).unwrap();
-        fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
+"#,
+        );
         fs::write(
             temp.path().join("pane.json"),
             r#"{"result":{"pane":{"pane_id":"w1:p2","terminal_id":"owned-terminal"}}}"#,

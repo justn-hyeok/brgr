@@ -12,6 +12,8 @@ mod error_memo;
 mod evidence;
 mod execution_mode;
 mod failure_banner;
+#[cfg(test)]
+mod fast_script;
 mod handoff_condition;
 mod harness_commands;
 mod head;

@@ -516,7 +516,6 @@ mod tests {
     /// A fake Herdr that lists Codex, Claude and shell panes and serves their
     /// screens from files, so `traced` runs end to end.
     fn fake_herdr(screens: &[(&str, &str, &str)]) -> (tempfile::TempDir, std::path::PathBuf) {
-        use std::os::unix::fs::PermissionsExt as _;
         let temp = tempfile::tempdir().unwrap();
         let mut agents = Vec::new();
         for (pane, kind, screen) in screens {
@@ -529,12 +528,10 @@ mod tests {
         )
         .unwrap();
         let binary = temp.path().join("herdr");
-        fs::write(
+        crate::fast_script::write_fast_script(
             &binary,
             "#!/bin/sh\nd=$(/usr/bin/dirname \"$0\")\nif [ \"$1\" = --session ]; then shift 2; fi\ncase \"$1 $2\" in\n 'agent list') /bin/cat \"$d/list.json\";;\n 'pane read') f=$(printf %s \"$3\" | /usr/bin/sed 's/:/_/'); /bin/cat \"$d/$f\";;\n *) exit 2;;\nesac\n",
-        )
-        .unwrap();
-        fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
+        );
         (temp, binary)
     }
 

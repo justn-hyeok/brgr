@@ -1292,6 +1292,74 @@ mod tests {
     };
     use std::collections::BTreeMap;
     use std::os::unix::fs::symlink;
+    use std::sync::OnceLock;
+
+    /// The first execution of every new executable file is serialized by
+    /// macOS (~200 ms each), so a test process that writes a fresh script per
+    /// case waits in one queue behind every other test's scripts (#224). One
+    /// process-global trampoline is made executable and run once;
+    /// [`write_fast_script`] hard-links that warmed inode to `path` and writes
+    /// `body` beside it as `path` with a `.body` suffix. Only for a body whose
+    /// first line is `#!/bin/sh`; `$0` inside the body is `path.body`. A test
+    /// that rewrites, digests or chmods the executable keeps a unique inode
+    /// (ordinary `fs::write` and `chmod`).
+    const TRAMPOLINE_SOURCE: &str = concat!(
+        "#!/bin/sh\n",
+        "[ -f \"$0.body\" ] || exit 0\n",
+        "exec /bin/sh \"$0.body\" \"$@\"\n"
+    );
+
+    static WARMED_TRAMPOLINE: OnceLock<PathBuf> = OnceLock::new();
+
+    fn write_fast_script(path: &Path, body: &str) {
+        let first_line = body.lines().next();
+        assert_eq!(
+            first_line,
+            Some("#!/bin/sh"),
+            "write_fast_script requires a #!/bin/sh first line, got {first_line:?}"
+        );
+        let mut body_name = path
+            .file_name()
+            .expect("write_fast_script path has a file name")
+            .to_os_string();
+        body_name.push(".body");
+        let body_path = path.with_file_name(body_name);
+        fs::write(&body_path, body).unwrap();
+        fs::set_permissions(&body_path, fs::Permissions::from_mode(0o644)).unwrap();
+        if path.exists() {
+            fs::remove_file(path).unwrap();
+        }
+        match fs::hard_link(warmed_trampoline(), path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::CrossesDevices => {
+                fs::write(path, body).unwrap();
+                fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+            }
+            Err(error) => panic!("hard-linking trampoline to {}: {error}", path.display()),
+        }
+    }
+
+    fn warmed_trampoline() -> &'static Path {
+        WARMED_TRAMPOLINE.get_or_init(|| {
+            let dir = std::env::temp_dir().join("brgr-fast-script");
+            fs::create_dir_all(&dir).unwrap();
+            let trampoline = dir.join(format!("trampoline-{}", std::process::id()));
+            if trampoline.exists() {
+                fs::remove_file(&trampoline).unwrap();
+            }
+            fs::write(&trampoline, TRAMPOLINE_SOURCE).unwrap();
+            fs::set_permissions(&trampoline, fs::Permissions::from_mode(0o755)).unwrap();
+            let status = std::process::Command::new(&trampoline)
+                .arg("--warm")
+                .status()
+                .expect("run trampoline --warm");
+            assert!(status.success(), "trampoline --warm failed: {status}");
+            // Drop write bits so a later `fs::write` through a hard link
+            // cannot clobber every trampoline in this process.
+            fs::set_permissions(&trampoline, fs::Permissions::from_mode(0o555)).unwrap();
+            trampoline
+        })
+    }
 
     fn scratch_workspace(root: &tempfile::TempDir) -> PathBuf {
         let workspace = root.path().join("scratch");
@@ -1444,8 +1512,7 @@ mod tests {
 
     fn catalog_script(dir: &tempfile::TempDir, body: &str) -> PathBuf {
         let path = dir.path().join("catalog");
-        fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-        fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
+        write_fast_script(&path, &format!("#!/bin/sh\n{body}\n"));
         path
     }
 
@@ -1595,12 +1662,10 @@ mod tests {
     async fn authored_catalog_certifies_a_future_model_selecting_harness() {
         let root = tempfile::tempdir().unwrap();
         let executable = root.path().join("future-agent");
-        fs::write(
+        write_fast_script(
             &executable,
             "#!/bin/sh\ncase \"$1\" in\n --version) echo 'future 1';;\n --help) echo '--prompt-file <path> --model <name> --list-models';;\n --list-models) echo 'future-model - supported';;\n --prompt-file) /bin/cat \"$2\";;\n *) exit 2;;\nesac\n",
-        )
-        .unwrap();
-        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+        );
         let manifest = HarnessManifest {
             schema: MANIFEST_SCHEMA_V1.to_owned(),
             id: "local.future-agent".to_owned(),
@@ -1674,12 +1739,10 @@ mod tests {
     async fn gjc_catalog_filters_by_model_id_but_matches_full_provider_selector() {
         let root = tempfile::tempdir().unwrap();
         let executable = root.path().join("gjc");
-        fs::write(
+        write_fast_script(
             &executable,
             "#!/bin/sh\ncase \"$1\" in\n --version) echo 'gjc 1';;\n --help) echo '--mode=<value> --no-session --no-mcp -p, --print --model=<value>';;\n --list-models=gpt-5.6-luna) printf '%s\\n' 'Canonical models' 'canonical selected' 'gpt-5.6-luna openai-codex/gpt-5.6-luna' 'Provider models' 'provider model' 'opencode-zen gpt-5.6-luna';;\n *) exit 2;;\nesac\n",
-        )
-        .unwrap();
-        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+        );
         let registry = Registry::open(root.path().join("registry")).unwrap();
         let manifest = registry.draft(&executable).await.unwrap();
         registry
@@ -2264,9 +2327,10 @@ mod tests {
         }
     }
 
+    const FIXTURE_BODY: &str = "#!/bin/sh\ncase \"$1\" in\n  --version) echo 'fixture 1.0';;\n  --help) echo '  --prompt-file <path>  fresh run';;\n  --prompt-file) /bin/cat \"$2\";;\n  *) exit 2;;\nesac\n";
+
     fn fixture_executable(path: &Path) {
-        fs::write(path, "#!/bin/sh\ncase \"$1\" in\n  --version) echo 'fixture 1.0';;\n  --help) echo '  --prompt-file <path>  fresh run';;\n  --prompt-file) /bin/cat \"$2\";;\n  *) exit 2;;\nesac\n").unwrap();
-        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+        write_fast_script(path, FIXTURE_BODY);
     }
 
     /// `harness status` prints the canonical script path of a wrapper such as
@@ -2275,12 +2339,10 @@ mod tests {
     async fn a_script_path_drafts_as_the_harness_registered_for_it() {
         let root = tempfile::tempdir().unwrap();
         let script = root.path().join("index.mjs");
-        fs::write(
+        write_fast_script(
             &script,
             "#!/bin/sh\ncase \"$1\" in\n  --version) echo '1.74.1';;\n  --list-models) echo 'model-a';;\n  *) echo '--print [query] --permission-mode <mode> --no-session --no-skills --skip-onboarding --no-auto-update --max-turns <number> --model <model>';;\nesac\n",
-        )
-        .unwrap();
-        fs::set_permissions(&script, fs::Permissions::from_mode(0o700)).unwrap();
+        );
         let link = root.path().join("command-code");
         std::os::unix::fs::symlink(&script, &link).unwrap();
         let registry = Registry::open(root.path().join("registry")).unwrap();
@@ -2366,12 +2428,10 @@ mod tests {
     async fn agent_authored_positional_recipe_activates_without_core_changes() {
         let root = tempfile::tempdir().unwrap();
         let executable = root.path().join("novel-agent");
-        fs::write(
+        write_fast_script(
             &executable,
             "#!/bin/sh\ncase \"$1\" in\n --version) echo 'novel 1';;\n --help) echo '  -p, --print prompt';;\n -p) printf '%s' \"$2\";;\n *) exit 2;;\nesac\n",
-        )
-        .unwrap();
-        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+        );
         let manifest = HarnessManifest {
             schema: MANIFEST_SCHEMA_V1.to_owned(),
             id: "local.novel-agent".to_owned(),
@@ -2492,7 +2552,10 @@ mod tests {
     async fn altered_manifest_and_executable_are_rejected() {
         let root = tempfile::tempdir().unwrap();
         let executable = root.path().join("mystery-agent");
-        fixture_executable(&executable);
+        // This test rewrites the executable below to prove drift is caught, so
+        // it keeps a unique inode instead of the shared trampoline.
+        fs::write(&executable, FIXTURE_BODY).unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
         let registry = Registry::open(root.path().join("registry")).unwrap();
         let draft = registry.draft(&executable).await.unwrap();
         let activation = registry
@@ -2570,8 +2633,10 @@ mod tests {
     async fn omp_role_symlink_keeps_legacy_adapter_name() {
         let root = tempfile::tempdir().unwrap();
         let target = root.path().join("launch_tui.py");
-        fs::write(&target, "#!/bin/sh\necho '--expected-report --reuse-worktree-objective --reuse-worktree-owner --model --effort'\n").unwrap();
-        fs::set_permissions(&target, fs::Permissions::from_mode(0o700)).unwrap();
+        write_fast_script(
+            &target,
+            "#!/bin/sh\necho '--expected-report --reuse-worktree-objective --reuse-worktree-owner --model --effort'\n",
+        );
         let alias = root.path().join("omp-role");
         symlink(&target, &alias).unwrap();
         let registry = Registry::open(root.path().join("registry")).unwrap();
@@ -2599,15 +2664,13 @@ mod tests {
         let help_path = root.path().join("help.txt");
         fs::write(&help_path, "--prompt-file <path>\n").unwrap();
         let executable = root.path().join("fixture-agent");
-        fs::write(
+        write_fast_script(
             &executable,
-            format!(
+            &format!(
                 "#!/bin/sh\ncase \"$1\" in\n  --version) echo 1.0;;\n  --help) /bin/cat '{}';;\n  --prompt-file) /bin/cat \"$2\";;\nesac\n",
                 help_path.display()
             ),
-        )
-        .unwrap();
-        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+        );
         let registry = Registry::open(root.path().join("registry")).unwrap();
         let draft = registry.draft(&executable).await.unwrap();
         registry
@@ -2631,6 +2694,9 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let sidecar = root.path().join("sidecar");
         let executable = root.path().join("fixture-agent");
+        // This test rewrites and chmods the executable below to drive each
+        // health class, so it keeps a unique inode instead of the shared
+        // trampoline.
         fs::write(
             &executable,
             format!(

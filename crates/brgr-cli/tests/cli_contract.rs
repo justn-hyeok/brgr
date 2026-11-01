@@ -4327,10 +4327,17 @@ fn transferred_codex_session_receives_undecided_completion() {
         ],
     ));
     assert_eq!(rebound["session_id"], "session-b");
-    for _ in 0..100 {
-        if prompts.exists() {
-            break;
-        }
+    // The detached `__notify` dispatcher has to start, read the store, call
+    // `agent get`, then `agent prompt`; a loaded machine stretches that chain
+    // past five seconds, so the wait is generous. The event is still the
+    // prompt arriving.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !prompts.exists() {
+        assert!(
+            Instant::now() <= deadline,
+            "transferred Codex session was not prompted: {}",
+            run_state_debug(&home, &task)
+        );
         thread::sleep(Duration::from_millis(50));
     }
     let prompt = fs::read_to_string(prompts).expect("transferred Codex session was not prompted");
@@ -7851,13 +7858,15 @@ fn foreground_admission_lock_is_released_before_slow_harness_execution() {
     add_slow_prompt_file_harness(&home, &temp.path().join("slow"));
     let repo = repository.to_str().unwrap().to_owned();
     let home_path = home.clone();
+    // The first run's harness holds on a release file, not a timer, so it is
+    // still executing whenever the second finishes however slow the machine.
     thread::scope(|scope| {
         let first = scope.spawn(|| {
             run(
                 &home_path,
                 &[
                     "run",
-                    "SLOW_RUN",
+                    "HOLD_RUN",
                     "--harness",
                     "local.slow-agent",
                     "--workspace",
@@ -7867,19 +7876,22 @@ fn foreground_admission_lock_is_released_before_slow_harness_execution() {
                 &[("BRGR_OWNER_ID", "codex:worktree-slow")],
             )
         });
+        // Wait for the first run's launch envelope: the event that proves its
+        // admission has begun, not a fixed window. Under load the spawn alone
+        // can take seconds.
         let admitted = Instant::now();
-        while admitted.elapsed() < Duration::from_secs(2) {
-            if home_path
-                .join("launches")
-                .read_dir()
-                .map_or(0, Iterator::count)
-                > 0
-            {
-                break;
-            }
+        while home_path
+            .join("launches")
+            .read_dir()
+            .map_or(0, Iterator::count)
+            == 0
+        {
+            assert!(
+                admitted.elapsed() < Duration::from_secs(15),
+                "the first foreground run never reached admission"
+            );
             thread::sleep(Duration::from_millis(25));
         }
-        let second_started = Instant::now();
         let second = json_output(&run(
             &home_path,
             &[
@@ -7893,16 +7905,15 @@ fn foreground_admission_lock_is_released_before_slow_harness_execution() {
             ],
             &[("BRGR_OWNER_ID", "codex:worktree-fast")],
         ));
-        let second_elapsed = second_started.elapsed();
         assert_eq!(second["outcome"], "candidate");
-        assert!(
-            second_elapsed < Duration::from_secs(3),
-            "second admission waited on the first foreground run: {second_elapsed:?}"
-        );
+        // The semantic check: the second run finished while the first's held
+        // harness was still executing. A wall-clock bound on the second run's
+        // whole lifecycle only measures machine speed, not the lock.
         assert!(
             !first.is_finished(),
             "second task finished only after the slow first harness completed"
         );
+        fs::write(temp.path().join("slow").join("release"), "").unwrap();
         let first = json_output(&first.join().unwrap());
         assert_eq!(first["outcome"], "candidate");
         assert_ne!(first["task_id"], second["task_id"]);
@@ -8616,19 +8627,27 @@ fn an_old_session_stops_nothing_after_a_handoff() {
         "the cancellation the stale session refused still happened"
     );
     json_output(&run(&home, &["cancel", task], &head));
-    let deadline = Instant::now() + Duration::from_secs(20);
+    // `result` only reads; `status` drives reconcile_pending, which settles a
+    // run whose detached supervisor died unclaimed or never spawned. The
+    // window is generous because the surviving path — supervisor spawn,
+    // claim, process-group kill, seal — is real work that a loaded runner can
+    // stretch past twenty seconds.
+    let deadline = Instant::now() + Duration::from_mins(1);
     loop {
         assert!(
             Instant::now() <= deadline,
-            "the task did not stop after the head cancelled it"
+            "the task did not stop after the head cancelled it: {}",
+            run_state_debug(&home, task)
         );
-        let result = run_with_error(&home, task, &head);
-        if result.ok {
-            assert_eq!(result.outcome, "cancelled", "{result:?}");
+        let seen = json_output(&run(&home, &["status", task], &head));
+        if seen["state"].as_str() == Some("terminal") {
             break;
         }
         thread::sleep(Duration::from_millis(200));
     }
+    let result = run_with_error(&home, task, &head);
+    assert!(result.ok, "{result:?}");
+    assert_eq!(result.outcome, "cancelled", "{result:?}");
 }
 
 /// A foreign owner cannot cancel; `--force` stops the worker without taking
@@ -8660,19 +8679,45 @@ fn a_foreign_owner_force_cancels_a_running_worker() {
     );
     let forced = json_output(&run(&home, &["cancel", task, "--force"], &foreign));
     assert_eq!(forced["state"], "cancel_requested", "{forced}");
-    let deadline = Instant::now() + Duration::from_secs(20);
+    // `result` only reads; `status` drives reconcile_pending, which settles a
+    // run whose detached supervisor died unclaimed or never spawned. The
+    // window is generous because the surviving path — supervisor spawn,
+    // claim, process-group kill, seal — is real work that a loaded runner can
+    // stretch past twenty seconds.
+    let deadline = Instant::now() + Duration::from_mins(1);
     loop {
         assert!(
             Instant::now() <= deadline,
-            "the task did not stop after --force"
+            "the task did not stop after --force: {}",
+            run_state_debug(&home, task)
         );
-        let result = run_with_error(&home, task, &owner);
-        if result.ok {
-            assert_eq!(result.outcome, "cancelled", "{result:?}");
+        let seen = json_output(&run(&home, &["status", task], &owner));
+        if seen["state"].as_str() == Some("terminal") {
             break;
         }
         thread::sleep(Duration::from_millis(200));
     }
+    let result = run_with_error(&home, task, &owner);
+    assert!(result.ok, "{result:?}");
+    assert_eq!(result.outcome, "cancelled", "{result:?}");
+}
+
+/// A task's supervisor and dispatcher trail when a settle or delivery deadline
+/// fires: its launch, receipts, notify log and lock, and `supervisor.log`.
+fn run_state_debug(home: &Path, task: &str) -> String {
+    let mut out = String::new();
+    for path in [
+        home.join("launches").join(format!("{task}.json")),
+        home.join("runs").join(format!("{task}.supervisor.json")),
+        home.join("runs").join(format!("{task}.pid")),
+        home.join("runs").join(format!("{task}.notify.log")),
+        home.join("runs").join(format!("{task}.notify.lock")),
+        home.join("runs").join("supervisor.log"),
+    ] {
+        let text = fs::read_to_string(&path).unwrap_or_default();
+        let _ = writeln!(out, "{}: {}", path.display(), clipped(&text, 512));
+    }
+    out
 }
 
 /// After a handoff the outgoing session still cannot cancel, but `--force`
@@ -8710,19 +8755,27 @@ fn a_stale_session_force_cancels_after_a_handoff() {
         ("BRGR_OWNER_ID", "codex:handoff-force-cancel"),
         ("BRGR_SESSION_ID", "session-b"),
     ];
-    let deadline = Instant::now() + Duration::from_secs(20);
+    // `result` only reads; `status` drives reconcile_pending, which settles a
+    // run whose detached supervisor died unclaimed or never spawned. The
+    // window is generous because the surviving path — supervisor spawn,
+    // claim, process-group kill, seal — is real work that a loaded runner can
+    // stretch past twenty seconds.
+    let deadline = Instant::now() + Duration::from_mins(1);
     loop {
         assert!(
             Instant::now() <= deadline,
-            "the task did not stop after the stale session force-cancelled it"
+            "the task did not stop after the stale session force-cancelled it: {}",
+            run_state_debug(&home, task)
         );
-        let result = run_with_error(&home, task, &head);
-        if result.ok {
-            assert_eq!(result.outcome, "cancelled", "{result:?}");
+        let seen = json_output(&run(&home, &["status", task], &head));
+        if seen["state"].as_str() == Some("terminal") {
             break;
         }
         thread::sleep(Duration::from_millis(200));
     }
+    let result = run_with_error(&home, task, &head);
+    assert!(result.ok, "{result:?}");
+    assert_eq!(result.outcome, "cancelled", "{result:?}");
 }
 
 /// `--force` on an already sealed candidate closes nothing about the result:
