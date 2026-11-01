@@ -26,6 +26,7 @@ mod omp_adapter;
 mod pane_adapter;
 mod pane_cleanup;
 mod plugin_bridge;
+mod session_model;
 mod sleep_guard;
 mod statusline_install;
 mod supervision;

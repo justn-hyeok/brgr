@@ -176,3 +176,99 @@ fn a_codex_hook_with_an_unreadable_rollout_still_answers() {
     assert!(output.status.success());
     assert!(!home.join("context").exists());
 }
+
+/// A Codex worker's session runs in its task worktree, and its rollout is what
+/// `route_observation` reads the model from. The hook records that file for
+/// the task whose workspace the session runs in.
+#[test]
+fn a_worker_sessions_hook_records_the_rollout_for_its_task() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("home");
+    let worktree = home.join("worktrees/repo/aaaaaaaa");
+    fs::create_dir_all(&worktree).unwrap();
+    let task = brgr_protocol::TaskSpec {
+        schema: brgr_protocol::SCHEMA_V1.to_owned(),
+        task_id: brgr_protocol::TaskId::new(),
+        revision: 1,
+        create_request_id: "req".to_owned(),
+        owner_id: brgr_protocol::OwnerId::new("codex:test").unwrap(),
+        objective: "run".to_owned(),
+        workspace: worktree.to_string_lossy().into_owned(),
+        route: brgr_protocol::Route {
+            harness_id: "local.codex".to_owned(),
+            requested_model: None,
+            requested_effort: None,
+        },
+        required_capabilities: vec![],
+        artifact_contract: brgr_protocol::ArtifactContract {
+            media_type: "text/plain".to_owned(),
+            max_bytes: 1_024,
+        },
+        acceptance_criteria: vec!["done".to_owned()],
+        budget: brgr_protocol::AttemptBudget {
+            deadline_seconds: 30,
+            max_attempts: 1,
+        },
+        instructions: brgr_protocol::TaskInstructions::default(),
+        evidence: brgr_protocol::EvidenceSpec::default(),
+        max_concurrent_children: None,
+        permission: None,
+    };
+    brgr_store::Store::open(home.join("store"))
+        .unwrap()
+        .record_task(&task, "req")
+        .unwrap();
+    let codex_home = temp.path().join("codex");
+    let rollout = codex_home.join("sessions/2026/10/30/rollout-t-deadbeef.jsonl");
+    fs::create_dir_all(rollout.parent().unwrap()).unwrap();
+    fs::write(&rollout, "{}\n").unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_brgr"))
+        .arg("--home")
+        .arg(&home)
+        .args(["__hook", "session-start"])
+        .env("CODEX_HOME", &codex_home)
+        .env_remove("HERDR_ENV")
+        .env_remove("HERDR_PANE_ID")
+        .env_remove("BRGR_OWNER_ID")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(
+            serde_json::json!({
+                "session_id": "codex-worker-session",
+                "cwd": worktree,
+                "transcript_path": rollout,
+            })
+            .to_string()
+            .as_bytes(),
+        )
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let record = home.join(format!("runs/{}-r1.codex-session.jsonl", task.task_id));
+    let text = fs::read_to_string(&record).unwrap();
+    assert!(text.contains("codex-worker-session"), "{text}");
+    assert!(text.contains("rollout-t-deadbeef"), "{text}");
+    // An owner's session in its own directory records no worker file.
+    let output = codex_hook(
+        &home,
+        "stop",
+        &serde_json::json!({
+            "session_id": "codex-owner-session",
+            "cwd": temp.path(),
+            "transcript_path": rollout,
+        }),
+    );
+    assert!(output.status.success());
+    assert_eq!(fs::read_to_string(&record).unwrap().lines().count(), 1);
+}

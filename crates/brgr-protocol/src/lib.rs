@@ -421,6 +421,10 @@ pub struct ArtifactRef {
 #[serde(rename_all = "snake_case")]
 pub enum ObservationSource {
     HarnessJsonl,
+    /// Read from the harness's own session record after the run: the model a
+    /// pane worker's session log named. The worker can write that file, so it
+    /// is less trustworthy than a stream brgr itself captured.
+    HarnessSessionLog,
     /// Read from the harness's own settings, not from the run: the model a
     /// configured-default-only harness was set to use.
     HarnessConfig,
@@ -431,6 +435,7 @@ impl<'de> Deserialize<'de> for ObservationSource {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         Ok(match String::deserialize(deserializer)?.as_str() {
             "harness_jsonl" => Self::HarnessJsonl,
+            "harness_session_log" => Self::HarnessSessionLog,
             "harness_config" => Self::HarnessConfig,
             _ => Self::Unavailable,
         })
@@ -797,6 +802,10 @@ mod tests {
     fn an_observation_source_this_build_does_not_know_reads_as_unavailable() {
         for (wire, expected) in [
             ("\"harness_jsonl\"", ObservationSource::HarnessJsonl),
+            (
+                "\"harness_session_log\"",
+                ObservationSource::HarnessSessionLog,
+            ),
             ("\"harness_config\"", ObservationSource::HarnessConfig),
             ("\"unavailable\"", ObservationSource::Unavailable),
             ("\"a_source_added_later\"", ObservationSource::Unavailable),
@@ -808,6 +817,10 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&ObservationSource::HarnessConfig).unwrap(),
             "\"harness_config\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ObservationSource::HarnessSessionLog).unwrap(),
+            "\"harness_session_log\""
         );
     }
 

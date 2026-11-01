@@ -74,7 +74,7 @@ use execution::{AttemptControl, result_for, run_single_attempt, sha256};
 
 use std::path::{Path, PathBuf};
 
-use brgr_protocol::{ResultEnvelope, TaskSpec, TerminalOutcome};
+use brgr_protocol::{AttemptId, ResultEnvelope, TaskSpec, TerminalOutcome};
 use brgr_runner::{HarnessManifest, RunnerError};
 use brgr_store::{RunnerIdentity, Store, StoreError, UnfinishedAttempt};
 
@@ -84,6 +84,7 @@ pub struct Supervisor {
     store: Store,
     epoch: u64,
     delegation_host: Option<DelegationHost>,
+    session_model: Option<Box<SessionModel>>,
 }
 
 struct DelegationHost {
@@ -91,6 +92,11 @@ struct DelegationHost {
     brgr_executable: PathBuf,
     may_delegate: bool,
 }
+
+/// Reads the model a worker's own session record names for an attempt, when
+/// the caller can identify that exact record. `None` is "unknown", never a
+/// guess.
+pub type SessionModel = dyn Fn(&TaskSpec, AttemptId) -> Option<String> + Send + Sync;
 
 /// Independent observation of the original runner incarnation. A numeric PID
 /// is insufficient: `Alive` must carry the exact recorded birth/session marker.
@@ -117,7 +123,16 @@ impl Supervisor {
             store: Store::open(store_root)?,
             epoch: (uuid::Uuid::new_v4().as_u64_pair().0 & 0x7fff_ffff_ffff_ffff).max(1),
             delegation_host: None,
+            session_model: None,
         })
+    }
+
+    /// Reads a worker's own session record for the model it used, when the
+    /// record identifies that worker exactly (a Claude Code session id brgr
+    /// set, a Codex rollout recorded for the task's workspace). `None` leaves
+    /// the observation `unavailable`.
+    pub fn observe_session_models(&mut self, read: Box<SessionModel>) {
+        self.session_model = Some(read);
     }
 
     /// Gives each worker process its exact attempt identity and brgr
@@ -195,6 +210,12 @@ impl Supervisor {
                 "External side effects of the original run are unresolved; do not retry automatically"
                     .to_owned(),
             );
+            execution::apply_session_model(
+                &mut result,
+                self.session_model.as_deref(),
+                &attempt.task,
+                attempt.attempt_id,
+            );
             match self.store.commit_recovered_lost(&attempt, &result) {
                 Ok(_) => recovered.push(result),
                 // A live writer changed the attempt after our read. Its newer
@@ -245,6 +266,7 @@ impl Supervisor {
             pid_path,
             runner_identity,
             delegation_host: self.delegation_host.as_ref(),
+            session_model: self.session_model.as_deref(),
         };
 
         for number in 1..=spec.budget.max_attempts {
@@ -354,6 +376,7 @@ impl Supervisor {
         };
         let mut result = execution::result_for(&spec, attempt, outcome, artifacts, error);
         result.unresolved_effects = unresolved_effects;
+        execution::apply_session_model(&mut result, self.session_model.as_deref(), &spec, attempt);
         self.store
             .commit_terminal_result_final(&spec.owner_id, &result)?;
         Ok(result)

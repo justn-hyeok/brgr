@@ -117,6 +117,13 @@ fn result_schema_describes_a_legacy_embedded_route_observation() {
         "legacy field stopped serializing; this test no longer covers those bytes"
     );
     assert_matches_schema("result-v1.json", &encoded);
+    envelope.legacy_embedded_route_observation = Some(RouteObservation {
+        model: Some("claude-fixture".to_owned()),
+        model_source: ObservationSource::HarnessSessionLog,
+        effort: None,
+        effort_source: ObservationSource::Unavailable,
+    });
+    assert_matches_schema("result-v1.json", &serde_json::to_value(&envelope).unwrap());
 }
 
 #[test]

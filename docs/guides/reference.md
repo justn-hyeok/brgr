@@ -104,6 +104,20 @@ verified effort value in this event stream, so `effort_source` remains
 identity unless their adapter supplies evidence. A missing or different OMP
 model fails closed rather than becoming an accepted candidate.
 
+For a pane (TUI) run of Claude Code or Codex, `route_observation.model` names
+the model the worker's own session log reported, with source
+`harness_session_log`. A Claude Code worker is launched with
+`--session-id <attempt>`, so its transcript under
+`~/.claude/projects/<workspace>/<attempt>.jsonl` is exactly identified. A
+Codex worker's rollout file is recorded by the installed Codex hook when the
+session's own working directory is the task's workspace. Each file is read
+bounded and only for its model name, verified against the session or directory
+it must belong to; when brgr cannot name exactly one session file — nothing
+recorded, several sessions, or another task's — the source stays
+`unavailable`. The worker can write its own session log, so
+`harness_session_log` is weaker evidence than a stream brgr captured. Other
+pane harnesses are unchanged.
+
 For lowest available Luna effort on the installed CLIs tested on 2026-09-14:
 OMP uses `openai-codex/gpt-5.6-luna` with `--effort low`, GJC uses the same
 model with `--effort minimal`, Cursor CLI uses the exact model variant

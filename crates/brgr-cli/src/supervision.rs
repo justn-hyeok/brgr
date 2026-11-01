@@ -83,6 +83,7 @@ async fn supervise_inner(
         env::current_exe()?,
         launch.delegation_enabled,
     );
+    crate::session_model::install(paths, &mut supervisor);
     // Reconcile before publishing our own task receipt. Otherwise a previous
     // crashed attempt without a launch identity could mistake this new process
     // for its original live supervisor and remain unfinished forever.
@@ -239,6 +240,7 @@ fn recover_one(
 
 pub(crate) fn reconcile_pending(paths: &Paths) -> Result<()> {
     let mut supervisor = Supervisor::open(&paths.store)?;
+    crate::session_model::install(paths, &mut supervisor);
     for attempt in supervisor.store().unfinished_attempts()? {
         if !matches!(
             observe_attempt(paths, &attempt),

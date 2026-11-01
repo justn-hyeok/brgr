@@ -19,7 +19,7 @@ use brgr_store::{RunnerIdentity, Store, StoreError};
 use sha2::{Digest, Sha256};
 
 use crate::{
-    Attempt, CoreError, DelegationHost, SupervisorError, TaskRevision,
+    Attempt, CoreError, DelegationHost, SessionModel, SupervisorError, TaskRevision,
     evidence::{seal_requested_evidence, seal_requested_logs},
 };
 
@@ -29,6 +29,7 @@ pub(crate) struct AttemptControl<'a> {
     pub(crate) pid_path: Option<&'a Path>,
     pub(crate) runner_identity: Option<&'a RunnerIdentity>,
     pub(crate) delegation_host: Option<&'a DelegationHost>,
+    pub(crate) session_model: Option<&'a SessionModel>,
 }
 
 pub(crate) async fn run_single_attempt(
@@ -121,6 +122,7 @@ pub(crate) async fn run_single_attempt(
         manifest,
         &mut attempt,
         &mut producer_seq,
+        control.session_model,
         execution,
     )?;
     #[cfg(debug_assertions)]
@@ -242,6 +244,22 @@ pub(crate) fn finish_execution(
     manifest: &HarnessManifest,
     attempt: &mut Attempt,
     producer_seq: &mut u64,
+    session_model: Option<&SessionModel>,
+    execution: Result<brgr_runner::ExecutionOutput, RunnerError>,
+) -> Result<ResultEnvelope, SupervisorError> {
+    let attempt_id = attempt.id();
+    let mut result =
+        finish_execution_result(store, spec, manifest, attempt, producer_seq, execution)?;
+    apply_session_model(&mut result, session_model, spec, attempt_id);
+    Ok(result)
+}
+
+fn finish_execution_result(
+    store: &Store,
+    spec: &TaskSpec,
+    manifest: &HarnessManifest,
+    attempt: &mut Attempt,
+    producer_seq: &mut u64,
     execution: Result<brgr_runner::ExecutionOutput, RunnerError>,
 ) -> Result<ResultEnvelope, SupervisorError> {
     let attempt_id = attempt.id();
@@ -337,6 +355,34 @@ pub(crate) fn finish_execution(
             Some(error.to_string()),
         )),
     }
+}
+
+/// Fills a result's route observation from the worker's own session record
+/// when nothing more direct — the run's stream or a configured default —
+/// named a model. The worker could write that file, so it labels the value
+/// `HarnessSessionLog` rather than the run's own evidence.
+pub(crate) fn apply_session_model(
+    result: &mut ResultEnvelope,
+    session_model: Option<&SessionModel>,
+    spec: &TaskSpec,
+    attempt_id: AttemptId,
+) {
+    if result
+        .route_observation
+        .as_ref()
+        .is_some_and(|observation| observation.model.is_some())
+    {
+        return;
+    }
+    let Some(model) = session_model.and_then(|read| read(spec, attempt_id)) else {
+        return;
+    };
+    result.route_observation = Some(RouteObservation {
+        model: Some(model),
+        model_source: ObservationSource::HarnessSessionLog,
+        effort: None,
+        effort_source: ObservationSource::Unavailable,
+    });
 }
 
 /// The model of a successful run: the one its JSONL stream reported, else, for

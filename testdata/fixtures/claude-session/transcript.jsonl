@@ -1,0 +1,4 @@
+{"type":"summary","summary":"Review a change","leafUuid":"0e1d2c3b-4a59-6877-8899-aabbccddeeff","sessionId":"11111111-2222-3333-4444-555555555555"}
+{"type":"assistant","sessionId":"11111111-2222-3333-4444-555555555555","cwd":"/repo/work","message":{"model":"claude-fixture-1","id":"msg_fixture1","role":"assistant","content":[{"type":"text","text":"ok"}]}}
+{"type":"user","sessionId":"11111111-2222-3333-4444-555555555555","message":{"role":"user","content":"go on"}}
+{"type":"assistant","sessionId":"11111111-2222-3333-4444-555555555555","cwd":"/repo/work","message":{"model":"claude-fixture-2","id":"msg_fixture2","role":"assistant","content":[{"type":"text","text":"done"}]}}

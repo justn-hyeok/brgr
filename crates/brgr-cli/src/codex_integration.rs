@@ -464,7 +464,7 @@ fn hook_commands(executable: &Path, brgr_home: &Path) -> BTreeMap<String, String
         .collect()
 }
 
-fn codex_home() -> Result<PathBuf> {
+pub(crate) fn codex_home() -> Result<PathBuf> {
     if let Some(path) = env::var_os("CODEX_HOME") {
         return Ok(PathBuf::from(path));
     }
