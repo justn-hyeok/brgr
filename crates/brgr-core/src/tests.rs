@@ -4,7 +4,7 @@ use crate::execution::{
     transition,
 };
 use brgr_protocol::{ArtifactContract, AttemptBudget, OwnerId, Route, SCHEMA_V1};
-use brgr_protocol::{AttemptId, AttemptState, ResultId, TaskId};
+use brgr_protocol::{AttemptId, AttemptState, ObservationSource, ResultId, TaskId};
 use brgr_runner::ExecutionMode;
 use brgr_runner::{
     ExecutionOutput, LaunchSpec, MANIFEST_SCHEMA_V1, PROCESS_ADAPTER_V1, ProbeSpec, ResultSource,
@@ -198,6 +198,121 @@ async fn delegated_cancel_during_flight_is_lost_without_stop_claim_or_retry() {
 async fn delegated_deadline_exceeded_is_lost_without_stop_claim_or_retry() {
     run_delegated_interrupted(true).await;
 }
+fn delegated_pane_finish(
+    output: ExecutionOutput,
+    session_model: Option<&SessionModel>,
+) -> ResultEnvelope {
+    let root = tempfile::tempdir().unwrap();
+    let mut store = Store::open(root.path()).unwrap();
+    let spec = task_spec(TaskId::new(), 1);
+    store.record_task(&spec, "session-log-model").unwrap();
+    let attempt_id = AttemptId::new();
+    let mut attempt =
+        Attempt::new(TaskRevision::new(spec.clone()).unwrap(), attempt_id, 1).unwrap();
+    store
+        .claim_attempt(spec.task_id, spec.revision, attempt_id)
+        .unwrap();
+    let mut sequence = 0;
+    transition(&store, &mut attempt, AttemptState::Starting, &mut sequence).unwrap();
+    transition(&store, &mut attempt, AttemptState::Running, &mut sequence).unwrap();
+    let manifest = HarnessManifest {
+        schema: MANIFEST_SCHEMA_V1.to_owned(),
+        id: "local.claude-code".to_owned(),
+        adapter: PROCESS_ADAPTER_V1.to_owned(),
+        executable: PathBuf::from("/bin/echo"),
+        probe: ProbeSpec {
+            version_argv: vec!["--version".to_owned()],
+            help_argv: vec!["--help".to_owned()],
+            model_catalog: None,
+        },
+        launch: LaunchSpec {
+            argv: vec![],
+            model_argv: vec![],
+            effort_argv: vec![],
+            env_allow: vec![],
+            mode: ExecutionMode::DelegatedExternal,
+            permission_argv: brgr_runner::PermissionArgv::default(),
+            interactive: None,
+        },
+        result: ResultSpec {
+            source: ResultSource::Stdout,
+            media_type: "text/plain".to_owned(),
+            max_bytes: 1_024,
+            success_exit_codes: vec![0],
+        },
+        capabilities: BTreeMap::new(),
+    };
+    finish_execution(
+        &store,
+        &spec,
+        &manifest,
+        &mut attempt,
+        &mut sequence,
+        session_model,
+        Ok(output),
+    )
+    .unwrap()
+}
+
+#[test]
+fn a_run_records_the_model_its_own_session_log_names() {
+    let output = ExecutionOutput {
+        exit_code: Some(0),
+        stdout: b"report".to_vec(),
+        stderr: vec![],
+        result: b"report".to_vec(),
+        observed_model: None,
+        timed_out: false,
+        cancelled: false,
+        output_truncated: false,
+        elapsed: Duration::from_millis(1),
+    };
+    let result = delegated_pane_finish(
+        output.clone(),
+        Some(&|_spec, _attempt| Some("claude-fixture-2".to_owned())),
+    );
+    let observation = result.route_observation.unwrap();
+    assert_eq!(observation.model.as_deref(), Some("claude-fixture-2"));
+    assert_eq!(
+        observation.model_source,
+        ObservationSource::HarnessSessionLog
+    );
+    // A model the run's own stream reported outranks the session log.
+    let observed = ExecutionOutput {
+        observed_model: Some("stream/model".to_owned()),
+        ..output.clone()
+    };
+    let result = delegated_pane_finish(
+        observed,
+        Some(&|_spec, _attempt| Some("claude-fixture-2".to_owned())),
+    );
+    assert_eq!(
+        result.route_observation.unwrap().model_source,
+        ObservationSource::HarnessJsonl
+    );
+    // A lost run's session is still the model it actually used.
+    let failed = ExecutionOutput {
+        exit_code: Some(1),
+        result: vec![],
+        ..output.clone()
+    };
+    let result = delegated_pane_finish(
+        failed,
+        Some(&|_spec, _attempt| Some("claude-fixture-2".to_owned())),
+    );
+    assert_eq!(result.outcome, TerminalOutcome::Lost);
+    assert_eq!(
+        result.route_observation.unwrap().model.as_deref(),
+        Some("claude-fixture-2")
+    );
+    // No reader means the observation stays unavailable.
+    let result = delegated_pane_finish(output, None);
+    assert_eq!(
+        result.route_observation.unwrap().model_source,
+        ObservationSource::Unavailable
+    );
+}
+
 #[test]
 fn delegated_external_failure_is_lost_with_unresolved_effects() {
     let root = tempfile::tempdir().unwrap();
@@ -257,6 +372,7 @@ fn delegated_external_failure_is_lost_with_unresolved_effects() {
         &manifest,
         &mut attempt,
         &mut sequence,
+        None,
         Ok(failed.clone()),
     )
     .unwrap();
@@ -276,6 +392,7 @@ fn delegated_external_failure_is_lost_with_unresolved_effects() {
             &manifest,
             &mut attempt,
             &mut sequence,
+            None,
             Ok(interrupted),
         )
         .unwrap();
@@ -288,6 +405,7 @@ fn delegated_external_failure_is_lost_with_unresolved_effects() {
         &manifest,
         &mut attempt,
         &mut sequence,
+        None,
         Ok(failed),
     )
     .unwrap();
@@ -891,6 +1009,7 @@ fn a_candidate_result_notes_a_stash_left_on_the_task_branch() {
         &one_shot_manifest(),
         &mut attempt,
         &mut sequence,
+        None,
         Ok(successful_output(b"report")),
     )
     .unwrap();
@@ -921,6 +1040,7 @@ fn a_failed_result_notes_a_stash_left_on_the_task_branch() {
         &one_shot_manifest(),
         &mut attempt,
         &mut sequence,
+        None,
         Ok(ExecutionOutput {
             exit_code: Some(1),
             ..successful_output(b"")
@@ -952,6 +1072,7 @@ fn a_result_without_capture_diff_has_no_stash_note() {
         &one_shot_manifest(),
         &mut attempt,
         &mut sequence,
+        None,
         Ok(successful_output(b"report")),
     )
     .unwrap();

@@ -7,6 +7,17 @@
   command first (the skill and the error say so). `brgr doctor` now reports Codex 0.166 as
   the release the pane trace was checked against (it was 0.160), after a live check that a
   command shows no line while it runs and `Ran <command>` once it ends.
+- `route_observation.model` for a pane (TUI) run of Claude Code or Codex is
+  filled from the worker's own session log, with `model_source:
+  harness_session_log` — a new `ObservationSource` value older builds read as
+  `unavailable`. Claude Code workers already launch with
+  `--session-id <attempt>`, so their transcript is exactly identified; a Codex
+  worker's rollout is recorded by the installed Codex hook when the session's
+  own working directory is the task's workspace. Every read is bounded to the
+  model-name field only, verified against the session or directory the file
+  must belong to, and anything missing, oversize or odd stays `unavailable`
+  rather than a guess. Other harnesses are unchanged.
+
 ## 2.15.15 — 2026-11-01
 
 A Codex session on a shared Codex daemon that a worker started is recorded under its own owner.

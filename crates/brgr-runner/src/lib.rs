@@ -82,7 +82,7 @@ mod manifest;
 mod prompt;
 
 pub use cause::{CauseSource, FailureCause};
-pub use configured::configured_model;
+pub use configured::{MAX_MODEL_CHARS, configured_model};
 pub use error::RunnerError;
 
 use argv::{Substitutions, render_argv};

@@ -24,11 +24,14 @@ pub(crate) async fn hook(paths: &Paths, event: HookEvent) -> Result<()> {
     // A Codex worker runs in a brgr task worktree, and Codex runs every
     // installed hook for it too. This hook is for owners: binding the worker's
     // session, or telling it to call brgr as an owner, would mix the two up.
-    if input
-        .cwd
-        .as_deref()
-        .is_some_and(|cwd| in_task_worktree(paths, cwd))
+    // The session's own rollout file is worth recording first: it is how the
+    // task's result learns the model this worker actually used.
+    if let Some(cwd) = input.cwd.as_deref()
+        && in_task_worktree(paths, cwd)
     {
+        if let (Some(session_id), Some(rollout)) = (&input.session_id, &input.transcript_path) {
+            crate::session_model::record_codex_session(paths, cwd, session_id, rollout);
+        }
         println!("{{}}");
         return Ok(());
     }

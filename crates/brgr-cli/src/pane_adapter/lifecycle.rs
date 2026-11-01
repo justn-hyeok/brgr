@@ -147,7 +147,7 @@ pub(crate) fn stop_external(
     } else {
         close_leftover_pane(paths, attempt.task.task_id, attempt.task.revision, false);
     }
-    let result = brgr_protocol::ResultEnvelope {
+    let mut result = brgr_protocol::ResultEnvelope {
         schema: brgr_protocol::SCHEMA_V1.to_owned(),
         task_id: attempt.task.task_id,
         revision: attempt.task.revision,
@@ -171,6 +171,16 @@ pub(crate) fn stop_external(
         route_observation: Some(brgr_protocol::RouteObservation::unavailable()),
         unresolved_effects: Vec::new(),
     };
+    if let Some(model) =
+        crate::session_model::pane_session_model(paths, &attempt.task, attempt.attempt_id)
+    {
+        result.route_observation = Some(brgr_protocol::RouteObservation {
+            model: Some(model),
+            model_source: brgr_protocol::ObservationSource::HarnessSessionLog,
+            effort: None,
+            effort_source: brgr_protocol::ObservationSource::Unavailable,
+        });
+    }
     Store::open(&paths.store)?.commit_terminal_result_final(&attempt.task.owner_id, &result)?;
     Ok(true)
 }

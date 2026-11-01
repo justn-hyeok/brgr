@@ -11,7 +11,7 @@ use serde_json::Value;
 
 const MAX_BYTES: u64 = 1 << 20;
 /// Longest model id kept; real ids are far shorter.
-const MAX_MODEL_CHARS: usize = 200;
+pub const MAX_MODEL_CHARS: usize = 200;
 
 /// The model named by the harness's own settings, when it is one brgr knows
 /// how to read. `None` is "unknown", never a guess.
