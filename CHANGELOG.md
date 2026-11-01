@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- A Codex head whose first brgr command is `head handoff` is told what to do: Codex 0.162 and
+  later show a command's line only after it ends, so run one short `brgr --as SESSION`
+  command first (the skill and the error say so). `brgr doctor` now reports Codex 0.166 as
+  the release the pane trace was checked against (it was 0.160), after a live check that a
+  command shows no line while it runs and `Ran <command>` once it ends.
 ## 2.15.15 — 2026-11-01
 
 A Codex session on a shared Codex daemon that a worker started is recorded under its own owner.

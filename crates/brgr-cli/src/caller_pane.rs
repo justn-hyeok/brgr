@@ -177,8 +177,10 @@ fn traced(session: &str) -> Option<String> {
 }
 
 /// The Codex release whose command lines these traces were checked against.
-/// `brgr doctor` reports an installed Codex that differs from it.
-pub(crate) const VERIFIED_CODEX: &str = "codex-cli 0.160";
+/// `brgr doctor` reports an installed Codex that differs from it. 0.166 was
+/// checked live: a command shows no line while it runs and `Ran <command>` once
+/// it ends, which is what the trace and the deferred pane lookup read.
+pub(crate) const VERIFIED_CODEX: &str = "codex-cli 0.166";
 
 /// A line where Codex says it ran (or is running) `brgr` with this session.
 /// The id alone is not enough: any pane can print it.

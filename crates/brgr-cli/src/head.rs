@@ -726,6 +726,21 @@ fn incoming_head_prompt(
     )
 }
 
+/// Why `head handoff` could not place its pane. A Codex head gets one more
+/// line: Codex 0.162 and later show a command only after it ends, so the first
+/// call of a session cannot see its own pane, while any earlier call that has
+/// ended leaves the line brgr looks for.
+fn handoff_pane_message(owner_id: &OwnerId) -> String {
+    let base = "`head handoff` opens a pane beside this head, so it needs a verified Herdr pane; use `head request` outside Herdr";
+    if owner_id.as_str().starts_with("codex:") {
+        format!(
+            "{base}. On Codex 0.162 and later a command shows no line while it runs, so run one short brgr command with the same `--as` first (for example `brgr --as SESSION status --brief`) and retry"
+        )
+    } else {
+        base.to_owned()
+    }
+}
+
 /// Records the offer and opens the incoming head's pane; returns the receipt.
 fn open_handoff(
     paths: &Paths,
@@ -735,8 +750,8 @@ fn open_handoff(
 ) -> Result<Value> {
     let (owner_id, revision) = handoff_owner(store, task)?;
     let (session, epoch) = require_owner(store, &owner_id)?;
-    let caller = crate::caller_pane::verified()
-        .context("`head handoff` opens a pane beside this head, so it needs a verified Herdr pane; use `head request` outside Herdr")?;
+    let caller =
+        crate::caller_pane::verified().ok_or_else(|| anyhow!(handoff_pane_message(&owner_id)))?;
     if store
         .owner_takeovers(&owner_id)?
         .iter()
