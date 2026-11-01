@@ -416,10 +416,17 @@ await new Promise((resolve) => setTimeout(resolve, 8000));
 fn resume_with_a_live_driver_starts_nothing() {
     require_node();
     let fixture = fixture_home();
+    // The driver must be provably live at `resume`: it waits on a release
+    // file instead of a timer, so a loaded machine cannot let the script end
+    // before the resume call arrives.
+    let release = fixture.root.join("release-driver");
     let script = write_script(
         &fixture.root,
         "idle.mjs",
-        "await new Promise((resolve) => setTimeout(resolve, 4000));\n",
+        &format!(
+            "import {{ existsSync }} from \"node:fs\";\nwhile (!existsSync({})) await new Promise((resolve) => setTimeout(resolve, 100));\n",
+            json!(release.to_str().unwrap())
+        ),
     );
     let receipt = json_output(&run(
         &fixture.home,
@@ -427,8 +434,9 @@ fn resume_with_a_live_driver_starts_nothing() {
         &owner_env(),
     ));
     let run_id = receipt["run_id"].as_str().unwrap();
+    // A detached driver's spawn can take seconds on a loaded machine.
     assert!(
-        wait_until(Duration::from_secs(5), || workflow_pid(
+        wait_until(Duration::from_secs(15), || workflow_pid(
             &fixture.home,
             run_id
         )
@@ -448,6 +456,7 @@ fn resume_with_a_live_driver_starts_nothing() {
     );
     let pid_after = fs::read_to_string(workflow_pid(&fixture.home, run_id)).unwrap();
     assert_eq!(pid_before, pid_after);
+    fs::write(&release, b"1\n").unwrap();
     wait_run_state(&fixture.home, run_id, "completed", Duration::from_secs(15));
 }
 
@@ -507,8 +516,9 @@ await new Promise((resolve) => setTimeout(resolve, 60000));
         &owner_env(),
     ));
     let task_id = listed["steps"][0]["task_id"].as_str().unwrap().to_owned();
+    // A detached driver's spawn can take seconds on a loaded machine.
     assert!(
-        wait_until(Duration::from_secs(5), || workflow_pid(
+        wait_until(Duration::from_secs(15), || workflow_pid(
             &fixture.home,
             &run_id
         )
@@ -527,20 +537,15 @@ await new Promise((resolve) => setTimeout(resolve, 60000));
         wait_until(Duration::from_secs(5), || !process_alive(pid)),
         "driver {pid} still alive"
     );
-    assert!(
-        wait_until(Duration::from_secs(15), || {
-            let status = run(
-                &fixture.home,
-                &["workflow", "status", &run_id],
-                &owner_env(),
-            );
-            serde_json::from_slice::<Value>(&status.stdout)
-                .ok()
-                .and_then(|value| value["steps"][0]["state"].as_str().map(str::to_owned))
-                .is_some_and(|state| state != "running" && state != "starting" && state != "queued")
-        }),
-        "step {task_id} was not cancelled"
-    );
+    // `workflow status` only reads, so a step whose supervisor was killed
+    // before it claimed the task would look running forever. `wait` drives
+    // reconcile_pending, which settles it as cancelled either way.
+    let settled = json_output(&run(
+        &fixture.home,
+        &["wait", &task_id, "--timeout-seconds", "30"],
+        &owner_env(),
+    ));
+    assert_eq!(settled["outcome"], "cancelled", "{settled}");
     let again = run(
         &fixture.home,
         &["workflow", "cancel", &run_id],

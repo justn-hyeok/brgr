@@ -1250,7 +1250,6 @@ mod lifecycle_tests {
         assert_eq!(still.see(None), 0);
         assert_eq!(still.see(None), 0, "an unreadable screen is never still");
     }
-    use std::os::unix::fs::PermissionsExt as _;
 
     #[test]
     fn a_shell_prompt_is_not_a_numbered_menu_row() {
@@ -1266,8 +1265,7 @@ mod lifecycle_tests {
     fn an_empty_successful_herdr_acknowledgement_is_a_valid_transport_reply() {
         let temp = tempfile::tempdir().unwrap();
         let binary = temp.path().join("herdr");
-        fs::write(&binary, "#!/bin/sh\nexit 0\n").unwrap();
-        fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
+        crate::fast_script::write_fast_script(&binary, "#!/bin/sh\nexit 0\n");
         let herdr = Herdr {
             binary: binary.into_os_string(),
             session: None,
@@ -1285,8 +1283,7 @@ mod lifecycle_tests {
         let temp = tempfile::tempdir().unwrap();
         let paths = Paths::new(Some(temp.path().join("home"))).unwrap();
         let binary = temp.path().join("herdr");
-        fs::write(&binary, "#!/bin/sh\nexit 1\n").unwrap();
-        fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
+        crate::fast_script::write_fast_script(&binary, "#!/bin/sh\nexit 1\n");
         let task = TaskId::new();
         let path = paths.pane_receipt(task, 1);
         write_json_atomic(

@@ -17,6 +17,19 @@
   model-name field only, verified against the session or directory the file
   must belong to, and anything missing, oversize or odd stays `unavailable`
   rather than a guess. Other harnesses are unchanged.
+- Tests only: fake `#!/bin/sh` executables in `brgr-runner` and `brgr-registry`
+  unit tests and `brgr-cli` unit tests (`caller_pane`, `plugin_bridge`,
+  `pane_adapter`, `error_memo`, `tui_host`) are hard-links of one warmed
+  trampoline per test binary, matching `write_fast_script` in the integration
+  tests, so they no longer pay macOS's first-exec cost on a new inode (#224).
+  Under load, `a_foreign_owner_force_cancels_a_running_worker` now polls
+  `brgr status` — which drives the reconciliation that settles a run whose
+  supervisor never claimed it — instead of the read-only `brgr result`; the
+  workflow-runner cancel test waits on the step through `brgr wait` for the
+  same reason, `resume_with_a_live_driver_starts_nothing` holds its driver on
+  a file instead of a timer, and the admission-lock test drops a wall-clock
+  bound that measured machine speed instead of the lock.
+
 
 ## 2.15.15 — 2026-11-01
 

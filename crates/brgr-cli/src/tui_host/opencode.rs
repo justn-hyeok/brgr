@@ -351,7 +351,6 @@ mod tests {
     }
 
     fn fixture() -> (tempfile::TempDir, NativeLaunch) {
-        use std::os::unix::fs::PermissionsExt as _;
         let root = tempfile::tempdir().unwrap();
         let mut launch = launch();
         launch.workspace = root.path().to_owned();
@@ -371,7 +370,7 @@ mod tests {
         )
         .unwrap();
         launch.executable = root.path().join("opencode");
-        fs::write(
+        crate::fast_script::write_fast_script(
             &launch.executable,
             r#"#!/bin/sh
 if [ "$1" = serve ]; then
@@ -389,9 +388,7 @@ case "$4" in
   *) exit 3 ;;
 esac
 "#,
-        )
-        .unwrap();
-        fs::set_permissions(&launch.executable, fs::Permissions::from_mode(0o700)).unwrap();
+        );
         (root, launch)
     }
 

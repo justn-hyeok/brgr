@@ -579,7 +579,75 @@ mod tests {
     use brgr_protocol::{ArtifactContract, AttemptBudget, OwnerId, Route, SCHEMA_V1, TaskId};
     use serde_json::json;
     use std::os::unix::fs::PermissionsExt;
+    use std::sync::OnceLock;
     use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
+
+    /// The first execution of every new executable file is serialized by
+    /// macOS (~200 ms each), so a test process that writes a fresh script per
+    /// case waits in one queue behind every other test's scripts (#224). One
+    /// process-global trampoline is made executable and run once;
+    /// [`write_fast_script`] hard-links that warmed inode to `path` and writes
+    /// `body` beside it as `path` with a `.body` suffix. Only for a body whose
+    /// first line is `#!/bin/sh`; `$0` inside the body is `path.body`. A test
+    /// that rewrites, digests or chmods the executable keeps a unique inode
+    /// (ordinary `fs::write` and `chmod`).
+    const TRAMPOLINE_SOURCE: &str = concat!(
+        "#!/bin/sh\n",
+        "[ -f \"$0.body\" ] || exit 0\n",
+        "exec /bin/sh \"$0.body\" \"$@\"\n"
+    );
+
+    static WARMED_TRAMPOLINE: OnceLock<PathBuf> = OnceLock::new();
+
+    fn write_fast_script(path: &Path, body: &str) {
+        let first_line = body.lines().next();
+        assert_eq!(
+            first_line,
+            Some("#!/bin/sh"),
+            "write_fast_script requires a #!/bin/sh first line, got {first_line:?}"
+        );
+        let mut body_name = path
+            .file_name()
+            .expect("write_fast_script path has a file name")
+            .to_os_string();
+        body_name.push(".body");
+        let body_path = path.with_file_name(body_name);
+        std::fs::write(&body_path, body).unwrap();
+        std::fs::set_permissions(&body_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        if path.exists() {
+            std::fs::remove_file(path).unwrap();
+        }
+        match std::fs::hard_link(warmed_trampoline(), path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::CrossesDevices => {
+                std::fs::write(path, body).unwrap();
+                std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+            Err(error) => panic!("hard-linking trampoline to {}: {error}", path.display()),
+        }
+    }
+
+    fn warmed_trampoline() -> &'static Path {
+        WARMED_TRAMPOLINE.get_or_init(|| {
+            let dir = std::env::temp_dir().join("brgr-fast-script");
+            std::fs::create_dir_all(&dir).unwrap();
+            let trampoline = dir.join(format!("trampoline-{}", std::process::id()));
+            if trampoline.exists() {
+                std::fs::remove_file(&trampoline).unwrap();
+            }
+            std::fs::write(&trampoline, TRAMPOLINE_SOURCE).unwrap();
+            std::fs::set_permissions(&trampoline, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let status = std::process::Command::new(&trampoline)
+                .arg("--warm")
+                .status()
+                .expect("run trampoline --warm");
+            assert!(status.success(), "trampoline --warm failed: {status}");
+            // Drop write bits so a later `fs::write` through a hard link
+            // cannot clobber every trampoline in this process.
+            std::fs::set_permissions(&trampoline, std::fs::Permissions::from_mode(0o555)).unwrap();
+            trampoline
+        })
+    }
 
     fn echo_manifest(max_bytes: u64) -> HarnessManifest {
         HarnessManifest {
@@ -790,12 +858,10 @@ mod tests {
     async fn inherited_stdout_cannot_extend_the_total_deadline() {
         let workspace = tempfile::tempdir().unwrap();
         let executable = workspace.path().join("fork-stdout-holder");
-        std::fs::write(
+        write_fast_script(
             &executable,
             "#!/bin/sh\n(sleep 3) &\nprintf 'parent done\\n'\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        );
         let mut manifest = echo_manifest(4_096);
         manifest.executable = executable;
         manifest.launch.argv.clear();
@@ -1329,12 +1395,10 @@ mod tests {
     async fn oversized_jsonl_event_stops_its_process_group_before_deadline() {
         let workspace = tempfile::tempdir().unwrap();
         let executable = workspace.path().join("oversized-jsonl");
-        std::fs::write(
+        write_fast_script(
             &executable,
             "#!/bin/sh\n/usr/bin/awk 'BEGIN { for (i = 0; i < 1200000; i++) printf \"x\" }'\n/bin/sleep 30\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        );
         let mut manifest = echo_manifest(16);
         manifest.executable = executable;
         manifest.result.source = ResultSource::JsonlAssistantFinal;
@@ -1467,12 +1531,10 @@ mod tests {
     async fn file_backed_probe_captures_full_help_and_flags_oversize() {
         let root = tempfile::tempdir().unwrap();
         let executable = root.path().join("probe");
-        std::fs::write(
+        write_fast_script(
             &executable,
             "#!/bin/sh\ni=0\nwhile [ \"$i\" -lt 100 ]; do printf 'model-catalog-line-12345678901234567890123456789012345678901234567890\\n'; i=$((i+1)); done\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        );
         let output = ProcessRunner::probe(&executable, &[], INCIDENTAL_PROBE_DEADLINE)
             .await
             .unwrap();
@@ -1480,11 +1542,10 @@ mod tests {
         assert_eq!(output.exit_code, Some(0));
         assert!(output.stdout.len() > 512);
         assert!(!output.output_truncated);
-        std::fs::write(
+        write_fast_script(
             &executable,
             "#!/bin/sh\ni=0\nwhile [ \"$i\" -lt 1200 ]; do printf 'model-catalog-line-12345678901234567890123456789012345678901234567890\\n'; i=$((i+1)); done\n",
-        )
-        .unwrap();
+        );
         let oversized = ProcessRunner::probe(&executable, &[], INCIDENTAL_PROBE_DEADLINE)
             .await
             .unwrap();
@@ -1502,15 +1563,13 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let executable = root.path().join("probe");
         let pid_path = root.path().join("pid");
-        std::fs::write(
+        write_fast_script(
             &executable,
-            format!(
+            &format!(
                 "#!/bin/sh\necho $$ > '{}'\nexec /usr/bin/head -c {FLOOD_CEILING_BYTES} /dev/zero\n",
                 pid_path.display()
             ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        );
         let flooded = ProcessRunner::probe(&executable, &[], Duration::from_secs(5))
             .await
             .unwrap();
@@ -1532,12 +1591,10 @@ mod tests {
     async fn probe_output_is_read_from_the_pipe_not_a_path_the_probe_can_replace() {
         let root = tempfile::tempdir().unwrap();
         let executable = root.path().join("probe");
-        std::fs::write(
+        write_fast_script(
             &executable,
             "#!/bin/sh\n/bin/mv stdout moved 2>/dev/null\n/bin/ln -s /etc/passwd stdout\nprintf 'SAFE_PROBE'\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        );
         let replaced = ProcessRunner::probe(&executable, &[], INCIDENTAL_PROBE_DEADLINE)
             .await
             .unwrap();
@@ -1557,15 +1614,13 @@ mod tests {
         };
         let dir = PathBuf::from(dir);
         let executable = dir.join("probe");
-        std::fs::write(
+        write_fast_script(
             &executable,
-            format!(
+            &format!(
                 "#!/bin/sh\necho $$ > '{}'\ni=0\nwhile [ \"$i\" -lt 600 ]; do echo tick; i=$((i+1)); sleep 0.05; done\n",
                 dir.join("pid").display()
             ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        );
         let _ = ProcessRunner::probe(&executable, &[], INCIDENTAL_PROBE_DEADLINE).await;
     }
 
@@ -1712,8 +1767,9 @@ mod tests {
         let bin = root.path().join("bin");
         std::fs::create_dir_all(&bin).unwrap();
         let interp = bin.join("brgr-health-interp");
-        std::fs::write(&interp, "#!/bin/sh\necho ok\n").unwrap();
-        std::fs::set_permissions(&interp, std::fs::Permissions::from_mode(0o700)).unwrap();
+        write_fast_script(&interp, "#!/bin/sh\necho ok\n");
+        // A `#!/usr/bin/env` shebang is not `#!/bin/sh`, so this file keeps its
+        // own inode; the probe is the point of the test.
         let executable = root.path().join("tool");
         std::fs::write(&executable, "#!/usr/bin/env brgr-health-interp\n").unwrap();
         std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();

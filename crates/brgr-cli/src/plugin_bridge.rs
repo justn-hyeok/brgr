@@ -572,15 +572,13 @@ async fn kill_process_group(pid: Option<u32>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt as _;
 
     use crate::adversary::Adversary;
     use tempfile::TempDir;
 
     fn write_script(dir: &Path, name: &str, body: &str) -> PathBuf {
         let path = dir.join(name);
-        fs::write(&path, body).unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+        crate::fast_script::write_fast_script(&path, body);
         path
     }
 

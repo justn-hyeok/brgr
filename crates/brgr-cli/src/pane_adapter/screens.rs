@@ -1001,11 +1001,10 @@ mod tests {
     }
 
     fn fake_herdr(screen: &str) -> (tempfile::TempDir, Herdr) {
-        use std::os::unix::fs::PermissionsExt as _;
         let temp = tempfile::tempdir().unwrap();
         let binary = temp.path().join("herdr");
         std::fs::write(temp.path().join("screen"), screen).unwrap();
-        std::fs::write(
+        crate::fast_script::write_fast_script(
             &binary,
             r#"#!/bin/sh
 d=$(/usr/bin/dirname "$0")
@@ -1015,9 +1014,7 @@ case "$1 $2" in
  *) exit 8;;
 esac
 "#,
-        )
-        .unwrap();
-        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
+        );
         let herdr = Herdr {
             binary: binary.into_os_string(),
             session: None,

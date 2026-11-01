@@ -878,16 +878,15 @@ mod tests {
 
     #[test]
     fn a_failure_is_filed_once_at_the_threshold_and_not_filed_again() {
-        use std::os::unix::fs::PermissionsExt as _;
         let temp = tempfile::tempdir().unwrap();
         let paths = Paths::new(Some(temp.path().join("home"))).unwrap();
         let gh = temp.path().join("gh");
-        fs::write(
+        // `${0%.body}` keeps the same side-file names when the fixture runs
+        // through the fast-script trampoline, where `$0` is `gh.body`.
+        crate::fast_script::write_fast_script(
             &gh,
-            "#!/bin/sh\necho \"$@\" >> \"$0.calls\"\ncase \"$2\" in\n list) echo '[]';;\n create) /bin/cat >> \"$0.body\"; echo https://github.com/o/r/issues/7;;\nesac\n",
-        )
-        .unwrap();
-        fs::set_permissions(&gh, fs::Permissions::from_mode(0o700)).unwrap();
+            "#!/bin/sh\necho \"$@\" >> \"${0%.body}.calls\"\ncase \"$2\" in\n list) echo '[]';;\n create) /bin/cat >> \"${0%.body}.stdin\"; echo https://github.com/o/r/issues/7;;\nesac\n",
+        );
         GH_PROGRAM.with(|program| *program.borrow_mut() = Some(gh.clone()));
         let mut config = Config::load(&paths.config).unwrap();
         config.issues.auto_file = true;
@@ -908,7 +907,7 @@ mod tests {
         file_issues(&paths).unwrap();
         let calls = fs::read_to_string(temp.path().join("gh.calls")).unwrap();
         assert_eq!(calls.matches("issue create").count(), 1, "{calls}");
-        let body = fs::read_to_string(temp.path().join("gh.body")).unwrap();
+        let body = fs::read_to_string(temp.path().join("gh.stdin")).unwrap();
         assert!(
             body.contains("brgr-fp:") && !body.contains("alice"),
             "{body}"
@@ -924,17 +923,15 @@ mod tests {
 
     #[test]
     fn one_failing_gh_call_keeps_the_issue_addresses_already_found() {
-        use std::os::unix::fs::PermissionsExt as _;
         let temp = tempfile::tempdir().unwrap();
         let paths = Paths::new(Some(temp.path().join("home"))).unwrap();
         let gh = temp.path().join("gh");
-        // The first create succeeds; every later one fails.
-        fs::write(
+        // The first create succeeds; every later one fails. `${0%.body}` keeps
+        // the marker name through the fast-script trampoline.
+        crate::fast_script::write_fast_script(
             &gh,
-            "#!/bin/sh\ncase \"$2\" in\n list) echo '[]';;\n create) if [ -e \"$0.made\" ]; then echo boom >&2; exit 1; fi; : > \"$0.made\"; /bin/cat >/dev/null; echo https://github.com/o/r/issues/1;;\nesac\n",
-        )
-        .unwrap();
-        fs::set_permissions(&gh, fs::Permissions::from_mode(0o700)).unwrap();
+            "#!/bin/sh\ncase \"$2\" in\n list) echo '[]';;\n create) if [ -e \"${0%.body}.made\" ]; then echo boom >&2; exit 1; fi; : > \"${0%.body}.made\"; /bin/cat >/dev/null; echo https://github.com/o/r/issues/1;;\nesac\n",
+        );
         GH_PROGRAM.with(|program| *program.borrow_mut() = Some(gh));
         let mut config = Config::load(&paths.config).unwrap();
         config.issues.auto_file = true;
