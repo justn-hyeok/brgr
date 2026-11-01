@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Tests only: `git_diff::tests::bounded_diff_stops_a_stalled_collector` failed once under load because
+  its fake `git` is a new script, and macOS runs the first exec of a new script slowly (the test
+  asserted a three-second bound). The fake now sleeps for ten minutes, so only the deadline can end
+  it, and the bound is a minute.
 - Tests only: `workflow_run_returns_before_a_sleeping_script_finishes` no longer asserts that
   `brgr workflow run` returns within one second (it took 1.3 s once under load); its script now
   waits on a release file and the test checks that the script had not finished when `run` returned.
