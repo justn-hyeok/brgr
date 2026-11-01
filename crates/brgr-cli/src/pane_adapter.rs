@@ -48,7 +48,8 @@ pub(crate) use lifecycle::{
 pub(crate) use native::report_digest as native_digest;
 pub(crate) use native::{deliver_owner_notice, send_native_input, serve_session};
 use native::{
-    deliver_worker_messages, report_digest, send_prompt, spawn_session_server, start_native,
+    deliver_worker_messages, report_digest, send_first_prompt, send_prompt, spawn_session_server,
+    start_native,
 };
 pub(crate) use screens::LAST_SCREEN as LAST_SCREEN_MARK;
 use screens::{Screen, ScreenWatch};
@@ -566,7 +567,7 @@ fn drive(
 
     let prompt = fs::read_to_string(&run.prompt_file)?;
     let instruction = result_instruction(notices.paths, run, &prompt, report)?;
-    send_prompt(herdr, name, pane, run, &instruction, notices.paths)?;
+    send_first_prompt(herdr, name, pane, run, &instruction, notices.paths)?;
     spawn_session_server(notices.paths, run.task)?;
     set_phase(notices.paths, run, "working");
     eprintln!("brgr pane mode · prompted the agent");

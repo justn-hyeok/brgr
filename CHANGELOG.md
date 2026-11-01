@@ -2,12 +2,15 @@
 
 ## Unreleased
 
-- A Codex worker no longer fails with `native TUI is waiting for input readiness` the first
-  time it starts in a repository Codex has not trusted yet. Codex 0.166 draws its banner and
-  input box about half a second before the folder prompt, and brgr took that frame for a ready
-  agent, so the first prompt failed when the dialog arrived. A native TUI now counts as ready
-  only after it has looked ready for two seconds without a break; the folder prompt is answered
-  as before. A native worker starts about two seconds later.
+- A Codex worker no longer fails with `native TUI is waiting for input readiness`. Two causes, both
+  on Codex 0.166: Codex draws its banner and input box about half a second before the folder
+  prompt in a repository it has not trusted yet, which brgr took for a ready agent; and Herdr
+  reports a freshly started Codex as `working` until its first turn ends, so waiting for `idle`
+  never sent the first prompt. A native TUI now counts as ready only after it has looked ready
+  for one second without a break; a Codex that Herdr calls `working` counts as ready when its
+  screen shows an empty composer and no `esc to interrupt`; and a first prompt the agent does
+  not accept yet is retried for up to twenty seconds, answering any screen that opens in the
+  meantime, instead of failing the run. A native worker starts about one second later.
 - A Codex head whose first brgr command is `head handoff` is told what to do: Codex 0.162 and
   later show a command's line only after it ends, so run one short `brgr --as SESSION`
   command first (the skill and the error say so). `brgr doctor` now reports Codex 0.166 as
