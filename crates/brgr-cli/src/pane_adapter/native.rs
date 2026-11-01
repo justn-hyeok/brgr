@@ -392,12 +392,30 @@ fn prompt_ready(herdr: &Herdr, pane: &str, run: &PaneRunArgs, paths: &Paths) -> 
     Ok(native_ready(herdr, pane, &run.kind, alive))
 }
 
+/// Whether the screen shows a Codex that is idle although Herdr says
+/// `working`. Herdr keeps a freshly started Codex at `working` until its first
+/// turn ends, so waiting for `idle` would never send the first prompt; the
+/// screen says what is true: an empty composer and no `esc to interrupt`.
+fn screen_overrides_working(status: &str, kind: &str, screen: &str) -> bool {
+    status == "working"
+        && kind == "codex"
+        && editor_ready(screen, kind)
+        && !screen.contains("esc to interrupt")
+}
+
 pub(super) fn native_ready(herdr: &Herdr, pane: &str, kind: &str, alive: bool) -> bool {
     if menu_on_screen(herdr, pane) {
         return false;
     }
     match herdr.status(pane) {
         Ok(status) if matches!(status.as_str(), "idle" | "done") => true,
+        Ok(status)
+            if herdr
+                .screen(pane)
+                .is_some_and(|screen| screen_overrides_working(&status, kind, &screen)) =>
+        {
+            true
+        }
         Ok(status) if status != "unknown" => false,
         _ => {
             alive
@@ -607,7 +625,7 @@ fn prepare_native_config(run: &PaneRunArgs, paths: &Paths) -> Result<(PathBuf, P
 /// shows its banner and prompt about half a second before the folder prompt,
 /// and a worker started on that frame fails its first prompt when the dialog
 /// arrives.
-const READY_SETTLE: Duration = Duration::from_secs(2);
+const READY_SETTLE: Duration = Duration::from_secs(1);
 
 /// Tracks how long the harness has looked ready without a break.
 #[derive(Default)]
@@ -632,6 +650,61 @@ impl ReadySettle {
     fn reset(&mut self) {
         self.since = None;
     }
+}
+
+/// Runs `attempt` until it goes through. While it fails as [`Unsent`] (the
+/// agent has not shown it is ready yet) it looks at the screen with `between`,
+/// waits `poll`, and tries again until `limit` has passed; the last
+/// [`Unsent`] is then the error. Any other error ends it at once.
+fn retry_unsent(
+    limit: Duration,
+    poll: Duration,
+    mut attempt: impl FnMut() -> Result<()>,
+    mut between: impl FnMut() -> Result<()>,
+) -> Result<()> {
+    let started = Instant::now();
+    loop {
+        match attempt() {
+            Ok(()) => return Ok(()),
+            Err(error) if error.is::<Unsent>() && started.elapsed() < limit => {
+                between()?;
+                thread::sleep(poll);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+/// The task's first prompt. A native TUI can look ready and then go back to
+/// starting up, or a dialog can open after it looked ready (Codex shows its
+/// status as unknown, then working, while it loads), so a prompt that is not
+/// accepted yet is tried again, answering any screen that appeared, for as long
+/// as startup may take instead of failing the run on the first refusal.
+pub(super) fn send_first_prompt(
+    herdr: &Herdr,
+    name: &str,
+    pane: &str,
+    run: &PaneRunArgs,
+    text: &str,
+    paths: &Paths,
+) -> Result<()> {
+    let mut watch = ScreenWatch::new(&run.kind);
+    retry_unsent(
+        SHELL_READY,
+        SHELL_POLL,
+        || send_prompt(herdr, name, pane, run, text, paths),
+        || {
+            let status = herdr.status(pane).ok();
+            match screens::resolve(herdr, pane, run, paths, status.as_deref())? {
+                Screen::Resolve { rule, .. } => watch.pressed(rule),
+                Screen::Unknown(text) => watch.observe(&Screen::Unknown(text)),
+                Screen::Clear => {
+                    watch.reset();
+                    Ok(())
+                }
+            }
+        },
+    )
 }
 
 pub(super) fn start_native(
@@ -700,9 +773,15 @@ pub(super) fn start_native(
         let prompt = herdr
             .screen(pane)
             .is_some_and(|screen| editor_ready(&screen, &run.kind));
+        let working_but_idle = status.as_deref().is_some_and(|status| {
+            herdr
+                .screen(pane)
+                .is_some_and(|screen| screen_overrides_working(status, &run.kind, &screen))
+        });
         let ready = (matches!(status.as_deref(), Some("idle" | "done"))
             || status.is_none()
             || matches!(status.as_deref(), Some("unknown"))
+            || working_but_idle
             || matches!(run.kind.as_str(), "gjc" | "command-code"))
             && (prompt || detected_ready)
             && !menu_on_screen(herdr, pane);
@@ -762,6 +841,116 @@ mod tests {
         assert!(!settle.held(true, start));
         settle.reset();
         assert!(!settle.held(true, start + READY_SETTLE));
+    }
+
+    #[test]
+    fn an_unsent_prompt_is_retried_until_it_goes_through() {
+        let mut attempts = 0;
+        let mut between = 0;
+        let outcome = retry_unsent(
+            Duration::from_secs(5),
+            Duration::from_millis(1),
+            || {
+                attempts += 1;
+                if attempts < 4 {
+                    Err(Unsent("not ready yet".to_owned()).into())
+                } else {
+                    Ok(())
+                }
+            },
+            || {
+                between += 1;
+                Ok(())
+            },
+        );
+        assert!(outcome.is_ok(), "{outcome:?}");
+        assert_eq!(attempts, 4);
+        assert_eq!(between, 3, "the screen is looked at between attempts");
+    }
+
+    #[test]
+    fn a_prompt_that_stays_unsent_fails_after_the_limit_with_the_reason() {
+        let outcome = retry_unsent(
+            Duration::from_millis(30),
+            Duration::from_millis(5),
+            || Err(Unsent("native TUI is waiting for input readiness".to_owned()).into()),
+            || Ok(()),
+        );
+        let error = outcome.unwrap_err();
+        assert!(error.is::<Unsent>(), "{error}");
+        assert!(error.to_string().contains("waiting for input readiness"));
+    }
+
+    #[test]
+    fn any_other_error_is_not_retried() {
+        let mut attempts = 0;
+        let outcome = retry_unsent(
+            Duration::from_secs(5),
+            Duration::from_millis(1),
+            || {
+                attempts += 1;
+                Err(anyhow::anyhow!("native transport outcome uncertain"))
+            },
+            || Ok(()),
+        );
+        assert!(outcome.is_err());
+        assert_eq!(attempts, 1);
+    }
+
+    #[test]
+    fn an_error_while_looking_at_the_screen_stops_the_retry() {
+        let outcome = retry_unsent(
+            Duration::from_secs(5),
+            Duration::from_millis(1),
+            || Err(Unsent("not ready yet".to_owned()).into()),
+            || {
+                Err(anyhow::anyhow!(
+                    "a screen no rule answers has stood too long"
+                ))
+            },
+        );
+        assert!(outcome.unwrap_err().to_string().contains("stood too long"));
+    }
+
+    const CODEX_IDLE_COMPOSER: &str = "  permissions: YOLO mode\n\n\u{2800}\u{2819}\u{281b}\u{283f}\u{283f}\n\u{203a}\u{2801}Ask Codex to do anything\n  GPT-6-Astra low \u{b7} ~/work/ws\n  \u{2190} for agents \u{b7} ? for shortcuts\n";
+    const CODEX_BUSY: &str = "  permissions: YOLO mode\n\n\u{2022} Working (3s \u{2022} esc to interrupt)\n\u{203a} Ask Codex to do anything\n  GPT-6-Astra low \u{b7} ~/work/ws\n";
+
+    #[test]
+    fn codex_idle_at_its_composer_is_ready_even_while_herdr_says_working() {
+        // Herdr keeps a freshly started Codex at `working` until its first turn
+        // ends, with the composer empty and nothing running.
+        assert!(screen_overrides_working(
+            "working",
+            "codex",
+            CODEX_IDLE_COMPOSER
+        ));
+    }
+
+    #[test]
+    fn codex_that_is_running_a_turn_is_not_ready() {
+        assert!(!screen_overrides_working("working", "codex", CODEX_BUSY));
+    }
+
+    #[test]
+    fn only_a_working_codex_is_read_from_the_screen() {
+        for (status, kind) in [
+            ("working", "claude"),
+            ("working", "cursor"),
+            ("blocked", "codex"),
+            ("idle", "codex"),
+            ("unknown", "codex"),
+        ] {
+            assert!(
+                !screen_overrides_working(status, kind, CODEX_IDLE_COMPOSER),
+                "{status} {kind}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_codex_folder_prompt_is_not_a_ready_composer() {
+        let trust = "  Folder access\n  /work/ws\n  Trust this folder? Codex can read\n\u{203a} 1. Trust and continue\n  2. Back to Agent Command Center\n";
+        assert!(!screen_overrides_working("working", "codex", trust));
     }
 
     #[test]
