@@ -246,26 +246,33 @@ fn read_pid(path: &Path) -> u32 {
 fn workflow_run_returns_before_a_sleeping_script_finishes() {
     require_node();
     let fixture = fixture_home();
+    // The script holds on a release file instead of a timer, so a loaded machine
+    // cannot let it finish before `run` returns, and `run` is judged by whether
+    // the script was still going when it returned, not by how many milliseconds
+    // it took.
+    let release = fixture.root.join("release-sleeping-script");
     let script = write_script(
         &fixture.root,
         "sleep.mjs",
-        "console.log('workflow-driver-stdout');\nawait new Promise((resolve) => setTimeout(resolve, 2000));\n",
+        &format!(
+            "import {{ existsSync }} from \"node:fs\";\nconsole.log('workflow-driver-stdout');\nwhile (!existsSync({})) await new Promise((resolve) => setTimeout(resolve, 50));\n",
+            json!(release.to_str().unwrap())
+        ),
     );
-    let started = Instant::now();
     let receipt = json_output(&run(
         &fixture.home,
         &["workflow", "run", script.to_str().unwrap()],
         &owner_env(),
     ));
-    let elapsed = started.elapsed();
-    assert!(
-        elapsed < Duration::from_secs(1),
-        "workflow run blocked for {elapsed:?}"
-    );
     let run_id = receipt["run_id"].as_str().unwrap();
     assert_eq!(receipt["state"], "running");
     assert_eq!(receipt["owner"], "codex:workflow-owner");
-    wait_run_state(&fixture.home, run_id, "completed", Duration::from_secs(15));
+    assert!(
+        !release.exists(),
+        "the script was never released, so it cannot have finished"
+    );
+    fs::write(&release, "go").unwrap();
+    wait_run_state(&fixture.home, run_id, "completed", Duration::from_mins(1));
     let log = fs::read_to_string(workflow_log(&fixture.home, run_id)).unwrap();
     assert!(
         log.contains("workflow-driver-stdout"),

@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Tests only: `workflow_run_returns_before_a_sleeping_script_finishes` no longer asserts that
+  `brgr workflow run` returns within one second (it took 1.3 s once under load); its script now
+  waits on a release file and the test checks that the script had not finished when `run` returned.
 - Tests only: when `pane_mode_runs_the_agent_in_a_pane_and_seals_its_report` fails to find its
   workspace cleaned after the decision, the failure now also prints the fake agent's state, the
   pane receipt, the native host state and the last Herdr calls. It failed once in seven full
