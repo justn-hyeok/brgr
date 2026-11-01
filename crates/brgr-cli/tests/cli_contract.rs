@@ -1441,8 +1441,29 @@ fn pane_mode_runs_the_agent_in_a_pane_and_seals_its_report() {
         &["accept", task],
         &[("BRGR_OWNER_ID", "codex:pane-test")],
     ));
+    // The pane closes and the report is archived once the agent shows idle. The
+    // fake Herdr reports `working` to exactly one status read and `idle` after
+    // it, and two brgr processes can run this task's cleanup at the same moment
+    // (the failure report of a loaded run showed two, one reading `working` and
+    // backing off, the other finding nothing left to close). A cleanup that
+    // finds the agent busy is finished by the next brgr command, as it is for a
+    // real pane, so look for the outcome by running a command instead of
+    // expecting it in the very instant `accept` returns.
+    let settled = (0..40).any(|_| {
+        let _ = run(
+            &fixture.home,
+            &["status"],
+            &[("BRGR_OWNER_ID", "codex:pane-test")],
+        );
+        let done =
+            !fixture.workspace.join(".brgr").exists() && fixture.state("closed").trim() == "closed";
+        if !done {
+            thread::sleep(Duration::from_millis(500));
+        }
+        done
+    });
     assert!(
-        !fixture.workspace.join(".brgr").exists(),
+        settled,
         "{}",
         leftover_brgr_debug_with_herdr(
             &fixture.workspace,
@@ -1451,7 +1472,6 @@ fn pane_mode_runs_the_agent_in_a_pane_and_seals_its_report() {
             Some(&fixture.state)
         )
     );
-    assert_eq!(fixture.state("closed").trim(), "closed");
 }
 
 /// The failure report of the pane-cleanup test names what decides the cleanup, so

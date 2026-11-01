@@ -9,6 +9,16 @@
 - Tests only: `workflow_run_returns_before_a_sleeping_script_finishes` no longer asserts that
   `brgr workflow run` returns within one second (it took 1.3 s once under load); its script now
   waits on a release file and the test checks that the script had not finished when `run` returned.
+- Tests only: `pane_mode_runs_the_agent_in_a_pane_and_seals_its_report` no longer expects the
+  workspace to be cleaned in the very instant `accept` returns. In a loaded run its failure
+  report showed two brgr processes running the same task's cleanup at once with the fake
+  Herdr's read-once `working` state, so neither closed the pane; a later brgr command finishes a
+  cleanup that found the agent busy, and the test now looks for that. A failure also prints the
+  fake agent's state, the pane receipt and the last Herdr calls with their calling process
+  (issue #224).
+- Tests only: `workflow_run_returns_before_a_sleeping_script_finishes` no longer asserts that
+  `brgr workflow run` returns within one second (it took 1.3 s once under load); its script now
+  waits on a release file and the test checks that the script had not finished when `run` returned.
 - Tests only: when `pane_mode_runs_the_agent_in_a_pane_and_seals_its_report` fails to find its
   workspace cleaned after the decision, the failure now also prints the fake agent's state, the
   pane receipt, the native host state and the last Herdr calls. It failed once in seven full
