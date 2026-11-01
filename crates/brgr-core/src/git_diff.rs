@@ -448,7 +448,9 @@ mod tests {
     fn bounded_diff_stops_a_stalled_collector() {
         let root = tempfile::tempdir().unwrap();
         let slow = root.path().join("slow-git");
-        fs::write(&slow, "#!/bin/sh\n/bin/sleep 5\nprintf 'late patch'\n").unwrap();
+        // The collector never finishes on its own: only the deadline can end it,
+        // so the test does not depend on how quickly this process is started.
+        fs::write(&slow, "#!/bin/sh\nexec /bin/sleep 600\n").unwrap();
         fs::set_permissions(&slow, fs::Permissions::from_mode(0o700)).unwrap();
         let started = Instant::now();
         let error = bounded_git_diff_with_executable(
@@ -461,6 +463,8 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.contains("deadline"));
-        assert!(started.elapsed() < Duration::from_secs(3));
+        // A collector that was not stopped would still be asleep ten minutes
+        // from now; a loaded machine may take seconds just to start the script.
+        assert!(started.elapsed() < Duration::from_mins(1));
     }
 }

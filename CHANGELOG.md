@@ -2,6 +2,38 @@
 
 ## Unreleased
 
+- Tests only: `git_diff::tests::bounded_diff_stops_a_stalled_collector` failed once under load because
+  its fake `git` is a new script, and macOS runs the first exec of a new script slowly (the test
+  asserted a three-second bound). The fake now sleeps for ten minutes, so only the deadline can end
+  it, and the bound is a minute.
+- Tests only: `workflow_run_returns_before_a_sleeping_script_finishes` no longer asserts that
+  `brgr workflow run` returns within one second (it took 1.3 s once under load); its script now
+  waits on a release file and the test checks that the script had not finished when `run` returned.
+- Tests only: three pane tests (`pane_mode_runs_the_agent_in_a_pane_and_seals_its_report`,
+  `include_ignored_reaches_the_reclaim_a_pane_cleanup_runs`,
+  `owned_native_editor_accepts_input_before_herdr_registers_the_agent`) no longer expect the pane
+  to be closed and the workspace cleaned in the very instant `accept` returns. In loaded runs two
+  brgr processes ran the same task's cleanup at once against the fake Herdr's read-once `working`
+  state, so neither closed the pane; a later brgr command finishes a cleanup that found the agent
+  busy, and the tests now run `status` until it has. A failure of the first also prints the fake
+  agent's state, the pane receipt and the last Herdr calls with their calling process (issue #224).
+- Tests only: `workflow_run_returns_before_a_sleeping_script_finishes` no longer asserts that
+  `brgr workflow run` returns within one second (it took 1.3 s once under load); its script now
+  waits on a release file and the test checks that the script had not finished when `run` returned.
+- Tests only: `pane_mode_runs_the_agent_in_a_pane_and_seals_its_report` no longer expects the
+  workspace to be cleaned in the very instant `accept` returns. In a loaded run its failure
+  report showed two brgr processes running the same task's cleanup at once with the fake
+  Herdr's read-once `working` state, so neither closed the pane; a later brgr command finishes a
+  cleanup that found the agent busy, and the test now looks for that. A failure also prints the
+  fake agent's state, the pane receipt and the last Herdr calls with their calling process
+  (issue #224).
+- Tests only: `workflow_run_returns_before_a_sleeping_script_finishes` no longer asserts that
+  `brgr workflow run` returns within one second (it took 1.3 s once under load); its script now
+  waits on a release file and the test checks that the script had not finished when `run` returned.
+- Tests only: when `pane_mode_runs_the_agent_in_a_pane_and_seals_its_report` fails to find its
+  workspace cleaned after the decision, the failure now also prints the fake agent's state, the
+  pane receipt, the native host state and the last Herdr calls. It failed once in seven full
+  runs under load and its cause is not known yet (issue #224).
 - A Codex worker no longer fails with `native TUI is waiting for input readiness`. Two causes, both
   on Codex 0.166: Codex draws its banner and input box about half a second before the folder
   prompt in a repository it has not trusted yet, which brgr took for a ready agent; and Herdr
