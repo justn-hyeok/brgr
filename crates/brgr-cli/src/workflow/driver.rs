@@ -403,13 +403,11 @@ fn file_digest(path: &Path) -> Result<String> {
     Ok(text)
 }
 
+/// Writes an owner-only file in one step: a reader (the driver's pid file is
+/// read by `resume` and `cancel`) sees the old file or the whole new one, never
+/// an empty or partial file, which would read as "no live driver".
 fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    fs::write(path, bytes)?;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
-    Ok(())
+    crate::write_bytes_atomic(path, bytes)
 }
 
 fn print_launch_receipt(paths: &Paths, run: &WorkflowRun, json_output: bool) {
@@ -481,4 +479,52 @@ pub(crate) fn trusts_recorded_pane(pane: &str) -> bool {
         recorded_source_pane(&paths, &run).as_deref() == Some(pane)
             && crate::caller_pane::live_owner_pane(pane).is_some()
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// `live_driver_pid` reads the driver's pid file while the driver, or a
+    /// `resume`, may be writing it. A reader must see the whole file or none of
+    /// it: an empty or partial read is "no live driver", and `resume` would
+    /// start a second one.
+    #[test]
+    fn a_reader_never_sees_a_torn_private_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("run.workflow.pid");
+        let payload = vec![b'7'; 256 * 1024];
+        write_private(&path, &payload).unwrap();
+        let finished = AtomicBool::new(false);
+        let torn = std::thread::scope(|scope| {
+            let reader = scope.spawn(|| {
+                let mut torn = 0_u32;
+                while !finished.load(Ordering::Acquire) {
+                    if let Ok(bytes) = fs::read(&path)
+                        && bytes.len() != payload.len()
+                    {
+                        torn += 1;
+                    }
+                }
+                torn
+            });
+            for _ in 0..400 {
+                write_private(&path, &payload).unwrap();
+            }
+            finished.store(true, Ordering::Release);
+            reader.join().unwrap()
+        });
+        assert_eq!(torn, 0, "{torn} reads saw an empty or partial file");
+    }
+
+    #[test]
+    fn a_private_file_is_owner_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nested").join("run.workflow.pid");
+        write_private(&path, b"1\n").unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"1\n");
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+    }
 }
