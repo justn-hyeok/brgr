@@ -144,7 +144,10 @@ and legacy `prefer_print_mode` settings never select it. Use
 `--owner-session SESSION --source-pane PANE` for a positively verified source
 when the caller is a shared daemon. `--as SESSION` (the short form) is the
 session in the calling context; Codex owners are identified by what the panes
-show, not by a shared daemon's environment. When `--as` names a session and
+show, not by a shared daemon's environment. Codex 0.162 and later show a
+command's line only after it ends, so a run looks for the pane once the call
+has finished, while `head handoff` needs it at once: first run one short command such as
+`brgr --as SESSION status --brief` and the line is there. When `--as` names a session and
 `BRGR_SESSION_ID` names a different one, `BRGR_PARENT_TASK_ID` and
 `BRGR_PARENT_ATTEMPT_ID` belong to that other session and are ignored, and so
 is `BRGR_OWNER_ID`: the call's owner is `codex:SESSION` (or the session's own

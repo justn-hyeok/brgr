@@ -30,7 +30,7 @@ brgr hands bounded work to registered coding agents and seals what they return f
 2. When the work should be done by Claude, use `--harness local.claude-code`. Do not run Claude through another harness.
 3. Workers always run with full permissions (yolo). Nothing lowers it; `--permission` is ignored.
 4. Close what you open. Decide every result (`accept`, `reject`, or `result TASK --ack`) so brgr closes the worker's pane and removes its worktree once nothing in it would be lost. Use `--keep-pane` or `--keep-worktree` only when the user asks to keep one.
-5. From Codex, start every brgr command with `--as SESSION`, the session in your calling context, and never add `--source-pane`. brgr finds your pane from what the Codex panes show; if it cannot, the run fails instead of opening beside someone else. From Cursor, `CURSOR_CONVERSATION_ID` is the session; `--as` is optional.
+5. From Codex, start every brgr command with `--as SESSION`, the session in your calling context, and never add `--source-pane`. brgr finds your pane from what the Codex panes show; if it cannot, the run fails instead of opening beside someone else. Codex 0.162 and later show a command's line only after it ends, so before the first handoff of a session run one short brgr command with the same `--as` (for example `brgr --as SESSION status --brief`). From Cursor, `CURSOR_CONVERSATION_ID` is the session; `--as` is optional.
 6. Leave a worker's screens to brgr. It accepts the workspace trust prompt, continue notices, Claude Code's bypass warning and new-MCP-server prompt, and skips update offers.
 
 ## The loop
@@ -52,7 +52,7 @@ brgr hands bounded work to registered coding agents and seals what they return f
 
 - The quoted screen says "insufficient credits", a usage limit, or an HTTP 4xx: the harness or its model failed, not brgr. Use another harness, or set a model with `brgr config set model <name> --harness <id>`.
 - "a screen no brgr rule answers": the quote shows the screen (`herdr pane read PANE --source visible` shows it live). If a key clears it, answer before the three-minute deadline with `brgr input TASK --key <key>` or `--text <text>`, and tell the user so a rule can be added.
-- "could not find the calling Codex pane": the command did not start with `--as SESSION`, or the pane is too narrow to show it.
+- "could not find the calling Codex pane": the command did not start with `--as SESSION`, or the pane is too narrow to show it, or (Codex 0.162 and later) this was the first brgr command of the session and it must end before its line shows: run a short one such as `brgr --as SESSION status --brief`, then retry.
 - "finished without writing its report": the agent stopped early; the quoted screen says why.
 - `brgr doctor` reports a harness as unhealthy after its CLI updated: register it again with `brgr harness add <executable> --workspace <scratch> --prompt "<small probe>"`.
 
@@ -614,6 +614,14 @@ mod tests {
             assert!(SKILL_TEXT.contains(rule), "skill no longer mentions {rule}");
         }
         assert!(!SKILL_TEXT.contains("without a pane"));
+    }
+
+    #[test]
+    fn skill_tells_codex_to_run_a_short_command_before_the_first_handoff() {
+        assert!(
+            SKILL_TEXT.contains("before the first handoff of a session"),
+            "the skill must say a Codex head runs a short command with the same --as first"
+        );
     }
 
     #[test]

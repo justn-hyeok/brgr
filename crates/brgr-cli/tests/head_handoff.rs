@@ -735,3 +735,36 @@ fn handoff_help_names_the_task_id_format() {
         "{help}"
     );
 }
+
+#[test]
+fn a_codex_handoff_without_a_visible_pane_says_to_run_a_short_command_first() {
+    // Codex 0.162 and later show a command's line only after it ends, so the
+    // first call of a session cannot see its own pane yet.
+    let (_temp, home, _workspace) = gjc_home();
+    let session = "01a0fb33-447c-7ba0-9f37-ba04f33ce809";
+    let output = run(
+        &home,
+        &[
+            "--as", session, "head", "handoff", "--kind", "codex", "--goal", "g",
+        ],
+        &[("BRGR_SESSION_ID", session)],
+    );
+    assert!(!output.status.success());
+    let said = String::from_utf8_lossy(&output.stderr);
+    assert!(said.contains("verified Herdr pane"), "{said}");
+    assert!(said.contains("status --brief"), "{said}");
+}
+
+#[test]
+fn a_claude_handoff_without_a_pane_does_not_get_the_codex_advice() {
+    let (_temp, home, _workspace) = gjc_home();
+    let output = run(
+        &home,
+        &["head", "handoff", "--kind", "claude", "--goal", "g"],
+        &[("CLAUDE_CODE_SESSION_ID", "claude-session")],
+    );
+    assert!(!output.status.success());
+    let said = String::from_utf8_lossy(&output.stderr);
+    assert!(said.contains("verified Herdr pane"), "{said}");
+    assert!(!said.contains("status --brief"), "{said}");
+}
