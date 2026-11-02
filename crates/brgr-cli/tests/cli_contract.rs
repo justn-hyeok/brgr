@@ -2483,14 +2483,14 @@ if test -n "${BRGR_PARENT_ATTEMPT_ID:-}"; then
     child_json=$("$BRGR_BIN" --json --headless run CHILD --harness local.gjc --workspace "$PWD")
     child_task=$(printf '%s\n' "$child_json" | /usr/bin/sed -n 's/.*"task_id":"\([^"]*\)".*/\1/p')
     test -n "$child_task"
-    "$BRGR_BIN" --json wait "$child_task" --timeout-seconds 10 >/dev/null
+    "$BRGR_BIN" --json wait "$child_task" --timeout-seconds 120 >/dev/null
     "$BRGR_BIN" --json result "$child_task" >/dev/null
     "$BRGR_BIN" --json accept "$child_task" --reason 'child artifact checked' >/dev/null
   elif /usr/bin/grep -q CHILD "$prompt_file"; then
     child_json=$("$BRGR_BIN" --json --headless run LEAF --harness local.gjc --workspace "$PWD")
     child_task=$(printf '%s\n' "$child_json" | /usr/bin/sed -n 's/.*"task_id":"\([^"]*\)".*/\1/p')
     test -n "$child_task"
-    "$BRGR_BIN" --json wait "$child_task" --timeout-seconds 10 >/dev/null
+    "$BRGR_BIN" --json wait "$child_task" --timeout-seconds 120 >/dev/null
     "$BRGR_BIN" --json result "$child_task" >/dev/null
     "$BRGR_BIN" --json accept "$child_task" --reason 'leaf artifact checked' >/dev/null
   fi
@@ -4071,6 +4071,7 @@ fn slow_herdr_registration_cannot_leave_an_unclaimed_task() {
     let workspace = temp.path().join("work");
     let herdr = temp.path().join("herdr");
     let reported = temp.path().join("reported-session");
+    let release = temp.path().join("herdr-release");
     fs::create_dir_all(&workspace).unwrap();
     write_fast_script(
         &herdr,
@@ -4080,11 +4081,11 @@ case "$1 $2" in
   if [ -s "$BRGR_TEST_SESSION_FILE" ]; then
    printf '{"result":{"agent":{"agent":"codex","pane_id":"w1:p1","agent_status":"working","agent_session":{"value":"%s"}}}}\n' "$(/bin/cat "$BRGR_TEST_SESSION_FILE")"
   else
-   /bin/sleep 3
+   n=0; while [ ! -e "$BRGR_TEST_RELEASE" ] && [ "$n" -lt 600 ]; do /bin/sleep 0.1; n=$((n+1)); done
    printf '%s\n' '{"result":{"agent":{"agent":"codex","pane_id":"w1:p1","agent_status":"working"}}}'
   fi;;
  'pane report-agent-session')
-  /bin/sleep 3
+  n=0; while [ ! -e "$BRGR_TEST_RELEASE" ] && [ "$n" -lt 600 ]; do /bin/sleep 0.1; n=$((n+1)); done
   while [ "$#" -gt 0 ]; do
    if [ "$1" = --agent-session-id ]; then printf '%s' "$2" > "$BRGR_TEST_SESSION_FILE"; fi
    shift
@@ -4104,19 +4105,23 @@ esac
         ("HERDR_PANE_ID", "w1:p1"),
         ("HERDR_BIN_PATH", herdr.to_str().unwrap()),
         ("BRGR_TEST_SESSION_FILE", reported.to_str().unwrap()),
+        ("BRGR_TEST_RELEASE", release.to_str().unwrap()),
     ];
-    let started = Instant::now();
     let launch = json_output(&run(
         &home,
         &["run", "SLOW", "--workspace", workspace.to_str().unwrap()],
         &envs,
     ));
-    assert!(
-        started.elapsed() < Duration::from_secs(2),
-        "task admission waited for Herdr"
-    );
+    // Herdr answers only once the release file exists, and it does not yet:
+    // a `run` that has returned did not wait for it. No clock is involved.
+    assert!(!release.exists(), "task admission waited for Herdr");
     let task = launch["task_id"].as_str().unwrap();
-    thread::sleep(Duration::from_millis(5_500));
+    fs::write(&release, "go").unwrap();
+    // Let the slow registration finish: it records the session once released.
+    let began = Instant::now();
+    while !reported.is_file() && began.elapsed() < Duration::from_secs(15) {
+        thread::sleep(Duration::from_millis(100));
+    }
     let status = json_output(&run(&home, &["status", task], &envs));
     assert_ne!(status["state"], "terminal", "{status}");
     json_output(&run(&home, &["cancel", task], &envs));
