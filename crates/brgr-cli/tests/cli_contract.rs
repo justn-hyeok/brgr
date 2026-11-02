@@ -7772,7 +7772,7 @@ fn add_slow_prompt_file_harness(home: &Path, root: &Path) {
     let executable = root.join("slow-agent");
     write_fast_script(
         &executable,
-        "#!/bin/sh\ncase \"$1\" in\n  --version) echo 'slow 1';;\n  --help) echo '  --prompt-file <path>  fresh run';;\n  --prompt-file)\n    if /usr/bin/grep -q SLOW_RUN \"$2\"; then /bin/sleep 4; fi\n    if /usr/bin/grep -q HOLD_RUN \"$2\"; then n=0; while [ ! -e \"${0%/*}/release\" ] && [ $n -lt 600 ]; do /bin/sleep 0.1; n=$((n+1)); done; fi\n    /bin/cat \"$2\";;\n  *) exit 2;;\nesac\n",
+        "#!/bin/sh\ncase \"$1\" in\n  --version) echo 'slow 1';;\n  --help) echo '  --prompt-file <path>  fresh run';;\n  --prompt-file)\n    if /usr/bin/grep -q SLOW_RUN \"$2\"; then /bin/sleep 4; fi\n    if /usr/bin/grep -q HOLD_RUN \"$2\"; then : > \"${0%/*}/started\"; n=0; while [ ! -e \"${0%/*}/release\" ] && [ $n -lt 600 ]; do /bin/sleep 0.1; n=$((n+1)); done; fi\n    /bin/cat \"$2\";;\n  *) exit 2;;\nesac\n",
     );
     json_output(&run(
         home,
@@ -7876,6 +7876,15 @@ fn a_lost_run_whose_worker_still_runs_cannot_be_revised_until_it_stops() {
     while !record.is_file() && began.elapsed() < Duration::from_secs(10) {
         thread::sleep(Duration::from_millis(50));
     }
+    // The worker must be running before its supervisor is killed: on a loaded
+    // machine the supervisor's record can exist before the worker has started,
+    // and a run with no live worker may rightly be revised.
+    let worker_started = temp.path().join("slow").join("started");
+    let began = Instant::now();
+    while !worker_started.is_file() && began.elapsed() < Duration::from_mins(1) {
+        thread::sleep(Duration::from_millis(50));
+    }
+    assert!(worker_started.is_file(), "the worker never started");
     let supervisor: Value = serde_json::from_slice(&fs::read(&record).unwrap()).unwrap();
     assert!(
         Command::new("/bin/kill")
