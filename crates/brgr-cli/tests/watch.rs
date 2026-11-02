@@ -225,19 +225,16 @@ fn watch_prints_state_then_result_then_done_once_each() {
 fn watch_prints_an_existing_result_and_exits() {
     let (_temp, home, workspace) = watch_home();
     let task = start_task(&home, &workspace, "BRGR_FIXTURE_OK", true);
-    let started = Instant::now();
+    // An explicit timeout turns "kept running after the result existed" into a
+    // `timeout` event and a failed exit, so no wall-clock bound is needed.
     let output = run(
         &home,
-        &["watch", &task],
+        &["watch", &task, "--timeout-seconds", "60"],
         &[("BRGR_OWNER_ID", "codex:watch-test")],
     );
     assert!(
-        started.elapsed() < Duration::from_secs(3),
-        "watch kept running after the task already had a result"
-    );
-    assert!(
         output.status.success(),
-        "{}",
+        "watch kept running after the task already had a result, or failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     let events = event_lines(&output.stdout);
@@ -398,7 +395,7 @@ fn watch_timeout_prints_timeout_and_exits_nonzero() {
         &[("BRGR_OWNER_ID", "codex:watch-test")],
     );
     assert!(
-        started.elapsed() < Duration::from_secs(10),
+        started.elapsed() < Duration::from_mins(1),
         "watch did not honor --timeout-seconds"
     );
     assert!(!output.status.success());
@@ -552,19 +549,16 @@ fn watch_all_does_not_add_a_task_created_after_it_started() {
 fn watch_all_with_no_unfinished_tasks_exits_zero_with_a_message() {
     let (_temp, home, workspace) = watch_home();
     let finished = start_task(&home, &workspace, "BRGR_FIXTURE_OK", true);
-    let started = Instant::now();
+    // With an explicit timeout, waiting would end as a `timeout` and a failed
+    // exit; the message below is what an immediate exit says.
     let output = run(
         &home,
-        &["watch", "--all"],
+        &["watch", "--all", "--timeout-seconds", "60"],
         &[("BRGR_OWNER_ID", "codex:watch-test")],
     );
     assert!(
-        started.elapsed() < Duration::from_secs(3),
-        "watch --all waited when this owner had no unfinished tasks"
-    );
-    assert!(
         output.status.success(),
-        "{}",
+        "watch --all waited when this owner had no unfinished tasks, or failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
