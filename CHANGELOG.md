@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- A workflow driver's pid file is written in one step. It used to be truncated and then written, so
+  `brgr workflow resume` or `cancel` reading it in that instant saw an empty file, took it for "no live
+  driver", and could start a second driver. It surfaced as a failure of `resume_with_a_live_driver_starts_nothing`
+  in a loaded test run (issue #224).
 - Tests only: `oversized_jsonl_event_stops_its_process_group_before_deadline` failed once under heavy
   load (load average 36) with `CaptureDeadlineElapsed`: its fake harness built the oversized event with
   a 1.2-million-iteration `awk` loop that outran the ten-second deadline. The event is now written in
