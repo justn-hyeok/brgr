@@ -668,20 +668,34 @@ mod tests {
         assert!(table.contains_key(&std::process::id()));
     }
 
+    /// A child that stays until killed, with an environment the test can read.
+    /// `spawn` can return in the middle of the exec: the kernel wakes the parent
+    /// before it fills in the new image's environment, and `/proc` reads as empty
+    /// until then. `MARK` shows it has been filled in. An ancestor of a running
+    /// brgr has long finished its exec, so `pane_in_environment` never sees this.
     #[cfg(target_os = "linux")]
     fn waiting_child(pane: Option<&str>) -> std::process::Child {
-        let mut command = Command::new("/bin/sh");
-        command.args(["-c", "exec /bin/sleep 600"]).env_clear();
+        let mut command = Command::new("/bin/sleep");
+        command.arg("600").env_clear().env("MARK", "1");
         if let Some(pane) = pane {
             command.env("HERDR_PANE_ID", pane);
-        } else {
-            command.env_remove("HERDR_PANE_ID");
         }
-        command
+        let child = command
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        command.spawn().unwrap()
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let environ = format!("/proc/{}/environ", child.id());
+        let started = std::time::Instant::now();
+        while !fs::read(&environ).is_ok_and(|bytes| !bytes.is_empty()) {
+            assert!(
+                started.elapsed() < std::time::Duration::from_mins(1),
+                "the child's environment never appeared"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        child
     }
 
     #[cfg(target_os = "linux")]
