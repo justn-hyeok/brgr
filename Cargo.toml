@@ -45,8 +45,3 @@ unsafe_code = "forbid"
 [workspace.lints.clippy]
 all = "warn"
 pedantic = "warn"
-
-# Tests run brgr as a real process thousands of times. Optimizing the
-# dependencies, SQLite above all, makes each run cheaper at a one-time build cost.
-[profile.dev.package."*"]
-opt-level = 2
