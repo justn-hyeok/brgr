@@ -11,7 +11,7 @@ permissions:
 jobs:
   # The gate for a pull request: the tests take half as long here as on macOS.
   linux:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-24.04-arm
     env:
       CARGO_PROFILE_DEV_DEBUG: "0"
     steps:
