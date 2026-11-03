@@ -220,13 +220,24 @@ pub(crate) fn restore_cursor(paths: &Paths, task: TaskId, revision: u32) -> Resu
     let Ok(bytes) = fs::read(&path) else {
         return Ok(());
     };
-    let hook: CursorHook = serde_json::from_slice(&bytes)?;
+    let hook: CursorHook =
+        serde_json::from_slice(&bytes).with_context(|| format!("reading {}", path.display()))?;
     let current = fs::read(&hook.path).ok();
     if current.as_deref() == Some(hook.generated.as_slice()) {
         if let Some(original) = hook.original {
-            crate::write_bytes_atomic(&hook.path, &original)?;
+            crate::write_bytes_atomic(&hook.path, &original)
+                .with_context(|| format!("restoring the Cursor hook {}", hook.path.display()))?;
         } else {
-            fs::remove_file(&hook.path)?;
+            crate::pane_adapter::other_process_may_act("before the cursor hook is removed");
+            match fs::remove_file(&hook.path) {
+                Ok(()) => {}
+                // The other process doing the same cleanup restored it first.
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(anyhow::Error::from(error)
+                        .context(format!("removing the Cursor hook {}", hook.path.display())));
+                }
+            }
             let _ = fs::remove_dir(hook.path.parent().unwrap());
         }
     }

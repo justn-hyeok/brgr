@@ -43,7 +43,8 @@ pub(crate) use lifecycle::seal_native_report;
 pub(crate) use lifecycle::stop_external;
 use lifecycle::{PaneReceipt, update_receipt, verify_receipt};
 pub(crate) use lifecycle::{
-    cleanup_settled, close_leftover_pane, collect_recovered, external_alive, session_status,
+    cleanup_settled, close_leftover_pane, collect_recovered, external_alive, other_process_may_act,
+    report_awaits_archival, session_status,
 };
 pub(crate) use native::report_digest as native_digest;
 pub(crate) use native::{deliver_owner_notice, send_native_input, serve_session};
