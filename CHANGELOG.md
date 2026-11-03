@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Tests only: the three slowest tests no longer wait out real intervals, which removes about two minutes from a
+  full run. A fake worker's `grep ASK` also matched the word `TASK` in its prompt, so a step nobody questioned sat
+  in `message wait` for its 60-second limit; it now matches the whole word. The workflow admission test holds its
+  first step on a file instead of a 30-second sleep, and the harness health test injects a short deadline for its
+  timeout case. No shipped behavior changes.
 - Herdr commands for worktree creation, pane cleanup, and OMP agent lookup now honor `HERDR_BIN_PATH` like the others. Tests no longer reach a real Herdr from inside a Herdr pane (issue #270).
 - `brgr accept` could print `brgr cleanup pending: No such file or directory (os error 2)` for a
   pane worker (issue #265). The pane's session loop and the deciding command both archive the

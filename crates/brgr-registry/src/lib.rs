@@ -580,6 +580,14 @@ impl Registry {
     /// timeout, nonzero exit, and evidence drift are classified as [`Health`].
     /// Probes inherit the caller `PATH` via [`ProcessRunner::probe`].
     pub async fn health_probed(&self, harness_id: &str) -> Result<Health, RegistryError> {
+        self.health_probed_within(harness_id, PROBE_DEADLINE).await
+    }
+
+    async fn health_probed_within(
+        &self,
+        harness_id: &str,
+        deadline: Duration,
+    ) -> Result<Health, RegistryError> {
         validate_harness_id(harness_id)?;
         let manifest_bytes = fs::read(self.manifest_path(harness_id))?;
         let manifest: HarnessManifest = serde_json::from_slice(&manifest_bytes)?;
@@ -601,14 +609,13 @@ impl Registry {
             (&manifest.probe.version_argv, &receipt.version_digest, false),
             (&manifest.probe.help_argv, &receipt.help_digest, true),
         ] {
-            let observed =
-                match ProcessRunner::probe(&manifest.executable, argv, PROBE_DEADLINE).await {
-                    Ok(output) => output,
-                    Err(RunnerError::SpawnIo(_) | RunnerError::InvalidExecutable(_)) => {
-                        return Ok(Health::Unspawnable);
-                    }
-                    Err(error) => return Err(error.into()),
-                };
+            let observed = match ProcessRunner::probe(&manifest.executable, argv, deadline).await {
+                Ok(output) => output,
+                Err(RunnerError::SpawnIo(_) | RunnerError::InvalidExecutable(_)) => {
+                    return Ok(Health::Unspawnable);
+                }
+                Err(error) => return Err(error.into()),
+            };
             let evidence = if is_help {
                 help_output(&observed)
             } else {
@@ -2702,7 +2709,7 @@ mod tests {
         fs::write(
             &executable,
             format!(
-                "#!/bin/sh\nif [ -f '{0}' ]; then\n  case \"$(/bin/cat '{0}')\" in\n    stall) /bin/sleep 6;;\n    sleep) /bin/sleep 30;;\n    fail) exit 3;;\n  esac\nfi\ncase \"$1\" in\n  --version) echo 1.0;;\n  --help) echo '  --prompt-file <path>';;\n  --prompt-file) /bin/cat \"$2\";;\nesac\n",
+                "#!/bin/sh\nif [ -f '{0}' ]; then\n  case \"$(/bin/cat '{0}')\" in\n    stall) /bin/sleep 1;;\n    sleep) /bin/sleep 600;;\n    fail) exit 3;;\n  esac\nfi\ncase \"$1\" in\n  --version) echo 1.0;;\n  --help) echo '  --prompt-file <path>';;\n  --prompt-file) /bin/cat \"$2\";;\nesac\n",
                 sidecar.display(),
             ),
         )
@@ -2739,15 +2746,22 @@ mod tests {
         );
 
         // A slow probe is not a hung one: a multi-second stall, which a busy
-        // machine produces, must not fail a working harness.
+        // machine produces, must not fail a working harness. Five seconds once
+        // did, so the limit stays well past it.
+        const { assert!(PROBE_DEADLINE.as_secs() >= 15) };
         fs::write(&sidecar, "stall").unwrap();
         assert_eq!(
             registry.health_probed(&draft.id).await.unwrap(),
             Health::Healthy
         );
+        // Only the deadline can end this probe, so a short one cannot read
+        // differently on a loaded machine.
         fs::write(&sidecar, "sleep").unwrap();
         assert_eq!(
-            registry.health_probed(&draft.id).await.unwrap(),
+            registry
+                .health_probed_within(&draft.id, Duration::from_millis(200))
+                .await
+                .unwrap(),
             Health::TimedOut
         );
         fs::write(&sidecar, "fail").unwrap();
