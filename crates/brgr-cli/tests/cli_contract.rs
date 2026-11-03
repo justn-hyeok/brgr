@@ -8945,6 +8945,10 @@ fn the_incoming_session_records_the_next_revision_through_the_guard() {
 }
 
 #[test]
+#[cfg_attr(
+    target_os = "linux",
+    ignore = "Linux caps one argument at 128 KiB, and this objective is passed as one (#229)"
+)]
 fn a_256_kib_objective_is_admitted_by_brgr_run() {
     let (_temp, home, workspace) = gjc_home();
     let objective = "a".repeat(brgr_protocol::MAX_OBJECTIVE_BYTES);
@@ -8969,6 +8973,10 @@ fn a_256_kib_objective_is_admitted_by_brgr_run() {
 }
 
 #[test]
+#[cfg_attr(
+    target_os = "linux",
+    ignore = "Linux caps one argument at 128 KiB, and this objective is passed as one (#229)"
+)]
 fn a_256_kib_plus_one_objective_is_refused_by_brgr_run_without_creating_a_task() {
     let (_temp, home, workspace) = gjc_home();
     let objective = "a".repeat(brgr_protocol::MAX_OBJECTIVE_BYTES + 1);
