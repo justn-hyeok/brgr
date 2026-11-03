@@ -305,7 +305,7 @@ pub(crate) fn reconcile_pending(paths: &Paths) -> Result<()> {
             )
             && let Err(error) = crate::pane_adapter::cleanup_settled(paths, task, revision)
         {
-            eprintln!("brgr cleanup pending: {error}");
+            eprintln!("brgr cleanup pending: {error:#}");
         }
     }
     Ok(())

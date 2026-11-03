@@ -1409,9 +1409,7 @@ pub(crate) fn reclaim_task(paths: &Paths, task: TaskId, revision: u32) -> Option
     if parent.parent() != Some(root.as_path()) || !worktree.is_dir() {
         return None;
     }
-    // A pane-mode worker still runs in the worktree until its pane closes;
-    // the pane cleanup calls this again once it has.
-    if paths.pane_receipt(task, revision).exists() && !pane_closed(paths, task, revision) {
+    if left_to_the_pane_cleanup(paths, task, revision) {
         return None;
     }
     // Only a settled revision is assessed, so the once-only marker below can
@@ -1573,6 +1571,20 @@ pub(crate) fn reclaim_and_report(paths: &Paths, task: TaskId, revision: u32) {
     if let Some(note) = reclaim_task(paths, task, revision) {
         eprintln!("brgr · {note}");
     }
+}
+
+/// Whether a pane-mode run's worktree is not this reclaim's to remove yet.
+///
+/// A pane-mode worker still runs in the worktree until its pane closes; the
+/// pane cleanup calls the reclaim again once it has. That cleanup then
+/// archives the handled report out of the worktree and reclaims right after.
+/// A decision's own reclaim can get here in between, when the pane is recorded
+/// closed and the report is still inside: it would keep the worktree for that
+/// report, and the once-only assessment mark would keep it for good. Leave it
+/// to the cleanup that archives.
+fn left_to_the_pane_cleanup(paths: &Paths, task: TaskId, revision: u32) -> bool {
+    (paths.pane_receipt(task, revision).exists() && !pane_closed(paths, task, revision))
+        || crate::pane_adapter::report_awaits_archival(paths, task, revision)
 }
 
 /// Whether the revision's pane receipt says its pane has been closed.

@@ -342,7 +342,10 @@ pub(crate) fn collect_recovered(
 }
 
 pub(crate) fn cleanup_settled(paths: &Paths, task: TaskId, revision: u32) -> Result<()> {
-    let launch: LaunchEnvelope = serde_json::from_slice(&fs::read(paths.launch(task, revision))?)?;
+    let launch_path = paths.launch(task, revision);
+    let launch: LaunchEnvelope = serde_json::from_slice(
+        &fs::read(&launch_path).with_context(|| format!("reading {}", launch_path.display()))?,
+    )?;
     if !launch.pane_mode || launch.keep_pane {
         return Ok(());
     }
@@ -400,7 +403,9 @@ pub(crate) fn cleanup_settled(paths: &Paths, task: TaskId, revision: u32) -> Res
         }
     }
     close_leftover_pane(paths, task, revision, false);
-    let latest: PaneReceipt = serde_json::from_slice(&fs::read(&path)?)?;
+    let latest: PaneReceipt = serde_json::from_slice(
+        &fs::read(&path).with_context(|| format!("reading {}", path.display()))?,
+    )?;
     if latest.cleanup == "closed" {
         archive_report(paths, task, revision)?;
         crate::worktree_prune::reclaim_and_report(paths, task, revision);
@@ -408,30 +413,153 @@ pub(crate) fn cleanup_settled(paths: &Paths, task: TaskId, revision: u32) -> Res
     Ok(())
 }
 
-fn archive_report(paths: &Paths, task: TaskId, revision: u32) -> Result<()> {
-    crate::native_result::restore_cursor(paths, task, revision)?;
+/// A point in a cleanup step where another process running the same cleanup
+/// (the pane's session loop and the deciding command both do) can act between
+/// this process's check and what follows it. Tests act there; a release build
+/// does nothing.
+#[cfg(not(test))]
+pub(crate) fn other_process_may_act(_point: &str) {}
+
+/// What the other process does at a named point, in a test.
+#[cfg(test)]
+type OtherProcess = Box<dyn Fn(&str)>;
+
+#[cfg(test)]
+thread_local! {
+    pub(super) static OTHER_PROCESS: std::cell::RefCell<Option<OtherProcess>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn other_process_may_act(point: &str) {
+    OTHER_PROCESS.with(|slot| {
+        if let Some(act) = slot.borrow().as_deref() {
+            act(point);
+        }
+    });
+}
+
+/// A handled report the receipt still records in the workspace, to be moved
+/// into the run directory once the pane has closed.
+struct PendingArchive {
+    receipt: PathBuf,
+    report: PathBuf,
+    expected: String,
+    max_bytes: u64,
+    archive: PathBuf,
+}
+
+fn pending_archive(paths: &Paths, task: TaskId, revision: u32) -> Result<Option<PendingArchive>> {
     let path = paths.pane_receipt(task, revision);
-    let receipt: PaneReceipt = serde_json::from_slice(&fs::read(&path)?)?;
+    let receipt: PaneReceipt = serde_json::from_slice(
+        &fs::read(&path).with_context(|| format!("reading {}", path.display()))?,
+    )?;
     if receipt.archived_report.is_some() || receipt.archive_refused.is_some() {
-        return Ok(());
+        return Ok(None);
     }
     let (Some(report), Some(expected), Some(attempt)) =
-        (&receipt.report, &receipt.report_digest, receipt.attempt)
+        (receipt.report, receipt.report_digest, receipt.attempt)
     else {
-        return Ok(());
+        return Ok(None);
     };
     let spec = Store::open(&paths.store)?.task_for_attempt(attempt)?;
     let owned =
         PathBuf::from(&spec.workspace).join(format!(".brgr/tasks/{task}-r{revision}/report.md"));
-    if *report != owned || !report.is_file() {
-        return Ok(());
+    if report != owned {
+        return Ok(None);
     }
-    let bytes = read_report(report, spec.artifact_contract.max_bytes)?;
-    if report_digest(&bytes) != *expected {
+    Ok(Some(PendingArchive {
+        receipt: path,
+        report,
+        expected,
+        max_bytes: spec.artifact_contract.max_bytes,
+        archive: paths.runs.join(format!("{task}-r{revision}.report.md")),
+    }))
+}
+
+/// Whether the revision's handled report is still in its workspace waiting to
+/// be archived. A worktree reclaim leaves such a worktree to the cleanup that
+/// archives the report, which reclaims right after.
+pub(crate) fn report_awaits_archival(paths: &Paths, task: TaskId, revision: u32) -> bool {
+    pending_archive(paths, task, revision)
+        .ok()
+        .flatten()
+        .is_some_and(|pending| pending.report.is_file())
+}
+
+fn is_not_found(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<std::io::Error>()
+        .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+}
+
+/// Moves the handled report out of the workspace. The pane's session loop and
+/// the deciding command both run this for the same task, without a lock
+/// between them, so every file this step touches may already have been handled
+/// by the other process: that is the step's success, proven by the archive's
+/// bytes, never by skipping the digest check. A file missing for any other
+/// reason is reported, naming it.
+fn archive_report(paths: &Paths, task: TaskId, revision: u32) -> Result<()> {
+    crate::native_result::restore_cursor(paths, task, revision)?;
+    let Some(pending) = pending_archive(paths, task, revision)? else {
+        return Ok(());
+    };
+    let PendingArchive {
+        receipt,
+        report,
+        expected,
+        max_bytes,
+        archive,
+    } = pending;
+    other_process_may_act("before the sealed report is read");
+    let bytes = match read_report(&report, max_bytes) {
+        Ok(bytes) => bytes,
+        Err(error) if is_not_found(&error) => {
+            // The other process writes the archive before it removes the
+            // report and updates the receipt last, so a report gone after
+            // this receipt was read is its work exactly when the archive
+            // holds the sealed bytes.
+            if read_report(&archive, max_bytes).is_ok_and(|bytes| report_digest(&bytes) == expected)
+            {
+                return update_receipt(&receipt, |value| value.archived_report = Some(archive));
+            }
+            // Reported once, like a changed report: returning an error made
+            // every later command retry and warn again.
+            let reason = format!(
+                "sealed report {} is missing before archival",
+                report.display()
+            );
+            update_receipt(&receipt, |value| {
+                value.archive_refused = Some(reason.clone());
+            })?;
+            eprintln!(
+                "brgr could not archive the handled report of task {task} (revision {revision}): {reason}"
+            );
+            return Ok(());
+        }
+        Err(error) => {
+            // Non-NotFound read failures (for example a directory, FIFO,
+            // symlink, or oversized report) cannot be archived safely. Keep
+            // the owner's artifact in place and record the refusal so this
+            // permanent condition does not make every command retry it.
+            let reason = format!(
+                "could not read sealed report {}: {error:#}",
+                report.display()
+            );
+            update_receipt(&receipt, |value| {
+                value.archive_refused = Some(reason.clone());
+            })?;
+            eprintln!(
+                "brgr could not archive the handled report of task {task} (revision {revision}): {reason}"
+            );
+            return Ok(());
+        }
+    };
+    if report_digest(&bytes) != expected {
         // A permanent mismatch: leave the file for the owner and say so once.
         // Returning an error made every later command retry and warn again.
         let reason = "handled report changed before archival";
-        update_receipt(&path, |value| {
+        update_receipt(&receipt, |value| {
             value.archive_refused = Some(reason.to_owned());
         })?;
         eprintln!(
@@ -440,9 +568,18 @@ fn archive_report(paths: &Paths, task: TaskId, revision: u32) -> Result<()> {
         );
         return Ok(());
     }
-    let archive = paths.runs.join(format!("{task}-r{revision}.report.md"));
-    crate::write_bytes_atomic(&archive, &bytes)?;
-    fs::remove_file(report)?;
+    crate::write_bytes_atomic(&archive, &bytes)
+        .with_context(|| format!("writing the report archive {}", archive.display()))?;
+    other_process_may_act("before the sealed report is removed");
+    match fs::remove_file(&report) {
+        Ok(()) => {}
+        // Removed by the other process, after it wrote the same archive.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(anyhow::Error::from(error)
+                .context(format!("removing the archived report {}", report.display())));
+        }
+    }
     let mut directory = report.parent();
     for _ in 0..3 {
         let Some(parent) = directory else {
@@ -453,7 +590,7 @@ fn archive_report(paths: &Paths, task: TaskId, revision: u32) -> Result<()> {
         }
         directory = parent.parent();
     }
-    update_receipt(&path, |value| value.archived_report = Some(archive))
+    update_receipt(&receipt, |value| value.archived_report = Some(archive))
 }
 
 fn mark_closed(path: &Path) -> Result<()> {

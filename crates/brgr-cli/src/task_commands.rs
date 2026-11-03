@@ -353,7 +353,7 @@ pub(crate) fn result(
         // The acknowledgement is already durable: a cleanup problem is reported,
         // not returned, or the caller would retry a decision that was recorded.
         if let Err(error) = crate::pane_adapter::cleanup_settled(paths, task, spec.revision) {
-            eprintln!("brgr cleanup pending: {error}");
+            eprintln!("brgr cleanup pending: {error:#}");
         }
         crate::worktree_prune::reclaim_and_report(paths, task, spec.revision);
     }
@@ -712,7 +712,7 @@ pub(crate) fn record_verdict(
         return Err(error.into());
     }
     if let Err(error) = crate::pane_adapter::cleanup_settled(paths, task, spec.revision) {
-        eprintln!("brgr cleanup pending: {error}");
+        eprintln!("brgr cleanup pending: {error:#}");
     }
     let persisted = store
         .decision_for_result(result.result_id)?

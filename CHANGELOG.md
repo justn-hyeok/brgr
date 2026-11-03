@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- `brgr accept` could print `brgr cleanup pending: No such file or directory (os error 2)` for a
+  pane worker (issue #265). The pane's session loop and the deciding command both archive the
+  handled report and restore the Cursor hook, with no lock between them, so one could remove a
+  file after the other had checked it; a decision's own worktree reclaim could also run before the
+  report was archived and keep the worktree for good. A file the other process already handled is
+  now the step's success, proven by the archive holding the sealed bytes, never by skipping the
+  digest check; a report missing for any other reason is reported once, naming the path; the
+  reclaim leaves a worktree whose report is not archived yet to the cleanup that archives it; and
+  every remaining `cleanup pending` error names the file that failed.
+
 ## 2.15.16 — 2026-11-03
 
 Codex workers start reliably on Codex 0.166, a pane worker's model is shown, asking for a result too early no longer says the task does not exist, a workflow driver's pid file can no longer be read empty, and the test suite is steadier under load.
