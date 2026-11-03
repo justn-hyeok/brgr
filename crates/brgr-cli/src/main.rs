@@ -1187,7 +1187,7 @@ mod tests {
         let Command::Run(args) = parsed.command else {
             panic!("not a run");
         };
-        assert_eq!(args.objective, "--workspace /etc");
+        assert_eq!(args.objective.as_deref(), Some("--workspace /etc"));
         assert_eq!(args.step.as_deref(), Some("--help~retry1"));
         assert_eq!(args.step_deadline, Some(2));
         assert_eq!(args.step_retries, Some(1));

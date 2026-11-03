@@ -280,8 +280,12 @@ brgr result TASK
 brgr accept TASK --reason "criteria verified"
 ```
 
-A task objective is at most 256 KiB (UTF-8 bytes). A new `brgr run OBJECTIVE`
-and the workflow SDK `agent()` refuse a longer one before creating a task. Omit `--criterion`
+A task objective is at most 256 KiB (UTF-8 bytes). Pass it as `brgr run OBJECTIVE`
+or as `brgr run --objective-file PATH`; the file must be a regular UTF-8 file.
+Linux limits one argument to 128 KiB, so use `--objective-file` for larger
+objectives to avoid the operating system's `E2BIG` argument limit. The workflow
+SDK `agent()` uses a private temporary file for tasks over 64 KiB. Both forms
+refuse a longer objective before creating a task. Omit `--criterion`
 only for a short objective: longer than 512 bytes, the default criterion is
 the fixed text `Objective achieved` and does not quote the prompt. Each
 `--criterion` is at most 4096 bytes, at most 32 criteria, 65536 bytes in total.

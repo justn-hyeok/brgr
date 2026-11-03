@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- `brgr run --objective-file PATH` accepts objectives up to 256 KiB without putting them in a single process argument; the workflow SDK uses and removes a private temporary file for tasks over 64 KiB (issue #229).
 - Tests only: the three slowest tests no longer wait out real intervals, which removes about two minutes from a
   full run. A fake worker's `grep ASK` also matched the word `TASK` in its prompt, so a step nobody questioned sat
   in `message wait` for its 60-second limit; it now matches the whole word. The workflow admission test holds its
