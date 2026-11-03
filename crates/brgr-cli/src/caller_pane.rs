@@ -670,8 +670,10 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     fn waiting_child(pane: Option<&str>) -> std::process::Child {
-        let mut command = Command::new("/bin/sh");
-        command.args(["-c", "exec /bin/sleep 600"]).env_clear();
+        // One exec, finished before `spawn` returns: a shell that execs again
+        // has an unreadable environment for an instant during the second one.
+        let mut command = Command::new("/bin/sleep");
+        command.arg("600").env_clear();
         if let Some(pane) = pane {
             command.env("HERDR_PANE_ID", pane);
         } else {
