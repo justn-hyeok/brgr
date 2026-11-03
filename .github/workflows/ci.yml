@@ -33,6 +33,26 @@ jobs:
       - if: github.event_name == 'push'
         run: cargo build --workspace --release --locked
 
+  linux-experiment:
+    runs-on: ubuntu-24.04
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.95.0 --profile minimal
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: false
+      - run: nproc
+      - run: cargo build --workspace --all-features --tests --locked
+        env:
+          CARGO_PROFILE_DEV_DEBUG: 0
+      - run: cargo test --workspace --all-features --locked --no-fail-fast -- -Z unstable-options --report-time
+        env:
+          CARGO_PROFILE_DEV_DEBUG: 0
+          RUSTC_BOOTSTRAP: 1
+          RUST_TEST_THREADS: 8
+
   supply-chain:
     runs-on: ubuntu-24.04
     steps:
