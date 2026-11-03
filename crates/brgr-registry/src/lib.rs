@@ -2414,7 +2414,8 @@ mod tests {
                 model: None,
                 effort: None,
                 permission: None,
-                deadline: Duration::from_secs(2),
+                // A hang guard: the fixture ends at once, however slowly it starts.
+                deadline: Duration::from_mins(1),
                 cancel_path: None,
                 pid_path: None,
             },
@@ -2483,7 +2484,8 @@ mod tests {
                 model: None,
                 effort: None,
                 permission: None,
-                deadline: Duration::from_secs(2),
+                // A hang guard: the fixture ends at once, however slowly it starts.
+                deadline: Duration::from_mins(1),
                 cancel_path: None,
                 pid_path: None,
             },

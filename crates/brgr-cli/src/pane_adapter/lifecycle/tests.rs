@@ -442,9 +442,11 @@ fn non_regular_report_does_not_block_a_recovery_probe() {
             .unwrap()
             .success()
     );
+    // A read that opened the FIFO would block until a writer came, which is
+    // never, so the bound only guards against that hang.
     let started = Instant::now();
     assert!(read_report(&fixture.report, 4096).is_err());
-    assert!(started.elapsed() < Duration::from_secs(1));
+    assert!(started.elapsed() < Duration::from_mins(1));
 }
 
 /// Puts the fixture where the two cleanups of one task meet (issue #265): the

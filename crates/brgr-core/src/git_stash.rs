@@ -101,11 +101,10 @@ fn could_not_check(workspace: &Path) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        fs, os::unix::fs::PermissionsExt as _, path::Path, process::Command, time::Duration,
-    };
+    use std::{fs, path::Path, process::Command, time::Duration};
 
     use super::*;
+    use crate::fast_script::write_fast_script;
 
     const BRANCH: &str = "brgr/task-ab12cd34";
 
@@ -216,12 +215,10 @@ mod tests {
         let repo = repository(BRANCH);
         let fake = repo.path().join("fake-git");
         // The branch lookup succeeds; only the stash listing fails.
-        fs::write(
+        write_fast_script(
             &fake,
             "#!/bin/sh\ncase \"$*\" in\n  *\"stash list\"*) exit 1 ;;\nesac\nprintf 'brgr/task-ab12cd34\\n'\n",
-        )
-        .unwrap();
-        fs::set_permissions(&fake, fs::Permissions::from_mode(0o700)).unwrap();
+        );
 
         let notes = stash_notes_with_executable(&fake, repo.path(), Duration::from_secs(20));
 

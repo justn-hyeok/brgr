@@ -858,9 +858,11 @@ mod tests {
     async fn inherited_stdout_cannot_extend_the_total_deadline() {
         let workspace = tempfile::tempdir().unwrap();
         let executable = workspace.path().join("fork-stdout-holder");
+        // The holder keeps stdout for ten minutes: a run that waited for it
+        // could only end then, so only such a run can reach the bound below.
         write_fast_script(
             &executable,
-            "#!/bin/sh\n(sleep 3) &\nprintf 'parent done\\n'\n",
+            "#!/bin/sh\n(/bin/sleep 600) &\nprintf 'parent done\\n'\n",
         );
         let mut manifest = echo_manifest(4_096);
         manifest.executable = executable;
@@ -889,7 +891,10 @@ mod tests {
             Ok(output) => assert!(output.timed_out && !output.succeeded(&manifest)),
             other => panic!("unexpected unbounded outcome: {other:?}"),
         }
-        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(
+            started.elapsed() < Duration::from_mins(1),
+            "the inherited stdout held the run past its deadline"
+        );
     }
 
     #[tokio::test]
@@ -906,7 +911,8 @@ mod tests {
                 model: None,
                 effort: None,
                 permission: None,
-                deadline: Duration::from_secs(2),
+                // A hang guard: `echo` ends at once, however slowly it starts.
+                deadline: Duration::from_mins(1),
                 cancel_path: None,
                 pid_path: None,
             },
@@ -932,7 +938,8 @@ mod tests {
                 model: None,
                 effort: None,
                 permission: None,
-                deadline: Duration::from_secs(2),
+                // A hang guard: `echo` ends at once, however slowly it starts.
+                deadline: Duration::from_mins(1),
                 cancel_path: None,
                 pid_path: None,
             },
@@ -1469,8 +1476,10 @@ mod tests {
         .unwrap();
 
         assert!(output.cancelled);
+        // Not the ten-second deadline, and not the fixture's thirty-second
+        // sleep: the cancel file is what ended it. The bound is a hang guard.
         assert!(!output.timed_out);
-        assert!(started.elapsed() < Duration::from_secs(3));
+        assert!(started.elapsed() < Duration::from_mins(1));
     }
 
     #[test]
@@ -1673,8 +1682,10 @@ mod tests {
         };
         parent.kill().unwrap();
         parent.wait().unwrap();
+        // The child ends on its next write (every 50 ms) and the system then
+        // reaps it; the wait is a hang guard for a loaded machine.
         let killed = Instant::now();
-        while process_is_alive(&pid) && killed.elapsed() < Duration::from_secs(5) {
+        while process_is_alive(&pid) && killed.elapsed() < Duration::from_mins(1) {
             std::thread::sleep(Duration::from_millis(50));
         }
         let survived = process_is_alive(&pid);

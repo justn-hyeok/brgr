@@ -117,10 +117,25 @@ mod tests {
     #[test]
     fn retry_busy_gives_up_only_after_its_budget() {
         let budget = Duration::from_millis(80);
+        // Each retry sleeps at least its backoff, so the schedule bounds how
+        // many calls fit in the budget plus the one made at the deadline. A
+        // loaded machine only lengthens the sleeps, which means fewer calls.
+        let mut most_calls = 1;
+        let mut slept = Duration::ZERO;
+        let mut delay = BUSY_RETRY_BACKOFF;
+        while slept < budget {
+            slept += delay;
+            delay = delay.saturating_mul(2).min(BUSY_RETRY_BACKOFF_CAP);
+            most_calls += 1;
+        }
         let start = Instant::now();
         let mut calls = 0;
         let error = retry_busy_within(budget, || {
             calls += 1;
+            assert!(
+                calls <= most_calls,
+                "retry kept going past its budget: {calls} calls"
+            );
             Err::<(), _>(StoreError::Database(rusqlite::Error::SqliteFailure(
                 rusqlite::ffi::Error::new(5),
                 None,
@@ -131,10 +146,6 @@ mod tests {
         assert!(calls > 1, "contention was not retried at all");
         let elapsed = start.elapsed();
         assert!(elapsed >= budget, "gave up before its budget: {elapsed:?}");
-        assert!(
-            elapsed < budget * 4,
-            "retry overran its budget: {elapsed:?}"
-        );
     }
     #[test]
     fn only_lock_contention_is_retried() {

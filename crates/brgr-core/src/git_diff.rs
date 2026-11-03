@@ -298,9 +298,8 @@ fn stop(child: &mut Child) {
 
 #[cfg(test)]
 mod tests {
-    use std::os::unix::fs::PermissionsExt as _;
-
     use super::*;
+    use crate::fast_script::write_fast_script;
 
     fn git(workspace: &Path, argv: &[&str]) -> String {
         let output = Command::new("git")
@@ -450,8 +449,7 @@ mod tests {
         let slow = root.path().join("slow-git");
         // The collector never finishes on its own: only the deadline can end it,
         // so the test does not depend on how quickly this process is started.
-        fs::write(&slow, "#!/bin/sh\nexec /bin/sleep 600\n").unwrap();
-        fs::set_permissions(&slow, fs::Permissions::from_mode(0o700)).unwrap();
+        write_fast_script(&slow, "#!/bin/sh\nexec /bin/sleep 600\n");
         let started = Instant::now();
         let error = bounded_git_diff_with_executable(
             &slow,

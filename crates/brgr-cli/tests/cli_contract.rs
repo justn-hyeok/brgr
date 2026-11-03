@@ -1,6 +1,6 @@
 mod common;
 
-use common::write_fast_script;
+use common::{HANG_GUARD, process_exists, wait_until, write_fast_script};
 
 use std::{
     fmt::Write as _,
@@ -18,6 +18,37 @@ use tempfile::TempDir;
 
 fn brgr() -> &'static str {
     env!("CARGO_BIN_EXE_brgr")
+}
+
+/// The task's active attempt once its detached supervisor has claimed it.
+fn active_attempt(store: &brgr_store::Store, task: &str) -> brgr_protocol::AttemptId {
+    let task_id = task.parse().unwrap();
+    let mut found = None;
+    assert!(
+        wait_until(|| {
+            found = store.active_message_attempt(task_id).ok();
+            found.is_some()
+        }),
+        "task {task} never had an active attempt"
+    );
+    found.unwrap()
+}
+
+/// Runs `brgr status`, which drives `reconcile_pending`, until the task is
+/// terminal, then reads its result. `None` once the hang guard passes.
+fn settle(home: &Path, task: &str, owner: &[(&str, &str)]) -> Option<Value> {
+    wait_until(|| json_output(&run(home, &["status", task], owner))["state"] == "terminal")
+        .then(|| json_output(&run(home, &["result", task], owner)))
+}
+
+/// The owner pane's prompt file once a line satisfies `delivered`.
+fn delivered_prompt(prompts: &Path, delivered: impl Fn(&str) -> bool) -> Option<String> {
+    let mut text = String::new();
+    wait_until(|| {
+        text = fs::read_to_string(prompts).unwrap_or_default();
+        delivered(&text)
+    })
+    .then_some(text)
 }
 
 /// A worker's own identity. `cargo test` inside a worker inherits it, and a
@@ -593,11 +624,11 @@ fn native_worker_placement_uses_config_and_reaches_owner_decision() {
     ));
     // The decision closes the pane at once when the agent reads idle;
     // otherwise the session loop closes it on its next poll.
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while fixture.state("closed").trim() != "closed" && Instant::now() < deadline {
-        thread::sleep(Duration::from_millis(100));
-    }
-    assert_eq!(fixture.state("closed").trim(), "closed");
+    assert!(
+        wait_until(|| fixture.state("closed").trim() == "closed"),
+        "the pane was never closed after the decision: {}",
+        fixture.state("calls.log")
+    );
 }
 /// A worker that asks its owner, or tries to delegate, as its prompt says.
 ///
@@ -674,7 +705,7 @@ fn a_worker_started_without_delegation_can_ask_its_owner() {
             "--for",
             "owner",
             "--timeout-seconds",
-            "20",
+            "60",
         ],
         &owner,
     ));
@@ -705,7 +736,7 @@ fn a_worker_started_without_delegation_can_ask_its_owner() {
 
     json_output(&run(
         &home,
-        &["wait", task, "--timeout-seconds", "20"],
+        &["wait", task, "--timeout-seconds", "60"],
         &owner,
     ));
     let result = json_output(&run(&home, &["result", task], &owner));
@@ -1098,21 +1129,24 @@ impl PaneFixture {
         fs::read_to_string(self.state.join(name)).unwrap_or_default()
     }
 
-    /// Runs `brgr status` until `done`, for up to twenty seconds. A decision's
+    /// Runs `brgr status` until `done`, for up to the hang guard. A decision's
     /// cleanup that finds the agent busy leaves the pane to the next brgr
     /// command (the fake Herdr reports `working` to one status read and `idle`
     /// after it, and two brgr processes can run the same cleanup at once), so a
     /// test looks for the outcome by running a command instead of expecting it
     /// in the instant the deciding command returns.
     fn wait_for_cleanup(&self, owner: &[(&str, &str)], done: impl Fn() -> bool) -> bool {
-        (0..40).any(|_| {
+        let started = Instant::now();
+        loop {
             let _ = run(&self.home, &["status"], owner);
-            let finished = done();
-            if !finished {
-                thread::sleep(Duration::from_millis(500));
+            if done() {
+                return true;
             }
-            finished
-        })
+            if started.elapsed() >= HANG_GUARD {
+                return false;
+            }
+            thread::sleep(Duration::from_millis(500));
+        }
     }
 }
 
@@ -1683,11 +1717,13 @@ fn native_partial_file_is_not_a_completed_report() {
         &env,
     ));
     let task = launched["task_id"].as_str().unwrap();
-    let deadline = Instant::now() + Duration::from_secs(15);
-    while !fixture.state("calls.log").contains("agent prompt") {
-        assert!(Instant::now() < deadline);
-        thread::sleep(Duration::from_millis(50));
-    }
+    assert!(
+        wait_until(|| fixture.state("calls.log").contains("agent prompt")),
+        "the agent was never prompted: {}",
+        fixture.state("calls.log")
+    );
+    // A pause only gives a wrong run the time to publish the partial file; a
+    // correct run never does, however long this waits.
     thread::sleep(Duration::from_millis(1200));
     let result = run(&fixture.home, &["result", task], &env);
     assert!(
@@ -1722,11 +1758,11 @@ fn native_conversation_waits_while_busy_then_delivers_once() {
         &env,
     ));
     let task = launched["task_id"].as_str().unwrap();
-    let deadline = Instant::now() + Duration::from_secs(15);
-    while !fixture.state("calls.log").contains("agent prompt") {
-        assert!(Instant::now() < deadline);
-        thread::sleep(Duration::from_millis(50));
-    }
+    assert!(
+        wait_until(|| fixture.state("calls.log").contains("agent prompt")),
+        "the agent was never prompted: {}",
+        fixture.state("calls.log")
+    );
     json_output(&run(
         &fixture.home,
         &[
@@ -1742,6 +1778,8 @@ fn native_conversation_waits_while_busy_then_delivers_once() {
         ],
         &env,
     ));
+    // The agent is held busy, so the follow-up must not be prompted however
+    // long this waits; the pause only gives a wrong run the chance to send it.
     thread::sleep(Duration::from_millis(1200));
     let calls = fixture.state("calls.log");
     assert_eq!(calls.matches("agent prompt w9:p2").count(), 1);
@@ -1753,7 +1791,7 @@ fn native_conversation_waits_while_busy_then_delivers_once() {
     fs::write(fixture.state.join("state.hang"), "idle").unwrap();
     let result = json_output(&run(
         &fixture.home,
-        &["wait", task, "--timeout-seconds", "15"],
+        &["wait", task, "--timeout-seconds", "60"],
         &env,
     ));
     assert_eq!(result["outcome"], "candidate");
@@ -2063,12 +2101,15 @@ fn pane_mode_completes_on_the_report_without_ever_seeing_work() {
     let fixture = pane_fixture();
     fs::create_dir_all(&fixture.state).unwrap();
     fs::write(fixture.state.join("unseen"), "").unwrap();
+    // A run that waited for the working state it never sees would wait out the
+    // unseen-work grace, set here to ten minutes, so only such a run can reach
+    // the one-minute bound; a loaded machine cannot.
     let started = Instant::now();
-    let ran = fixture.run(&[]);
+    let ran = fixture.run_with_env(&[], &[("BRGR_TEST_REPORT_GRACE_MS", "600000")]);
     assert_eq!(ran["outcome"], "candidate", "{ran}");
     assert!(
-        started.elapsed() < Duration::from_secs(30),
-        "{:?}",
+        started.elapsed() < Duration::from_mins(1),
+        "the run waited for a working state it never sees: {:?}",
         started.elapsed()
     );
 }
@@ -2098,11 +2139,11 @@ fn cancelling_a_pane_mode_task_closes_its_pane() {
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
     let child = command.spawn().unwrap();
-    let deadline = Instant::now() + Duration::from_secs(30);
-    while !fixture.state("calls.log").contains("agent prompt") {
-        assert!(Instant::now() < deadline, "{}", fixture.state("calls.log"));
-        thread::sleep(Duration::from_millis(100));
-    }
+    assert!(
+        wait_until(|| fixture.state("calls.log").contains("agent prompt")),
+        "the agent was never prompted: {}",
+        fixture.state("calls.log")
+    );
     let task = fs::read_dir(fixture.home.join("launches"))
         .unwrap()
         .find_map(|entry| {
@@ -2644,15 +2685,7 @@ fn rejected_delegated_child_revises_inside_parent_git_worktree() {
     let root_task = root["task_id"].as_str().unwrap();
     let root_id = root_task.parse().unwrap();
     let store = brgr_store::Store::open(home.join("store")).unwrap();
-    let root_attempt = (0..200)
-        .find_map(|_| {
-            let found = store.active_message_attempt(root_id).ok();
-            if found.is_none() {
-                thread::sleep(Duration::from_millis(25));
-            }
-            found
-        })
-        .expect("root attempt did not become active");
+    let root_attempt = active_attempt(&store, root_task);
     let parent_workspace = store.task(root_id).unwrap().workspace;
     assert!(Path::new(&parent_workspace).starts_with(home.canonicalize().unwrap()));
     let worker_owner = format!("worker:{root_attempt}");
@@ -2712,7 +2745,7 @@ fn rejected_delegated_child_revises_inside_parent_git_worktree() {
     json_output(&run(&home, &["cancel", root_task], &root_owner));
     let terminal = json_output(&run(
         &home,
-        &["wait", root_task, "--timeout-seconds", "10"],
+        &["wait", root_task, "--timeout-seconds", "60"],
         &root_owner,
     ));
     assert_eq!(terminal["outcome"], "cancelled");
@@ -2735,17 +2768,7 @@ fn tree_status_shows_question_and_tree_cancel_stops_both_processes() {
     ));
     let root_task = root["task_id"].as_str().unwrap();
     let store = brgr_store::Store::open(home.join("store")).unwrap();
-    let root_attempt = (0..100)
-        .find_map(|_| {
-            let found = store
-                .active_message_attempt(root_task.parse().unwrap())
-                .ok();
-            if found.is_none() {
-                thread::sleep(Duration::from_millis(20));
-            }
-            found
-        })
-        .expect("root attempt did not become active");
+    let root_attempt = active_attempt(&store, root_task);
     let worker_owner = format!("worker:{root_attempt}");
     let root_attempt_text = root_attempt.to_string();
     let worker = [
@@ -2760,15 +2783,7 @@ fn tree_status_shows_question_and_tree_cancel_stops_both_processes() {
         &worker,
     ));
     let child_task = child["task_id"].as_str().unwrap();
-    for _ in 0..100 {
-        if store
-            .active_message_attempt(child_task.parse().unwrap())
-            .is_ok()
-        {
-            break;
-        }
-        thread::sleep(Duration::from_millis(20));
-    }
+    active_attempt(&store, child_task);
     json_output(&run(
         &home,
         &[
@@ -2798,14 +2813,14 @@ fn tree_status_shows_question_and_tree_cancel_stops_both_processes() {
     assert_eq!(cancelled["requested"].as_array().unwrap().len(), 2);
     let child_terminal = json_output(&run(
         &home,
-        &["wait", child_task, "--timeout-seconds", "10"],
+        &["wait", child_task, "--timeout-seconds", "60"],
         &worker,
     ));
     assert_eq!(child_terminal["outcome"], "cancelled", "{child_terminal}");
     assert_eq!(
         json_output(&run(
             &home,
-            &["wait", root_task, "--timeout-seconds", "10"],
+            &["wait", root_task, "--timeout-seconds", "60"],
             &root_owner
         ))["outcome"],
         "cancelled"
@@ -2826,17 +2841,11 @@ fn committed_cancellation_intent_stops_running_worker_without_cancel_file() {
         .to_owned();
     let store = brgr_store::Store::open(home.join("store")).unwrap();
     let task_id = task.parse().unwrap();
-    for _ in 0..100 {
-        if store.active_message_attempt(task_id).is_ok() {
-            break;
-        }
-        thread::sleep(Duration::from_millis(20));
-    }
-    assert!(store.active_message_attempt(task_id).is_ok());
+    active_attempt(&store, &task);
     store.record_cancellation_intents(task_id, false).unwrap();
     let result = json_output(&run(
         &home,
-        &["wait", &task, "--timeout-seconds", "10"],
+        &["wait", &task, "--timeout-seconds", "60"],
         &owner,
     ));
     assert_eq!(result["outcome"], "cancelled");
@@ -2933,17 +2942,8 @@ fn start_message_fixture() -> MessageFixture {
         &[("BRGR_OWNER_ID", "codex:message-test")],
     ));
     let task = launch["task_id"].as_str().unwrap();
-    let task_id = task.parse().unwrap();
     let store = brgr_store::Store::open(home.join("store")).unwrap();
-    let attempt = (0..100)
-        .find_map(|_| {
-            let found = store.active_message_attempt(task_id).ok();
-            if found.is_none() {
-                thread::sleep(Duration::from_millis(20));
-            }
-            found
-        })
-        .expect("worker attempt did not become active");
+    let attempt = active_attempt(&store, task);
     MessageFixture {
         _temp: temp,
         home,
@@ -3136,7 +3136,7 @@ fn terminal_worker_can_read_and_ack_existing_message(
     json_output(&run(home, &["cancel", task], owner));
     let settled = json_output(&run(
         home,
-        &["wait", task, "--timeout-seconds", "10"],
+        &["wait", task, "--timeout-seconds", "60"],
         owner,
     ));
     assert_eq!(settled["outcome"], "cancelled");
@@ -3313,42 +3313,32 @@ fn idle_codex_parent_receives_completion_without_another_user_turn() {
     ));
     let task = launch["task_id"].as_str().unwrap();
     let store = brgr_store::Store::open(home.join("store")).unwrap();
-    for _ in 0..100 {
-        if store.latest_result(task.parse().unwrap()).is_ok() {
-            break;
-        }
-        thread::sleep(Duration::from_millis(50));
-    }
-    assert!(store.latest_result(task.parse().unwrap()).is_ok());
+    assert!(
+        wait_until(|| store.latest_result(task.parse().unwrap()).is_ok()),
+        "the run never sealed a result"
+    );
+    // The parent is busy, so no prompt may land however long this waits; the
+    // pause only gives a wrong dispatcher the chance to send one.
     thread::sleep(Duration::from_millis(700));
     assert!(!prompts.exists(), "busy Codex parent was prompted");
     assert_duplicate_notification_dispatcher_exits(&home, task, &envs);
     fs::write(&agent_state, "idle").unwrap();
-    for _ in 0..100 {
-        if prompts.exists() {
-            break;
-        }
-        thread::sleep(Duration::from_millis(50));
-    }
+    assert!(
+        wait_until(|| prompts.exists()),
+        "completion was not delivered"
+    );
     let prompt = fs::read_to_string(&prompts).expect("completion was not delivered");
     assert!(prompt.contains("FROM BRGR"));
     assert!(prompt.contains(task));
-    for _ in 0..100 {
-        if store
-            .pending_notifications_for_task(task.parse().unwrap())
-            .unwrap()
-            .is_empty()
-        {
-            break;
-        }
-        thread::sleep(Duration::from_millis(50));
-    }
     assert!(
-        store
+        wait_until(|| store
             .pending_notifications_for_task(task.parse().unwrap())
             .unwrap()
-            .is_empty()
+            .is_empty()),
+        "the delivered completion stayed pending"
     );
+    // Delivered once: a pause only gives a wrong dispatcher the chance to
+    // prompt again.
     thread::sleep(Duration::from_millis(700));
     assert_eq!(fs::read_to_string(prompts).unwrap(), prompt);
 }
@@ -3393,23 +3383,20 @@ fn idle_codex_parent_is_told_a_run_failed_with_its_reason() {
     ));
     let task = launch["task_id"].as_str().unwrap();
     let store = brgr_store::Store::open(home.join("store")).unwrap();
-    for _ in 0..100 {
-        if store.latest_result(task.parse().unwrap()).is_ok() {
-            break;
-        }
-        thread::sleep(Duration::from_millis(50));
-    }
-    assert!(store.latest_result(task.parse().unwrap()).is_ok());
+    assert!(
+        wait_until(|| store.latest_result(task.parse().unwrap()).is_ok()),
+        "the run never sealed a result"
+    );
+    // The parent is busy, so no prompt may land however long this waits; the
+    // pause only gives a wrong dispatcher the chance to send one.
     thread::sleep(Duration::from_millis(700));
     assert!(!prompts.exists(), "busy Codex parent was prompted");
     assert_duplicate_notification_dispatcher_exits(&home, task, &envs);
     fs::write(&agent_state, "idle").unwrap();
-    for _ in 0..100 {
-        if prompts.exists() {
-            break;
-        }
-        thread::sleep(Duration::from_millis(50));
-    }
+    assert!(
+        wait_until(|| prompts.exists()),
+        "completion was not delivered"
+    );
     let prompt = fs::read_to_string(&prompts).expect("completion was not delivered");
     assert!(prompt.contains("FROM BRGR"), "{prompt}");
     assert!(prompt.contains("\"type\":\"brgr_failure\""), "{prompt}");
@@ -3457,15 +3444,7 @@ fn idle_cursor_owner_is_told_when_its_task_completes() {
         &owner,
     ));
     let task = launch["task_id"].as_str().unwrap();
-    let delivered = (0..200)
-        .find_map(|_| {
-            let text = fs::read_to_string(&prompts).unwrap_or_default();
-            if text.contains(task) {
-                return Some(text);
-            }
-            thread::sleep(Duration::from_millis(50));
-            None
-        })
+    let delivered = delivered_prompt(&prompts, |text| text.contains(task))
         .expect("the completion was not delivered to the Cursor owner");
     assert!(delivered.contains("FROM BRGR"), "{delivered}");
     assert!(delivered.contains("brgr_completion"), "{delivered}");
@@ -3518,16 +3497,9 @@ fn a_new_head_receives_the_owners_completion_notices_after_a_handoff() {
     ));
     let task = launch["task_id"].as_str().unwrap();
     let delivered_to = |pane: &str| {
-        (0..200).find_map(|_| {
-            let text = fs::read_to_string(&prompts).unwrap_or_default();
-            if text
-                .lines()
+        delivered_prompt(&prompts, |text| {
+            text.lines()
                 .any(|line| line.starts_with(pane) && line.contains(task))
-            {
-                return Some(text);
-            }
-            thread::sleep(Duration::from_millis(50));
-            None
         })
     };
     delivered_to("w1:p1").expect("the completion did not reach the first head");
@@ -3592,16 +3564,9 @@ fn a_head_in_another_harness_receives_the_owners_completion_notices_after_a_hand
     ));
     let task = launch["task_id"].as_str().unwrap();
     let delivered_to = |pane: &str| {
-        (0..200).find_map(|_| {
-            let text = fs::read_to_string(&prompts).unwrap_or_default();
-            if text
-                .lines()
+        delivered_prompt(&prompts, |text| {
+            text.lines()
                 .any(|line| line.starts_with(pane) && line.contains(task))
-            {
-                return Some(text);
-            }
-            thread::sleep(Duration::from_millis(50));
-            None
         })
     };
     delivered_to("w1:p1").expect("the completion did not reach the first head");
@@ -3665,16 +3630,7 @@ fn idle_codex_owner_is_told_when_a_worker_asks() {
     ));
     let task = launch["task_id"].as_str().unwrap();
     let store = brgr_store::Store::open(home.join("store")).unwrap();
-    let attempt = (0..100)
-        .find_map(|_| {
-            let found = store.active_message_attempt(task.parse().unwrap()).ok();
-            if found.is_none() {
-                thread::sleep(Duration::from_millis(20));
-            }
-            found
-        })
-        .expect("worker attempt did not become active")
-        .to_string();
+    let attempt = active_attempt(&store, task).to_string();
     let worker_owner = format!("worker:{attempt}");
     let worker = [
         ("BRGR_OWNER_ID", worker_owner.as_str()),
@@ -3702,15 +3658,7 @@ fn idle_codex_owner_is_told_when_a_worker_asks() {
     thread::sleep(Duration::from_millis(1_200));
     assert!(!prompts.exists(), "a busy Codex owner was prompted");
     fs::write(&agent_state, "idle").unwrap();
-    let delivered = (0..100)
-        .find_map(|_| {
-            let text = fs::read_to_string(&prompts).unwrap_or_default();
-            if text.contains(&question_id) {
-                return Some(text);
-            }
-            thread::sleep(Duration::from_millis(50));
-            None
-        })
+    let delivered = delivered_prompt(&prompts, |text| text.contains(&question_id))
         .expect("the question was not delivered");
     assert!(delivered.contains("FROM BRGR"), "{delivered}");
     assert!(delivered.contains("brgr_question"), "{delivered}");
@@ -3772,16 +3720,7 @@ fn idle_claude_owner_is_told_when_a_worker_asks() {
     ));
     let task = launch["task_id"].as_str().unwrap();
     let store = brgr_store::Store::open(home.join("store")).unwrap();
-    let attempt = (0..100)
-        .find_map(|_| {
-            let found = store.active_message_attempt(task.parse().unwrap()).ok();
-            if found.is_none() {
-                thread::sleep(Duration::from_millis(20));
-            }
-            found
-        })
-        .expect("worker attempt did not become active")
-        .to_string();
+    let attempt = active_attempt(&store, task).to_string();
     let worker_owner = format!("worker:{attempt}");
     let worker = [
         ("BRGR_OWNER_ID", worker_owner.as_str()),
@@ -3809,15 +3748,7 @@ fn idle_claude_owner_is_told_when_a_worker_asks() {
     thread::sleep(Duration::from_millis(1_200));
     assert!(!prompts.exists(), "a busy Claude owner was prompted");
     fs::write(&agent_state, "idle").unwrap();
-    let delivered = (0..100)
-        .find_map(|_| {
-            let text = fs::read_to_string(&prompts).unwrap_or_default();
-            if text.contains(&question_id) {
-                return Some(text);
-            }
-            thread::sleep(Duration::from_millis(50));
-            None
-        })
+    let delivered = delivered_prompt(&prompts, |text| text.contains(&question_id))
         .expect("the question was not delivered");
     assert!(delivered.contains("FROM BRGR"), "{delivered}");
     assert!(delivered.contains("brgr_question"), "{delivered}");
@@ -3865,13 +3796,7 @@ fn a_dispatcher_exits_when_its_control_home_is_removed() {
     // Not cancelled first: a final result also ends the dispatcher, and this
     // must show that a vanished home alone is enough.
     fs::remove_dir_all(&home).unwrap();
-    let exited = (0..50).any(|_| {
-        if dispatcher.try_wait().unwrap().is_some() {
-            return true;
-        }
-        thread::sleep(Duration::from_millis(100));
-        false
-    });
+    let exited = wait_until(|| dispatcher.try_wait().unwrap().is_some());
     if !exited {
         let _ = dispatcher.kill();
     }
@@ -3936,12 +3861,10 @@ esac
         &envs,
     ));
     assert_eq!(result["outcome"], "candidate");
-    for _ in 0..100 {
-        if reported.exists() {
-            break;
-        }
-        thread::sleep(Duration::from_millis(20));
-    }
+    assert!(
+        wait_until(|| reported.exists()),
+        "the Codex session was never reported"
+    );
     assert_eq!(fs::read_to_string(&reported).unwrap(), "session-a");
     let task = result["task_id"].as_str().unwrap();
     json_output(&run(&home, &["accept", task], &envs));
@@ -4021,7 +3944,9 @@ fn unavailable_herdr_does_not_hide_the_codex_inbox_hook() {
     let workspace = temp.path().join("work");
     let herdr = temp.path().join("herdr");
     fs::create_dir_all(&workspace).unwrap();
-    write_fast_script(&herdr, "#!/bin/sh\nexec /bin/sleep 3\n");
+    // A Herdr that never answers: a hook that waited for it would wait ten
+    // minutes, so only such a hook can reach the one-minute bounds below.
+    write_fast_script(&herdr, "#!/bin/sh\nexec /bin/sleep 600\n");
     let fixture = gjc_fixture();
     add_fixture(&home, &fixture, &temp.path().join("scratch"));
     let owner = [
@@ -4042,7 +3967,7 @@ fn unavailable_herdr_does_not_hide_the_codex_inbox_hook() {
     let task = result["task_id"].as_str().unwrap();
     let (output, elapsed) = invoke_hook_with_herdr(&home, &herdr, "user-prompt-submit");
     assert!(
-        elapsed < Duration::from_secs(2),
+        elapsed < HANG_GUARD,
         "slow Herdr delayed the inbox hook: {elapsed:?}"
     );
     assert!(output.status.success());
@@ -4054,7 +3979,10 @@ fn unavailable_herdr_does_not_hide_the_codex_inbox_hook() {
             .contains(task)
     );
     let (stop, stop_elapsed) = invoke_hook_with_herdr(&home, &herdr, "stop");
-    assert!(stop_elapsed < Duration::from_secs(2));
+    assert!(
+        stop_elapsed < HANG_GUARD,
+        "slow Herdr delayed the stop hook: {stop_elapsed:?}"
+    );
     let stop: Value = serde_json::from_slice(&stop.stdout).unwrap();
     assert_eq!(stop["decision"], "block");
     assert!(stop["reason"].as_str().unwrap().contains(task), "{stop}");
@@ -4118,16 +4046,16 @@ esac
     let task = launch["task_id"].as_str().unwrap();
     fs::write(&release, "go").unwrap();
     // Let the slow registration finish: it records the session once released.
-    let began = Instant::now();
-    while !reported.is_file() && began.elapsed() < Duration::from_secs(15) {
-        thread::sleep(Duration::from_millis(100));
-    }
+    assert!(
+        wait_until(|| reported.is_file()),
+        "the released registration never recorded the session"
+    );
     let status = json_output(&run(&home, &["status", task], &envs));
     assert_ne!(status["state"], "terminal", "{status}");
     json_output(&run(&home, &["cancel", task], &envs));
     let terminal = json_output(&run(
         &home,
-        &["wait", task, "--timeout-seconds", "10"],
+        &["wait", task, "--timeout-seconds", "60"],
         &envs,
     ));
     assert_eq!(terminal["outcome"], "cancelled");
@@ -4212,14 +4140,9 @@ fn assert_duplicate_notification_dispatcher_exits(home: &Path, task: &str, envs:
         .envs(envs.iter().copied())
         .spawn()
         .unwrap();
-    let duplicate_started = Instant::now();
-    while duplicate_started.elapsed() < Duration::from_secs(2) {
-        if duplicate.try_wait().unwrap().is_some() {
-            break;
-        }
-        thread::sleep(Duration::from_millis(20));
-    }
-    if duplicate.try_wait().unwrap().is_none() {
+    // A duplicate that stays is one that polls for up to a day; its exit is
+    // the event, and the hang guard cannot be reached by one that does exit.
+    if !wait_until(|| duplicate.try_wait().unwrap().is_some()) {
         duplicate.kill().unwrap();
         duplicate.wait().unwrap();
         panic!("duplicate notification dispatcher stayed active");
@@ -4308,12 +4231,8 @@ fn final_failed_result_does_not_leave_a_notification_dispatcher_running() {
         .arg(task)
         .spawn()
         .unwrap();
-    let started = Instant::now();
-    while started.elapsed() < Duration::from_secs(3) {
-        if dispatcher.try_wait().unwrap().is_some() {
-            return;
-        }
-        thread::sleep(Duration::from_millis(20));
+    if wait_until(|| dispatcher.try_wait().unwrap().is_some()) {
+        return;
     }
     dispatcher.kill().unwrap();
     dispatcher.wait().unwrap();
@@ -4426,15 +4345,11 @@ fn transferred_codex_session_receives_undecided_completion() {
     // `agent get`, then `agent prompt`; a loaded machine stretches that chain
     // past five seconds, so the wait is generous. The event is still the
     // prompt arriving.
-    let deadline = Instant::now() + Duration::from_secs(30);
-    while !prompts.exists() {
-        assert!(
-            Instant::now() <= deadline,
-            "transferred Codex session was not prompted: {}",
-            run_state_debug(&home, &task)
-        );
-        thread::sleep(Duration::from_millis(50));
-    }
+    assert!(
+        wait_until(|| prompts.exists()),
+        "transferred Codex session was not prompted: {}",
+        run_state_debug(&home, &task)
+    );
     let prompt = fs::read_to_string(prompts).expect("transferred Codex session was not prompted");
     assert!(prompt.contains(&task));
     assert!(prompt.contains("FROM BRGR"));
@@ -6381,16 +6296,7 @@ fn detached_supervisor_exit_before_claim_becomes_one_durable_lost_inbox_item() {
     let task = launch["task_id"].as_str().unwrap();
     let first_status = json_output(&run(&home, &["status", task], &owner));
     assert_eq!(first_status["state"], "queued");
-    let mut terminal = None;
-    for _ in 0..120 {
-        let status = json_output(&run(&home, &["status", task], &owner));
-        if status["state"] == "terminal" {
-            terminal = Some(json_output(&run(&home, &["result", task], &owner)));
-            break;
-        }
-        thread::sleep(Duration::from_millis(50));
-    }
-    let terminal = terminal.expect("abandoned admitted task did not settle");
+    let terminal = settle(&home, task, &owner).expect("abandoned admitted task did not settle");
     assert_eq!(terminal["result"]["outcome"], "lost");
     assert_eq!(terminal["artifacts"].as_array().unwrap().len(), 0);
     let result_id = terminal["result"]["result_id"].as_str().unwrap();
@@ -6432,7 +6338,7 @@ fn wait_reconciles_a_crashed_detached_supervisor_to_lost() {
     let task = launch["task_id"].as_str().unwrap();
     let waited = json_output(&run(
         &home,
-        &["wait", task, "--timeout-seconds", "8"],
+        &["wait", task, "--timeout-seconds", "60"],
         &owner,
     ));
     assert_eq!(waited["outcome"], "lost");
@@ -6468,16 +6374,8 @@ fn detached_crash_windows_reconcile_without_duplicate_or_overlapping_attempts() 
             &[owner[0], ("BRGR_TEST_CRASH_STAGE", stage)],
         ));
         let task = launch["task_id"].as_str().unwrap();
-        let mut terminal = None;
-        for _ in 0..120 {
-            let status = json_output(&run(&home, &["status", task], &owner));
-            if status["state"] == "terminal" {
-                terminal = Some(json_output(&run(&home, &["result", task], &owner)));
-                break;
-            }
-            thread::sleep(Duration::from_millis(50));
-        }
-        let terminal = terminal.unwrap_or_else(|| panic!("crash stage {stage} did not settle"));
+        let terminal = settle(&home, task, &owner)
+            .unwrap_or_else(|| panic!("crash stage {stage} did not settle"));
         assert_eq!(terminal["result"]["outcome"], expected, "stage {stage}");
         if expected == "lost" {
             assert!(terminal["artifacts"].as_array().unwrap().is_empty());
@@ -6567,38 +6465,27 @@ fn status_during_live_pre_identity_window_does_not_publish_lost() {
             "--workspace",
             workspace.to_str().unwrap(),
         ],
-        &[owner, ("BRGR_TEST_PAUSE_AFTER_CLAIM_MS", "1500")],
+        // The longest pause the product allows: the window opens whenever the
+        // detached supervisor gets to its claim, and stays open for the pause.
+        &[owner, ("BRGR_TEST_PAUSE_AFTER_CLAIM_MS", "2000")],
     ));
     let task = launch["task_id"].as_str().unwrap();
-    let mut saw_window = false;
-    for _ in 0..100 {
-        let store = brgr_store::Store::open(home.join("store")).unwrap();
-        if store
+    let store = brgr_store::Store::open(home.join("store")).unwrap();
+    assert!(
+        wait_until(|| store
             .unfinished_attempts()
             .unwrap()
             .iter()
-            .any(|attempt| attempt.task.task_id.to_string() == task && attempt.launch.is_none())
-        {
-            let status = json_output(&run(&home, &["status", task], &[owner]));
-            assert_ne!(status["state"], "terminal");
-            saw_window = true;
-            break;
-        }
-        thread::sleep(Duration::from_millis(10));
-    }
-    assert!(saw_window, "the live pre-identity window was not observed");
-    let mut result = None;
-    for _ in 0..120 {
-        let status = json_output(&run(&home, &["status", task], &[owner]));
-        if status["state"] == "terminal" {
-            result = Some(json_output(&run(&home, &["result", task], &[owner])));
-            break;
-        }
-        thread::sleep(Duration::from_millis(20));
-    }
+            .any(|attempt| attempt.task.task_id.to_string() == task && attempt.launch.is_none())),
+        "the live pre-identity window was not observed"
+    );
+    // This status drives recovery inside the window. A slow machine may reach
+    // it after the window closes and the run has finished, so the state it
+    // prints proves nothing; a live supervisor recovered as lost shows below.
+    json_output(&run(&home, &["status", task], &[owner]));
+    let result = settle(&home, task, &[owner]).expect("the paused run never settled");
     assert_eq!(
-        result.unwrap()["result"]["outcome"],
-        "candidate",
+        result["result"]["outcome"], "candidate",
         "a live supervisor was incorrectly recovered as lost"
     );
 }
@@ -6615,16 +6502,7 @@ fn queued_cancel_settles_without_starting_the_harness() {
     let task = launch["task_id"].as_str().unwrap();
     let requested = json_output(&run(&home, &["cancel", task], &owner));
     assert_eq!(requested["state"], "cancel_requested");
-    let mut outcome = None;
-    for _ in 0..120 {
-        let status = json_output(&run(&home, &["status", task], &owner));
-        if status["state"] == "terminal" {
-            outcome = Some(json_output(&run(&home, &["result", task], &owner)));
-            break;
-        }
-        thread::sleep(Duration::from_millis(50));
-    }
-    let result = outcome.expect("queued cancellation did not settle");
+    let result = settle(&home, task, &owner).expect("queued cancellation did not settle");
     assert_eq!(result["result"]["outcome"], "cancelled");
     assert!(result["artifacts"].as_array().unwrap().is_empty());
     assert!(matches!(
@@ -6763,24 +6641,14 @@ fn omp_process_can_cancel_without_a_herdr_pane() {
         &owner,
     ));
     let task = launch["task_id"].as_str().unwrap();
-    for _ in 0..100 {
-        if run(&home, &["status", task], &owner).status.success() {
-            break;
-        }
-        thread::sleep(Duration::from_millis(50));
-    }
+    assert!(
+        wait_until(|| run(&home, &["status", task], &owner).status.success()),
+        "the OMP run never became visible"
+    );
     let requested = json_output(&run(&home, &["cancel", task], &owner));
     assert_eq!(requested["state"], "cancel_requested");
-    let mut final_result = None;
-    for _ in 0..100 {
-        let output = run(&home, &["result", task], &owner);
-        if output.status.success() {
-            final_result = Some(json_output(&output));
-            break;
-        }
-        thread::sleep(Duration::from_millis(50));
-    }
-    assert_eq!(final_result.unwrap()["result"]["outcome"], "cancelled");
+    let final_result = settle(&home, task, &owner).expect("the cancelled OMP run never settled");
+    assert_eq!(final_result["result"]["outcome"], "cancelled");
     let acknowledged = json_output(&run(&home, &["result", task, "--ack"], &owner));
     assert_eq!(acknowledged["result"]["outcome"], "cancelled");
 }
@@ -6895,16 +6763,8 @@ fn detached_success_reopens_for_an_offline_owner_then_accepts_once() {
     let task = launch["task_id"].as_str().unwrap().to_owned();
     assert_eq!(launch["state"], "starting");
 
-    let mut terminal = None;
-    for _ in 0..120 {
-        let status = json_output(&run(&home, &["status", &task], &owner));
-        if status["state"] == "terminal" {
-            terminal = Some(json_output(&run(&home, &["result", &task], &owner)));
-            break;
-        }
-        thread::sleep(Duration::from_millis(50));
-    }
-    let terminal = terminal.expect("detached fixture run did not settle for its offline owner");
+    let terminal = settle(&home, &task, &owner)
+        .expect("detached fixture run did not settle for its offline owner");
     assert_eq!(terminal["result"]["outcome"], "candidate");
     assert_eq!(terminal["artifacts"][0]["text"], "BRGR_FIXTURE_OK");
     let result_id = terminal["result"]["result_id"].as_str().unwrap().to_owned();
@@ -7823,10 +7683,10 @@ fn observing_a_status_does_not_recover_or_record_anything() {
     ));
     let task = started["task_id"].as_str().unwrap();
     let record = home.join("runs").join(format!("{task}.supervisor.json"));
-    let began = Instant::now();
-    while !record.is_file() && began.elapsed() < Duration::from_secs(10) {
-        thread::sleep(Duration::from_millis(50));
-    }
+    assert!(
+        wait_until(|| record.is_file()),
+        "the supervisor never wrote its record"
+    );
     let supervisor: Value = serde_json::from_slice(&fs::read(&record).unwrap()).unwrap();
     let pid = supervisor["identity"]["handle"].as_str().unwrap();
     assert!(
@@ -7836,7 +7696,11 @@ fn observing_a_status_does_not_recover_or_record_anything() {
             .unwrap()
             .success()
     );
-    thread::sleep(Duration::from_millis(300));
+    // Recovery looks the pid up; it is gone once the system has reaped it.
+    assert!(
+        wait_until(|| !process_exists(pid)),
+        "the killed supervisor {pid} never went away"
+    );
 
     let seen = json_output(&run(&home, &["status", task, "--observe"], &observer));
     assert_ne!(seen["state"], "terminal", "{seen}");
@@ -7877,28 +7741,32 @@ fn a_lost_run_whose_worker_still_runs_cannot_be_revised_until_it_stops() {
     ));
     let task = started["task_id"].as_str().unwrap();
     let record = home.join("runs").join(format!("{task}.supervisor.json"));
-    let began = Instant::now();
-    while !record.is_file() && began.elapsed() < Duration::from_secs(10) {
-        thread::sleep(Duration::from_millis(50));
-    }
+    assert!(
+        wait_until(|| record.is_file()),
+        "the supervisor never wrote its record"
+    );
     // The worker must be running before its supervisor is killed: on a loaded
     // machine the supervisor's record can exist before the worker has started,
     // and a run with no live worker may rightly be revised.
     let worker_started = temp.path().join("slow").join("started");
-    let began = Instant::now();
-    while !worker_started.is_file() && began.elapsed() < Duration::from_mins(1) {
-        thread::sleep(Duration::from_millis(50));
-    }
-    assert!(worker_started.is_file(), "the worker never started");
+    assert!(
+        wait_until(|| worker_started.is_file()),
+        "the worker never started"
+    );
     let supervisor: Value = serde_json::from_slice(&fs::read(&record).unwrap()).unwrap();
+    let pid = supervisor["identity"]["handle"].as_str().unwrap();
     assert!(
         Command::new("/bin/kill")
-            .args(["-9", supervisor["identity"]["handle"].as_str().unwrap()])
+            .args(["-9", pid])
             .status()
             .unwrap()
             .success()
     );
-    thread::sleep(Duration::from_millis(300));
+    // Recovery looks the pid up; it is gone once the system has reaped it.
+    assert!(
+        wait_until(|| !process_exists(pid)),
+        "the killed supervisor {pid} never went away"
+    );
     // Recovery records the run as lost while its worker keeps sleeping.
     let lost = json_output(&run(&home, &["status", task], &owner));
     assert_eq!(lost["state"], "terminal", "{lost}");
@@ -7943,7 +7811,7 @@ fn a_lost_run_whose_worker_still_runs_cannot_be_revised_until_it_stops() {
             break;
         }
         assert!(
-            began.elapsed() < Duration::from_secs(20),
+            began.elapsed() < HANG_GUARD,
             "{}",
             String::from_utf8_lossy(&retried.stderr)
         );
@@ -7991,7 +7859,7 @@ fn foreground_admission_lock_is_released_before_slow_harness_execution() {
             == 0
         {
             assert!(
-                admitted.elapsed() < Duration::from_secs(15),
+                admitted.elapsed() < HANG_GUARD,
                 "the first foreground run never reached admission"
             );
             thread::sleep(Duration::from_millis(25));
@@ -8543,7 +8411,7 @@ fn handing_over_home() -> (TempDir, PathBuf, String, String) {
             "--for",
             "owner",
             "--timeout-seconds",
-            "30",
+            "60",
         ],
         &owner,
     ));
@@ -8662,7 +8530,7 @@ fn the_worker_still_reports_to_the_head_after_a_handoff() {
 
     json_output(&run(
         &home,
-        &["wait", &task, "--timeout-seconds", "40"],
+        &["wait", &task, "--timeout-seconds", "60"],
         &head,
     ));
     let result = json_output(&run(&home, &["result", &task], &head));
@@ -8681,7 +8549,7 @@ fn the_worker_still_reports_to_the_head_after_a_handoff() {
             "--for",
             "owner",
             "--timeout-seconds",
-            "10",
+            "60",
         ],
         &head,
     ));

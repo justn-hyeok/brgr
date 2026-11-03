@@ -26,7 +26,7 @@ const SCANNED: [(&str, &str); 19] = [
     ("workflow.rs", include_str!("workflow.rs")),
 ];
 
-use super::contention::{BUSY_RETRY_BACKOFF, is_lock_contention};
+use super::contention::{BUSY_RETRY_BUDGET, is_lock_contention};
 use brgr_protocol::{
     ArtifactContract, DecisionId, DecisionVerdict, Event, EventId, EventKind, ObservationSource,
     OwnerId, SCHEMA_V1, TaskId, TerminalOutcome,
@@ -1935,8 +1935,10 @@ fn task_admission_fails_fast_instead_of_retrying_under_the_admission_lock() {
     blocker.execute_batch("ROLLBACK").unwrap();
 
     assert!(is_lock_contention(&error), "unexpected error: {error}");
+    // The blocker holds the lock throughout, so a retried admission could
+    // only give up once the retry budget was spent: that budget is the bound.
     assert!(
-        elapsed < BUSY_RETRY_BACKOFF * 8,
+        elapsed < BUSY_RETRY_BUDGET,
         "admission waited {elapsed:?} while holding the admission lock"
     );
 }
