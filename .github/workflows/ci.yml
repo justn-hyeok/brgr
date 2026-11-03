@@ -25,7 +25,7 @@ jobs:
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - run: cargo test --workspace --all-features --locked
         env:
-          RUST_TEST_THREADS: 16
+          RUST_TEST_THREADS: 8
           CARGO_PROFILE_DEV_DEBUG: 0
       - run: cargo test --workspace --doc --locked
       # A pull request skips this: main and the release tag both build it.
