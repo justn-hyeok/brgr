@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- `brgr result`, `accept`, `reject`, `diff`, `apply` and the other commands that read a task's result
+  said `task ... does not exist` while the task was still running and had no result, and `brgr status`
+  could see it. They now say `task ... has no sealed result yet`. A task that really is unknown still
+  says it does not exist.
 - A workflow driver's pid file is written in one step. It used to be truncated and then written, so
   `brgr workflow resume` or `cancel` reading it in that instant saw an empty file, took it for "no live
   driver", and could start a second driver. It surfaced as a failure of `resume_with_a_live_driver_starts_nothing`

@@ -839,7 +839,7 @@ fn settled(store: &Store, task: TaskId) -> Result<bool> {
         }
         // A failed spawn may receive a bounded automatic retry. Its first
         // result is not proof that this task's run is finished.
-        Ok(_) | Err(StoreError::TaskNotFound(_)) => Ok(false),
+        Ok(_) | Err(StoreError::NoResultYet(_)) => Ok(false),
         Err(error) => Err(error.into()),
     }
 }

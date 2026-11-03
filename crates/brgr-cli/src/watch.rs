@@ -156,7 +156,7 @@ fn publish_task(store: &Store, watched: &mut Watched, all_done: &mut bool) -> Re
                 }))?;
             }
         }
-        Err(StoreError::TaskNotFound(_)) => *all_done = false,
+        Err(StoreError::NoResultYet(_)) => *all_done = false,
         Err(error) => return Err(error.into()),
     }
     Ok(())

@@ -8920,6 +8920,36 @@ fn force_cancel_of_a_candidate_does_not_block_revise() {
     assert_eq!(revised["revision"], 2);
 }
 
+/// A running task exists; only its result is missing. Calling it missing sent
+/// callers looking for a task that `brgr status` could still see.
+#[test]
+fn a_task_without_a_result_yet_is_not_reported_as_missing() {
+    let (_temp, home, workspace) = asking_home();
+    let owner = [("BRGR_OWNER_ID", "codex:no-result-yet")];
+    let launched = json_output(&run(
+        &home,
+        &["run", "ASK", "--workspace", workspace.to_str().unwrap()],
+        &owner,
+    ));
+    // The worker is waiting on its owner, so no result can be sealed yet.
+    let task = launched["task_id"].as_str().unwrap();
+    for args in [["result", task], ["accept", task]] {
+        let output = run(&home, &args, &owner);
+        let text = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success(), "{args:?} succeeded");
+        assert!(text.contains("no sealed result yet"), "{args:?}: {text}");
+        assert!(!text.contains("does not exist"), "{args:?}: {text}");
+    }
+
+    let unknown = "00000000-0000-4000-8000-000000000000";
+    let output = run(&home, &["result", unknown], &owner);
+    let text = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success());
+    assert!(text.contains("does not exist"), "{text}");
+
+    json_output(&run(&home, &["cancel", task], &owner));
+}
+
 #[derive(Debug)]
 struct Poll {
     ok: bool,
@@ -8936,7 +8966,7 @@ fn run_with_error(home: &Path, task: &str, envs: &[(&str, &str)]) -> Poll {
             outcome: value["result"]["outcome"].as_str().unwrap().to_owned(),
         };
     }
-    assert!(text.contains("does not exist"), "{text}");
+    assert!(text.contains("no sealed result yet"), "{text}");
     Poll {
         ok: false,
         outcome: String::new(),
