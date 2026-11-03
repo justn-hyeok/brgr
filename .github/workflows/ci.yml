@@ -28,6 +28,12 @@ jobs:
         env:
           RUST_TEST_THREADS: "8"
       - run: cargo test --workspace --doc --locked
+      - name: Repeat the environment test
+        run: |
+          binary=$(cargo test -p brgr-cli --bin brgr --no-run --locked --message-format=json 2>/dev/null | jq -r 'select(.executable != null and .profile.test == true) | .executable' | head -1)
+          test -n "$binary"
+          for run in $(seq 1 200); do "$binary" caller_pane::tests::pane_environment_is_read_from_another_process --exact -q >/dev/null || { echo "failed at $run"; exit 1; }; done
+          echo "200 runs passed"
 
   # The platform brgr ships for, on every push to main. The release tag runs the
   # tests here again before anything is published.
