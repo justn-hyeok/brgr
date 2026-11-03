@@ -3,7 +3,9 @@
 use std::{
     env,
     fmt::Write as _,
-    fs::{self},
+    fs::{self, File, OpenOptions},
+    io::Read,
+    os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
 };
 
@@ -140,6 +142,11 @@ pub(crate) enum ExecutionDisposition {
 // exceeds the local line-count heuristic.
 #[allow(clippy::too_many_lines)]
 pub(crate) async fn run_task(paths: &Paths, mut args: RunArgs, json_output: bool) -> Result<()> {
+    let objective = match (args.objective.take(), args.objective_file.take()) {
+        (Some(objective), None) => objective,
+        (None, Some(path)) => read_objective_file(&path)?,
+        _ => bail!("provide exactly one of OBJECTIVE or --objective-file"),
+    };
     let requested_mode = requested_mode(args.mode, crate::invocation::current().headless)?;
     let _awake = crate::sleep_guard::keep_awake();
     let config = Config::load(&paths.config)?;
@@ -171,19 +178,20 @@ pub(crate) async fn run_task(paths: &Paths, mut args: RunArgs, json_output: bool
     } else {
         owner_from_environment()?
     };
-    let workflow = workflow_step_from_run(&args, &harness, &calling, &source_workspace)?;
+    let workflow =
+        workflow_step_from_run(&args, &objective, &harness, &calling, &source_workspace)?;
     let create_request_id = match &workflow {
         Some(step) => format!("wf-{}-{}", step.run_id, step.step_key),
         None => format!("run-{task_id}"),
     };
-    let criteria = acceptance_criteria(&args.objective, args.criteria);
+    let criteria = acceptance_criteria(&objective, args.criteria);
     let spec = TaskSpec {
         schema: SCHEMA_V1.to_owned(),
         task_id,
         revision: 1,
         create_request_id,
         owner_id,
-        objective: args.objective,
+        objective,
         workspace: source_workspace.to_string_lossy().into_owned(),
         route: Route {
             harness_id: harness,
@@ -246,6 +254,38 @@ pub(crate) async fn run_task(paths: &Paths, mut args: RunArgs, json_output: bool
         )),
     )
     .await
+}
+
+fn read_objective_file(path: &Path) -> Result<String> {
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+        .with_context(|| format!("cannot open objective file {}", path.display()))?;
+    read_objective(file, path)
+}
+
+fn read_objective(mut file: File, path: &Path) -> Result<String> {
+    use std::os::unix::fs::FileTypeExt;
+    let metadata = file
+        .metadata()
+        .with_context(|| format!("cannot inspect objective file {}", path.display()))?;
+    if !metadata.is_file() || metadata.file_type().is_fifo() {
+        bail!("objective file {} is not a regular file", path.display());
+    }
+    let limit = u64::try_from(brgr_protocol::MAX_OBJECTIVE_BYTES)?;
+    if metadata.len() > limit {
+        bail!("objective must be at most {limit} bytes");
+    }
+    let mut bytes = Vec::new();
+    file.by_ref()
+        .take(limit.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .with_context(|| format!("cannot read objective file {}", path.display()))?;
+    if u64::try_from(bytes.len())? > limit {
+        bail!("objective must be at most {limit} bytes");
+    }
+    String::from_utf8(bytes).context("objective file must contain valid UTF-8")
 }
 
 /// How long a stage of starting a task may run before brgr says what it is
@@ -939,6 +979,7 @@ struct RecordedLaunch<'a> {
 
 fn workflow_step_from_run(
     args: &RunArgs,
+    objective: &str,
     harness: &str,
     calling: &config::CallingOptions,
     workspace: &Path,
@@ -953,7 +994,7 @@ fn workflow_step_from_run(
         run_id: WorkflowRunId::new(run.clone())?,
         step_key,
         input_digest: sha256_hex(&serde_json::to_vec(&WorkflowStepInput {
-            objective: &args.objective,
+            objective,
             harness,
             model: &calling.model,
             effort: &calling.effort,

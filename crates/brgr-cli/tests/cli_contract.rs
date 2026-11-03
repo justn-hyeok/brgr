@@ -8947,7 +8947,7 @@ fn the_incoming_session_records_the_next_revision_through_the_guard() {
 #[test]
 #[cfg_attr(
     target_os = "linux",
-    ignore = "Linux caps one argument at 128 KiB, and this objective is passed as one (#229)"
+    ignore = "The operating system caps a single argument at 128 KiB; this test exercises positional input (#229)"
 )]
 fn a_256_kib_objective_is_admitted_by_brgr_run() {
     let (_temp, home, workspace) = gjc_home();
@@ -8975,7 +8975,7 @@ fn a_256_kib_objective_is_admitted_by_brgr_run() {
 #[test]
 #[cfg_attr(
     target_os = "linux",
-    ignore = "Linux caps one argument at 128 KiB, and this objective is passed as one (#229)"
+    ignore = "The operating system caps a single argument at 128 KiB; this test exercises positional input (#229)"
 )]
 fn a_256_kib_plus_one_objective_is_refused_by_brgr_run_without_creating_a_task() {
     let (_temp, home, workspace) = gjc_home();
@@ -9006,6 +9006,131 @@ fn a_256_kib_plus_one_objective_is_refused_by_brgr_run_without_creating_a_task()
         store.tasks(100).unwrap().is_empty(),
         "an over-long run created a task"
     );
+}
+
+#[test]
+fn objective_file_admits_exactly_256_kib() {
+    let (temp, home, workspace) = gjc_home();
+    let objective_file = temp.path().join("objective.txt");
+    fs::write(
+        &objective_file,
+        "a".repeat(brgr_protocol::MAX_OBJECTIVE_BYTES),
+    )
+    .unwrap();
+    let launched = json_output(&run(
+        &home,
+        &[
+            "run",
+            "--objective-file",
+            objective_file.to_str().unwrap(),
+            "--workspace",
+            workspace.to_str().unwrap(),
+        ],
+        &[("BRGR_OWNER_ID", "codex:objective-file")],
+    ));
+    let task = launched["task_id"].as_str().unwrap();
+    assert_eq!(
+        store_task(&home, task).objective.len(),
+        brgr_protocol::MAX_OBJECTIVE_BYTES
+    );
+    let _ = run(
+        &home,
+        &["cancel", task],
+        &[("BRGR_OWNER_ID", "codex:objective-file")],
+    );
+}
+
+#[test]
+fn objective_file_over_limit_is_refused_without_task() {
+    let (temp, home, workspace) = gjc_home();
+    let objective_file = temp.path().join("objective.txt");
+    fs::write(
+        &objective_file,
+        "a".repeat(brgr_protocol::MAX_OBJECTIVE_BYTES + 1),
+    )
+    .unwrap();
+    let output = run(
+        &home,
+        &[
+            "run",
+            "--objective-file",
+            objective_file.to_str().unwrap(),
+            "--workspace",
+            workspace.to_str().unwrap(),
+        ],
+        &[("BRGR_OWNER_ID", "codex:objective-file")],
+    );
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("262144"));
+    assert!(
+        brgr_store::Store::open(home.join("store"))
+            .unwrap()
+            .tasks(100)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn objective_file_rejects_non_regular_and_missing_inputs_without_task() {
+    use std::os::unix::fs::symlink;
+    let (temp, home, workspace) = gjc_home();
+    let dir = temp.path().join("dir");
+    fs::create_dir(&dir).unwrap();
+    let target = temp.path().join("target");
+    fs::write(&target, "objective").unwrap();
+    let link = temp.path().join("link");
+    symlink(&target, &link).unwrap();
+    let fifo = temp.path().join("fifo");
+    assert!(
+        std::process::Command::new("/usr/bin/mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let missing = temp.path().join("missing");
+    for path in [&dir, &fifo, &link, &missing] {
+        let output = run(
+            &home,
+            &[
+                "run",
+                "--objective-file",
+                path.to_str().unwrap(),
+                "--workspace",
+                workspace.to_str().unwrap(),
+            ],
+            &[("BRGR_OWNER_ID", "codex:objective-file")],
+        );
+        assert!(!output.status.success(), "accepted {}", path.display());
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("objective"),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            brgr_store::Store::open(home.join("store"))
+                .unwrap()
+                .tasks(100)
+                .unwrap()
+                .is_empty()
+        );
+    }
+}
+
+#[test]
+fn objective_file_requires_exactly_one_objective_form() {
+    let (temp, home, _workspace) = gjc_home();
+    let file = temp.path().join("objective.txt");
+    fs::write(&file, "objective").unwrap();
+    for args in [
+        vec!["run", "both", "--objective-file", file.to_str().unwrap()],
+        vec!["run"],
+    ] {
+        let output = run(&home, &args, &[("BRGR_OWNER_ID", "codex:objective-file")]);
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("objective"));
+    }
 }
 
 #[test]

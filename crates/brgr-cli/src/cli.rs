@@ -34,6 +34,7 @@ pub(crate) struct Cli {
 }
 
 #[derive(Subcommand)]
+#[allow(clippy::large_enum_variant)] // Run's flat clap argument set is intentionally owned at dispatch.
 pub(crate) enum Command {
     /// Start a bounded fresh run and seal its result for owner review.
     Run(RunArgs),
@@ -457,7 +458,18 @@ pub(crate) enum ArtifactCommand {
 
 #[derive(Args)]
 pub(crate) struct RunArgs {
-    pub(crate) objective: String,
+    #[arg(
+        required_unless_present = "objective_file",
+        conflicts_with = "objective_file"
+    )]
+    pub(crate) objective: Option<String>,
+    /// Read the task objective from a regular UTF-8 file (up to 256 KiB).
+    #[arg(
+        long,
+        required_unless_present = "objective",
+        conflicts_with = "objective"
+    )]
+    pub(crate) objective_file: Option<PathBuf>,
     /// Select the native pane or one-shot headless route explicitly.
     #[arg(long, value_enum)]
     pub(crate) mode: Option<ModeRequest>,

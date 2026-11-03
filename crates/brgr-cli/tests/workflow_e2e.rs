@@ -121,7 +121,7 @@ await parallel([
       await new Promise((resolve) => setTimeout(resolve, 50));
     }
     writeFileSync(process.env.BRGR_HOME + "/second-launching", "1");
-    return agent({ task: "BRGR_FIXTURE_OK second", mode: "headless", key: "second" });
+    return agent({ task: "BRGR_FIXTURE_OK second" + "x".repeat(65536), mode: "headless", key: "second" });
   },
 ]);
 "#;
@@ -2232,10 +2232,6 @@ exit 1
 }
 
 #[test]
-#[cfg_attr(
-    target_os = "linux",
-    ignore = "Linux caps one argument at 128 KiB, and this objective is passed as one (#229)"
-)]
 fn sdk_accepts_a_256_kib_task_and_launches() {
     require_node();
     let fixture = fixture_home();
@@ -2266,6 +2262,21 @@ esac
     );
     let log = fake_argv_log(&fixture);
     assert!(log.contains(" run "), "256 KiB task did not launch: {log}");
+    assert!(
+        log.contains("--objective-file"),
+        "large task did not use a file: {log}"
+    );
+    let objective_path = log
+        .split("--objective-file ")
+        .nth(1)
+        .and_then(|tail| tail.split_whitespace().next())
+        .expect("objective file path in argv log");
+    let objective_directory = Path::new(objective_path).parent().unwrap();
+    assert!(
+        !objective_directory.exists(),
+        "temporary objective directory remains: {}",
+        objective_directory.display()
+    );
 }
 
 #[test]
