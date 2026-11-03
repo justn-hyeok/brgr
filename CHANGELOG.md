@@ -2,50 +2,14 @@
 
 ## Unreleased
 
+## 2.15.16 — 2026-11-03
+
+Codex workers start reliably on Codex 0.166, a pane worker's model is shown, asking for a result too early no longer says the task does not exist, a workflow driver's pid file can no longer be read empty, and the test suite is steadier under load.
+
 - `brgr result`, `accept`, `reject`, `diff`, `apply` and the other commands that read a task's result
   said `task ... does not exist` while the task was still running and had no result, and `brgr status`
   could see it. They now say `task ... has no sealed result yet`. A task that really is unknown still
   says it does not exist.
-- A workflow driver's pid file is written in one step. It used to be truncated and then written, so
-  `brgr workflow resume` or `cancel` reading it in that instant saw an empty file, took it for "no live
-  driver", and could start a second driver. It surfaced as a failure of `resume_with_a_live_driver_starts_nothing`
-  in a loaded test run (issue #224).
-- Tests only: `oversized_jsonl_event_stops_its_process_group_before_deadline` failed once under heavy
-  load (load average 36) with `CaptureDeadlineElapsed`: its fake harness built the oversized event with
-  a 1.2-million-iteration `awk` loop that outran the ten-second deadline. The event is now written in
-  an instant and the deadline is a minute, so only the oversized event can stop the run (issue #224).
-- Tests only: `git_diff::tests::bounded_diff_stops_a_stalled_collector` failed once under load because
-  its fake `git` is a new script, and macOS runs the first exec of a new script slowly (the test
-  asserted a three-second bound). The fake now sleeps for ten minutes, so only the deadline can end
-  it, and the bound is a minute.
-- Tests only: `workflow_run_returns_before_a_sleeping_script_finishes` no longer asserts that
-  `brgr workflow run` returns within one second (it took 1.3 s once under load); its script now
-  waits on a release file and the test checks that the script had not finished when `run` returned.
-- Tests only: three pane tests (`pane_mode_runs_the_agent_in_a_pane_and_seals_its_report`,
-  `include_ignored_reaches_the_reclaim_a_pane_cleanup_runs`,
-  `owned_native_editor_accepts_input_before_herdr_registers_the_agent`) no longer expect the pane
-  to be closed and the workspace cleaned in the very instant `accept` returns. In loaded runs two
-  brgr processes ran the same task's cleanup at once against the fake Herdr's read-once `working`
-  state, so neither closed the pane; a later brgr command finishes a cleanup that found the agent
-  busy, and the tests now run `status` until it has. A failure of the first also prints the fake
-  agent's state, the pane receipt and the last Herdr calls with their calling process (issue #224).
-- Tests only: `workflow_run_returns_before_a_sleeping_script_finishes` no longer asserts that
-  `brgr workflow run` returns within one second (it took 1.3 s once under load); its script now
-  waits on a release file and the test checks that the script had not finished when `run` returned.
-- Tests only: `pane_mode_runs_the_agent_in_a_pane_and_seals_its_report` no longer expects the
-  workspace to be cleaned in the very instant `accept` returns. In a loaded run its failure
-  report showed two brgr processes running the same task's cleanup at once with the fake
-  Herdr's read-once `working` state, so neither closed the pane; a later brgr command finishes a
-  cleanup that found the agent busy, and the test now looks for that. A failure also prints the
-  fake agent's state, the pane receipt and the last Herdr calls with their calling process
-  (issue #224).
-- Tests only: `workflow_run_returns_before_a_sleeping_script_finishes` no longer asserts that
-  `brgr workflow run` returns within one second (it took 1.3 s once under load); its script now
-  waits on a release file and the test checks that the script had not finished when `run` returned.
-- Tests only: when `pane_mode_runs_the_agent_in_a_pane_and_seals_its_report` fails to find its
-  workspace cleaned after the decision, the failure now also prints the fake agent's state, the
-  pane receipt, the native host state and the last Herdr calls. It failed once in seven full
-  runs under load and its cause is not known yet (issue #224).
 - A Codex worker no longer fails with `native TUI is waiting for input readiness`. Two causes, both
   on Codex 0.166: Codex draws its banner and input box about half a second before the folder
   prompt in a repository it has not trusted yet, which brgr took for a ready agent; and Herdr
@@ -55,34 +19,29 @@
   screen shows an empty composer and no `esc to interrupt`; and a first prompt the agent does
   not accept yet is retried for up to twenty seconds, answering any screen that opens in the
   meantime, instead of failing the run. A native worker starts about one second later.
+- `route_observation.model` for a pane (TUI) run of Claude Code or Codex is filled from the
+  worker's own session log, with `model_source: harness_session_log`, a new `ObservationSource`
+  value that older builds read as `unavailable`. Claude Code workers launch with
+  `--session-id <attempt>`, so their transcript is exactly identified; a Codex worker's rollout is
+  recorded by the installed Codex hook when the session's working directory is the task's
+  workspace. Every read is bounded to the model-name field and anything missing, oversize or odd
+  stays `unavailable` rather than a guess. Other harnesses are unchanged.
 - A Codex head whose first brgr command is `head handoff` is told what to do: Codex 0.162 and
-  later show a command's line only after it ends, so run one short `brgr --as SESSION`
-  command first (the skill and the error say so). `brgr doctor` now reports Codex 0.166 as
-  the release the pane trace was checked against (it was 0.160), after a live check that a
-  command shows no line while it runs and `Ran <command>` once it ends.
-- `route_observation.model` for a pane (TUI) run of Claude Code or Codex is
-  filled from the worker's own session log, with `model_source:
-  harness_session_log` — a new `ObservationSource` value older builds read as
-  `unavailable`. Claude Code workers already launch with
-  `--session-id <attempt>`, so their transcript is exactly identified; a Codex
-  worker's rollout is recorded by the installed Codex hook when the session's
-  own working directory is the task's workspace. Every read is bounded to the
-  model-name field only, verified against the session or directory the file
-  must belong to, and anything missing, oversize or odd stays `unavailable`
-  rather than a guess. Other harnesses are unchanged.
-- Tests only: fake `#!/bin/sh` executables in `brgr-runner` and `brgr-registry`
-  unit tests and `brgr-cli` unit tests (`caller_pane`, `plugin_bridge`,
-  `pane_adapter`, `error_memo`, `tui_host`) are hard-links of one warmed
-  trampoline per test binary, matching `write_fast_script` in the integration
-  tests, so they no longer pay macOS's first-exec cost on a new inode (#224).
-  Under load, `a_foreign_owner_force_cancels_a_running_worker` now polls
-  `brgr status` — which drives the reconciliation that settles a run whose
-  supervisor never claimed it — instead of the read-only `brgr result`; the
-  workflow-runner cancel test waits on the step through `brgr wait` for the
-  same reason, `resume_with_a_live_driver_starts_nothing` holds its driver on
-  a file instead of a timer, and the admission-lock test drops a wall-clock
-  bound that measured machine speed instead of the lock.
-
+  later show a command's line only after it ends, so run one short `brgr --as SESSION` command
+  first (the skill and the error say so). `brgr doctor` now reports Codex 0.166 as the release the
+  pane trace was checked against (it was 0.160).
+- A workflow driver's pid file is written in one step. It used to be truncated and then written, so
+  `brgr workflow resume` or `cancel` reading it in that instant saw an empty file, took it for "no
+  live driver", and could start a second driver.
+- Tests only (issue #224): fake `#!/bin/sh` executables in the unit and integration tests are hard
+  links of one warmed trampoline, so they no longer pay macOS's slow first exec of a new file;
+  tests that waited for a cancelled or cleaned-up run now run `brgr status` (which reconciles)
+  until it has settled instead of expecting it in the instant a command returns; wall-clock bounds
+  in the workflow-run, `git_diff`, oversized-event and `watch` tests were replaced by waiting on a
+  file, a deadline that only the code under test can end, an instant write, or an explicit timeout.
+  A failure of the pane-mode test now prints the fake agent's state, the pane receipt and the last
+  Herdr calls with their calling process. The supervisor-kill, slow-Herdr admission and
+  recursive-worker tests now wait on the event itself instead of a clock window.
 
 ## 2.15.15 — 2026-11-01
 
