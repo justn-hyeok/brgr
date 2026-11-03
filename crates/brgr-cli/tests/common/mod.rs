@@ -2,7 +2,7 @@
 #![allow(dead_code)]
 
 use std::{
-    fs, io,
+    env, fs, io,
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     process::Command,
@@ -20,6 +20,7 @@ const TRAMPOLINE_SOURCE: &str = concat!(
 );
 
 static WARMED_TRAMPOLINE: OnceLock<PathBuf> = OnceLock::new();
+static HERDR_STUB_DIR: OnceLock<PathBuf> = OnceLock::new();
 
 /// Writes a `#!/bin/sh` test executable without macOS's first-exec cost.
 ///
@@ -206,12 +207,80 @@ pub const INHERITED_WORKER_ENV: &[&str] = &[
 /// The brgr binary under test, with the worker identity removed. Debug builds
 /// trust a faked `HERDR_PANE_ID` only with `BRGR_TEST_TRUST_HERDR_PANE`.
 pub fn brgr_command() -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_brgr"));
+    let mut command = Command::new(brgr_binary());
     command.env("BRGR_TEST_TRUST_HERDR_PANE", "1");
     for name in INHERITED_WORKER_ENV {
         command.env_remove(name);
     }
+    clear_inherited_herdr_env(&mut command);
+    // Harness children inherit PATH (but the runner removes HERDR_BIN_PATH),
+    // so put a failing Herdr stub first while preserving every existing tool.
+    command.env("PATH", test_path());
     command
+}
+
+/// PATH used by intermediary test processes that may launch the brgr binary.
+pub fn test_path() -> std::ffi::OsString {
+    std::env::join_paths(
+        std::iter::once(herdr_stub_dir().to_path_buf())
+            .chain(env::split_paths(&env::var_os("PATH").unwrap_or_default())),
+    )
+    .unwrap()
+}
+
+fn herdr_stub_dir() -> &'static Path {
+    HERDR_STUB_DIR.get_or_init(|| {
+        let directory =
+            env::temp_dir().join(format!("brgr-test-herdr-stub-{}", std::process::id()));
+        fs::create_dir_all(&directory).unwrap();
+        write_fast_script(&directory.join("herdr"), "#!/bin/sh\nexit 1\n");
+        directory
+    })
+}
+
+/// Removes inherited Herdr environment variables from this process.
+/// Intermediary processes use this when they may run brgr later.
+pub fn clear_inherited_herdr_env(command: &mut Command) {
+    for (name, _) in env::vars_os() {
+        if name.to_string_lossy().starts_with("HERDR_") {
+            command.env_remove(name);
+        }
+    }
+}
+
+/// Path to the binary under test for places that need to name it as data.
+pub fn brgr_binary() -> &'static str {
+    env!("CARGO_BIN_EXE_brgr")
+}
+
+fn contains_binary_constructor(source: &str) -> bool {
+    let constructor = concat!("Command::new(env!(\"CARGO_BIN_EXE_", "brgr\"))");
+    let binary = concat!("env!(\"CARGO_BIN_EXE_", "brgr\")");
+    source.contains(constructor) || source.contains(binary)
+}
+
+pub fn brgr_constructor_offenders(root: &Path) -> Vec<PathBuf> {
+    fn scan(directory: &Path, allowed: &Path, offenders: &mut Vec<PathBuf>) {
+        for entry in fs::read_dir(directory).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                scan(&path, allowed, offenders);
+            } else if path.extension().is_some_and(|ext| ext == "rs") && path != allowed {
+                let source = fs::read_to_string(&path).unwrap();
+                if contains_binary_constructor(&source) {
+                    offenders.push(path);
+                }
+            }
+        }
+    }
+
+    let allowed = root.join("tests/common/mod.rs");
+    let mut offenders = Vec::new();
+    for directory in [root.join("tests"), root.join("benches")] {
+        scan(&directory, &allowed, &mut offenders);
+    }
+    offenders.sort();
+    offenders
 }
 
 /// Runs `brgr --home HOME ARGS` with a clean Herdr/worker environment and a
@@ -224,18 +293,6 @@ pub fn run(home: &Path, args: &[&str], envs: &[(&str, &str)]) -> std::process::O
     let subcommand = args.iter().find(|arg| !arg.starts_with('-'));
     if matches!(subcommand.copied(), Some("run" | "revise")) {
         command.arg("--headless");
-    }
-    for name in [
-        "HERDR_ENV",
-        "HERDR_PANE_ID",
-        "HERDR_TAB_ID",
-        "HERDR_WORKSPACE_ID",
-        "HERDR_BIN_PATH",
-        "HERDR_SOCKET_PATH",
-        "HERDR_SESSION",
-        "HERDR_PLUGIN_ID",
-    ] {
-        command.env_remove(name);
     }
     if !envs
         .iter()

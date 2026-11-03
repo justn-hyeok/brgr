@@ -1,6 +1,6 @@
 mod common;
 
-use common::write_fast_script;
+use common::{brgr_command, write_fast_script};
 
 use std::{fs, path::Path, process::Command};
 
@@ -8,7 +8,7 @@ use serde_json::Value;
 use tempfile::TempDir;
 
 fn command(home: &Path) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_brgr"));
+    let mut command = brgr_command();
     command.args(["--json", "--home"]).arg(home);
     for key in [
         "CODEX_THREAD_ID",

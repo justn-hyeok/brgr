@@ -17,6 +17,9 @@
 //! cargo bench -p brgr-cli --bench concurrent_admission
 //! ```
 
+#[path = "../tests/common/mod.rs"]
+mod common;
+
 use std::collections::BTreeSet;
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
@@ -24,6 +27,8 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
+
+use common::brgr_command;
 
 /// Matches the `sleep` in `testdata/fixtures/bench/gjc`.
 const HARNESS_SECONDS: f64 = 1.0;
@@ -173,7 +178,7 @@ fn register_fixture(home: &Path, scratch: &Path) {
 }
 
 fn brgr(home: &Path) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_brgr"));
+    let mut command = brgr_command();
     command
         .arg("--home")
         .arg(home)

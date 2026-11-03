@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Herdr commands for worktree creation, pane cleanup, and OMP agent lookup now honor `HERDR_BIN_PATH` like the others. Tests no longer reach a real Herdr from inside a Herdr pane (issue #270).
 - `brgr accept` could print `brgr cleanup pending: No such file or directory (os error 2)` for a
   pane worker (issue #265). The pane's session loop and the deciding command both archive the
   handled report and restore the Cursor hook, with no lock between them, so one could remove a

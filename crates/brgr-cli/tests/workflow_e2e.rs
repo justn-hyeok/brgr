@@ -2,7 +2,9 @@
 
 mod common;
 
-use common::write_fast_script;
+use common::{
+    brgr_binary as brgr, brgr_command, clear_inherited_herdr_env, test_path, write_fast_script,
+};
 
 use std::{
     fs,
@@ -14,34 +16,6 @@ use std::{
 
 use serde_json::Value;
 use tempfile::TempDir;
-
-fn brgr() -> &'static str {
-    env!("CARGO_BIN_EXE_brgr")
-}
-
-const INHERITED: &[&str] = &[
-    "BRGR_HOME",
-    "BRGR_BIN",
-    "BRGR_OWNER_ID",
-    "BRGR_SESSION_ID",
-    "BRGR_PARENT_TASK_ID",
-    "BRGR_PARENT_ATTEMPT_ID",
-    "BRGR_WORKER_HERDR_CONTEXT",
-    "CODEX_THREAD_ID",
-    "CLAUDE_CODE_SESSION_ID",
-    "CURSOR_CONVERSATION_ID",
-];
-
-const HERDR: &[&str] = &[
-    "HERDR_ENV",
-    "HERDR_PANE_ID",
-    "HERDR_TAB_ID",
-    "HERDR_WORKSPACE_ID",
-    "HERDR_BIN_PATH",
-    "HERDR_SOCKET_PATH",
-    "HERDR_SESSION",
-    "HERDR_PLUGIN_ID",
-];
 
 const CRITERION_SCRIPT: &str = r#"
 import { existsSync, writeFileSync } from "node:fs";
@@ -764,15 +738,6 @@ fn require_node() {
     );
 }
 
-fn brgr_command() -> Command {
-    let mut command = Command::new(brgr());
-    command.env("BRGR_TEST_TRUST_HERDR_PANE", "1");
-    for name in INHERITED {
-        command.env_remove(name);
-    }
-    command
-}
-
 fn run(
     home: &Path,
     workspace: &Path,
@@ -788,12 +753,6 @@ fn run(
         .args(args);
     if matches!(args.first(), Some(&"run" | &"revise")) {
         command.arg("--headless");
-    }
-    command.env_remove("CODEX_THREAD_ID");
-    command.env_remove("CLAUDE_CODE_SESSION_ID");
-    command.env_remove("CURSOR_CONVERSATION_ID");
-    for name in HERDR {
-        command.env_remove(name);
     }
     if !envs.iter().any(|(name, _)| {
         matches!(
@@ -1130,12 +1089,11 @@ fn spawn_agent_script(
         .env_remove("CLAUDE_CODE_SESSION_ID")
         .env_remove("CURSOR_CONVERSATION_ID")
         .env("BRGR_TEST_TRUST_HERDR_PANE", "1")
+        .env("PATH", test_path())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    for name in HERDR {
-        command.env_remove(name);
-    }
+    clear_inherited_herdr_env(&mut command);
     command.spawn().unwrap()
 }
 

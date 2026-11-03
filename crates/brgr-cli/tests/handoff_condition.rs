@@ -1,59 +1,18 @@
 //! The note a head gets when its usage passes the configured limit.
 mod common;
 
-use std::{fs, path::Path, process::Command};
+use std::{fs, path::Path};
 
 use serde_json::Value;
 use tempfile::TempDir;
 
-use common::{calls, fake_herdr, herdr_env};
-
-fn brgr() -> &'static str {
-    env!("CARGO_BIN_EXE_brgr")
-}
-
-const INHERITED_WORKER_ENV: &[&str] = &[
-    "BRGR_HOME",
-    "BRGR_BIN",
-    "BRGR_OWNER_ID",
-    "BRGR_SESSION_ID",
-    "BRGR_PARENT_TASK_ID",
-    "BRGR_PARENT_ATTEMPT_ID",
-    "BRGR_WORKER_HERDR_CONTEXT",
-    "CODEX_THREAD_ID",
-    "CLAUDE_CODE_SESSION_ID",
-    "CURSOR_CONVERSATION_ID",
-];
-
-fn brgr_command() -> Command {
-    let mut command = Command::new(brgr());
-    command.env("BRGR_TEST_TRUST_HERDR_PANE", "1");
-    for name in INHERITED_WORKER_ENV {
-        command.env_remove(name);
-    }
-    command
-}
+use common::{brgr_command, calls, fake_herdr, herdr_env};
 
 fn run(home: &Path, args: &[&str], envs: &[(&str, &str)]) -> std::process::Output {
     let mut command = brgr_command();
     command.arg("--home").arg(home).arg("--json").args(args);
     if matches!(args.first(), Some(&"run")) {
         command.arg("--headless");
-    }
-    command.env_remove("CODEX_THREAD_ID");
-    command.env_remove("CLAUDE_CODE_SESSION_ID");
-    command.env_remove("CURSOR_CONVERSATION_ID");
-    for name in [
-        "HERDR_ENV",
-        "HERDR_PANE_ID",
-        "HERDR_TAB_ID",
-        "HERDR_WORKSPACE_ID",
-        "HERDR_BIN_PATH",
-        "HERDR_SOCKET_PATH",
-        "HERDR_SESSION",
-        "HERDR_PLUGIN_ID",
-    ] {
-        command.env_remove(name);
     }
     if !envs.iter().any(|(name, _)| {
         matches!(

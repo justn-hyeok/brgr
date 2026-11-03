@@ -212,7 +212,8 @@ pub fn close_if_eligible(store: &Store, runs: &Path, task_id: TaskId) -> Result<
         write_json_atomic(&path, &receipt)?;
         return Ok("retained_live_state_changed".to_owned());
     }
-    let closed = Command::new("herdr")
+    let herdr = crate::caller_pane::binary().context("Herdr executable is not available")?;
+    let closed = Command::new(herdr)
         .args(["pane", "close", &receipt.pane_id])
         .output()?;
     for _ in 0..10 {
@@ -235,7 +236,8 @@ pub fn close_if_eligible(store: &Store, runs: &Path, task_id: TaskId) -> Result<
 }
 
 fn pane_absent(pane_id: &str) -> Result<bool> {
-    let output = Command::new("herdr")
+    let herdr = crate::caller_pane::binary().context("Herdr executable is not available")?;
+    let output = Command::new(herdr)
         .args(["pane", "get", pane_id])
         .output()?;
     if output.status.success() {
@@ -312,7 +314,8 @@ fn live_tab(tab_id: &str) -> Result<Value> {
 }
 
 fn herdr_get(kind: &str, id: &str) -> Result<Value> {
-    let output = Command::new("herdr").args([kind, "get", id]).output()?;
+    let herdr = crate::caller_pane::binary().context("Herdr executable is not available")?;
+    let output = Command::new(herdr).args([kind, "get", id]).output()?;
     if !output.status.success() {
         bail!("Herdr cannot identify {kind} {id}");
     }

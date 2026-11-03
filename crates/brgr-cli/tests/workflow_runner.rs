@@ -1,5 +1,7 @@
 //! Black-box runner for `brgr workflow run|resume|cancel` and the hidden driver.
 
+mod common;
+
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -8,36 +10,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+use common::{brgr_binary as brgr, brgr_command};
 use serde_json::{Value, json};
 use tempfile::TempDir;
-
-fn brgr() -> &'static str {
-    env!("CARGO_BIN_EXE_brgr")
-}
-
-const INHERITED_WORKER_ENV: &[&str] = &[
-    "BRGR_HOME",
-    "BRGR_BIN",
-    "BRGR_OWNER_ID",
-    "BRGR_SESSION_ID",
-    "BRGR_PARENT_TASK_ID",
-    "BRGR_PARENT_ATTEMPT_ID",
-    "BRGR_WORKER_HERDR_CONTEXT",
-    "CODEX_THREAD_ID",
-    "CLAUDE_CODE_SESSION_ID",
-    "CURSOR_CONVERSATION_ID",
-];
-
-const HERDR_ENV: &[&str] = &[
-    "HERDR_ENV",
-    "HERDR_PANE_ID",
-    "HERDR_TAB_ID",
-    "HERDR_WORKSPACE_ID",
-    "HERDR_BIN_PATH",
-    "HERDR_SOCKET_PATH",
-    "HERDR_SESSION",
-    "HERDR_PLUGIN_ID",
-];
 
 fn require_node() {
     let output = Command::new("node")
@@ -51,15 +26,6 @@ fn require_node() {
     );
 }
 
-fn brgr_command() -> Command {
-    let mut command = Command::new(brgr());
-    command.env("BRGR_TEST_TRUST_HERDR_PANE", "1");
-    for name in INHERITED_WORKER_ENV {
-        command.env_remove(name);
-    }
-    command
-}
-
 fn run(home: &Path, args: &[&str], envs: &[(&str, &str)]) -> std::process::Output {
     let mut command = brgr_command();
     command.arg("--home").arg(home).arg("--json").args(args);
@@ -69,9 +35,6 @@ fn run(home: &Path, args: &[&str], envs: &[(&str, &str)]) -> std::process::Outpu
     command.env_remove("CODEX_THREAD_ID");
     command.env_remove("CLAUDE_CODE_SESSION_ID");
     command.env_remove("CURSOR_CONVERSATION_ID");
-    for name in HERDR_ENV {
-        command.env_remove(name);
-    }
     if !envs.iter().any(|(name, _)| {
         matches!(
             *name,
