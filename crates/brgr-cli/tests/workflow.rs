@@ -8,7 +8,7 @@ use std::{
     process::Command,
 };
 
-use common::brgr_command;
+use common::{brgr_command, wait_until};
 use serde_json::Value;
 use tempfile::TempDir;
 
@@ -278,11 +278,15 @@ fn a_second_unfinished_step_exits_75_until_the_first_has_a_result() {
         &fixture.workspace,
         run_id,
         "one",
-        "SLOW first step",
+        "WORKFLOW_GATE_FIRST",
         &[],
         &envs,
     ));
     let first_task = first["task_id"].as_str().unwrap().to_owned();
+    assert!(wait_until(|| fixture
+        .home
+        .join("workflow-first-started")
+        .is_file()));
     assert_eq!(task_worktrees(&fixture.home).len(), 1);
 
     let refused = launch_step(
@@ -315,6 +319,11 @@ fn a_second_unfinished_step_exits_75_until_the_first_has_a_result() {
     );
     assert_eq!(launch_files(&fixture.home).len(), 1);
 
+    fs::write(fixture.home.join("workflow-release-first"), b"1").unwrap();
+    assert!(wait_until(|| fixture
+        .home
+        .join("workflow-first-result-ready")
+        .is_file()));
     json_output(&run(
         &fixture.home,
         &["wait", &first_task, "--timeout-seconds", "90"],

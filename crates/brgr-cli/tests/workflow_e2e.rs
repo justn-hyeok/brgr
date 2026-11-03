@@ -692,7 +692,7 @@ prompt_file=
 for argument in "$@"; do
   case "$argument" in @*) prompt_file=${argument#@};; esac
 done
-if test -n "${BRGR_PARENT_ATTEMPT_ID:-}" && /usr/bin/grep -q ASK "$prompt_file"; then
+if test -n "${BRGR_PARENT_ATTEMPT_ID:-}" && /usr/bin/grep -qw ASK "$prompt_file"; then
   "$BRGR_BIN" --json message send "$BRGR_PARENT_TASK_ID" --to owner --kind question --body 'Which token?' >/dev/null
   reply=$("$BRGR_BIN" --json message wait "$BRGR_PARENT_TASK_ID" --for worker --timeout-seconds 60)
   reply_id=$(printf '%s\n' "$reply" | /usr/bin/sed -n 's/.*"message_id":"\([^"]*\)".*/\1/p')
@@ -931,6 +931,20 @@ fn init_sdk(fixture: &Fixture) {
         &[],
     ));
     assert!(fixture.scripts.join("brgr-workflow.mjs").is_file());
+}
+
+/// Makes this fixture's own copy of the SDK leave a `cap-hit` file when a launch
+/// is refused at the parallel cap, so a test can hold the first step until the
+/// shipped retry path has really been taken.
+fn mark_cap_hits_in_sdk(fixture: &Fixture) {
+    let path = fixture.scripts.join("brgr-workflow.mjs");
+    let source = fs::read_to_string(&path).unwrap();
+    let refused = "if (error && error.code === TEMPFAIL) {";
+    assert!(source.contains(refused), "the SDK has no {refused}");
+    let marked = format!(
+        "{refused} (await import(\"node:fs\")).writeFileSync(process.env.BRGR_HOME + \"/cap-hit\", \"1\");"
+    );
+    fs::write(&path, source.replace(refused, &marked)).unwrap();
 }
 
 fn write_script(fixture: &Fixture, name: &str, source: &str) -> PathBuf {
@@ -1485,6 +1499,7 @@ fn a_launch_that_hits_the_parallel_cap_while_blocked_keeps_waiting() {
     require_node();
     let fixture = fixture_with_script(ASKING_GJC);
     init_sdk(&fixture);
+    mark_cap_hits_in_sdk(&fixture);
     let script = write_script(&fixture, "cap-blocked.mjs", CAP_WHILE_BLOCKED_SCRIPT);
     let run_id = start_workflow_with(&fixture, &script, &["--max-parallel", "1"]);
     let blocked = wait_run_state(&fixture, &run_id, "blocked", Duration::from_secs(90));
@@ -1494,6 +1509,9 @@ fn a_launch_that_hits_the_parallel_cap_while_blocked_keeps_waiting() {
         &fixture.home.join("second-launching"),
         Duration::from_secs(90),
     );
+    // The first step stays unanswered until the second launch has been refused,
+    // so the run cannot finish without going through the retry.
+    wait_for_file(&fixture.home.join("cap-hit"), Duration::from_secs(90));
     let ask = blocked["steps"][0]["task_id"].as_str().unwrap().to_owned();
     assert_eq!(step_keys(&blocked), vec!["ask"], "{blocked}");
     reply_to_worker_question(&fixture, &ask, "token-42");

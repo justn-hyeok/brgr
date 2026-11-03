@@ -22,6 +22,15 @@ done
 if [ -n "$prompt_file" ] && /usr/bin/grep -q 'SLOW' "$prompt_file"; then
   /bin/sleep 30
 fi
+if [ -n "$prompt_file" ] && /usr/bin/grep -q 'WORKFLOW_GATE_FIRST' "$prompt_file"; then
+  : > "$BRGR_HOME/workflow-first-started"
+  n=0
+  while [ ! -f "$BRGR_HOME/workflow-release-first" ] && [ "$n" -lt 6000 ]; do
+    /bin/sleep 0.1
+    n=$((n + 1))
+  done
+  : > "$BRGR_HOME/workflow-first-result-ready"
+fi
 # A worker that leaves a file of its own, or only its harness cache.
 if [ -n "$prompt_file" ] && /usr/bin/grep -q 'WRITE' "$prompt_file"; then
   printf 'worker output\n' > AGENT_OUTPUT.txt
