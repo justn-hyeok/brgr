@@ -10,6 +10,8 @@
 //! crate and this is the crate every other one depends on last; nothing about
 //! the check is CLI-specific.
 
+mod common;
+
 use std::{
     collections::BTreeSet,
     fs,
@@ -160,4 +162,35 @@ fn the_release_workflow_finds_this_versions_notes() {
         root.join(&notes).is_file(),
         "release.yml would look for {notes}, which does not exist"
     );
+}
+
+#[test]
+fn every_test_and_bench_constructs_brgr_through_the_shared_helper() {
+    let crate_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let offenders = common::brgr_constructor_offenders(crate_root);
+    assert!(
+        offenders.is_empty(),
+        "construct brgr subprocesses through tests/common/mod.rs: {}",
+        offenders
+            .iter()
+            .map(|path| path.strip_prefix(crate_root).unwrap().display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+
+    // Prove the scanner reports exactly one source that bypasses the helper.
+    let fixture_root = tempfile::tempdir().unwrap();
+    fs::create_dir_all(fixture_root.path().join("tests/common")).unwrap();
+    fs::create_dir_all(fixture_root.path().join("benches")).unwrap();
+    fs::write(fixture_root.path().join("tests/common/mod.rs"), "").unwrap();
+    fs::write(
+        fixture_root.path().join("tests/new_test.rs"),
+        concat!(
+            "fn bypass() { Command::new(env!(\"CARGO_BIN_EXE_",
+            "brgr\")); }"
+        ),
+    )
+    .unwrap();
+    let offenders = common::brgr_constructor_offenders(fixture_root.path());
+    assert_eq!(offenders, [fixture_root.path().join("tests/new_test.rs")]);
 }

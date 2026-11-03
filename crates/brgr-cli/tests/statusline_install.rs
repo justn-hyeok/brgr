@@ -1,6 +1,10 @@
 //! `brgr integrate claude install --context` and `integrate cursor install`,
 //! against scratch configs.
 
+mod common;
+
+use common::brgr_command;
+
 use std::{
     fs,
     io::Write as _,
@@ -38,7 +42,7 @@ fn settings(setup: &Setup) -> PathBuf {
 }
 
 fn brgr(setup: &Setup, args: &[&str]) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_brgr"))
+    brgr_command()
         .arg("--home")
         .arg(&setup.home)
         .arg("--json")
@@ -212,7 +216,7 @@ fn a_plain_install_does_not_touch_the_status_line() {
 }
 
 fn cursor(setup: &Setup, args: &[&str]) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_brgr"))
+    brgr_command()
         .arg("--home")
         .arg(&setup.home)
         .arg("--json")
@@ -268,7 +272,7 @@ fn a_chained_tilde_path_is_expanded_by_brgr_when_the_harness_does_not() {
     fs::create_dir_all(script.parent().unwrap()).unwrap();
     fs::write(&script, "#!/bin/bash\ncat >/dev/null\necho from-home\n").unwrap();
     fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_brgr"))
+    let mut child = brgr_command()
         .arg("--home")
         .arg(&setup.home)
         .args(["__context", "--source", "cursor", "--", "~/bin/status.sh"])

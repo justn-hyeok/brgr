@@ -1,11 +1,10 @@
 //! `brgr __context` as a harness status line command.
 
-use std::{
-    fs,
-    io::Write as _,
-    path::Path,
-    process::{Command, Stdio},
-};
+mod common;
+
+use common::brgr_command;
+
+use std::{fs, io::Write as _, path::Path, process::Stdio};
 
 use serde_json::Value;
 use tempfile::TempDir;
@@ -14,7 +13,7 @@ const CLAUDE: &str = include_str!("../../../testdata/fixtures/statusline/claude-
 const SESSION: &str = "0a91ffd2-1a5e-4c75-b65a-54cc4b3b1fa0";
 
 fn context(home: &Path, chain: &[&str], input: &str) -> std::process::Output {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_brgr"))
+    let mut child = brgr_command()
         .arg("--home")
         .arg(home)
         .arg("__context")
@@ -109,7 +108,7 @@ const ROLLOUT: &str =
     include_str!("../../../testdata/fixtures/codex-rollout/token-counts-0.162.1.jsonl");
 
 fn codex_hook(home: &Path, event: &str, input: &Value) -> std::process::Output {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_brgr"))
+    let mut child = brgr_command()
         .arg("--home")
         .arg(home)
         .args(["__hook", event])
@@ -222,7 +221,7 @@ fn a_worker_sessions_hook_records_the_rollout_for_its_task() {
     let rollout = codex_home.join("sessions/2026/10/30/rollout-t-deadbeef.jsonl");
     fs::create_dir_all(rollout.parent().unwrap()).unwrap();
     fs::write(&rollout, "{}\n").unwrap();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_brgr"))
+    let mut child = brgr_command()
         .arg("--home")
         .arg(&home)
         .args(["__hook", "session-start"])

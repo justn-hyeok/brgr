@@ -16,35 +16,7 @@ use std::{
 use serde_json::Value;
 use tempfile::TempDir;
 
-use common::{fake_herdr, herdr_env, write_fast_script};
-
-fn brgr() -> &'static str {
-    env!("CARGO_BIN_EXE_brgr")
-}
-
-const INHERITED: &[&str] = &[
-    "BRGR_HOME",
-    "BRGR_BIN",
-    "BRGR_OWNER_ID",
-    "BRGR_SESSION_ID",
-    "BRGR_PARENT_TASK_ID",
-    "BRGR_PARENT_ATTEMPT_ID",
-    "BRGR_WORKER_HERDR_CONTEXT",
-    "CODEX_THREAD_ID",
-    "CLAUDE_CODE_SESSION_ID",
-    "CURSOR_CONVERSATION_ID",
-];
-
-const HERDR: &[&str] = &[
-    "HERDR_ENV",
-    "HERDR_PANE_ID",
-    "HERDR_TAB_ID",
-    "HERDR_WORKSPACE_ID",
-    "HERDR_BIN_PATH",
-    "HERDR_SOCKET_PATH",
-    "HERDR_SESSION",
-    "HERDR_PLUGIN_ID",
-];
+use common::{brgr_command, fake_herdr, herdr_env, write_fast_script};
 
 const NO_PANE_NOTE: &str = "no verified Herdr pane: workflow steps must use mode headless";
 const OWNER_SESSION: &str = "workflow-session";
@@ -95,15 +67,6 @@ fn require_node() {
     );
 }
 
-fn brgr_command() -> Command {
-    let mut command = Command::new(brgr());
-    command.env("BRGR_TEST_TRUST_HERDR_PANE", "1");
-    for name in INHERITED {
-        command.env_remove(name);
-    }
-    command
-}
-
 fn run(
     home: &Path,
     workspace: &Path,
@@ -117,12 +80,6 @@ fn run(
         .arg(home)
         .arg("--json")
         .args(args);
-    command.env_remove("CODEX_THREAD_ID");
-    command.env_remove("CLAUDE_CODE_SESSION_ID");
-    command.env_remove("CURSOR_CONVERSATION_ID");
-    for name in HERDR {
-        command.env_remove(name);
-    }
     if !envs.iter().any(|(name, _)| {
         matches!(
             *name,

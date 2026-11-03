@@ -12,6 +12,10 @@
 //! would deadlock on a full pipe buffer if any of them produced a large
 //! backtrace.
 
+mod common;
+
+use common::brgr_command;
+
 use std::{
     collections::BTreeSet,
     fs::{self, File},
@@ -120,7 +124,7 @@ fn register_bench_fixture(home: &Path, scratch: &Path) {
 }
 
 fn brgr(home: &Path) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_brgr"));
+    let mut command = brgr_command();
     command.arg("--headless");
     command
         .arg("--home")

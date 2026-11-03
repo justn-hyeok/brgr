@@ -12,10 +12,11 @@
 //! constraints such as `minLength`, `minimum`, `pattern` or `format`, so a green
 //! run means the field names and shapes agree, not that every constraint holds.
 
-use std::{
-    path::{Path, PathBuf},
-    process::Command,
-};
+mod common;
+
+use common::brgr_command;
+
+use std::path::{Path, PathBuf};
 
 use brgr_protocol::{
     ArtifactContract, ArtifactRef, AttemptBudget, AttemptId, EvidenceSpec, ObservationSource,
@@ -131,7 +132,7 @@ fn harness_schema_describes_a_drafted_manifest() {
     // An isolated home: without `--home` this resolves the developer's real
     // control home, creates and chmods it, and opens their real registry.
     let temp = TempDir::new().unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_brgr"))
+    let output = brgr_command()
         .arg("--home")
         .arg(temp.path().join("home"))
         .arg("--json")

@@ -190,7 +190,8 @@ pub(crate) fn fresh_omp_report_path(paths: &Paths, task: TaskId, revision: u32) 
 }
 
 pub(crate) fn get_omp_agent(agent: &str) -> Result<serde_json::Value> {
-    let observed = ProcessCommand::new("herdr")
+    let herdr = crate::caller_pane::binary().context("Herdr executable is not available")?;
+    let observed = ProcessCommand::new(herdr)
         .args(["agent", "get", agent])
         .output()?;
     if !observed.status.success() {
@@ -382,7 +383,8 @@ pub(crate) fn recover_omp_contract(
     let receipt: serde_json::Value = serde_json::from_slice(&fs::read(receipt_path)?)?;
     let live = (0..20)
         .find_map(|_| {
-            let output = ProcessCommand::new("herdr")
+            let herdr = crate::caller_pane::binary()?;
+            let output = ProcessCommand::new(herdr)
                 .args(["agent", "get", agent])
                 .output()
                 .ok()?;

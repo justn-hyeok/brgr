@@ -744,7 +744,8 @@ fn add_herdr_worktree(
 ) -> Result<std::process::ExitStatus> {
     let mut last = None;
     for attempt in 0..GIT_LOCK_ATTEMPTS {
-        let output = Command::new("herdr")
+        let herdr = crate::caller_pane::binary().context("Herdr executable is not available")?;
+        let output = Command::new(herdr)
             .args(["worktree", "create", "--cwd"])
             .arg(primary)
             .args(["--branch", branch, "--base", revision, "--path"])

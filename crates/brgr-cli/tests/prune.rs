@@ -8,7 +8,7 @@
 
 mod common;
 
-use common::write_fast_script;
+use common::{brgr_command, write_fast_script};
 
 use std::{
     fs,
@@ -1648,7 +1648,7 @@ impl Fixture {
     }
 
     fn command(&self) -> Command {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_brgr"));
+        let mut command = brgr_command();
         command
             .arg("--headless")
             .arg("--home")

@@ -1,6 +1,8 @@
 mod common;
 
-use common::{HANG_GUARD, process_exists, wait_until, write_fast_script};
+use common::{
+    HANG_GUARD, brgr_binary as brgr, brgr_command, process_exists, wait_until, write_fast_script,
+};
 
 use std::{
     fmt::Write as _,
@@ -15,10 +17,6 @@ use std::{
 
 use serde_json::{Value, json};
 use tempfile::TempDir;
-
-fn brgr() -> &'static str {
-    env!("CARGO_BIN_EXE_brgr")
-}
 
 /// The task's active attempt once its detached supervisor has claimed it.
 fn active_attempt(store: &brgr_store::Store, task: &str) -> brgr_protocol::AttemptId {
@@ -51,37 +49,6 @@ fn delivered_prompt(prompts: &Path, delivered: impl Fn(&str) -> bool) -> Option<
     .then_some(text)
 }
 
-/// A worker's own identity. `cargo test` inside a worker inherits it, and a
-/// fixture command must not: a stale parent attempt or a session that disagrees
-/// with `CODEX_THREAD_ID` fails the command before the fixture runs.
-const INHERITED_WORKER_ENV: &[&str] = &[
-    "BRGR_HOME",
-    "BRGR_BIN",
-    "BRGR_OWNER_ID",
-    "BRGR_SESSION_ID",
-    "BRGR_PARENT_TASK_ID",
-    "BRGR_PARENT_ATTEMPT_ID",
-    "BRGR_WORKER_HERDR_CONTEXT",
-    "CODEX_THREAD_ID",
-    "CLAUDE_CODE_SESSION_ID",
-    "CURSOR_CONVERSATION_ID",
-];
-
-fn clear_inherited_worker_env(command: &mut Command) {
-    for name in INHERITED_WORKER_ENV {
-        command.env_remove(name);
-    }
-}
-
-/// brgr for a test. Debug builds trust a faked `HERDR_PANE_ID` only with this
-/// variable: a test's own process chain never runs inside the pane it claims.
-fn brgr_command() -> Command {
-    let mut command = Command::new(brgr());
-    command.env("BRGR_TEST_TRUST_HERDR_PANE", "1");
-    clear_inherited_worker_env(&mut command);
-    command
-}
-
 fn run(home: &Path, args: &[&str], envs: &[(&str, &str)]) -> std::process::Output {
     let mut command = brgr_command();
     command.arg("--home").arg(home).arg("--json").args(args);
@@ -93,21 +60,6 @@ fn run(home: &Path, args: &[&str], envs: &[(&str, &str)]) -> std::process::Outpu
             && (args.contains(&"local.claude-code") || args.contains(&"local.opencode")))
     {
         command.arg("--headless");
-    }
-    command.env_remove("CODEX_THREAD_ID");
-    command.env_remove("CLAUDE_CODE_SESSION_ID");
-    command.env_remove("CURSOR_CONVERSATION_ID");
-    for name in [
-        "HERDR_ENV",
-        "HERDR_PANE_ID",
-        "HERDR_TAB_ID",
-        "HERDR_WORKSPACE_ID",
-        "HERDR_BIN_PATH",
-        "HERDR_SOCKET_PATH",
-        "HERDR_SESSION",
-        "HERDR_PLUGIN_ID",
-    ] {
-        command.env_remove(name);
     }
     // A Claude Code or Cursor owner is identified by its own session variable.
     if !envs
