@@ -372,7 +372,7 @@ impl Store {
                 |row| row.get::<_, String>(0),
             )
             .optional()?
-            .ok_or(StoreError::TaskNotFound(task_id))?;
+            .ok_or(StoreError::NoResultYet(task_id))?;
         Ok(serde_json::from_str(&json)?)
     }
 }

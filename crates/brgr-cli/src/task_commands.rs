@@ -211,7 +211,7 @@ fn brief_one(store: &Store, task_id: TaskId, observe: bool, json_output: bool) -
         .map(|event| event_kind_name(event.kind));
     let result = match store.latest_result(task_id) {
         Ok(envelope) => Some(envelope),
-        Err(StoreError::TaskNotFound(_)) => None,
+        Err(StoreError::NoResultYet(_)) => None,
         Err(error) => return Err(error.into()),
     };
     let decision = match &result {
@@ -251,7 +251,7 @@ fn task_detail(
 ) -> Result<human::TaskDetail> {
     let outcome = match store.latest_result(spec.task_id) {
         Ok(result) => Some(format!("{:?}", result.outcome).to_lowercase()),
-        Err(StoreError::TaskNotFound(_)) => None,
+        Err(StoreError::NoResultYet(_)) => None,
         Err(error) => return Err(error.into()),
     };
     Ok(human::TaskDetail {
@@ -396,7 +396,7 @@ pub(crate) async fn wait_for_result(
                 );
                 return Ok(());
             }
-            Err(StoreError::TaskNotFound(_)) => {}
+            Err(StoreError::NoResultYet(_)) => {}
             Err(error) => return Err(error.into()),
         }
         if let Ok(attempt) = store.latest_message_attempt(task) {

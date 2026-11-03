@@ -76,6 +76,8 @@ pub enum StoreError {
     },
     #[error("task {0} does not exist")]
     TaskNotFound(TaskId),
+    #[error("task {0} has no sealed result yet")]
+    NoResultYet(TaskId),
     #[error("task {task_id} revision {revision} exhausted its attempt budget")]
     AttemptBudgetExhausted { task_id: TaskId, revision: u32 },
     #[error("task list limit is invalid")]

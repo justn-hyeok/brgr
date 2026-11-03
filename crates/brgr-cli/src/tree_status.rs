@@ -38,7 +38,7 @@ pub fn show(store: &Store, root: TaskId, json_output: bool) -> Result<()> {
         })?;
         let result = match store.latest_result(node.task_id) {
             Ok(result) => Some(result),
-            Err(StoreError::TaskNotFound(_)) => None,
+            Err(StoreError::NoResultYet(_)) => None,
             Err(error) => return Err(error.into()),
         };
         let decision = result
