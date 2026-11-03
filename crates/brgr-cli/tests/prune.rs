@@ -367,7 +367,20 @@ fn a_stray_checkout_of_another_repository_is_never_asked_which_repository_it_is(
     let other = fixture.temp.path().join("other");
     fs::create_dir_all(&other).unwrap();
     git(&other, &["init", "-q"]);
-    git(&other, &["commit", "-q", "--allow-empty", "-m", "init"]);
+    git(
+        &other,
+        &[
+            "-c",
+            "user.name=brgr-test",
+            "-c",
+            "user.email=brgr-test@example.com",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "init",
+        ],
+    );
     git(&other, &["branch", "brgr/task-cafed00d"]);
     let stray = fixture.worktrees_root().join("repo").join("+backup");
     git(
