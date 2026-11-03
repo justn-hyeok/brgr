@@ -11,6 +11,12 @@
   digest check; a report missing for any other reason is reported once, naming the path; the
   reclaim leaves a worktree whose report is not archived yet to the cleanup that archives it; and
   every remaining `cleanup pending` error names the file that failed.
+- Tests only (#224): every test wait is decided by an event the test controls, with a one-minute hang guard
+  where a window once measured machine speed. `watch` fixtures hold on a release file and the tests act on
+  the watch's own output; killed supervisors and drivers are waited for by pid; store and runner bounds are
+  the budget or deadline only the code under test can reach; the workflow resume-deadline test moves the
+  store's clock past an hour-long deadline instead of sleeping through a short one; `brgr-core`'s
+  fake `git` executables use the warmed trampoline.
 
 ## 2.15.16 — 2026-11-03
 

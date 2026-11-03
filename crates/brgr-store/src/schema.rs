@@ -390,6 +390,7 @@ mod tests {
 
     use super::*;
     use crate::Store;
+    use crate::contention::BUSY_TIMEOUT;
     use crate::fixtures::{index_names, sealed_result, task};
     use brgr_protocol::AttemptId;
 
@@ -511,8 +512,10 @@ mod tests {
             "a foreign stamp made the open take the write lock: {:?}",
             reopened.err()
         );
+        // An open that took the write lock would wait out `busy_timeout`
+        // before failing, so only such an open can reach this bound.
         assert!(
-            elapsed < Duration::from_secs(1),
+            elapsed < BUSY_TIMEOUT,
             "the open waited {elapsed:?} on the write lock"
         );
         // The disagreement is left alone rather than fought over.
@@ -587,8 +590,10 @@ mod tests {
             "opening a store took a write lock: {:?}",
             second.err()
         );
+        // An open that took the write lock would wait out `busy_timeout`
+        // before failing, so only such an open can reach this bound.
         assert!(
-            started.elapsed() < Duration::from_secs(1),
+            started.elapsed() < BUSY_TIMEOUT,
             "opening a store waited on the write lock for {:?}",
             started.elapsed()
         );

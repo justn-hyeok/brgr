@@ -291,7 +291,7 @@ fn a_script_that_exits_nonzero_leaves_the_run_failed() {
         &owner_env(),
     ));
     let run_id = receipt["run_id"].as_str().unwrap();
-    wait_run_state(&fixture.home, run_id, "failed", Duration::from_secs(15));
+    wait_run_state(&fixture.home, run_id, "failed", Duration::from_mins(1));
 }
 
 #[test]
@@ -311,7 +311,7 @@ fn the_driver_passes_allowlisted_environment_and_strips_the_parent_sentinel() {
         &envs,
     ));
     let run_id = receipt["run_id"].as_str().unwrap();
-    wait_run_state(&fixture.home, run_id, "completed", Duration::from_secs(15));
+    wait_run_state(&fixture.home, run_id, "completed", Duration::from_mins(1));
     let log = fs::read_to_string(workflow_log(&fixture.home, run_id)).unwrap();
     let env: Value =
         serde_json::from_str(log.lines().find(|line| line.starts_with('{')).unwrap()).unwrap();
@@ -383,8 +383,9 @@ await new Promise((resolve) => setTimeout(resolve, 8000));
         &["wait", &task_id, "--timeout-seconds", "90"],
         &owner_env(),
     ));
+    // A detached driver's spawn can take seconds on a loaded machine.
     assert!(
-        wait_until(Duration::from_secs(5), || workflow_pid(
+        wait_until(Duration::from_mins(1), || workflow_pid(
             &fixture.home,
             &run_id
         )
@@ -397,7 +398,11 @@ await new Promise((resolve) => setTimeout(resolve, 8000));
         .status()
         .unwrap();
     assert!(killed.success(), "failed to kill driver group {pid}");
-    assert!(wait_until(Duration::from_secs(5), || !process_alive(pid)));
+    // The system reaps a killed driver seconds late on a loaded machine.
+    assert!(
+        wait_until(Duration::from_mins(1), || !process_alive(pid)),
+        "driver {pid} still alive"
+    );
     let resumed = json_output(&run(
         &fixture.home,
         &["workflow", "resume", &run_id],
@@ -407,7 +412,7 @@ await new Promise((resolve) => setTimeout(resolve, 8000));
         resumed.get("driver").and_then(Value::as_str),
         Some("already running")
     );
-    wait_run_state(&fixture.home, &run_id, "completed", Duration::from_secs(20));
+    wait_run_state(&fixture.home, &run_id, "completed", Duration::from_mins(1));
     let after = json_output(&run(
         &fixture.home,
         &["workflow", "status", &run_id],
@@ -443,7 +448,7 @@ fn resume_with_a_live_driver_starts_nothing() {
     let run_id = receipt["run_id"].as_str().unwrap();
     // A detached driver's spawn can take seconds on a loaded machine.
     assert!(
-        wait_until(Duration::from_secs(15), || workflow_pid(
+        wait_until(Duration::from_mins(1), || workflow_pid(
             &fixture.home,
             run_id
         )
@@ -464,7 +469,7 @@ fn resume_with_a_live_driver_starts_nothing() {
     let pid_after = fs::read_to_string(workflow_pid(&fixture.home, run_id)).unwrap();
     assert_eq!(pid_before, pid_after);
     fs::write(&release, b"1\n").unwrap();
-    wait_run_state(&fixture.home, run_id, "completed", Duration::from_secs(15));
+    wait_run_state(&fixture.home, run_id, "completed", Duration::from_mins(1));
 }
 
 #[test]
@@ -525,7 +530,7 @@ await new Promise((resolve) => setTimeout(resolve, 60000));
     let task_id = listed["steps"][0]["task_id"].as_str().unwrap().to_owned();
     // A detached driver's spawn can take seconds on a loaded machine.
     assert!(
-        wait_until(Duration::from_secs(15), || workflow_pid(
+        wait_until(Duration::from_mins(1), || workflow_pid(
             &fixture.home,
             &run_id
         )
@@ -539,9 +544,9 @@ await new Promise((resolve) => setTimeout(resolve, 60000));
         &owner_env(),
     ));
     assert_eq!(cancelled["state"], "cancelled");
-    wait_run_state(&fixture.home, &run_id, "cancelled", Duration::from_secs(10));
+    wait_run_state(&fixture.home, &run_id, "cancelled", Duration::from_mins(1));
     assert!(
-        wait_until(Duration::from_secs(5), || !process_alive(pid)),
+        wait_until(Duration::from_mins(1), || !process_alive(pid)),
         "driver {pid} still alive"
     );
     // `workflow status` only reads, so a step whose supervisor was killed
@@ -549,7 +554,7 @@ await new Promise((resolve) => setTimeout(resolve, 60000));
     // reconcile_pending, which settles it as cancelled either way.
     let settled = json_output(&run(
         &fixture.home,
-        &["wait", &task_id, "--timeout-seconds", "30"],
+        &["wait", &task_id, "--timeout-seconds", "60"],
         &owner_env(),
     ));
     assert_eq!(settled["outcome"], "cancelled", "{settled}");

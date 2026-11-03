@@ -234,7 +234,7 @@ const sealed = await agent({
   task: "HOLD until release",
   mode: "headless",
   key: "hold",
-  deadline: 25,
+  deadline: 3600,
 });
 writeFileSync(process.env.BRGR_HOME + "/agent-result.json", JSON.stringify(sealed));
 "#;
@@ -1350,8 +1350,10 @@ fn kill_driver(fixture: &Fixture, run_id: &str) {
         .home
         .join("runs")
         .join(format!("{run_id}.workflow.pid"));
+    // Both waits are hang guards: a detached driver's spawn, and the system's
+    // reaping of a killed one, take seconds on a loaded machine.
     assert!(
-        wait_until(Duration::from_secs(5), || pid_path.is_file()),
+        wait_until(Duration::from_mins(1), || pid_path.is_file()),
         "driver pid file missing"
     );
     let pid: u32 = fs::read_to_string(&pid_path)
@@ -1365,7 +1367,7 @@ fn kill_driver(fixture: &Fixture, run_id: &str) {
         .unwrap();
     assert!(killed.success(), "failed to kill driver group {pid}");
     assert!(
-        wait_until(Duration::from_secs(5), || {
+        wait_until(Duration::from_mins(1), || {
             Command::new("/bin/kill")
                 .args(["-0", &pid.to_string()])
                 .status()
@@ -1951,8 +1953,17 @@ fn resume_after_the_driver_dies_does_not_reset_the_step_deadline() {
     let task = wait_for_first_step(&fixture, &run_id);
     wait_for_step_running(&fixture, &run_id, &task);
     kill_driver(&fixture, &run_id);
-    thread::sleep(Duration::from_secs(28));
-    let resumed_at = Instant::now();
+    // The hour-long deadline has already passed by the store's clock, so a
+    // resume that keeps it cancels at once. One that counted a fresh deadline
+    // would hold the step for an hour, far past the wait below.
+    let created = status_created_at(&fixture, &task)["created_at"]
+        .as_u64()
+        .expect("running task has no created_at");
+    set_task_attempt_clocks(
+        &fixture,
+        &task,
+        i64::try_from(created.saturating_sub(7_200)).unwrap(),
+    );
     json_output(&run(
         &fixture.home,
         &fixture.workspace,
@@ -1960,12 +1971,12 @@ fn resume_after_the_driver_dies_does_not_reset_the_step_deadline() {
         &owner_env(),
     ));
     let status = wait_run_state(&fixture, &run_id, "completed", Duration::from_secs(90));
-    assert!(
-        resumed_at.elapsed() < Duration::from_secs(20),
-        "resume waited a fresh deadline: elapsed={:?} log={}",
-        resumed_at.elapsed(),
-        workflow_log(&fixture, &run_id)
+    assert_eq!(
+        status["steps"].as_array().map(Vec::len),
+        Some(1),
+        "resume started another step: {status}"
     );
+    assert_eq!(step_task_id(&status), task, "{status}");
     let sealed = agent_result(&fixture);
     assert_eq!(sealed["outcome"], "cancelled", "{sealed}");
     assert_eq!(sealed["timed_out"], true, "{sealed}");
@@ -2506,7 +2517,7 @@ esac
     );
     let mut first = spawn_sdk_script(&fixture, &fake_bin, &script);
     assert!(
-        wait_until(Duration::from_secs(10), || fixture
+        wait_until(Duration::from_mins(1), || fixture
             .scripts
             .join("cancelled")
             .is_file()),

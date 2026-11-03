@@ -62,6 +62,8 @@
 
 mod evidence;
 mod execution;
+#[cfg(test)]
+mod fast_script;
 mod git_diff;
 mod git_stash;
 mod state;

@@ -461,8 +461,10 @@ fn live_driver_pid(fixture: &Fixture, run_id: &str) -> Option<u32> {
 }
 
 fn kill_driver(fixture: &Fixture, run_id: &str) {
+    // Both waits are hang guards: a detached driver's spawn, and the system's
+    // reaping of a killed one, take seconds on a loaded machine.
     assert!(
-        wait_until(Duration::from_secs(5), || {
+        wait_until(Duration::from_mins(1), || {
             live_driver_pid(fixture, run_id).is_some()
         }),
         "driver never became live"
@@ -481,7 +483,7 @@ fn kill_driver(fixture: &Fixture, run_id: &str) {
         .stderr(Stdio::null())
         .status();
     assert!(
-        wait_until(Duration::from_secs(5), || {
+        wait_until(Duration::from_mins(1), || {
             live_driver_pid(fixture, run_id).is_none()
         }),
         "driver {pid} still alive"

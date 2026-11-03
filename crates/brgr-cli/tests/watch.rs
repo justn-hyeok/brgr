@@ -2,14 +2,13 @@
 
 mod common;
 
-use common::write_fast_script;
+use common::{wait_until, write_fast_script};
 
 use std::{
     fs,
     io::{BufRead, BufReader, Read},
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    thread,
     time::{Duration, Instant},
 };
 
@@ -104,9 +103,10 @@ fn add_fixture(home: &Path, fixture: &Path, scratch: &Path) {
     assert!(receipt["scratch_result_digest"].as_str().is_some());
 }
 
-/// Prints the fixture success protocol. `PAUSE` sleeps a few seconds so a watch
-/// can observe the task while it is still running; `HOLD` stays up through a
-/// short watch timeout.
+/// Prints the fixture success protocol. `PAUSE` holds until the test writes
+/// `release-pause` in the control home (see [`release_pause`]), so a watch can
+/// observe the task while it is still running however slow the machine; `HOLD`
+/// stays up through a short watch timeout.
 const WATCH_FIXTURE: &str = r#"#!/bin/sh
 set -eu
 case "${1:-}" in
@@ -124,7 +124,11 @@ done
 if [ -n "$prompt_file" ] && /usr/bin/grep -q 'HOLD' "$prompt_file"; then
   /bin/sleep 30
 elif [ -n "$prompt_file" ] && /usr/bin/grep -q 'PAUSE' "$prompt_file"; then
-  /bin/sleep 6
+  n=0
+  while [ ! -e "$BRGR_HOME/release-pause" ] && [ "$n" -lt 6000 ]; do
+    /bin/sleep 0.1
+    n=$((n + 1))
+  done
 fi
 printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"BRGR_FIXTURE_OK"}]}}'
 printf '%s\n' '{"type":"agent_end","stopReason":"completed"}'
@@ -155,16 +159,83 @@ fn start_task(home: &Path, workspace: &Path, objective: &str, foreground: bool) 
 fn wait_until_running(home: &Path, task: &str) {
     let store = brgr_store::Store::open(home.join("store")).unwrap();
     let task_id = task.parse().unwrap();
-    for _ in 0..200 {
-        if matches!(
+    assert!(
+        wait_until(|| matches!(
             store.attempt_state(task_id),
             Ok(brgr_protocol::AttemptState::Running)
-        ) {
-            return;
+        )),
+        "task {task} did not start running"
+    );
+}
+
+/// Lets every `PAUSE` worker in `home` finish.
+fn release_pause(home: &Path) {
+    fs::write(home.join("release-pause"), b"1\n").unwrap();
+}
+
+/// A watch whose stdout the test reads line by line, so it can act once the
+/// watch has printed an event instead of guessing when it has.
+fn spawn_watch(
+    home: &Path,
+    args: &[&str],
+) -> (std::process::Child, BufReader<std::process::ChildStdout>) {
+    let mut child = isolated_brgr(home, args, &[("BRGR_OWNER_ID", "codex:watch-test")]);
+    child.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = child.spawn().unwrap();
+    let stdout = BufReader::new(child.stdout.take().unwrap());
+    (child, stdout)
+}
+
+/// Reads event lines until one satisfies `wanted`, returning every line read.
+/// A watch that never prints such a line ends on its own `--timeout-seconds`,
+/// which closes stdout and fails the read.
+fn read_until(
+    stdout: &mut BufReader<std::process::ChildStdout>,
+    wanted: impl Fn(&Value) -> bool,
+) -> String {
+    let mut read = String::new();
+    loop {
+        let mut line = String::new();
+        assert!(
+            stdout.read_line(&mut line).unwrap() > 0,
+            "the watch ended before the awaited event: {read}"
+        );
+        read.push_str(&line);
+        if line.trim().is_empty() {
+            continue;
         }
-        thread::sleep(Duration::from_millis(25));
+        let event: Value = serde_json::from_str(line.trim())
+            .unwrap_or_else(|_| panic!("not one JSON object: {line}"));
+        if wanted(&event) {
+            return read;
+        }
     }
-    panic!("task {task} did not start running");
+}
+
+/// Waits for the watch to exit and returns its full stdout: the lines already
+/// read followed by the rest.
+fn finish_watch(
+    mut child: std::process::Child,
+    mut stdout: BufReader<std::process::ChildStdout>,
+    read: String,
+) -> (std::process::ExitStatus, String, String) {
+    let status = child.wait().unwrap();
+    let mut rest = String::new();
+    stdout.read_to_string(&mut rest).unwrap();
+    let mut stderr = Vec::new();
+    child
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_end(&mut stderr)
+        .unwrap();
+    let mut rendered = read;
+    rendered.push_str(&rest);
+    (
+        status,
+        rendered,
+        String::from_utf8_lossy(&stderr).into_owned(),
+    )
 }
 
 fn event_lines(stdout: &[u8]) -> Vec<Value> {
@@ -201,17 +272,15 @@ fn watch_prints_state_then_result_then_done_once_each() {
     let (_temp, home, workspace) = watch_home();
     let task = start_task(&home, &workspace, "PAUSE", false);
     wait_until_running(&home, &task);
-    let output = run(
-        &home,
-        &["watch", &task, &task],
-        &[("BRGR_OWNER_ID", "codex:watch-test")],
-    );
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let events = event_lines(&output.stdout);
+    // The worker is held until the watch has printed its state, so the state
+    // event is observed while the task runs on any machine.
+    let (child, mut stdout) =
+        spawn_watch(&home, &["watch", &task, &task, "--timeout-seconds", "60"]);
+    let read = read_until(&mut stdout, |event| event["event"] == "state");
+    release_pause(&home);
+    let (status, rendered, stderr) = finish_watch(child, stdout, read);
+    assert!(status.success(), "{stderr}");
+    let events = event_lines(rendered.as_bytes());
     assert_eq!(event_names(&events), ["state", "result", "done"]);
     assert_eq!(events[0]["task_id"], task);
     assert_ne!(events[0]["state"], "terminal");
@@ -250,17 +319,26 @@ fn watch_emits_done_only_after_every_task_has_a_result() {
     let finished = start_task(&home, &workspace, "BRGR_FIXTURE_OK", true);
     let running = start_task(&home, &workspace, "PAUSE", false);
     wait_until_running(&home, &running);
-    let output = run(
+    // The running task is held until the watch has printed the finished one's
+    // result, so `done` can only follow a result that arrived later.
+    let (child, mut stdout) = spawn_watch(
         &home,
-        &["watch", &finished, &running, &finished],
-        &[("BRGR_OWNER_ID", "codex:watch-test")],
+        &[
+            "watch",
+            &finished,
+            &running,
+            &finished,
+            "--timeout-seconds",
+            "60",
+        ],
     );
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let events = event_lines(&output.stdout);
+    let read = read_until(&mut stdout, |event| {
+        event["event"] == "result" && event["task_id"] == finished
+    });
+    release_pause(&home);
+    let (status, rendered, stderr) = finish_watch(child, stdout, read);
+    assert!(status.success(), "{stderr}");
+    let events = event_lines(rendered.as_bytes());
     let names = event_names(&events);
     let done_at = names.iter().position(|name| *name == "done").unwrap();
     assert_eq!(done_at, names.len() - 1);
@@ -288,15 +366,15 @@ fn watch_prints_one_question_event_and_does_not_repeat_it_after_the_answer() {
     let task = start_task(&home, &workspace, "PAUSE", false);
     let store = brgr_store::Store::open(home.join("store")).unwrap();
     let task_id = task.parse().unwrap();
-    let attempt = (0..200)
-        .find_map(|_| {
-            let found = store.active_message_attempt(task_id).ok();
-            if found.is_none() {
-                thread::sleep(Duration::from_millis(25));
-            }
-            found
-        })
-        .expect("worker attempt did not become active");
+    let mut attempt = None;
+    assert!(
+        wait_until(|| {
+            attempt = store.active_message_attempt(task_id).ok();
+            attempt.is_some()
+        }),
+        "worker attempt did not become active"
+    );
+    let attempt = attempt.unwrap();
     let attempt_text = attempt.to_string();
     let worker_owner = format!("worker:{attempt_text}");
     let worker = [
@@ -305,31 +383,8 @@ fn watch_prints_one_question_event_and_does_not_repeat_it_after_the_answer() {
         ("BRGR_PARENT_TASK_ID", task.as_str()),
         ("BRGR_PARENT_ATTEMPT_ID", attempt_text.as_str()),
     ];
-    let mut child = brgr_command();
-    child
-        .arg("--home")
-        .arg(&home)
-        .arg("--json")
-        .args(["watch", task.as_str(), "--timeout-seconds", "20"])
-        .env("BRGR_SESSION_ID", "fixture-session")
-        .env("BRGR_OWNER_ID", "codex:watch-test")
-        .env_remove("CODEX_THREAD_ID")
-        .env_remove("CLAUDE_CODE_SESSION_ID")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    for name in [
-        "HERDR_ENV",
-        "HERDR_PANE_ID",
-        "HERDR_TAB_ID",
-        "HERDR_WORKSPACE_ID",
-        "HERDR_BIN_PATH",
-        "HERDR_SOCKET_PATH",
-        "HERDR_SESSION",
-        "HERDR_PLUGIN_ID",
-    ] {
-        child.env_remove(name);
-    }
-    let child = child.spawn().unwrap();
+    let (child, mut stdout) =
+        spawn_watch(&home, &["watch", task.as_str(), "--timeout-seconds", "60"]);
     let question = json_output(&run(
         &home,
         &[
@@ -346,7 +401,9 @@ fn watch_prints_one_question_event_and_does_not_repeat_it_after_the_answer() {
         &worker,
     ));
     let question_id = question["message_id"].as_str().unwrap().to_owned();
-    thread::sleep(Duration::from_millis(1500));
+    // Answer only once the watch has printed the question: what is checked is
+    // that the answer does not make it print the question again.
+    let read = read_until(&mut stdout, |event| event["event"] == "question");
     json_output(&run(
         &home,
         &[
@@ -364,13 +421,10 @@ fn watch_prints_one_question_event_and_does_not_repeat_it_after_the_answer() {
         ],
         &[("BRGR_OWNER_ID", "codex:watch-test")],
     ));
-    let output = child.wait_with_output().unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let events = event_lines(&output.stdout);
+    release_pause(&home);
+    let (status, rendered, stderr) = finish_watch(child, stdout, read);
+    assert!(status.success(), "{stderr}");
+    let events = event_lines(rendered.as_bytes());
     let questions: Vec<&Value> = events
         .iter()
         .filter(|event| event["event"] == "question")
@@ -378,7 +432,6 @@ fn watch_prints_one_question_event_and_does_not_repeat_it_after_the_answer() {
     assert_eq!(questions.len(), 1);
     assert_eq!(questions[0]["task_id"], task);
     assert_eq!(questions[0]["message_id"], question_id);
-    let rendered = String::from_utf8(output.stdout).unwrap();
     assert!(!rendered.contains("Which token?"));
     assert!(!rendered.contains("TOKEN_OK"));
     assert_eq!(events.last().unwrap()["event"], "done");
@@ -472,17 +525,12 @@ fn watch_all_includes_only_this_owners_unfinished_tasks() {
         .unwrap()
         .to_owned();
     wait_until_running(&home, &theirs);
-    let output = run(
-        &home,
-        &["watch", "--all", "--timeout-seconds", "20"],
-        &[("BRGR_OWNER_ID", "codex:watch-test")],
-    );
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let events = event_lines(&output.stdout);
+    let (child, mut stdout) = spawn_watch(&home, &["watch", "--all", "--timeout-seconds", "60"]);
+    let read = read_until(&mut stdout, |event| event["task_id"] == ours);
+    release_pause(&home);
+    let (status, rendered, stderr) = finish_watch(child, stdout, read);
+    assert!(status.success(), "{stderr}");
+    let events = event_lines(rendered.as_bytes());
     let results: Vec<&str> = events
         .iter()
         .filter(|event| event["event"] == "result")
@@ -503,35 +551,15 @@ fn watch_all_does_not_add_a_task_created_after_it_started() {
     let (_temp, home, workspace) = watch_home();
     let first = start_task(&home, &workspace, "PAUSE", false);
     wait_until_running(&home, &first);
-    let mut child = isolated_brgr(
-        &home,
-        &["watch", "--all", "--timeout-seconds", "20"],
-        &[("BRGR_OWNER_ID", "codex:watch-test")],
-    );
-    child.stdout(Stdio::piped()).stderr(Stdio::piped());
-    let mut child = child.spawn().unwrap();
-    let mut stdout = BufReader::new(child.stdout.take().unwrap());
-    let mut first_line = String::new();
-    stdout.read_line(&mut first_line).unwrap();
-    assert!(
-        !first_line.trim().is_empty(),
-        "watch --all produced no events before a later task was created"
-    );
+    let (child, mut stdout) = spawn_watch(&home, &["watch", "--all", "--timeout-seconds", "60"]);
+    let read = read_until(&mut stdout, |event| event["task_id"] == first);
     let later = start_task(&home, &workspace, "HOLD", false);
     wait_until_running(&home, &later);
-    let status = child.wait().unwrap();
-    let mut rest = String::new();
-    stdout.read_to_string(&mut rest).unwrap();
-    let mut stderr = Vec::new();
-    child
-        .stderr
-        .take()
-        .unwrap()
-        .read_to_end(&mut stderr)
-        .unwrap();
-    assert!(status.success(), "{}", String::from_utf8_lossy(&stderr));
-    let mut rendered = first_line;
-    rendered.push_str(&rest);
+    // The first task is held until the later one runs, so the watch is still
+    // open to pick it up, and must not.
+    release_pause(&home);
+    let (status, rendered, stderr) = finish_watch(child, stdout, read);
+    assert!(status.success(), "{stderr}");
     let events = event_lines(rendered.as_bytes());
     let mentioned: Vec<&str> = events
         .iter()

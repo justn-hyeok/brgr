@@ -203,6 +203,8 @@ fn env_refs(envs: &[(impl AsRef<str>, impl AsRef<str>)]) -> Vec<(&str, &str)> {
         .collect()
 }
 
+/// `timeout` is a hang guard: the dispatcher is a detached brgr process that a
+/// loaded machine starts seconds late, so a short one fails correct runs.
 fn wait_for_prompt(path: &Path, needle: &str, timeout: Duration) -> String {
     let started = Instant::now();
     loop {
@@ -268,7 +270,7 @@ fn a_completed_run_notice_is_delivered_to_the_owner_pane_exactly_once() {
         &["workflow", "set-state", &run_id, "completed"],
         &envs,
     ));
-    let prompt = wait_for_prompt(&fixture.prompts, &run_id, Duration::from_secs(8));
+    let prompt = wait_for_prompt(&fixture.prompts, &run_id, Duration::from_mins(1));
     assert!(prompt.contains("FROM BRGR"), "{prompt}");
     assert!(prompt.contains("\"type\":\"brgr_workflow\""), "{prompt}");
     assert!(prompt.contains("\"state\":\"completed\""), "{prompt}");
@@ -339,7 +341,7 @@ fn a_busy_owner_pane_keeps_the_notice_pending_until_idle() {
     assert_eq!(notices[0]["state"], "blocked");
     assert_eq!(notices[0]["delivered"], false);
     fs::write(&fixture.agent_state, "idle").unwrap();
-    let prompt = wait_for_prompt(&fixture.prompts, &run_id, Duration::from_secs(8));
+    let prompt = wait_for_prompt(&fixture.prompts, &run_id, Duration::from_mins(1));
     assert!(prompt.contains("\"state\":\"blocked\""), "{prompt}");
     let delivered = json_output(&run(&fixture.home, &["workflow", "status", &run_id], &envs));
     assert_eq!(delivered["notices"][0]["delivered"], true, "{delivered}");

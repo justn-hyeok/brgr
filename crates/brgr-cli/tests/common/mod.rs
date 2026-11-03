@@ -7,6 +7,8 @@ use std::{
     path::{Path, PathBuf},
     process::Command,
     sync::OnceLock,
+    thread,
+    time::{Duration, Instant},
 };
 
 use serde_json::Value;
@@ -94,6 +96,40 @@ fn create_warmed_trampoline() -> PathBuf {
     // clobber every trampoline in this process.
     fs::set_permissions(&trampoline, fs::Permissions::from_mode(0o555)).unwrap();
     trampoline
+}
+
+/// How long a test waits for an event before it gives up.
+///
+/// This is a hang guard, not a measurement: a correct run reaches its event
+/// long before it, and only a run that never produces the event hits it. It is
+/// a minute because a loaded machine (#224) starts a detached brgr process,
+/// runs a fake Herdr, or seals a result seconds late, and a shorter guard then
+/// becomes the reason a correct run fails.
+pub const HANG_GUARD: Duration = Duration::from_mins(1);
+
+/// Polls `ready` every 50 ms until it is true, for up to [`HANG_GUARD`].
+/// Returns whether it became true, so the caller names the event it waited for
+/// in its own assertion.
+pub fn wait_until(mut ready: impl FnMut() -> bool) -> bool {
+    let started = Instant::now();
+    loop {
+        if ready() {
+            return true;
+        }
+        if started.elapsed() >= HANG_GUARD {
+            return false;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// Whether `pid` still exists, zombies included: `/bin/kill -0`.
+pub fn process_exists(pid: &str) -> bool {
+    Command::new("/bin/kill")
+        .args(["-0", pid])
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
 }
 
 /// A Herdr that records every call and answers the few pane-mode and handoff
