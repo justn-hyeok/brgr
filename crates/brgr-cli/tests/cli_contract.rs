@@ -2585,7 +2585,7 @@ fn an_agent_that_never_writes_its_report_fails_with_the_cause() {
     fs::write(fixture.state.join("no-report"), "").unwrap();
     let started = Instant::now();
     let ran = fixture.run_with_env(&[], &[("BRGR_TEST_REPORT_GRACE_MS", "300")]);
-    assert_eq!(ran["outcome"], "lost", "{ran}");
+    assert_eq!(ran["outcome"], "failed", "{ran}");
     let error = ran["error"].as_str().unwrap();
     assert!(
         error.contains("finished without writing its report"),
@@ -2646,10 +2646,10 @@ fn include_ignored_reaches_the_reclaim_a_pane_cleanup_runs() {
     );
 }
 
-/// A worker that changed files and then never wrote its report is lost, but
+/// A worker that changed files and then never wrote its report has failed, but
 /// its work stays reviewable: the worktree diff is sealed with the result.
 #[test]
-fn a_lost_run_without_a_report_keeps_its_worktree_diff_reviewable() {
+fn a_run_without_a_report_keeps_its_worktree_diff_reviewable() {
     let fixture = pane_fixture();
     seed_git_repo(&fixture.workspace);
     fs::create_dir_all(&fixture.state).unwrap();
@@ -2657,7 +2657,7 @@ fn a_lost_run_without_a_report_keeps_its_worktree_diff_reviewable() {
         fs::write(fixture.state.join(flag), "").unwrap();
     }
     let ran = fixture.run_with_env(&["--capture-diff"], &[("BRGR_TEST_REPORT_GRACE_MS", "300")]);
-    assert_eq!(ran["outcome"], "lost", "{ran}");
+    assert_eq!(ran["outcome"], "failed", "{ran}");
     let task = ran["task_id"].as_str().unwrap();
     let owner = [("BRGR_OWNER_ID", "codex:pane-test")];
     let shown = run(&fixture.home, &["diff", task], &owner);
@@ -2680,11 +2680,11 @@ fn a_lost_run_without_a_report_keeps_its_worktree_diff_reviewable() {
 fn a_lost_result_can_be_revised_without_a_decision() {
     let fixture = pane_fixture();
     fs::create_dir_all(&fixture.state).unwrap();
-    fs::write(fixture.state.join("no-report"), "").unwrap();
-    let lost = fixture.run_with_env(&[], &[("BRGR_TEST_REPORT_GRACE_MS", "300")]);
+    fs::write(fixture.state.join("start-fails"), "").unwrap();
+    let lost = fixture.run(&[]);
     assert_eq!(lost["outcome"], "lost", "{lost}");
     let task = lost["task_id"].as_str().unwrap();
-    fs::remove_file(fixture.state.join("no-report")).unwrap();
+    fs::remove_file(fixture.state.join("start-fails")).unwrap();
 
     let herdr = fixture.herdr.to_str().unwrap();
     let env = [

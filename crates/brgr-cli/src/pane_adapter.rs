@@ -285,7 +285,20 @@ fn pane_argv(
 }
 
 /// Runs the agent in a pane and prints its report.
-pub(crate) fn run_pane_adapter(paths: &Paths, run: &PaneRunArgs) -> Result<()> {
+/// `__pane-run`. The supervisor reads an agent that gave no report from the exit
+/// status, since every other failure here leaves the worker's fate unknown.
+pub(crate) fn pane_run_command(paths: &Paths, run: &PaneRunArgs) -> Result<()> {
+    let result = run_pane_adapter(paths, run);
+    if let Err(error) = &result
+        && error.is::<AgentGaveNoReport>()
+    {
+        eprintln!("Error: {error}");
+        std::process::exit(brgr_core::AGENT_GAVE_NO_REPORT_EXIT);
+    }
+    result
+}
+
+fn run_pane_adapter(paths: &Paths, run: &PaneRunArgs) -> Result<()> {
     if env::var("HERDR_ENV").as_deref() != Ok("1") && run.caller.is_none() {
         bail!("pane mode requires a Herdr caller");
     }
@@ -674,6 +687,18 @@ fn drive(
     }
 }
 
+/// The agent stopped by itself and a reminder did not get a report out of it.
+#[derive(Debug)]
+struct AgentGaveNoReport(String);
+
+impl std::fmt::Display for AgentGaveNoReport {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for AgentGaveNoReport {}
+
 /// An agent that stopped without its report being sealed. It seals a file the
 /// agent did write; otherwise it reminds the agent once, then fails with the
 /// cause instead of waiting for the deadline.
@@ -760,11 +785,12 @@ impl IdleReport {
                 .screen(pane)
                 .map(|screen| screens::tail(&screen))
                 .unwrap_or_default();
-            bail!(
+            return Err(AgentGaveNoReport(format!(
                 "the agent finished without writing its report to {}; {} {last}",
                 report.display(),
                 screens::LAST_SCREEN
-            );
+            ))
+            .into());
         }
         let nudge = format!(
             "Write your complete final answer as Markdown to {} now. After completing that file, record completion with \"$BRGR_BIN\" __seal-report {} {}.",
