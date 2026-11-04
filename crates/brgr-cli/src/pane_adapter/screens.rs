@@ -181,8 +181,9 @@ fn keys_between(from: usize, to: usize) -> Vec<&'static str> {
     std::iter::repeat_n(key, to.abs_diff(from)).collect()
 }
 
-/// Claude Code's own gates in front of a run, answered by accepting: the
-/// Bypass Permissions warning and a newly found MCP server.
+/// A harness's own gates in front of a run, answered by accepting: Claude Code's
+/// Bypass Permissions warning and newly found MCP server, and Codex's review of
+/// new hooks, which `brgr integrate codex install` is what adds.
 fn accepting_option(lower: &str, options: &[MenuOption]) -> Option<(&'static str, usize)> {
     let position = |prefix: &str| {
         options
@@ -191,6 +192,9 @@ fn accepting_option(lower: &str, options: &[MenuOption]) -> Option<(&'static str
     };
     if lower.contains("bypass permissions mode") {
         return position("yes, i accept").map(|at| ("bypass-warning", at));
+    }
+    if lower.contains("hooks need review") {
+        return position("trust all").map(|at| ("codex-hooks-trust", at));
     }
     if lower.contains("mcp server") {
         // The single-server choice first; "use this and all future" only if it
@@ -742,6 +746,22 @@ mod tests {
             classify(screen, Path::new("/somewhere")),
             Screen::Unknown(_)
         ));
+    }
+
+    /// Captured from Codex CLI 0.166.0 on its first run after
+    /// `brgr integrate codex install`. Text sent to this screen is lost.
+    const CODEX_HOOKS_REVIEW: &str =
+        include_str!("../../../../testdata/fixtures/screens/codex-0.166-hooks-review.txt");
+
+    #[test]
+    fn codexs_hook_review_is_answered_by_trusting_all() {
+        assert_eq!(
+            classify(CODEX_HOOKS_REVIEW, Path::new("/somewhere")),
+            Screen::Resolve {
+                rule: "codex-hooks-trust",
+                keys: vec!["down", "enter"],
+            }
+        );
     }
 
     /// Captured from GitHub Copilot CLI 1.0.86 in a Herdr pane.
