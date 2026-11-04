@@ -24,11 +24,31 @@ jobs:
           expected="${GITHUB_REF_NAME#v}"
           actual="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "brgr-cli") | .version')"
           test "$expected" = "$actual"
-      # fmt and clippy are deterministic for this commit and the pinned toolchain
-      # and already gate the release pull request in ci.yml. The tag re-proves
-      # what depends on a clean machine: the tests, the release build and the
-      # packaged smoke run below.
-      - run: cargo test --workspace --all-features --locked
+      # The tests, fmt and clippy ran on this exact commit in the push run of
+      # ci.yml, so a tag can be pushed right after the merge and this waits for
+      # them. Nothing below runs unless that run passed, macOS job included.
+      # What depends on a clean machine is proved here: the release build, with
+      # no cache, and the packaged smoke run.
+      - name: Wait for the main CI run of this commit
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for _ in $(seq 1 120); do
+            run="$(gh run list --workflow ci.yml --event push --branch main --commit "$GITHUB_SHA" --limit 1 \
+              --json databaseId,status,conclusion --jq '.[0] // empty' || true)"
+            if [ -n "$run" ] && [ "$(jq -r .status <<<"$run")" = completed ]; then
+              macos="$(gh run view "$(jq -r .databaseId <<<"$run")" \
+                --json jobs --jq '.jobs[] | select(.name == "macos") | .conclusion')"
+              echo "main CI for $GITHUB_SHA: $(jq -r .conclusion <<<"$run"), macos: ${macos:-absent}"
+              test "$(jq -r .conclusion <<<"$run")" = success
+              test "$macos" = success
+              exit 0
+            fi
+            sleep 15
+          done
+          echo "no finished main CI run for $GITHUB_SHA after 30 minutes" >&2
+          exit 1
       - run: cargo build -p brgr-cli --release --locked
       - name: Verify Apple Silicon deployment target
         run: |
