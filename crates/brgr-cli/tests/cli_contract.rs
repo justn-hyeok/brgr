@@ -887,6 +887,114 @@ fn a_worker_started_without_delegation_cannot_start_a_child() {
     assert_eq!(listed.as_array().map(Vec::len), Some(1), "{listed}");
 }
 
+#[test]
+#[allow(clippy::too_many_lines)] // End-to-end pane-mode admission and worker identity contract.
+fn a_pane_worker_without_delegation_is_refused_before_child_admission() {
+    let fixture = pane_fixture();
+    seed_git_repo(&fixture.workspace);
+    fs::create_dir_all(&fixture.state).unwrap();
+    fs::write(fixture.state.join("hang"), "").unwrap();
+    add_fixture(
+        &fixture.home,
+        &brgr_fixture(),
+        &fixture.workspace.parent().unwrap().join("fixture-scratch"),
+    );
+    let mut parent_process = brgr_command();
+    parent_process
+        .arg("--home")
+        .arg(&fixture.home)
+        .arg("--json")
+        .args([
+            "run",
+            "Do not delegate",
+            "--harness",
+            "local.claude-code",
+            "--workspace",
+        ])
+        .arg(&fixture.workspace)
+        .arg("--foreground")
+        .env_remove("CODEX_THREAD_ID")
+        .env("BRGR_SESSION_ID", "fixture-session")
+        .env("BRGR_OWNER_ID", "codex:pane-test")
+        .env("HERDR_ENV", "1")
+        .env("HERDR_PANE_ID", "w9:p1")
+        .env("HERDR_BIN_PATH", &fixture.herdr)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let parent_process = parent_process.spawn().unwrap();
+    assert!(
+        wait_until(|| fixture.state("calls.log").contains("agent prompt")),
+        "the pane worker was never prompted"
+    );
+    let parent_task = fs::read_dir(fixture.home.join("launches"))
+        .unwrap()
+        .find_map(|entry| {
+            let name = entry.ok()?.file_name().into_string().ok()?;
+            name.strip_suffix(".json").map(str::to_owned)
+        })
+        .unwrap();
+    let store = brgr_store::Store::open(fixture.home.join("store")).unwrap();
+    let parent_id = parent_task.parse().unwrap();
+    let parent_spec = store.task(parent_id).unwrap();
+    let parent_attempt = active_attempt(&store, &parent_task);
+    let launch: Value = serde_json::from_slice(
+        &fs::read(
+            fixture
+                .home
+                .join("launches")
+                .join(format!("{parent_task}.json")),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let before = store.tasks(100).unwrap().len();
+    let wrong_task = "2b2c279a-b8e1-43a8-846c-cb8344a301d7";
+    let wrong_attempt = "3b2c279a-b8e1-43a8-846c-cb8344a301d7";
+    let worker_owner = format!("worker:{parent_attempt}");
+    let mut child_command = brgr_command();
+    let child = child_command
+        .arg("--home")
+        .arg(&fixture.home)
+        .arg("--json")
+        .args([
+            "--headless",
+            "run",
+            "LEAF",
+            "--harness",
+            "local.fixture",
+            "--workspace",
+        ])
+        .arg(&parent_spec.workspace)
+        .args(["--foreground"])
+        .current_dir(&parent_spec.workspace)
+        .env_remove("CODEX_THREAD_ID")
+        .env("BRGR_SESSION_ID", "fixture-session")
+        .env("BRGR_OWNER_ID", &worker_owner)
+        .env("BRGR_PARENT_TASK_ID", wrong_task)
+        .env("BRGR_PARENT_ATTEMPT_ID", wrong_attempt)
+        .output()
+        .unwrap();
+    assert!(
+        !child.status.success(),
+        "child admission unexpectedly succeeded"
+    );
+    let error = String::from_utf8_lossy(&child.stderr);
+    assert!(error.contains("--enable-delegation"), "{error}");
+    assert_eq!(
+        store.tasks(100).unwrap().len(),
+        before,
+        "a refused child was admitted"
+    );
+    assert_eq!(launch["delegation_enabled"], false, "{launch}");
+    json_output(&run(
+        &fixture.home,
+        &["cancel", &parent_task],
+        &[("BRGR_OWNER_ID", "codex:pane-test")],
+    ));
+    let output = parent_process.wait_with_output().unwrap();
+    assert!(!output.status.success() || String::from_utf8_lossy(&output.stdout).contains("lost"));
+}
+
 /// A level the harness cannot honour is refused before anything runs, and a
 /// configured cap binds a task that asked for nothing instead of being ignored.
 ///
@@ -2638,6 +2746,12 @@ test -f "$prompt_file"
 if test -n "${BRGR_PARENT_ATTEMPT_ID:-}"; then
   if /usr/bin/grep -q UNSETTLED "$prompt_file"; then
     "$BRGR_BIN" --json --headless run LEAF --harness local.fixture --workspace "$PWD" --foreground >/dev/null
+  elif /usr/bin/grep -q CANCEL_CHILD "$prompt_file"; then
+    child_json=$("$BRGR_BIN" --json --headless run SLOW --harness local.fixture --workspace "$PWD")
+    child_task=$(printf '%s\n' "$child_json" | /usr/bin/sed -n 's/.*"task_id":"\([^"]*\)".*/\1/p')
+    test -n "$child_task"
+    "$BRGR_BIN" --json cancel "$child_task" >/dev/null
+    "$BRGR_BIN" --json wait "$child_task" --timeout-seconds 60 >/dev/null
   elif /usr/bin/grep -q ROOT "$prompt_file"; then
     child_json=$("$BRGR_BIN" --json --headless run CHILD --harness local.fixture --workspace "$PWD")
     child_task=$(printf '%s\n' "$child_json" | /usr/bin/sed -n 's/.*"task_id":"\([^"]*\)".*/\1/p')
@@ -2658,8 +2772,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
 printf '%s\n' '{"type":"agent_end","stopReason":"completed"}'
 "#;
 
-#[test]
-fn a_worker_can_delegate_twice_and_decide_each_child_before_reporting() {
+fn recursive_fixture_home() -> (TempDir, PathBuf, PathBuf) {
     let temp = TempDir::new().unwrap();
     let home = temp.path().join("brgr");
     let workspace = temp.path().join("work");
@@ -2667,6 +2780,12 @@ fn a_worker_can_delegate_twice_and_decide_each_child_before_reporting() {
     fs::create_dir_all(&workspace).unwrap();
     write_fast_script(&executable, RECURSIVE_FIXTURE_FIXTURE);
     add_fixture(&home, &executable, &temp.path().join("scratch"));
+    (temp, home, workspace)
+}
+
+#[test]
+fn an_owner_can_read_all_descendants_after_parent_workers_exit() {
+    let (_temp, home, workspace) = recursive_fixture_home();
 
     let root = json_output(&run(
         &home,
@@ -2682,7 +2801,7 @@ fn a_worker_can_delegate_twice_and_decide_each_child_before_reporting() {
         ],
         &[("BRGR_OWNER_ID", "codex:recursive-root")],
     ));
-    assert_eq!(root["outcome"], "candidate");
+    assert_eq!(root["outcome"], "candidate", "{root}");
     let root_task = root["task_id"].as_str().unwrap();
     let waited = json_output(&run(
         &home,
@@ -2705,13 +2824,52 @@ fn a_worker_can_delegate_twice_and_decide_each_child_before_reporting() {
     assert_eq!(leaf_depth, 2);
     assert_eq!(child.owner_id.as_str(), format!("worker:{child_attempt}"));
     assert_eq!(store.unsettled_children(child_attempt).unwrap(), 0);
+    let owner = [("BRGR_OWNER_ID", "codex:recursive-root")];
+    let brief = json_output(&run(&home, &["status", "--brief"], &owner));
+    assert_eq!(brief.as_array().unwrap().len(), 3, "{brief}");
+    let brief_child = brief
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["task_id"] == child.task_id.to_string())
+        .unwrap();
+    assert_eq!(brief_child["parent_task_id"], root_task);
+    assert_eq!(brief_child["harness"], "local.fixture");
+    assert!(brief_child["model"].is_null());
+    let status = json_output(&run(&home, &["status"], &owner));
+    assert_eq!(status.as_array().unwrap().len(), 3, "{status}");
+    let status_leaf = status
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["task"]["task_id"] == leaf.task_id.to_string())
+        .unwrap();
+    assert_eq!(status_leaf["parent_task_id"], child.task_id.to_string());
+    assert_eq!(status_leaf["task"]["route"]["harness_id"], "local.fixture");
+    assert_eq!(status_leaf["task"]["route"]["requested_model"], Value::Null);
+    let child_task_id = child.task_id.to_string();
+    let child_status = json_output(&run(&home, &["status", &child_task_id], &owner));
+    assert_eq!(child_status["parent_task_id"], root_task);
+    let child_result = json_output(&run(&home, &["result", &child_task_id], &owner));
+    assert_eq!(child_result["artifacts"][0]["text"], "BRGR_RECURSIVE_OK");
+    let cannot_decide = run(&home, &["accept", &child_task_id], &owner);
+    assert!(
+        !cannot_decide.status.success(),
+        "ancestor owner acquired decision rights"
+    );
     let root_result = json_output(&run(
         &home,
         &["result", root_task],
         &[("BRGR_OWNER_ID", "codex:recursive-root")],
     ));
     assert_eq!(root_result["artifacts"][0]["text"], "BRGR_RECURSIVE_OK");
+}
 
+#[test]
+fn cancelled_children_settle_but_undecided_results_name_their_commands() {
+    let (_temp, home, workspace) = recursive_fixture_home();
+    let owner = [("BRGR_OWNER_ID", "codex:recursive-root")];
+    let store = brgr_store::Store::open(home.join("store")).unwrap();
     let unsettled = json_output(&run(
         &home,
         &[
@@ -2724,15 +2882,66 @@ fn a_worker_can_delegate_twice_and_decide_each_child_before_reporting() {
             "--enable-delegation",
             "--foreground",
         ],
-        &[("BRGR_OWNER_ID", "codex:recursive-root")],
+        &owner,
     ));
     assert_eq!(unsettled["outcome"], "failed");
+    let unsettled_root_id = unsettled["task_id"].as_str().unwrap().parse().unwrap();
+    let unsettled_child = store
+        .subtree(unsettled_root_id)
+        .unwrap()
+        .into_iter()
+        .find(|node| node.depth == 1)
+        .map(|node| store.task(node.task_id).unwrap())
+        .unwrap();
+    let error = unsettled["error"].as_str().unwrap();
     assert!(
-        unsettled["error"]
-            .as_str()
-            .unwrap()
-            .contains("child task(s) remain")
+        error.contains(&unsettled_child.task_id.to_string()),
+        "{error}"
     );
+    assert!(
+        error.contains(&format!("brgr accept {}", unsettled_child.task_id)),
+        "{error}"
+    );
+
+    let cancelled_parent = json_output(&run(
+        &home,
+        &[
+            "run",
+            "CANCEL_CHILD",
+            "--harness",
+            "local.fixture",
+            "--workspace",
+            workspace.to_str().unwrap(),
+            "--enable-delegation",
+            "--foreground",
+        ],
+        &owner,
+    ));
+    assert_eq!(
+        cancelled_parent["outcome"], "candidate",
+        "{cancelled_parent}"
+    );
+    let parent_id = cancelled_parent["task_id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let cancelled_child = store
+        .subtree(parent_id)
+        .unwrap()
+        .into_iter()
+        .find(|node| node.depth == 1)
+        .map(|node| store.task(node.task_id).unwrap())
+        .unwrap();
+    assert_eq!(
+        store
+            .latest_result(cancelled_child.task_id)
+            .unwrap()
+            .outcome,
+        brgr_protocol::TerminalOutcome::Cancelled
+    );
+    let parent_attempt = store.latest_message_attempt(parent_id).unwrap();
+    assert_eq!(store.unsettled_children(parent_attempt).unwrap(), 0);
 }
 
 #[test]
@@ -2943,6 +3152,86 @@ fn tree_status_shows_question_and_tree_cancel_stops_both_processes() {
         ))["outcome"],
         "cancelled"
     );
+}
+
+#[test]
+fn cancelling_a_parent_stops_a_child_process_group_and_receipts_both_tasks() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("brgr");
+    let workspace = temp.path().join("work");
+    let executable = temp.path().join("fixture");
+    let child_json_path = temp.path().join("child.json");
+    let ping_pid_path = temp.path().join("ping.pid");
+    fs::create_dir_all(&workspace).unwrap();
+    let script = format!(
+        r#"#!/bin/sh
+set -eu
+case "${{1:-}}" in
+  --version) echo 'fixture v-cancel-group'; exit 0;;
+  --help) printf '%s\n' '-p, --print' '--mode=<value>' '--no-session' '--no-mcp' '--model' '--thinking'; exit 0;;
+esac
+prompt_file=
+for argument in "$@"; do case "$argument" in @*) prompt_file=${{argument#@}};; esac; done
+if /usr/bin/grep -q '^ROOT' "$prompt_file"; then
+  child_json=$("$BRGR_BIN" --json --headless run CHILD --harness local.fixture --workspace "$PWD")
+  printf '%s\n' "$child_json" > "{}"
+  while :; do /bin/sleep 1; done
+elif /usr/bin/grep -q '^CHILD' "$prompt_file"; then
+  /bin/sleep 120 &
+  ping_pid=$!
+  printf '%s\n' "$ping_pid" > "{}"
+  wait "$ping_pid"
+fi
+printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[{{"type":"text","text":"cancel fixture completed"}}]}}}}'
+printf '%s\n' '{{"type":"agent_end","stopReason":"completed"}}'
+"#,
+        child_json_path.display(),
+        ping_pid_path.display()
+    );
+    write_fast_script(&executable, &script);
+    add_fixture(&home, &executable, &temp.path().join("scratch"));
+    let owner = [("BRGR_OWNER_ID", "codex:cancel-group")];
+    let root = json_output(&run(
+        &home,
+        &[
+            "run",
+            "ROOT",
+            "--harness",
+            "local.fixture",
+            "--workspace",
+            workspace.to_str().unwrap(),
+            "--enable-delegation",
+        ],
+        &owner,
+    ));
+    let root_task = root["task_id"].as_str().unwrap();
+    assert!(
+        wait_until(|| child_json_path.is_file() && ping_pid_path.is_file()),
+        "the nested task did not start the process: {}",
+        fs::read_to_string(&child_json_path).unwrap_or_default()
+    );
+    let child_json: Value = serde_json::from_slice(&fs::read(&child_json_path).unwrap()).unwrap();
+    let child_task = child_json["task_id"].as_str().unwrap();
+    let ping_pid = fs::read_to_string(&ping_pid_path)
+        .unwrap()
+        .trim()
+        .to_owned();
+    assert!(process_exists(&ping_pid), "the child process did not start");
+    let cancelled = json_output(&run(&home, &["cancel", root_task], &owner));
+    assert_eq!(cancelled["state"], "cancel_requested", "{cancelled}");
+    let stopped: Vec<String> = serde_json::from_value(cancelled["stopped_tasks"].clone()).unwrap();
+    assert!(stopped.iter().any(|task| task == root_task), "{cancelled}");
+    assert!(stopped.iter().any(|task| task == child_task), "{cancelled}");
+    assert!(
+        wait_until(|| !process_exists(&ping_pid)),
+        "the child process group survived parent cancellation (pid {ping_pid})"
+    );
+    let store = brgr_store::Store::open(home.join("store")).unwrap();
+    assert!(wait_until(|| store
+        .attempt_state(child_task.parse().unwrap())
+        .is_ok_and(
+            |state| state == brgr_protocol::AttemptState::Terminal
+        )));
 }
 
 #[test]
@@ -8346,7 +8635,12 @@ fn a_debate_wait_started_before_the_debate_returns_with_the_group() {
         &tasks[0],
         &["debate", "wait", "--timeout-seconds", "60"],
     );
-    thread::sleep(Duration::from_millis(500));
+    // Its marker says the wait has begun; a debate older than the wait is not news.
+    wait_until(|| {
+        fs::read_dir(home.join("runs/debate-waits"))
+            .is_ok_and(|mut entries| entries.next().is_some())
+    });
+    thread::sleep(Duration::from_millis(300));
     let group = json_output(&run(
         &home,
         &["debate", "start", &tasks[0], &tasks[1]],

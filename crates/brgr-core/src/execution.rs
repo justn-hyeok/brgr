@@ -546,10 +546,28 @@ pub(crate) fn unsettled_worker_reason(
     task_id: TaskId,
     attempt_id: AttemptId,
 ) -> Result<Option<String>, StoreError> {
-    let children = store.unsettled_children(attempt_id)?;
-    if children > 0 {
+    let children = store.unsettled_child_tasks(attempt_id)?;
+    if !children.is_empty() {
+        let details = children
+            .iter()
+            .map(|child| {
+                let id = child.to_string();
+                match store.latest_result(*child) {
+                    Ok(result) if result.outcome == TerminalOutcome::Candidate => Ok(format!(
+                        "{id} (candidate: `brgr accept {id}` or `brgr reject {id}`)"
+                    )),
+                    Ok(_) => Ok(format!("{id} (acknowledge with `brgr result {id} --ack`)")),
+                    Err(StoreError::NoResultYet(_)) => Ok(format!(
+                        "{id} (cancel with `brgr cancel {id}` or wait for its result)"
+                    )),
+                    Err(error) => Err(error),
+                }
+            })
+            .collect::<Result<Vec<_>, StoreError>>()?;
         return Ok(Some(format!(
-            "{children} child task(s) remain undecided or unacknowledged"
+            "{} child task(s) remain undecided or unacknowledged: {}",
+            children.len(),
+            details.join("; ")
         )));
     }
     let questions = store.unsettled_questions(task_id, attempt_id)?;
