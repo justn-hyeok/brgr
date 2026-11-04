@@ -98,6 +98,24 @@ pub fn warm_executable(path: &Path) {
     }
 }
 
+/// Runs a command on a file this process just wrote, waiting out the moment a
+/// `fork` in another test thread can still hold it open for writing on Linux.
+/// The guard only stops a hang: a correct run does not reach it.
+pub fn output_when_not_busy(command: &mut Command) -> std::process::Output {
+    let started = std::time::Instant::now();
+    loop {
+        match command.output() {
+            Err(error)
+                if error.kind() == io::ErrorKind::ExecutableFileBusy
+                    && started.elapsed() < HANG_GUARD =>
+            {
+                thread::sleep(Duration::from_millis(10));
+            }
+            other => return other.unwrap(),
+        }
+    }
+}
+
 fn warmed_trampoline() -> &'static Path {
     WARMED_TRAMPOLINE.get_or_init(create_warmed_trampoline)
 }

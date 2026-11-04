@@ -1,7 +1,8 @@
 mod common;
 
 use common::{
-    HANG_GUARD, brgr_binary as brgr, brgr_command, process_exists, wait_until, write_fast_script,
+    HANG_GUARD, brgr_binary as brgr, brgr_command, output_when_not_busy, process_exists,
+    wait_until, write_fast_script,
 };
 
 use std::{
@@ -4644,14 +4645,14 @@ fn codex_integration_accepts_an_equivalent_caller_and_detects_hook_binary_drift(
     fs::copy(brgr(), &hook_binary).unwrap();
     fs::set_permissions(&hook_binary, fs::Permissions::from_mode(0o700)).unwrap();
 
-    let installed = Command::new(&hook_binary)
-        .arg("--home")
-        .arg(&home)
-        .arg("--json")
-        .args(["integrate", "codex", "install"])
-        .env("CODEX_HOME", &codex_home)
-        .output()
-        .unwrap();
+    let installed = output_when_not_busy(
+        Command::new(&hook_binary)
+            .arg("--home")
+            .arg(&home)
+            .arg("--json")
+            .args(["integrate", "codex", "install"])
+            .env("CODEX_HOME", &codex_home),
+    );
     assert!(installed.status.success());
     let envs = [("CODEX_HOME", codex_home.to_str().unwrap())];
     let equivalent = json_output(&run(&home, &["integrate", "codex", "status"], &envs));
