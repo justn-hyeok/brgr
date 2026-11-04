@@ -89,6 +89,16 @@ pub(crate) fn bounded_git_diff_with_executable(
     // A repository without a commit or a staged file has no index yet.
     if real_index.is_file() {
         fs::copy(real_index, &index).map_err(|error| error.to_string())?;
+        // Git trusts a file's size and time only if the file is older than the
+        // index. A copy's fresh time would hide an edit that keeps the size.
+        let modified = fs::metadata(real_index)
+            .and_then(|metadata| metadata.modified())
+            .map_err(|error| error.to_string())?;
+        fs::File::options()
+            .write(true)
+            .open(&index)
+            .and_then(|file| file.set_modified(modified))
+            .map_err(|error| error.to_string())?;
     }
     let listing = git(deadline.saturating_sub(started.elapsed())).run(
         &["ls-files", "--others", "--exclude-standard", "-z"],
