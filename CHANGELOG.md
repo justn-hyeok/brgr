@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+## 2.15.18 — 2026-11-05
+
+brgr now runs on x86_64 Linux with real agents, debate no longer stalls, and a worker's children have a real boundary. GJC is gone.
+
+- Linux release archive, checksums and plugin support, with real heads and workers checked on Ubuntu 24.04 (issue #284).
+- A debate member blocked in `message wait`, `wait` or `watch` now returns early for a debate message, and `debate wait` says when a debate starts during it. `debate status` shows unread age, worker state and blocking waits, `debate send` refuses a finished member, and every debate subcommand has help (issue #301).
+- A Codex worker now knows who it is. Its commands run in Codex's shared daemon, which never had its identity; a task directory in a brgr worktree now names the worker and its pane.
+- **Behavior change:** pane mode no longer enables delegation by itself. A worker needs `--enable-delegation` to start children (issue #302).
+- **Behavior change:** `brgr cancel TASK` stops the whole subtree, and tools under the agent. `status` and `result` reach every descendant for an ancestor's owner. A child its parent cancelled no longer fails that parent (issue #302).
+- `brgr debate wait` exits 0 with a `timeout` receipt instead of an error.
+- `brgr config alias set|list|remove` and `brgr run --use NAME` name a harness and model (issue #308).
+- Screen rules for Codex's hook review and Claude Code's fullscreen renderer offer. Without them a worker on a fresh install stopped there (issues #303, #284).
+- A headless result records `slept_seconds` when the machine slept (issue #259).
+- **Removed:** GJC. A registered `local.gjc` and its config section keep loading, and it no longer runs (issue #307).
+- Harness tiers: tier 1 is Claude Code, Codex CLI, Cursor CLI and Devin CLI (issue #307).
+
 ## 2.15.17 — 2026-11-04
 
 A Linux worker's edit can no longer vanish from its sealed diff, `accept` no longer warns about cleanup another process finished, a large objective can come from a file, and the test suite runs on Linux.
