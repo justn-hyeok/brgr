@@ -2,37 +2,35 @@
 
 ## Unreleased
 
-- Creating a task worktree retries when `git worktree add` finds another worktree still being created (`failed to read .git/worktrees/…/commondir`). It used to fail the run.
+## 2.15.17 — 2026-11-04
+
+A Linux worker's edit can no longer vanish from its sealed diff, `accept` no longer warns about cleanup another process finished, a large objective can come from a file, and the test suite runs on Linux.
+
 - A worker's edit could vanish from its sealed diff on Linux, so `brgr land` reported success having applied nothing. brgr
   copied the Git index before diffing and the copy got a fresh time, which told Git it could trust a file's size and
   time; an edit that kept the file's size, in the same second as the checkout, then looked unchanged. The copy now
   keeps the index's time (issue #289).
-- Tests only: warming a fake executable retries `ETXTBSY`, which failed one Linux run in twenty when a `fork` in another
-  test thread still held the file open for writing.
-- Tests only: add repeated cross-process cancellation, decision, and SIGKILL reconciliation checks against one shared control home.
-- `brgr run --objective-file PATH` accepts objectives up to 256 KiB without putting them in a single process argument; the workflow SDK uses and removes a private temporary file for tasks over 64 KiB (issue #229).
-- On Linux, caller pane verification now reads `HERDR_PANE_ID` from the ancestor's bounded `/proc/<pid>/environ` file instead of using macOS-only `ps -E`.
-- Tests only: the three slowest tests no longer wait out real intervals, which removes about two minutes from a
-  full run. A fake worker's `grep ASK` also matched the word `TASK` in its prompt, so a step nobody questioned sat
-  in `message wait` for its 60-second limit; it now matches the whole word. The workflow admission test holds its
-  first step on a file instead of a 30-second sleep, and the harness health test injects a short deadline for its
-  timeout case. No shipped behavior changes.
-- Herdr commands for worktree creation, pane cleanup, and OMP agent lookup now honor `HERDR_BIN_PATH` like the others. Tests no longer reach a real Herdr from inside a Herdr pane (issue #270).
-- `brgr accept` could print `brgr cleanup pending: No such file or directory (os error 2)` for a
-  pane worker (issue #265). The pane's session loop and the deciding command both archive the
-  handled report and restore the Cursor hook, with no lock between them, so one could remove a
-  file after the other had checked it; a decision's own worktree reclaim could also run before the
-  report was archived and keep the worktree for good. A file the other process already handled is
-  now the step's success, proven by the archive holding the sealed bytes, never by skipping the
-  digest check; a report missing for any other reason is reported once, naming the path; the
-  reclaim leaves a worktree whose report is not archived yet to the cleanup that archives it; and
-  every remaining `cleanup pending` error names the file that failed.
-- Tests only (#224): every test wait is decided by an event the test controls, with a one-minute hang guard
-  where a window once measured machine speed. `watch` fixtures hold on a release file and the tests act on
-  the watch's own output; killed supervisors and drivers are waited for by pid; store and runner bounds are
-  the budget or deadline only the code under test can reach; the workflow resume-deadline test moves the
-  store's clock past an hour-long deadline instead of sleeping through a short one; `brgr-core`'s
-  fake `git` executables use the warmed trampoline.
+- `brgr accept` could print `brgr cleanup pending: No such file or directory (os error 2)` for a pane worker (issue #265).
+  The pane's session loop and the deciding command run the same cleanup with no lock between them. A file the other
+  process already handled is now the step's success, proven by the archive holding the sealed bytes; a report missing or
+  unreadable for any other reason is reported once, naming the path. A decision's own reclaim could also run before the
+  report was archived and keep the worktree for good; it now leaves that to the cleanup that archives. Every remaining
+  `cleanup pending` error names the file that failed.
+- `brgr run --objective-file PATH` accepts an objective up to 256 KiB without putting it in one process argument, which
+  Linux caps at 128 KiB. The workflow SDK uses a private temporary file for tasks over 64 KiB.
+- On Linux, the check that no ancestor process claims a different pane reads `/proc/PID/environ`. It used `ps -E`, which
+  procps rejects, so the check did nothing there.
+- Creating a task worktree retries when `git worktree add` finds another worktree still being created.
+- The Herdr commands for worktree creation, pane cleanup and OMP agent lookup honor `HERDR_BIN_PATH` like the others.
+- Tests only: the suite no longer reaches a real Herdr from inside a Herdr pane, where it could send a real agent a
+  `FROM BRGR` notice for a task that does not exist (issue #270). Tests and benches now run brgr through one isolated
+  constructor, and a source scan keeps it that way.
+- Tests only: tests wait for events they control instead of clock windows (issue #224), new multi-process tests race
+  cancel, recovery, decisions and restarts on one control home (readiness gate 2-4), the slowest tests stopped waiting out
+  real intervals, and Linux-only races and `ETXTBSY` in tests were fixed.
+- CI: a pull request runs on Linux, in about two minutes. The macOS job runs on the push to `main`. A release waits for that
+  commit's `main` run to pass instead of repeating the tests, and still does an uncached release build and a smoke run of
+  the packaged binary.
 
 ## 2.15.16 — 2026-11-03
 
