@@ -28,6 +28,14 @@ jobs:
         env:
           RUST_TEST_THREADS: "8"
       - run: cargo test --workspace --doc --locked
+      - name: Repeat the settle tests
+        run: |
+          binary=$(cargo test -p brgr-cli --test concurrency_settle --no-run --locked --message-format=json 2>/dev/null | jq -r 'select(.executable != null and .profile.test == true) | .executable' | head -1)
+          test -n "$binary"
+          fails=0
+          for run in $(seq 1 25); do out=$("$binary" 2>&1 || true); echo "$out" | grep -q "5 passed; 0 failed" || { fails=$((fails + 1)); echo "RUN $run FAILED"; echo "$out" | tail -40; }; done
+          echo "settle repeat: $fails failures in 25 runs"
+          test "$fails" = 0
 
   # The platform brgr ships for, on every push to main. The release tag runs the
   # tests here again before anything is published.
