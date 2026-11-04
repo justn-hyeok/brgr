@@ -60,7 +60,7 @@ brgr hands bounded work to registered coding agents and seals what they return f
 
 Owner and worker talk with `brgr message send TASK --to owner|worker --kind note|question|reply --body "<text>"`; a reply adds `--reply-to MESSAGE_ID`. Read with `brgr message list TASK --for owner|worker` or `brgr message wait TASK --for owner|worker`, and acknowledge with `brgr message ack TASK MESSAGE_ID --for owner|worker`. Messages wait while the recipient is busy. A native screen is not a message: answer it with `brgr input TASK --key <key>`. A worker can hand back its answer without editing files with `brgr report TASK --body "<text>"`.
 
-Siblings talk directly only when the user asks for a **debate**: `brgr debate start TASK_A TASK_B`. Participants receive the group id and use `brgr debate send GROUP --to TASK --kind question --body "<text>"`, `brgr debate list`, `brgr debate wait` and `brgr debate ack MESSAGE_ID`; a reply adds `--kind reply --reply-to MESSAGE_ID`. The owner uses `brgr debate status GROUP` and `brgr debate stop GROUP`.
+Siblings talk directly only when the user asks for a **debate**: `brgr debate start TASK_A TASK_B`. Participants receive the group id and use `brgr debate send GROUP --to TASK --kind question --body "<text>"`, `brgr debate list`, `brgr debate wait` and `brgr debate ack MESSAGE_ID`; a reply adds `--kind reply --reply-to MESSAGE_ID`. If a blocking `message wait`, `wait` or `watch` returns `debate_message_pending`, run `brgr debate list`, acknowledge the peer message, then wait again if needed. `brgr debate wait` returns `debate_joined` with the group when a debate starts while it waits, and its `timeout` receipt names the group. The owner uses `brgr debate status GROUP` and `brgr debate stop GROUP`.
 
 ## More
 

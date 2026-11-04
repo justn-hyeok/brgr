@@ -1,4 +1,4 @@
-use std::{env, time::Duration};
+use std::time::Duration;
 
 use anyhow::{Context as _, Result, bail};
 use brgr_protocol::{AttemptId, TaskId};
@@ -171,6 +171,7 @@ async fn wait_for_message(
         bail!("message wait timeout must be between 1 and 86400 seconds");
     }
     let store = Store::open(&paths.store)?;
+    let debate = DebateWait::start(paths);
     let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_seconds);
     loop {
         let attempt = match authorized_attempt(&store, task, recipient, false) {
@@ -195,10 +196,87 @@ async fn wait_for_message(
             print_value(&serde_json::to_value(message)?, json_output);
             return Ok(());
         }
+        if debate.message_pending(&store)? {
+            print_value(&debate_pending_receipt(), json_output);
+            return Ok(());
+        }
         if tokio::time::Instant::now() >= deadline {
             bail!("no message for task {task} before the wait timeout");
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+/// What a blocking command prints when it returns early for a debate message.
+pub(crate) fn debate_pending_receipt() -> serde_json::Value {
+    json!({
+        "state": "debate_message_pending",
+        "instruction": "Run brgr debate list, answer or brgr debate ack each message, then wait again.",
+    })
+}
+
+/// Lets a worker's blocking brgr command notice a debate message, which it could
+/// otherwise not read until the command ends. It asks on every poll, because a
+/// debate can start while the command is already waiting.
+pub(crate) struct DebateWait {
+    worker: Option<(TaskId, AttemptId)>,
+    _marker: Option<WaitMarker>,
+}
+
+impl DebateWait {
+    pub(crate) fn start(paths: &Paths) -> Self {
+        let task = crate::worker_identity::task().and_then(|value| value.parse::<TaskId>().ok());
+        let attempt =
+            crate::worker_identity::attempt().and_then(|value| value.parse::<AttemptId>().ok());
+        let worker = task.zip(attempt);
+        // The marker only informs `debate status`, so a failure must not stop the wait.
+        let marker = worker.and_then(|(task, _)| WaitMarker::create(paths, task).ok());
+        Self {
+            worker,
+            _marker: marker,
+        }
+    }
+
+    pub(crate) fn message_pending(&self, store: &Store) -> Result<bool> {
+        let Some((task, attempt)) = self.worker else {
+            return Ok(false);
+        };
+        Ok(!store.peer_inbox(task, attempt)?.is_empty())
+    }
+}
+
+pub(crate) struct WaitMarker(std::path::PathBuf);
+impl WaitMarker {
+    pub(crate) fn create(paths: &Paths, task: TaskId) -> Result<Self> {
+        use std::io::Write as _;
+        let directory = paths.runs.join("debate-waits");
+        std::fs::create_dir_all(&directory)?;
+        let path = directory.join(format!("{task}-{}.json", std::process::id()));
+        let mut file = std::fs::File::create(&path)?;
+        let seconds = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_secs();
+        let birth = process_signature(std::process::id().cast_signed())
+            .context("could not verify wait process identity")?;
+        write!(file, "{seconds}\n{birth}")?;
+        Ok(Self(path))
+    }
+}
+
+pub(crate) fn process_signature(pid: i32) -> Option<String> {
+    let output = std::process::Command::new("/bin/ps")
+        .args(["-o", "lstart=", "-p", &pid.to_string()])
+        .output()
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+        .filter(|value| !value.is_empty())
+}
+impl Drop for WaitMarker {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
     }
 }
 
@@ -222,11 +300,11 @@ fn authorized_attempt(
             Ok((attempt, Some(proof)))
         }
         MessageSide::Worker => {
-            let own_task: TaskId = env::var("BRGR_PARENT_TASK_ID")
+            let own_task: TaskId = crate::worker_identity::task()
                 .context("worker task identity is absent")?
                 .parse()
                 .context("worker task identity is invalid")?;
-            let own_attempt: AttemptId = env::var("BRGR_PARENT_ATTEMPT_ID")
+            let own_attempt: AttemptId = crate::worker_identity::attempt()
                 .context("worker attempt identity is absent")?
                 .parse()
                 .context("worker attempt identity is invalid")?;

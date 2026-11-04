@@ -8221,6 +8221,467 @@ fn debate_takeover(home: &Path, owner: &str, key: &str) {
     committed_takeover(home, owner, "fixture-session", "session-b", key);
 }
 
+/// Starts `args` as worker `task`'s blocking command.
+fn debate_waiter(home: &Path, owner: &str, task: &str, args: &[&str]) -> std::process::Child {
+    let store = brgr_store::Store::open(home.join("store")).unwrap();
+    let attempt = store
+        .latest_message_attempt(task.parse().unwrap())
+        .unwrap()
+        .to_string();
+    brgr_command()
+        .arg("--home")
+        .arg(home)
+        .arg("--json")
+        .args(args)
+        .env("BRGR_PARENT_TASK_ID", task)
+        .env("BRGR_PARENT_ATTEMPT_ID", attempt)
+        .env("BRGR_OWNER_ID", owner)
+        .env("BRGR_SESSION_ID", "fixture-session")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap()
+}
+
+fn send_peer_question(home: &Path, group: &str, from: &str, to: &str) {
+    let store = brgr_store::Store::open(home.join("store")).unwrap();
+    let attempt = store.latest_message_attempt(from.parse().unwrap()).unwrap();
+    store
+        .post_peer_message_from(
+            &brgr_store::PeerDraft {
+                id: "323e4567-e89b-12d3-a456-426614174000".to_owned(),
+                group: group.to_owned(),
+                from: from.parse().unwrap(),
+                to: to.parse().unwrap(),
+                kind: brgr_store::MessageKind::Question,
+                body: "Need your view".to_owned(),
+                reply_to: None,
+            },
+            attempt,
+        )
+        .unwrap();
+}
+
+fn assert_returns_for_debate(mut child: std::process::Child) {
+    let began = Instant::now();
+    while child.try_wait().unwrap().is_none() {
+        assert!(
+            began.elapsed() < Duration::from_secs(15),
+            "the wait did not return for a debate message"
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("debate_message_pending"),
+        "{output:?}"
+    );
+}
+
+/// A Codex worker's commands run in a daemon with someone else's environment, so
+/// only its directory says who it is.
+#[test]
+fn a_worker_with_a_stale_environment_is_known_by_its_task_directory() {
+    let owner = "codex:debate-directory";
+    let (_temp, home, tasks) = debate_home(owner);
+    let group = json_output(&run(
+        &home,
+        &["debate", "start", &tasks[0], &tasks[1]],
+        &[("BRGR_OWNER_ID", owner)],
+    ))["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let worktree = home.join("worktrees/repo/abc");
+    fs::create_dir_all(worktree.join(format!(".brgr/tasks/{}-r1", tasks[0]))).unwrap();
+    let output = brgr_command()
+        .current_dir(&worktree)
+        .arg("--home")
+        .arg(&home)
+        .arg("--json")
+        .args([
+            "debate",
+            "send",
+            &group,
+            "--to",
+            &tasks[1],
+            "--kind",
+            "question",
+            "--body",
+            "Which is larger?",
+        ])
+        // The other member's identity, as a daemon that member started would hold.
+        .env("BRGR_PARENT_TASK_ID", &tasks[1])
+        .env(
+            "BRGR_PARENT_ATTEMPT_ID",
+            "00000000-0000-4000-8000-000000000000",
+        )
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let status = json_output(&run(
+        &home,
+        &["debate", "status", &group],
+        &[("BRGR_OWNER_ID", owner)],
+    ));
+    let member = status["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|member| member["task"] == tasks[1].as_str())
+        .unwrap();
+    assert_eq!(member["unread_count"], 1, "{status}");
+    let age = member["oldest_unread_seconds"].as_i64().unwrap();
+    assert!((0..60).contains(&age), "a new message's age: {age}");
+}
+
+#[test]
+fn a_debate_wait_started_before_the_debate_returns_with_the_group() {
+    let owner = "codex:debate-joined";
+    let (_temp, home, tasks) = debate_home(owner);
+    let mut child = debate_waiter(
+        &home,
+        owner,
+        &tasks[0],
+        &["debate", "wait", "--timeout-seconds", "60"],
+    );
+    thread::sleep(Duration::from_millis(500));
+    let group = json_output(&run(
+        &home,
+        &["debate", "start", &tasks[0], &tasks[1]],
+        &[("BRGR_OWNER_ID", owner)],
+    ))["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let began = Instant::now();
+    while child.try_wait().unwrap().is_none() {
+        assert!(
+            began.elapsed() < Duration::from_secs(15),
+            "the wait did not return"
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let receipt: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(receipt["state"], "debate_joined");
+    assert_eq!(receipt["group"], group.as_str());
+}
+
+#[test]
+fn a_wait_started_before_the_debate_still_returns_for_its_message() {
+    let owner = "codex:debate-late-start";
+    let (_temp, home, tasks) = debate_home(owner);
+    let child = debate_waiter(
+        &home,
+        owner,
+        &tasks[0],
+        &[
+            "message",
+            "wait",
+            &tasks[1],
+            "--for",
+            "owner",
+            "--timeout-seconds",
+            "60",
+        ],
+    );
+    thread::sleep(Duration::from_millis(500));
+    let group = json_output(&run(
+        &home,
+        &["debate", "start", &tasks[0], &tasks[1]],
+        &[("BRGR_OWNER_ID", owner)],
+    ))["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    send_peer_question(&home, &group, &tasks[1], &tasks[0]);
+    assert_returns_for_debate(child);
+}
+
+#[test]
+fn a_debate_members_brgr_wait_returns_for_a_debate_message() {
+    let owner = "codex:debate-brgr-wait";
+    let (_temp, home, tasks) = debate_home(owner);
+    let group = json_output(&run(
+        &home,
+        &["debate", "start", &tasks[0], &tasks[1]],
+        &[("BRGR_OWNER_ID", owner)],
+    ))["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    // The fixture's attempts have no live supervisor, so `wait` would settle them
+    // on its first reconcile: the message is already there when it starts.
+    send_peer_question(&home, &group, &tasks[1], &tasks[0]);
+    assert_returns_for_debate(debate_waiter(
+        &home,
+        owner,
+        &tasks[0],
+        &["wait", &tasks[1], "--timeout-seconds", "60"],
+    ));
+}
+
+#[test]
+fn a_debate_members_watch_returns_for_a_debate_message() {
+    let owner = "codex:debate-watch";
+    let (_temp, home, tasks) = debate_home(owner);
+    let group = json_output(&run(
+        &home,
+        &["debate", "start", &tasks[0], &tasks[1]],
+        &[("BRGR_OWNER_ID", owner)],
+    ))["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    send_peer_question(&home, &group, &tasks[1], &tasks[0]);
+    assert_returns_for_debate(debate_waiter(
+        &home,
+        owner,
+        &tasks[0],
+        &["watch", &tasks[1]],
+    ));
+}
+
+#[test]
+fn debate_member_message_wait_returns_early_for_peer_message() {
+    let owner = "codex:debate-early-wait";
+    let (_temp, home, tasks) = debate_home(owner);
+    let started = json_output(&run(
+        &home,
+        &[
+            "debate",
+            "start",
+            &tasks[0],
+            &tasks[1],
+            "--request-id",
+            "123e4567-e89b-12d3-a456-426614174000",
+        ],
+        &[("BRGR_OWNER_ID", owner)],
+    ));
+    let group = started["id"].as_str().unwrap().to_owned();
+    let store = brgr_store::Store::open(home.join("store")).unwrap();
+    let mut waiter = brgr_command();
+    waiter
+        .arg("--home")
+        .arg(&home)
+        .arg("--json")
+        .args([
+            "message",
+            "wait",
+            &tasks[1],
+            "--for",
+            "owner",
+            "--timeout-seconds",
+            "30",
+        ])
+        .env("BRGR_PARENT_TASK_ID", &tasks[0])
+        .env(
+            "BRGR_PARENT_ATTEMPT_ID",
+            store
+                .latest_message_attempt(tasks[0].parse().unwrap())
+                .unwrap()
+                .to_string(),
+        )
+        .env("BRGR_OWNER_ID", owner)
+        .env("BRGR_SESSION_ID", "fixture-session")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = waiter.spawn().unwrap();
+    thread::sleep(Duration::from_millis(300));
+    let from_attempt = store
+        .latest_message_attempt(tasks[1].parse().unwrap())
+        .unwrap();
+    store
+        .post_peer_message_from(
+            &brgr_store::PeerDraft {
+                id: "223e4567-e89b-12d3-a456-426614174000".to_owned(),
+                group,
+                from: tasks[1].parse().unwrap(),
+                to: tasks[0].parse().unwrap(),
+                kind: brgr_store::MessageKind::Question,
+                body: "Need your view".to_owned(),
+                reply_to: None,
+            },
+            from_attempt,
+        )
+        .unwrap();
+    let began = Instant::now();
+    let output = loop {
+        if child.try_wait().unwrap().is_some() {
+            break child.wait_with_output().unwrap();
+        }
+        assert!(
+            began.elapsed() < Duration::from_secs(5),
+            "message wait did not return early"
+        );
+        thread::sleep(Duration::from_millis(25));
+    };
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("debate_message_pending"));
+}
+
+#[test]
+fn non_debate_message_wait_keeps_waiting_until_timeout() {
+    let owner = "codex:non-debate-wait";
+    let (_temp, home, tasks) = debate_home(owner);
+    let store = brgr_store::Store::open(home.join("store")).unwrap();
+    let attempt = store
+        .latest_message_attempt(tasks[0].parse().unwrap())
+        .unwrap()
+        .to_string();
+    let began = Instant::now();
+    let output = run(
+        &home,
+        &[
+            "message",
+            "wait",
+            &tasks[0],
+            "--for",
+            "owner",
+            "--timeout-seconds",
+            "2",
+        ],
+        &[
+            ("BRGR_PARENT_TASK_ID", &tasks[0]),
+            ("BRGR_PARENT_ATTEMPT_ID", &attempt),
+            ("BRGR_OWNER_ID", owner),
+        ],
+    );
+    assert!(!output.status.success());
+    assert!(began.elapsed() >= Duration::from_millis(1700));
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("debate_message_pending"));
+}
+
+#[test]
+fn debate_status_shows_unread_age_and_finished_member() {
+    let owner = "codex:debate-status-members";
+    let (_temp, home, tasks) = debate_home(owner);
+    let started = json_output(&run(
+        &home,
+        &[
+            "debate",
+            "start",
+            &tasks[0],
+            &tasks[1],
+            "--request-id",
+            "323e4567-e89b-12d3-a456-426614174000",
+        ],
+        &[("BRGR_OWNER_ID", owner)],
+    ));
+    let group = started["id"].as_str().unwrap();
+    let store = brgr_store::Store::open(home.join("store")).unwrap();
+    let from: brgr_protocol::TaskId = tasks[0].parse().unwrap();
+    let to: brgr_protocol::TaskId = tasks[1].parse().unwrap();
+    let target_attempt = store.latest_message_attempt(to).unwrap();
+    store
+        .post_peer_message_from(
+            &brgr_store::PeerDraft {
+                id: "423e4567-e89b-12d3-a456-426614174000".into(),
+                group: group.into(),
+                from,
+                to,
+                kind: brgr_store::MessageKind::Question,
+                body: "Unread".into(),
+                reply_to: None,
+            },
+            store.latest_message_attempt(from).unwrap(),
+        )
+        .unwrap();
+    rusqlite::Connection::open(home.join("store/brgr.sqlite3"))
+        .unwrap()
+        .execute(
+            "UPDATE attempts SET state='terminal' WHERE attempt_id=?1",
+            [target_attempt.to_string()],
+        )
+        .unwrap();
+    let status = json_output(&run(
+        &home,
+        &["debate", "status", group],
+        &[("BRGR_OWNER_ID", owner)],
+    ));
+    let member = status["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|member| member["task"] == tasks[1])
+        .unwrap();
+    assert_eq!(member["unread_count"], 1);
+    assert!(member["oldest_unread_seconds"].as_i64().unwrap() >= 0);
+    assert_eq!(member["worker_state"], "finished");
+}
+
+#[test]
+fn debate_send_refuses_a_finished_member() {
+    let owner = "codex:debate-finished-send";
+    let (_temp, home, tasks) = debate_home(owner);
+    let started = json_output(&run(
+        &home,
+        &[
+            "debate",
+            "start",
+            &tasks[0],
+            &tasks[1],
+            "--request-id",
+            "523e4567-e89b-12d3-a456-426614174000",
+        ],
+        &[("BRGR_OWNER_ID", owner)],
+    ));
+    let group = started["id"].as_str().unwrap();
+    let store = brgr_store::Store::open(home.join("store")).unwrap();
+    let target: brgr_protocol::TaskId = tasks[1].parse().unwrap();
+    let attempt = store.latest_message_attempt(target).unwrap();
+    rusqlite::Connection::open(home.join("store/brgr.sqlite3"))
+        .unwrap()
+        .execute(
+            "UPDATE attempts SET state='terminal' WHERE attempt_id=?1",
+            [attempt.to_string()],
+        )
+        .unwrap();
+    let output = run(
+        &home,
+        &[
+            "debate", "send", group, "--from", &tasks[0], "--to", &tasks[1], "--body", "Hello",
+        ],
+        &[("BRGR_OWNER_ID", owner)],
+    );
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("finished or is gone"));
+}
+
+#[test]
+fn debate_subcommands_have_help_descriptions() {
+    let (_temp, home, _tasks) = debate_home("codex:debate-help");
+    for command in ["start", "status", "stop", "send", "list", "wait", "ack"] {
+        let output = run(&home, &["debate", command, "--help"], &[]);
+        assert!(
+            output.status.success(),
+            "{command}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let text = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            text.lines()
+                .next()
+                .is_some_and(|line| !line.trim().is_empty()),
+            "{command} missing one-line help: {text}"
+        );
+    }
+    let root = run(&home, &["debate", "--help"], &[]);
+    assert!(
+        String::from_utf8_lossy(&root.stdout)
+            .lines()
+            .next()
+            .is_some_and(|line| !line.trim().is_empty())
+    );
+}
+
 fn owner_env<'a>(owner: &'a str, session: &'a str) -> [(&'a str, &'a str); 2] {
     [("BRGR_OWNER_ID", owner), ("BRGR_SESSION_ID", session)]
 }
