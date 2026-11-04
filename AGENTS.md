@@ -35,9 +35,9 @@ Batch releases. Collect fixes on `main` and cut one release for a coherent set o
 
 1. On a branch, bump the version in `Cargo.toml` (`[workspace.package]` and the five internal crates in `[workspace.dependencies]`) and `herdr-plugin.toml`, and the `--ref`/`--tag` in `README.md`. Add a `CHANGELOG.md` entry, write the release notes in `docs/releases/`, named after the tag, and link them first in the `docs/README.md` index. Run `cargo update --workspace --offline`.
 2. Open a `release: vX.Y.Z` pull request, wait for CI, and squash-merge it. A pull request runs on Linux only; the macOS job runs on the push to `main`.
-3. Wait for the macOS job on the merged `main`. Then run `git tag -a vX.Y.Z -m "brgr vX.Y.Z"` and push the tag.
+3. On the merged `main`, run `git tag -a vX.Y.Z -m "brgr vX.Y.Z"` and push the tag. There is no need to wait for the macOS job first: the release waits for it.
 
-The tag runs `.github/workflows/release.yml`. It tests and builds the binary, publishes the GitHub release as Latest with those notes, then publishes all six crates to crates.io with the `CARGO_REGISTRY_TOKEN` secret, dependencies first. If a run fails part way, for example on a crates.io 429, rerun it: crates already at that version are skipped and an existing release is updated. A release is done when the GitHub release is Latest and `cargo install --locked brgr-cli` installs the new version.
+The tag runs `.github/workflows/release.yml`. It waits for that commit's CI run on `main` to pass, macOS job included, and stops if it did not. It then builds the binary without a cache, runs the packaged smoke test, publishes the GitHub release as Latest with those notes, then publishes all six crates to crates.io with the `CARGO_REGISTRY_TOKEN` secret, dependencies first. If a run fails part way, for example on a crates.io 429, rerun it: crates already at that version are skipped and an existing release is updated. A release is done when the GitHub release is Latest and `cargo install --locked brgr-cli` installs the new version.
 
 ## Operating Contract
 
