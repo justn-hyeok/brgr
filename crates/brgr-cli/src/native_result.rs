@@ -15,8 +15,10 @@ struct CursorHook {
 }
 
 fn worker(paths: &Paths, task: TaskId) -> Result<(brgr_protocol::TaskSpec, PaneReceipt)> {
-    let attempt: AttemptId = env::var("BRGR_PARENT_ATTEMPT_ID")?.parse()?;
-    if env::var("BRGR_PARENT_TASK_ID")? != task.to_string() {
+    let attempt: AttemptId = crate::worker_identity::attempt()
+        .context("worker attempt identity is absent")?
+        .parse()?;
+    if crate::worker_identity::task().as_deref() != Some(task.to_string().as_str()) {
         bail!("report belongs to another worker");
     }
     let spec = Store::open(&paths.store)?.task_for_attempt(attempt)?;

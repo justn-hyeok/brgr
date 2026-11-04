@@ -106,6 +106,7 @@ pub(crate) enum Command {
         command: message::MessageCommand,
     },
     /// Explicit direct conversation between sibling TUI workers.
+    /// Start or participate in an explicit sibling conversation.
     Debate {
         #[command(subcommand)]
         command: crate::debate::DebateCommand,

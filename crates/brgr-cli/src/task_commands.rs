@@ -378,7 +378,12 @@ pub(crate) async fn wait_for_result(
     require_owner(&store, &spec.owner_id)?;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_seconds);
     let mut last_reconcile = tokio::time::Instant::now() - Duration::from_secs(1);
+    let debate = crate::message::DebateWait::start(paths);
     loop {
+        if debate.message_pending(&store)? {
+            print_value(&crate::message::debate_pending_receipt(), json_output);
+            return Ok(());
+        }
         if last_reconcile.elapsed() >= Duration::from_secs(1) {
             reconcile_pending(paths)?;
             last_reconcile = tokio::time::Instant::now();

@@ -907,6 +907,9 @@ fn source_pane(
 }
 
 fn caller_source_pane(spec: &TaskSpec) -> Option<String> {
+    if let Some(pane) = crate::worker_identity::pane() {
+        return Some(pane);
+    }
     crate::caller_pane::verified().or_else(|| {
         (spec.owner_id.as_str().starts_with("codex:")
             && std::env::var("HERDR_ENV").as_deref() == Ok("1")

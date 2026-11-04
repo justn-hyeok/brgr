@@ -777,6 +777,10 @@ still records a run without a driver when a caller needs only the journal.
 
 ## Development
 
+## Messages and debate
+
+Participants use `brgr debate send GROUP --to TASK --kind question --body "<text>"`, `brgr debate list`, `brgr debate wait`, and `brgr debate ack MESSAGE_ID`; replies add `--kind reply --reply-to MESSAGE_ID`. If a worker's blocking `message wait`, `wait` or `watch` returns `debate_message_pending`, run `brgr debate list`, read and acknowledge the peer message, then wait again if needed. Outside a debate these commands behave as before. `brgr debate wait` returns `debate_joined` with the group when a debate starts while it waits, and its `timeout` receipt names the group, because a busy pane cannot show the notice. The owner can use `brgr debate status GROUP` to inspect unread counts, age, worker state, and `brgr debate stop GROUP` to end the conversation.
+
 ```bash
 cargo build --workspace
 cargo test --workspace

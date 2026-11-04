@@ -37,6 +37,7 @@ mod task_commands;
 mod tree_status;
 mod tui_host;
 mod watch;
+mod worker_identity;
 mod workflow;
 mod workspace;
 mod worktree_prune;
@@ -252,6 +253,7 @@ async fn main() -> Result<()> {
     }
     bridge_host::validate_bridge_host_preflight(&cli)?;
     let paths = Paths::new(cli.home.clone())?;
+    worker_identity::initialize(&paths);
     let internal = matches!(
         &cli.command,
         Command::Plugin { .. }
@@ -621,6 +623,9 @@ fn owner_id_from(
 fn delegation_parent_from_environment() -> Result<Option<(TaskId, AttemptId)>> {
     let explicit = invocation::current().session.clone();
     let env_session = env::var("BRGR_SESSION_ID").ok();
+    if let Some(worker) = worker_identity::from_directory() {
+        return Ok(Some(worker));
+    }
     let parent_task = env::var("BRGR_PARENT_TASK_ID").ok();
     let parent_attempt = env::var("BRGR_PARENT_ATTEMPT_ID").ok();
     if foreign_parent_identity(explicit.as_deref(), env_session.as_deref()) {

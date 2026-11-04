@@ -206,6 +206,7 @@ CREATE TABLE IF NOT EXISTS peer_messages (
     body TEXT NOT NULL,
     in_reply_to TEXT,
     acknowledged INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL DEFAULT (unixepoch()),
     FOREIGN KEY (group_id) REFERENCES debate_groups(group_id)
 );
 CREATE TABLE IF NOT EXISTS head_takeovers (
@@ -326,6 +327,7 @@ pub(crate) fn initialize_connection(connection: &Connection) -> Result<(), Store
     let stamp = schema_version();
     let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
     if version == stamp {
+        ensure_peer_message_timestamp(connection)?;
         return Ok(());
     }
 
@@ -343,6 +345,27 @@ pub(crate) fn initialize_connection(connection: &Connection) -> Result<(), Store
         // Written before the stamp existed: record it once so ordinary opens stop
         // re-checking. A build that disagrees only on the digest leaves it alone.
         connection.pragma_update(None, "user_version", stamp)?;
+    }
+    ensure_peer_message_timestamp(connection)?;
+    Ok(())
+}
+
+fn ensure_peer_message_timestamp(connection: &Connection) -> Result<(), StoreError> {
+    let mut statement = connection.prepare("PRAGMA table_info(peer_messages)")?;
+    let names = statement.query_map([], |row| row.get::<_, String>(1))?;
+    let has_created_at = names
+        .collect::<Result<Vec<_>, _>>()?
+        .iter()
+        .any(|name| name == "created_at");
+    if !has_created_at {
+        connection.execute(
+            "ALTER TABLE peer_messages ADD COLUMN created_at INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+        connection.execute(
+            "UPDATE peer_messages SET created_at=unixepoch() WHERE created_at=0",
+            [],
+        )?;
     }
     Ok(())
 }

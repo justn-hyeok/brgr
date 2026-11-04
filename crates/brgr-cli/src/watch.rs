@@ -62,7 +62,14 @@ pub(crate) async fn watch(
         })
         .collect::<Vec<_>>();
 
+    let debate = crate::message::DebateWait::start(paths);
     loop {
+        if debate.message_pending(&store)? {
+            let mut event = crate::message::debate_pending_receipt();
+            event["event"] = json!("debate_message_pending");
+            emit(&event)?;
+            return Ok(());
+        }
         if last_reconcile.elapsed() >= Duration::from_secs(1) {
             // Same recovery cadence as `wait`: a dead supervisor becomes a lost
             // result the stream can report. This command never decides or acks.
