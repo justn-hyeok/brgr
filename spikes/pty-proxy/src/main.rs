@@ -205,8 +205,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let _ = fs::write(&screen_path, contents);
         let quiet = now.saturating_sub(last_output.load(Ordering::Relaxed));
         let state = format!(
-            "{{\"now_ms\":{now},\"quiet_ms\":{quiet},\"bytes\":{},\"title\":{:?}}}\n",
+            "{{\"now_ms\":{now},\"quiet_ms\":{quiet},\"bytes\":{},\"rows\":{},\"cols\":{},\"title\":{:?}}}\n",
             bytes.load(Ordering::Relaxed),
+            outer_size().rows,
+            outer_size().cols,
             title.lock().unwrap()
         );
         let _ = fs::write(&state_path, state);

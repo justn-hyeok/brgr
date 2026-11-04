@@ -315,8 +315,9 @@ owner(Head)는 사용자가 직접 띄운 세션이라 래퍼로 풀 수 없다.
 0. 스파이크([#228](https://github.com/justn-hyeok/brgr/issues/228)): PTY 프록시가
    Claude Code, Codex, Cursor TUI를 충실하게 감쌀 수 있는가. 설계를 바꾸는 유일한
    결정이라 먼저 한다. 결과가 나쁘면 제어되는 호스트만 TUI를 지원하고 순수
-   터미널은 headless만 지원한다. macOS 결과는 go다
-   ([보고서](../evidence/pty-proxy-spike-2026-11-04.md)). Linux와 순수 터미널
+   터미널은 headless만 지원한다. macOS와 Linux x86_64 결과는 go다
+   ([macOS](../evidence/pty-proxy-spike-2026-11-04.md),
+   [Linux](../evidence/pty-proxy-spike-linux-2026-11-04.md)). 순수 터미널
    에뮬레이터는 아직 시험하지 않았다.
 1. worker 세션과 배치 포트를 정의하고 호출 지점을 옮긴다. 첫 구현은 Herdr에 위임하는
    동작 불변 리팩터링이다. Phase 3.5(#200)와 #197이 이 안의 조각이다.

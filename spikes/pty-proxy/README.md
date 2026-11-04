@@ -28,7 +28,7 @@ python3 measure/fidelity_tmux.py $P OUTDIR    # tmux as the outer terminal
 python3 measure/tui.py claude $P OUTDIR SCRATCH_REPO claude --model haiku
 python3 measure/tui.py codex  $P OUTDIR SCRATCH_REPO codex -m gpt-6-luna --yolo
 python3 measure/tui.py cursor $P OUTDIR SCRATCH_REPO cursor-agent --model cursor-grok-4.6-high --force
-python3 measure/analyze.py OUTDIR target/release/read-screen ROWS COLS
+python3 measure/analyze.py OUTDIR target/release/read-screen
 ```
 
-`tui.py` starts the proxy from a copy named after the harness, because Herdr reports `unknown` for a proxy under its own name. That lets Herdr's status for the proxied pane serve as the truth for the same session. `ROWS` and `COLS` are the size of a proxied pane before any resize.
+`tui.py` starts the proxy from a copy named after the harness, because Herdr reports `unknown` for a proxy under its own name. That lets Herdr's status for the proxied pane serve as the truth for the same session.

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Status agreement and screen comparison from the rows and raw streams tui.py wrote.
-Usage: analyze.py DIR READ_SCREEN_BINARY ROWS COLS (the pane size before any resize)"""
+Usage: analyze.py DIR READ_SCREEN_BINARY"""
 import collections, difflib, json, os, subprocess, sys, tempfile
-d, reader, fixed_rows, fixed_cols = sys.argv[1], os.path.abspath(sys.argv[2]), sys.argv[3], sys.argv[4]
+d, reader = sys.argv[1], os.path.abspath(sys.argv[2])
 def lines(text): return [l.rstrip() for l in text.splitlines() if l.strip()]
 def ratio(a, b): return round(difflib.SequenceMatcher(None, lines(a), lines(b)).ratio(), 3)
 total = collections.Counter()
@@ -29,12 +29,13 @@ for n in ("claude", "codex", "cursor"):
     work = tempfile.mkdtemp()
     for tag in tags:
         a, b = open(f"{d}/{n}.{tag}.direct.txt").read(), open(f"{d}/{n}.{tag}.proxied.txt").read()
-        snap = rep["snaps"][tag]; rows_, cols = fixed_rows, fixed_cols
+        snap = rep["snaps"][tag]; rows_, cols = snap.get("rows"), snap.get("cols")
         out = ""
         if rows_ and cols and raw and tag not in ("resized", "resized_back", "quit"):
             subprocess.run([reader, str(rows_), str(cols), f"{work}/{tag}"], input=raw[:snap["offset"]])
+            out = f" ({rows_}x{cols})"
             v, al = open(f"{work}/{tag}.vt100.txt").read(), open(f"{work}/{tag}.alacritty.txt").read()
-            out = f" vt100 {ratio(v, b)} alacritty {ratio(al, b)}"
+            out += f" vt100 {ratio(v, b)} alacritty {ratio(al, b)}"
         print(f"  {tag:18} direct~proxied {ratio(a, b)}{out}")
     settled = {}
     for x in rows:

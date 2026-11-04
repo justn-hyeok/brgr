@@ -34,8 +34,9 @@ def snap(tag):
     for n, p in panes.items(): open(f"{prefix}.{tag}.{n}.txt", "w").write(text(p))
     # Where this screen ends in the raw stream, for replaying it through each emulator.
     offsets[tag] = os.path.getsize(prefix + ".raw") if os.path.exists(prefix + ".raw") else 0
-    layout = (h("pane", "get", proxied).get("result") or {}).get("pane", {})
-    report.setdefault("snaps", {})[tag] = {"offset": offsets[tag], "rows": layout.get("rows"), "cols": layout.get("cols")}
+    try: state = json.load(open(prefix + ".state"))
+    except Exception: state = {}
+    report.setdefault("snaps", {})[tag] = {"offset": offsets[tag], "rows": state.get("rows"), "cols": state.get("cols")}
 def say(*a): print(name, *a, flush=True)
 BUSY = re.compile(r"esc to interrupt|ctrl\+c to (?:interrupt|stop|cancel)|esc to cancel|Thinking|Generating", re.I)
 def sample(seconds, tag, rows):
@@ -64,6 +65,8 @@ try:
                 say("answering Cursor's trust prompt in", n); h("pane", "send-keys", p, "a"); pressed = True
             elif "trust and continue" in s:
                 say("answering Codex's trust menu in", n); h("pane", "send-keys", p, "Enter"); pressed = True
+            elif "try the new fullscreen renderer" in s:
+                say("declining Claude's renderer offer in", n); h("pane", "send-keys", p, "Down"); h("pane", "send-keys", p, "Enter"); pressed = True
             elif "yes, i trust this folder" in s:
                 # Claude Code's menu starts on "No, exit".
                 say("answering Claude's trust menu in", n); h("pane", "send-keys", p, "Down"); h("pane", "send-keys", p, "Enter"); pressed = True
