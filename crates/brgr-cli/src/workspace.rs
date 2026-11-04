@@ -804,6 +804,11 @@ fn git_ref_exists(root: &Path, git_ref: &str) -> Result<bool> {
 
 fn is_git_lock_error(stderr: &str) -> bool {
     let text = stderr.to_ascii_lowercase();
+    // `git worktree add` reads its siblings, and one being created at the same
+    // moment can have an admin directory whose files are not written yet.
+    if text.contains("failed to read .git/worktrees/") {
+        return true;
+    }
     text.contains("lock")
         && (text.contains("unable to create")
             || text.contains("unable to write")
@@ -1004,6 +1009,19 @@ mod tests {
         assert!(branches(&repo).contains("brgr/task-aaaaaaaa"));
         assert!(branches(&repo).contains("user/keep-me"));
         assert!(!worktrees.join("repo").join("aaaaaaaa").exists());
+    }
+
+    /// Seen on Linux: two `git worktree add` at once, and the second read the
+    /// first's admin directory before it was complete.
+    #[test]
+    fn a_sibling_worktree_still_being_created_is_retried() {
+        assert!(is_git_lock_error(
+            "Preparing worktree (new branch 'brgr/task-11111111')\n\
+             fatal: failed to read .git/worktrees/22222222/commondir: Success\n"
+        ));
+        assert!(!is_git_lock_error(
+            "fatal: invalid reference: brgr/task-11111111\n"
+        ));
     }
 
     #[test]
