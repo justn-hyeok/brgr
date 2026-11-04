@@ -161,7 +161,7 @@
 
 위 네 항목은 모두 수정하고 회귀 검사를 붙였다. 2-4와 2-5를 다시 닫으려면 다음이 필요하다.
 
-- [ ] 2-4 동시성: 다중 **프로세스** 경합을 관찰하는 검사에서 실패 0건. admission은 `cargo test -p brgr-cli --test concurrency`(git 저장소 위 8병렬, worktree와 admission lock 생성까지 단정)와 `cargo bench -p brgr-cli --bench concurrent_admission`이 덮는다. **남은 것: 동시 cancel/reconcile과 재시작을 같은 다중 프로세스 형태로 확인.** 현재 이 경로는 단일 프로세스 결정적 회귀만 있다.
+- [x] 2-4 동시성: 다중 **프로세스** 경합을 관찰하는 검사에서 실패 0건. admission은 `cargo test -p brgr-cli --test concurrency`(git 저장소 위 8병렬, worktree와 admission lock 생성까지 단정)와 `cargo bench -p brgr-cli --bench concurrent_admission`이 덮는다. **2026-11-04 닫음.** 동시 cancel, cancel과 정상 종료의 경합, 강제 종료 뒤 동시 복구, 동시 accept/reject, 5개 중단 지점의 재시작을 `cargo test -p brgr-cli --test concurrency_settle`이 실제 프로세스 경합으로 검사한다. Linux runner에서 25회 반복 실패 0건, macOS에서는 worker가 10회 반복해 실패 0건을 보고했고, 이후 cancel 판정을 고친 뒤 1회 더 통과했다. 제품 결함은 나오지 않았다. 범위는 x86_64 Linux runner와 이 Mac이고, cancel 경합에서 어느 쪽이 얼마나 이겼는지는 플랫폼별로 치우쳐 전부 집계하지 않았다.
 - [ ] 2-5 검토: 아래 **2-5 재정의**의 네 항목을 모두 통과한다.
 
 ### 2-5 재정의 — 사람 한 명이 아니라 절차로

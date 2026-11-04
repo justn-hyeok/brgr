@@ -1,7 +1,7 @@
 # Readiness status
 
-**v2 is the current release line.** Two gates below are still open:
-multi-process concurrency (2-4) and a full non-author review (2-5).
+**v2 is the current release line.** One gate below is still open: a full
+non-author review (2-5). Multi-process concurrency (2-4) closed on 2026-11-04.
 
 The rest of this page moved from the top of the README on 2026-10-05,
 unchanged. The [v1 readiness checklist](v1-readiness-checklist-2026-09-14.md)
