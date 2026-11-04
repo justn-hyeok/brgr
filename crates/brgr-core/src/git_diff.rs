@@ -318,6 +318,53 @@ mod tests {
         String::from_utf8(output.stdout).unwrap()
     }
 
+    /// A worker's edit that keeps a file's size, in the same instant as its
+    /// checkout, is told apart from a clean file only by content. Git compares
+    /// content when the file is no older than the index, so a copy of the
+    /// index has to keep the index's time. A fresh time makes the entry look
+    /// settled, and the edit vanishes from the sealed patch (seen on Linux and
+    /// macOS). The times are set by hand so this does not depend on the clock.
+    #[test]
+    fn a_same_size_edit_in_the_same_instant_as_the_index_stays_in_the_patch() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path();
+        git(workspace, &["init", "-q"]);
+        // A ctime the test cannot set would otherwise give the edit away.
+        git(workspace, &["config", "core.trustctime", "false"]);
+        git(workspace, &["config", "core.checkStat", "minimal"]);
+        // An hour ago: a copy of the index made now is clearly newer than the
+        // file, which is what makes Git trust the file's size and time.
+        let instant = std::time::SystemTime::now() - Duration::from_hours(1);
+        let set_time = |path: &Path| {
+            fs::File::options()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_modified(instant)
+                .unwrap();
+        };
+        fs::write(workspace.join("a"), "base\n").unwrap();
+        set_time(&workspace.join("a"));
+        git(workspace, &["add", "a"]);
+        git(workspace, &["commit", "-q", "-m", "base"]);
+        let tree = git(workspace, &["rev-parse", "HEAD^{tree}"]);
+        fs::write(workspace.join("a"), "task\n").unwrap();
+        set_time(&workspace.join("a"));
+        set_time(&workspace.join(".git/index"));
+
+        let patch = bounded_git_diff(
+            workspace,
+            tree.trim(),
+            &[],
+            1024 * 1024,
+            Duration::from_mins(1),
+        )
+        .unwrap();
+
+        let patch = String::from_utf8(patch).unwrap();
+        assert!(patch.contains("+task"), "the edit is missing: {patch:?}");
+    }
+
     fn repository() -> tempfile::TempDir {
         let root = tempfile::tempdir().unwrap();
         git(root.path(), &["init", "-q"]);
