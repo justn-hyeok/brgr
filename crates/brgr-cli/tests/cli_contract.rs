@@ -3275,11 +3275,9 @@ fn idle_codex_parent_receives_completion_without_another_user_turn() {
     assert!(!prompts.exists(), "busy Codex parent was prompted");
     assert_duplicate_notification_dispatcher_exits(&home, task, &envs);
     fs::write(&agent_state, "idle").unwrap();
-    assert!(
-        wait_until(|| prompts.exists()),
-        "completion was not delivered"
-    );
-    let prompt = fs::read_to_string(&prompts).expect("completion was not delivered");
+    // The file exists a moment before its text does, so wait for the text.
+    let prompt = delivered_prompt(&prompts, |text| text.contains("FROM BRGR"))
+        .expect("completion was not delivered");
     assert!(prompt.contains("FROM BRGR"));
     assert!(prompt.contains(task));
     assert!(
@@ -3345,11 +3343,9 @@ fn idle_codex_parent_is_told_a_run_failed_with_its_reason() {
     assert!(!prompts.exists(), "busy Codex parent was prompted");
     assert_duplicate_notification_dispatcher_exits(&home, task, &envs);
     fs::write(&agent_state, "idle").unwrap();
-    assert!(
-        wait_until(|| prompts.exists()),
-        "completion was not delivered"
-    );
-    let prompt = fs::read_to_string(&prompts).expect("completion was not delivered");
+    // The file exists a moment before its text does, so wait for the text.
+    let prompt = delivered_prompt(&prompts, |text| text.contains("FROM BRGR"))
+        .expect("completion was not delivered");
     assert!(prompt.contains("FROM BRGR"), "{prompt}");
     assert!(prompt.contains("\"type\":\"brgr_failure\""), "{prompt}");
     assert!(prompt.contains("\"outcome\":\"failed\""), "{prompt}");
@@ -4297,13 +4293,13 @@ fn transferred_codex_session_receives_undecided_completion() {
     // `agent get`, then `agent prompt`; a loaded machine stretches that chain
     // past five seconds, so the wait is generous. The event is still the
     // prompt arriving.
-    assert!(
-        wait_until(|| prompts.exists()),
-        "transferred Codex session was not prompted: {}",
-        run_state_debug(&home, &task)
-    );
-    let prompt = fs::read_to_string(prompts).expect("transferred Codex session was not prompted");
-    assert!(prompt.contains(&task));
+    // The file exists a moment before its text does, so wait for the text.
+    let prompt = delivered_prompt(&prompts, |text| text.contains(&task)).unwrap_or_else(|| {
+        panic!(
+            "transferred Codex session was not prompted: {}",
+            run_state_debug(&home, &task)
+        )
+    });
     assert!(prompt.contains("FROM BRGR"));
 }
 
