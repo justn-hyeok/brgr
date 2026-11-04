@@ -24,6 +24,8 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - name: Same-size edit test alone
+        run: cargo test -p brgr-core a_same_size_edit --locked
       - run: cargo test --workspace --all-features --locked
         env:
           RUST_TEST_THREADS: "8"
