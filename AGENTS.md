@@ -37,7 +37,7 @@ Batch releases. Collect fixes on `main` and cut one release for a coherent set o
 2. Open a `release: vX.Y.Z` pull request, wait for CI, and squash-merge it. A pull request runs on Linux only; the macOS job runs on the push to `main`.
 3. On the merged `main`, run `git tag -a vX.Y.Z -m "brgr vX.Y.Z"` and push the tag. There is no need to wait for the macOS job first: the release waits for it.
 
-The tag runs `.github/workflows/release.yml`. It waits for that commit's CI run on `main` to pass, macOS job included, and stops if it did not. It then builds the binary without a cache, runs the packaged smoke test, publishes the GitHub release as Latest with those notes, then publishes all six crates to crates.io with the `CARGO_REGISTRY_TOKEN` secret, dependencies first. If a run fails part way, for example on a crates.io 429, rerun it: crates already at that version are skipped and an existing release is updated. A release is done when the GitHub release is Latest and `cargo install --locked brgr-cli` installs the new version.
+The tag runs `.github/workflows/release.yml`. It builds the binary without a cache and runs the packaged smoke test while it waits for that commit's CI run on `main`. It publishes only if both pass, macOS job included: it publishes the GitHub release as Latest with those notes, then publishes all six crates to crates.io with the `CARGO_REGISTRY_TOKEN` secret, dependencies first. If a run fails part way, for example on a crates.io 429, rerun it: crates already at that version are skipped and an existing release is updated. A release is done when the GitHub release is Latest and `cargo install --locked brgr-cli` installs the new version.
 
 ## Operating Contract
 
