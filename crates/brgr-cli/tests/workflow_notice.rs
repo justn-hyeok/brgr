@@ -48,9 +48,9 @@ fn json_output(output: &std::process::Output) -> Value {
     serde_json::from_slice(&output.stdout).unwrap()
 }
 
-fn gjc_fixture() -> PathBuf {
+fn brgr_fixture() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../testdata/fixtures/gjc")
+        .join("../../testdata/fixtures/brgr-fixture")
         .canonicalize()
         .unwrap()
 }
@@ -62,7 +62,7 @@ fn add_fixture(home: &Path, scratch: &Path) {
         &[
             "harness",
             "add",
-            gjc_fixture().to_str().unwrap(),
+            brgr_fixture().to_str().unwrap(),
             "--workspace",
             scratch.to_str().unwrap(),
             "--prompt",

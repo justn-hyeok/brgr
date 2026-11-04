@@ -827,7 +827,7 @@ mod tests {
         assert!(validate_bridge_host_command(&escaped.command, root.path(), root.path()).is_err());
 
         let harness_status =
-            Cli::try_parse_from(["brgr", "harness", "status", "local.gjc"]).unwrap();
+            Cli::try_parse_from(["brgr", "harness", "status", "local.fixture"]).unwrap();
         validate_bridge_host_command(&harness_status.command, root.path(), root.path()).unwrap();
 
         let harness_add = Cli::try_parse_from([
@@ -881,9 +881,9 @@ mod tests {
 
     #[test]
     fn legacy_launch_without_pinned_manifest_cannot_replay() {
-        let error = pinned_manifest_for_launch(None, None, "local.gjc").unwrap_err();
+        let error = pinned_manifest_for_launch(None, None, "local.fixture").unwrap_err();
         assert!(error.to_string().contains("unsafe replay is disabled"));
-        let error = pinned_manifest_for_launch(None, Some("digest"), "local.gjc").unwrap_err();
+        let error = pinned_manifest_for_launch(None, Some("digest"), "local.fixture").unwrap_err();
         assert!(error.to_string().contains("unsafe replay is disabled"));
     }
 

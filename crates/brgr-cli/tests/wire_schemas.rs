@@ -61,7 +61,7 @@ fn task_schema_describes_a_serialized_task_spec() {
         objective: "Review the change".to_owned(),
         workspace: "/tmp/worktree".to_owned(),
         route: Route {
-            harness_id: "local.gjc".to_owned(),
+            harness_id: "local.fixture".to_owned(),
             // Populated so the optional route fields are exercised too.
             requested_model: Some("openai-codex/gpt-5.6-luna".to_owned()),
             requested_effort: Some("minimal".to_owned()),
@@ -396,7 +396,7 @@ fn load_schema(name: &str) -> Value {
 
 fn fixture() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../testdata/fixtures/bench/gjc")
+        .join("../../testdata/fixtures/bench/brgr-fixture")
         .canonicalize()
         .unwrap()
 }

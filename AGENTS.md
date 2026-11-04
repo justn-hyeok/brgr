@@ -23,7 +23,7 @@ Use stable Rust and standard `rustfmt` output with four-space indentation. Prefe
 
 ## Testing Guidelines
 
-Put unit tests beside the code and black-box tests in each crate's `tests/` directory. Name tests after observable behavior, for example `duplicate_terminal_event_keeps_one_inbox_item`. Cover state transitions, idempotency conflicts, process timeout/cancellation, artifact sealing, restart recovery, and malformed manifests. Live OMP or GJC checks are opt-in smoke tests; deterministic fixture executables remain the CI oracle.
+Put unit tests beside the code and black-box tests in each crate's `tests/` directory. Name tests after observable behavior, for example `duplicate_terminal_event_keeps_one_inbox_item`. Cover state transitions, idempotency conflicts, process timeout/cancellation, artifact sealing, restart recovery, and malformed manifests. Live OMP checks are opt-in smoke tests; deterministic fixture executables remain the CI oracle.
 
 ## Commit & Pull Request Guidelines
 

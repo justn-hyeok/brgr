@@ -664,6 +664,10 @@ pub(crate) async fn load_harness(
     harness: &str,
     auto_recertify: bool,
 ) -> Result<(HarnessManifest, ActivationReceipt)> {
+    // Before the probe, whose failure would suggest re-certifying it.
+    if harness == brgr_registry::REMOVED_HARNESS_ID {
+        return Err(brgr_registry::RegistryError::RemovedGjcSupport.into());
+    }
     let probed = registry.health_probed(harness).await?;
     let probed = recertify_if_allowed(registry, harness, probed, auto_recertify).await?;
     require_healthy_harness(

@@ -1,12 +1,12 @@
 #!/bin/sh
-# Benchmark fixture: same bounded contract as testdata/fixtures/gjc, but the
+# Benchmark fixture: same bounded contract as testdata/fixtures/fixture, but the
 # SLOW marker sleeps one second instead of thirty so a parallelism sweep stays
 # short. Never used by the CI oracle; benches only.
 set -eu
 
 case "${1:-}" in
   --version)
-    printf 'gjc v-fixture\n'
+    printf 'fixture v-fixture\n'
     exit 0
     ;;
   --help)

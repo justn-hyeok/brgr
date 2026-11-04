@@ -37,14 +37,14 @@ fn json_output(output: &std::process::Output) -> Value {
     serde_json::from_slice(&output.stdout).unwrap()
 }
 
-fn gjc_fixture() -> std::path::PathBuf {
+fn brgr_fixture() -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../testdata/fixtures/gjc")
+        .join("../../testdata/fixtures/brgr-fixture")
         .canonicalize()
         .unwrap()
 }
 
-fn gjc_home() -> (TempDir, std::path::PathBuf, std::path::PathBuf) {
+fn fixture_home() -> (TempDir, std::path::PathBuf, std::path::PathBuf) {
     let temp = TempDir::new().unwrap();
     let home = temp.path().join("brgr");
     let workspace = temp.path().join("work");
@@ -56,7 +56,7 @@ fn gjc_home() -> (TempDir, std::path::PathBuf, std::path::PathBuf) {
         &[
             "harness",
             "add",
-            gjc_fixture().to_str().unwrap(),
+            brgr_fixture().to_str().unwrap(),
             "--workspace",
             scratch.to_str().unwrap(),
             "--prompt",
@@ -185,7 +185,7 @@ fn request_and_prepare(home: &Path, task_id: &str, key: &str) -> String {
 
 #[test]
 fn head_takeover_resumes_retires_and_refuses_the_stale_outgoing_session() {
-    let (_temp, home, workspace) = gjc_home();
+    let (_temp, home, workspace) = fixture_home();
     let task_id = start_task(&home, &workspace);
     let takeover_id = request_and_prepare(&home, &task_id, "takeover-e2e");
     let shown = json_output(&run(
@@ -221,7 +221,7 @@ fn head_takeover_resumes_retires_and_refuses_the_stale_outgoing_session() {
 
 #[test]
 fn head_commit_abort_and_retire_refuse_wrong_callers_without_writes() {
-    let (_temp, home, workspace) = gjc_home();
+    let (_temp, home, workspace) = fixture_home();
     let task_id = start_task(&home, &workspace);
     let takeover_id = request_and_prepare(&home, &task_id, "wrong-callers");
     let outgoing_commit = run(&home, &["head", "commit", &takeover_id], &head_env());
@@ -250,7 +250,7 @@ fn head_mutations_refuse_a_mismatched_owner_id() {
         ("BRGR_SESSION_ID", "session-incoming"),
     ];
     for action in ["commit", "abort", "retire"] {
-        let (_temp, home, workspace) = gjc_home();
+        let (_temp, home, workspace) = fixture_home();
         let task_id = start_task(&home, &workspace);
         let takeover_id = request_and_prepare(&home, &task_id, &format!("owner-mismatch-{action}"));
         if action == "retire" {
@@ -290,7 +290,7 @@ fn head_mutations_refuse_a_mismatched_owner_id() {
 
 #[test]
 fn head_commit_is_idempotent_abort_after_commit_is_refused_and_retirement_requires_resumed() {
-    let (_temp, home, workspace) = gjc_home();
+    let (_temp, home, workspace) = fixture_home();
     let task_id = start_task(&home, &workspace);
     let takeover_id = request_and_prepare(&home, &task_id, "transitions");
     let first = json_output(&run(
@@ -339,7 +339,7 @@ fn head_commit_is_idempotent_abort_after_commit_is_refused_and_retirement_requir
 
 #[test]
 fn head_request_replay_after_commit_returns_the_existing_record() {
-    let (_temp, home, workspace) = gjc_home();
+    let (_temp, home, workspace) = fixture_home();
     let task_id = start_task(&home, &workspace);
     let takeover_id = request_and_prepare(&home, &task_id, "post-commit-replay");
     json_output(&run(
@@ -367,7 +367,7 @@ fn head_request_replay_after_commit_returns_the_existing_record() {
 
 #[test]
 fn bind_during_open_takeover_is_refused_without_changing_state() {
-    let (_temp, home, workspace) = gjc_home();
+    let (_temp, home, workspace) = fixture_home();
     let task_id = start_task(&home, &workspace);
     let takeover_id = request_and_prepare(&home, &task_id, "binding-conflict");
     let third_env = [
@@ -403,7 +403,7 @@ fn bind_during_open_takeover_is_refused_without_changing_state() {
 
 #[test]
 fn bind_is_allowed_again_after_takeover_is_terminal() {
-    let (_temp, home, workspace) = gjc_home();
+    let (_temp, home, workspace) = fixture_home();
     let task_id = start_task(&home, &workspace);
     let takeover_id = request_and_prepare(&home, &task_id, "binding-after-abort");
     json_output(&run(
@@ -429,7 +429,7 @@ fn bind_is_allowed_again_after_takeover_is_terminal() {
 
 #[test]
 fn head_commit_alone_never_marks_takeover_resumed() {
-    let (_temp, home, workspace) = gjc_home();
+    let (_temp, home, workspace) = fixture_home();
     let task_id = start_task(&home, &workspace);
     let takeover_id = request_and_prepare(&home, &task_id, "commit-is-not-resume");
     json_output(&run(
@@ -442,7 +442,7 @@ fn head_commit_alone_never_marks_takeover_resumed() {
 
 #[test]
 fn head_request_by_the_current_head_returns_the_same_record_for_the_same_key() {
-    let (_temp, home, workspace) = gjc_home();
+    let (_temp, home, workspace) = fixture_home();
     let task_id = start_task(&home, &workspace);
     let first = json_output(&run(
         &home,
@@ -480,7 +480,7 @@ fn head_request_by_the_current_head_returns_the_same_record_for_the_same_key() {
 
 #[test]
 fn head_request_with_the_same_key_and_another_destination_is_a_conflict() {
-    let (_temp, home, workspace) = gjc_home();
+    let (_temp, home, workspace) = fixture_home();
     let task_id = start_task(&home, &workspace);
     let first = run(
         &home,
@@ -518,7 +518,7 @@ fn head_request_with_the_same_key_and_another_destination_is_a_conflict() {
 
 #[test]
 fn head_request_by_a_non_head_is_refused_and_writes_nothing() {
-    let (_temp, home, workspace) = gjc_home();
+    let (_temp, home, workspace) = fixture_home();
     let task_id = start_task(&home, &workspace);
     let refused = run(
         &home,
@@ -548,7 +548,7 @@ fn head_request_by_a_non_head_is_refused_and_writes_nothing() {
 
 #[test]
 fn head_prepare_builds_the_manifest_from_the_store() {
-    let (_temp, home, workspace) = gjc_home();
+    let (_temp, home, workspace) = fixture_home();
     let undecided = start_task(&home, &workspace);
     let decided = start_task(&home, &workspace);
     let undecided_result = result_id(&home, &undecided);
@@ -616,7 +616,7 @@ fn head_prepare_builds_the_manifest_from_the_store() {
 
 #[test]
 fn head_prepare_by_anyone_but_the_outgoing_session_is_refused() {
-    let (_temp, home, workspace) = gjc_home();
+    let (_temp, home, workspace) = fixture_home();
     let task_id = start_task(&home, &workspace);
     let requested = json_output(&run(
         &home,
@@ -655,7 +655,7 @@ fn head_prepare_by_anyone_but_the_outgoing_session_is_refused() {
 
 #[test]
 fn head_show_prints_the_record_events_and_verified_manifest_and_rejects_a_tampered_one() {
-    let (_temp, home, workspace) = gjc_home();
+    let (_temp, home, workspace) = fixture_home();
     let task_id = start_task(&home, &workspace);
     let requested = json_output(&run(
         &home,
@@ -719,7 +719,7 @@ fn head_show_prints_the_record_events_and_verified_manifest_and_rejects_a_tamper
 
 #[test]
 fn head_status_lists_the_owners_takeovers_newest_first() {
-    let (_temp, home, workspace) = gjc_home();
+    let (_temp, home, workspace) = fixture_home();
     let task_id = start_task(&home, &workspace);
     let first = json_output(&run(
         &home,
@@ -772,7 +772,7 @@ fn head_status_lists_the_owners_takeovers_newest_first() {
 
 #[test]
 fn head_status_reports_the_epoch_after_commit() {
-    let (_temp, home, workspace) = gjc_home();
+    let (_temp, home, workspace) = fixture_home();
     let task_id = start_task(&home, &workspace);
     let takeover_id = request_and_prepare(&home, &task_id, "status-committed-epoch");
     let from_epoch = brgr_store::Store::open(home.join("store"))
@@ -798,7 +798,7 @@ fn head_status_reports_the_epoch_after_commit() {
 /// is the access check.
 #[test]
 fn an_abandoned_head_is_claimed_by_a_foreign_session() {
-    let (_temp, home, workspace) = gjc_home();
+    let (_temp, home, workspace) = fixture_home();
     let task_id = start_task(&home, &workspace);
     let refused = run(
         &home,
@@ -886,7 +886,7 @@ fn an_abandoned_head_is_claimed_by_a_foreign_session() {
 /// required.
 #[test]
 fn a_cursor_conversation_claims_an_abandoned_head_without_as() {
-    let (_temp, home, workspace) = gjc_home();
+    let (_temp, home, workspace) = fixture_home();
     let task_id = start_task(&home, &workspace);
     let cursor = [("CURSOR_CONVERSATION_ID", "cursor-conversation-1")];
     let claimed = json_output(&run(

@@ -145,7 +145,7 @@ fn brgr(home: &Path) -> Command {
 
 fn bench_fixture() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../testdata/fixtures/bench/gjc")
+        .join("../../testdata/fixtures/bench/brgr-fixture")
         .canonicalize()
         .unwrap()
 }

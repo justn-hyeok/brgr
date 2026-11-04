@@ -90,6 +90,10 @@ const PROBE_DEADLINE: Duration = Duration::from_secs(15);
 /// a working harness could not be registered.
 const SCRATCH_DEADLINE: Duration = Duration::from_mins(3);
 
+/// A harness whose support was removed. An installation may still have it
+/// registered; it stays readable but never runs.
+pub const REMOVED_HARNESS_ID: &str = "local.gjc";
+
 #[derive(Clone, Debug)]
 pub struct Registry {
     root: PathBuf,
@@ -204,7 +208,10 @@ impl Registry {
                 }
                 let stem = path.file_stem().unwrap_or_default().to_string_lossy();
                 validate_harness_id(&stem)?;
-                ids.insert(stem.into_owned());
+                // It cannot run, and there is nothing for the owner to repair.
+                if stem != REMOVED_HARNESS_ID {
+                    ids.insert(stem.into_owned());
+                }
             }
         }
         Ok(ids.into_iter().collect())
@@ -218,6 +225,9 @@ impl Registry {
     /// Returns [`RegistryError`] when probing fails, required documented flags
     /// are absent, or activation data cannot be persisted.
     pub async fn add(&self, executable: &Path) -> Result<ActivationReceipt, RegistryError> {
+        if executable.file_name().and_then(|value| value.to_str()) == Some("gjc") {
+            return Err(RegistryError::RemovedGjcSupport);
+        }
         let (manifest, probe) = self.draft_with_probe(executable).await?;
         if manifest.id != "local.omp-herdr" || manifest.adapter != OMP_ROLE_ADAPTER_V1 {
             return Err(RegistryError::ScratchRunRequired(manifest.id));
@@ -234,6 +244,9 @@ impl Registry {
     /// Returns an error if probing fails or a bounded fresh run cannot be
     /// described without guessing flags.
     pub async fn draft(&self, executable: &Path) -> Result<HarnessManifest, RegistryError> {
+        if executable.file_name().and_then(|value| value.to_str()) == Some("gjc") {
+            return Err(RegistryError::RemovedGjcSupport);
+        }
         self.draft_with_probe(executable)
             .await
             .map(|(manifest, _)| manifest)
@@ -514,6 +527,9 @@ impl Registry {
         harness_id: &str,
     ) -> Result<(HarnessManifest, ActivationReceipt), RegistryError> {
         validate_harness_id(harness_id)?;
+        if harness_id == REMOVED_HARNESS_ID {
+            return Err(RegistryError::RemovedGjcSupport);
+        }
         let manifest_bytes = fs::read(self.manifest_path(harness_id))?;
         let manifest: HarnessManifest = serde_json::from_slice(&manifest_bytes)?;
         let receipt: ActivationReceipt =
@@ -901,8 +917,7 @@ async fn probe_custom_contract(manifest: &HarnessManifest) -> Result<ProbeEviden
     if manifest.adapter != PROCESS_ADAPTER_V1
         || matches!(
             manifest.id.as_str(),
-            "local.gjc"
-                | "local.omp"
+            "local.omp"
                 | "local.omp-herdr"
                 | "local.cursor-cli"
                 | "local.command-code"
@@ -1457,8 +1472,9 @@ mod tests {
             .unwrap()
             .is_empty()
         );
-        let gjc = b"Canonical models\ncanonical selected variants\ngpt-5.6-luna openai-codex/gpt-5.6-luna 8\nProvider models\nprovider model context\nopencode-zen gpt-5.6-luna 1M\n";
-        let parsed = parse_model_catalog(&ModelCatalogFormat::CanonicalProviderTable, gjc).unwrap();
+        let fixture = b"Canonical models\ncanonical selected variants\ngpt-5.6-luna openai-codex/gpt-5.6-luna 8\nProvider models\nprovider model context\nopencode-zen gpt-5.6-luna 1M\n";
+        let parsed =
+            parse_model_catalog(&ModelCatalogFormat::CanonicalProviderTable, fixture).unwrap();
         for selector in [
             "gpt-5.6-luna",
             "openai-codex/gpt-5.6-luna",
@@ -1762,12 +1778,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn gjc_catalog_filters_by_model_id_but_matches_full_provider_selector() {
+    async fn fixture_catalog_filters_by_model_id_but_matches_full_provider_selector() {
         let root = tempfile::tempdir().unwrap();
-        let executable = root.path().join("gjc");
+        let executable = root.path().join("brgr-fixture");
         write_fast_script(
             &executable,
-            "#!/bin/sh\ncase \"$1\" in\n --version) echo 'gjc 1';;\n --help) echo '--mode=<value> --no-session --no-mcp -p, --print --model=<value>';;\n --list-models=gpt-5.6-luna) printf '%s\\n' 'Canonical models' 'canonical selected' 'gpt-5.6-luna openai-codex/gpt-5.6-luna' 'Provider models' 'provider model' 'opencode-zen gpt-5.6-luna';;\n *) exit 2;;\nesac\n",
+            "#!/bin/sh\ncase \"$1\" in\n --version) echo 'fixture 1';;\n --help) echo '--mode=<value> --no-session --no-mcp -p, --print --model=<value>';;\n --list-models=gpt-5.6-luna) printf '%s\\n' 'Canonical models' 'canonical selected' 'gpt-5.6-luna openai-codex/gpt-5.6-luna' 'Provider models' 'provider model' 'opencode-zen gpt-5.6-luna';;\n *) exit 2;;\nesac\n",
         );
         let registry = Registry::open(root.path().join("registry")).unwrap();
         let manifest = registry.draft(&executable).await.unwrap();
@@ -2746,7 +2762,7 @@ mod tests {
         );
 
         let original = fs::read(&executable).unwrap();
-        let alias = root.path().join("gjc-link");
+        let alias = root.path().join("fixture-link");
         symlink(&executable, &alias).unwrap();
         let mut rebuilt = original.clone();
         rebuilt.extend_from_slice(b"# rebuilt\n");
@@ -2839,5 +2855,21 @@ mod tests {
                 "action must run as printed: {action}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn executable_named_gjc_is_refused_for_add_and_draft() {
+        let root = tempfile::tempdir().unwrap();
+        let executable = root.path().join("gjc");
+        fixture_executable(&executable);
+        let registry = Registry::open(root.path().join("registry")).unwrap();
+        assert!(matches!(
+            registry.draft(&executable).await,
+            Err(RegistryError::RemovedGjcSupport)
+        ));
+        assert!(matches!(
+            registry.add(&executable).await,
+            Err(RegistryError::RemovedGjcSupport)
+        ));
     }
 }

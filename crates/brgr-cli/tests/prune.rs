@@ -1109,7 +1109,7 @@ fn an_unarchived_report_keeps_the_worktree() {
 fn a_harness_cache_alone_does_not_keep_the_worktree() {
     let fixture = Fixture::new();
     let task = fixture.run_with("CACHE", &[]);
-    assert!(fixture.worktree(&task).join(".gjc").is_dir());
+    assert!(fixture.worktree(&task).join(".fixture").is_dir());
     fixture.accept(&task);
     assert!(!fixture.worktree(&task).exists());
 }
@@ -1816,7 +1816,7 @@ fn json(output: &std::process::Output) -> Value {
 
 fn harness_fixture() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../testdata/fixtures/gjc")
+        .join("../../testdata/fixtures/brgr-fixture")
         .canonicalize()
         .unwrap()
 }

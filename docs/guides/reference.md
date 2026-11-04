@@ -62,7 +62,6 @@ headless. The separate `local.omp-herdr` route retains its legacy
 | Route or operation | v1 status |
 |---|---|
 | OMP process, Cursor CLI, Command Code, Devin CLI, Codex CLI, GitHub Copilot CLI, Gemini CLI, Pi | Certified bounded fresh-run contract; exact model/effort only where the activated recipe supports it |
-| GJC | Experimental: the recipe is kept and registered harnesses keep working, but it is not part of the certified set and is not rechecked on each release |
 | Approved unfamiliar one-shot CLI | Supported after manifest contract test and authorized scratch activation |
 | `local.omp-herdr` presentation | Optional best effort; external worker stop is not certified and uncertain failure is `lost` |
 | Resume, in-flight steering, provider-side undo | Deferred; unsupported requests must fail rather than silently fall back |
@@ -119,19 +118,18 @@ recorded, several sessions, or another task's — the source stays
 pane harnesses are unchanged.
 
 For lowest available Luna effort on the installed CLIs tested on 2026-09-14:
-OMP uses `openai-codex/gpt-5.6-luna` with `--effort low`, GJC uses the same
-model with `--effort minimal`, Cursor CLI uses the exact model variant
+OMP uses `openai-codex/gpt-5.6-luna` with `--effort low`, Cursor CLI uses the exact model variant
 `gpt-5.6-luna-none` without an effort flag, and Command Code uses
 `gpt-5.6-luna` with `--effort low`. Recheck each executable's native catalog
-after upgrading it. These are route requests; only OMP and GJC expose a
-native model observation, and none expose a verified effort observation.
+after upgrading it. These are route requests; only OMP exposes a native model
+observation, and none expose a verified effort observation.
 
 ## Standalone Codex and CLI
 
 ### Pane mode
 
 Generated recipes declare native TUI launches for Claude Code, Codex, Gemini
-CLI, GitHub Copilot CLI, Pi, Cursor, Devin, Cline, OMP, OpenCode, GJC, and
+CLI, GitHub Copilot CLI, Pi, Cursor, Devin, Cline, OMP, OpenCode, and
 Command Code. Codex runs every installed hook for a worker as well; brgr's
 own hook recognises a task worktree by the session's working directory and
 does nothing there, while the user's other hooks still run. Codex has no
@@ -266,15 +264,12 @@ brgr integrate codex install
 brgr integrate claude install   # same skill for Claude Code
 ```
 
-Ask Codex, for example, “GJC를 작은 scratch 작업으로 검증해 등록하고,
-이 변경을 검토하면서 실패 사례도 확인해줘.” Registration may invoke the
-selected harness's model, so authorize its scratch prompt explicitly.
+Ask Codex, for example, “이 변경을 검토하면서 실패 사례도 확인해줘.”
 Codex owns the task criteria and the accept/reject decision; brgr owns the
 bounded execution, sealed bytes, and durable inbox. The CLI remains an escape
 hatch for inspection and explicit operations:
 
 ```bash
-brgr run "Review this change" --harness local.gjc --criterion "findings cite changed lines"
 brgr status --brief
 brgr result TASK
 brgr accept TASK --reason "criteria verified"

@@ -103,7 +103,7 @@ fn delegated_fixture_manifest() -> HarnessManifest {
         id: "internal.fixture-delegated".to_owned(),
         adapter: PROCESS_ADAPTER_V1.to_owned(),
         executable: PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../testdata/fixtures/gjc")
+            .join("../../testdata/fixtures/brgr-fixture")
             .canonicalize()
             .unwrap(),
         probe: ProbeSpec {

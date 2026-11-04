@@ -30,7 +30,7 @@ use tempfile::TempDir;
 
 use common::brgr_command;
 
-/// Matches the `sleep` in `testdata/fixtures/bench/gjc`.
+/// Matches the `sleep` in `testdata/fixtures/bench/fixture`.
 const HARNESS_SECONDS: f64 = 1.0;
 const WIDTHS: &[usize] = &[1, 2, 4, 8];
 
@@ -190,7 +190,7 @@ fn brgr(home: &Path) -> Command {
 
 fn bench_fixture() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../testdata/fixtures/bench/gjc")
+        .join("../../testdata/fixtures/bench/brgr-fixture")
         .canonicalize()
         .expect("bench fixture path")
 }

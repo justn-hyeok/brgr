@@ -1,5 +1,7 @@
 # Recursive worker bridge
 
+GJC support has since been removed; the run records below are historical.
+
 Current native TUI behavior is described in [orchestration](orchestration.md).
 The dated receipts below preserve the earlier process-bridge evidence.
 

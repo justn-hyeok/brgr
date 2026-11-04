@@ -71,7 +71,7 @@ fn add_fixture(home: &Path, fixture: &Path, scratch: &Path) {
 const WATCH_FIXTURE: &str = r#"#!/bin/sh
 set -eu
 case "${1:-}" in
-  --version) printf 'gjc v-fixture\n'; exit 0;;
+  --version) printf 'fixture v-fixture\n'; exit 0;;
   --help)
     printf '%s\n' '-p, --print' '--mode=<value>' '--no-session' '--no-mcp' '--model' '--thinking'
     exit 0;;
@@ -100,7 +100,7 @@ fn watch_home() -> (TempDir, PathBuf, PathBuf) {
     let home = temp.path().join("brgr");
     let workspace = temp.path().join("work");
     fs::create_dir_all(&workspace).unwrap();
-    let executable = temp.path().join("gjc");
+    let executable = temp.path().join("fixture");
     write_fast_script(&executable, WATCH_FIXTURE);
     add_fixture(&home, &executable, &temp.path().join("scratch"));
     (temp, home, workspace)

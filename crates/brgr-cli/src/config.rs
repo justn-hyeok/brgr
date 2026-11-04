@@ -469,6 +469,10 @@ pub(crate) async fn check(paths: &crate::Paths, config: &Config, json_output: bo
         .chain(default.iter())
         .collect::<std::collections::BTreeSet<_>>()
     {
+        // A section left from before its support was removed configures nothing.
+        if id == brgr_registry::REMOVED_HARNESS_ID {
+            continue;
+        }
         let (manifest, _) = crate::admission::load_harness(&registry, id, false).await?;
         let options = config.calling(id);
         validate_manifest_argv(&options.argv, &manifest)?;

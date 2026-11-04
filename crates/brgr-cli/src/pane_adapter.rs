@@ -612,7 +612,7 @@ fn drive(
         }
         match status.as_str() {
             // Only `blocked` is acted on while the agent works. Herdr never
-            // classifies some harnesses (GJC, Command Code), which report
+            // classifies some harnesses (Fixture, Command Code), which report
             // `unknown` for their whole life, and their own output can look
             // like a menu.
             "blocked" => match screens::resolve(herdr, pane, run, notices.paths, Some(&status))? {
@@ -702,7 +702,7 @@ impl IdleReport {
         }
     }
 
-    /// Herdr never classifies some harnesses (GJC, Command Code), so their
+    /// Herdr never classifies some harnesses (Fixture, Command Code), so their
     /// status is `unknown` and idleness cannot be read. A report file that has
     /// not changed for the grace period is sealed for them; nothing is sent to
     /// the agent, since it may still be working.

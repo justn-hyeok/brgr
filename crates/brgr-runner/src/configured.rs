@@ -95,6 +95,6 @@ mod tests {
 
     #[test]
     fn only_known_harnesses_are_read() {
-        assert_eq!(configured_model("local.gjc"), None);
+        assert_eq!(configured_model("local.fixture"), None);
     }
 }
