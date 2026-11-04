@@ -256,6 +256,12 @@ result exists, whether a decision exists). `brgr status --brief --json` is a
 compact array with keys `task_id`, `state`, `harness`, `elapsed_seconds`,
 `objective_head`.
 
+`--deadline-seconds` counts awake time for a headless run, on macOS and on Linux,
+so machine sleep extends the wall-clock duration before the run times out. When
+wall-clock time exceeds awake time by more than 60 seconds, the sealed result
+records the gap as `slept_seconds`. A pane run's deadline is wall-clock time, so
+it includes machine sleep and its result has no such field.
+
 Install the local binary and Codex integration, then start a new Codex session:
 
 ```bash

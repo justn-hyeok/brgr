@@ -235,6 +235,7 @@ fn result() -> ResultEnvelope {
         legacy_embedded_route_observation: None,
         route_observation: None,
         unresolved_effects: vec![],
+        slept_seconds: None,
     }
 }
 

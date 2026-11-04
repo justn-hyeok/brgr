@@ -485,6 +485,10 @@ pub struct ResultEnvelope {
     #[serde(skip)]
     pub route_observation: Option<RouteObservation>,
     pub unresolved_effects: Vec<String>,
+    /// Wall-clock time beyond awake time, recorded only when the gap exceeds
+    /// the reporting threshold. Omitted to preserve older result digests.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slept_seconds: Option<u64>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -838,11 +842,13 @@ mod tests {
             legacy_embedded_route_observation: None,
             route_observation: None,
             unresolved_effects: vec![],
+            slept_seconds: None,
         };
         let bytes = serde_json::to_vec(&old).unwrap();
         assert!(!String::from_utf8_lossy(&bytes).contains("route_observation"));
         let decoded: ResultEnvelope = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(serde_json::to_vec(&decoded).unwrap(), bytes);
+        assert!(!String::from_utf8_lossy(&bytes).contains("slept_seconds"));
         let mut observed = decoded;
         observed.route_observation = Some(RouteObservation {
             model: Some("workbuddy/deepseek-v4.1-flash".to_owned()),

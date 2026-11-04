@@ -1423,6 +1423,7 @@ mod tests {
             cancelled: false,
             output_truncated: false,
             elapsed: Duration::ZERO,
+            slept_seconds: None,
         };
         assert_eq!(help_output(&output(b"", b"--auto")), b"--auto");
         assert_eq!(

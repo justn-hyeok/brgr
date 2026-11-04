@@ -25,6 +25,7 @@ fn a_lost_delegated_run_names_the_adapter_error() {
         cancelled: false,
         output_truncated: false,
         elapsed: Duration::from_secs(1),
+        slept_seconds: None,
     };
     assert_eq!(
         delegated_lost_reason(Some(&output)),
@@ -266,11 +267,13 @@ fn a_run_records_the_model_its_own_session_log_names() {
         cancelled: false,
         output_truncated: false,
         elapsed: Duration::from_millis(1),
+        slept_seconds: Some(61),
     };
     let result = delegated_pane_finish(
         output.clone(),
         Some(&|_spec, _attempt| Some("claude-fixture-2".to_owned())),
     );
+    assert_eq!(result.slept_seconds, Some(61));
     let observation = result.route_observation.unwrap();
     assert_eq!(observation.model.as_deref(), Some("claude-fixture-2"));
     assert_eq!(
@@ -365,6 +368,7 @@ fn delegated_external_failure_is_lost_with_unresolved_effects() {
         cancelled: false,
         output_truncated: false,
         elapsed: Duration::from_millis(1),
+        slept_seconds: None,
     };
     let result = finish_execution(
         &store,
@@ -425,6 +429,7 @@ fn result_for(attempt: &Attempt, outcome: TerminalOutcome) -> ResultEnvelope {
         legacy_embedded_route_observation: None,
         route_observation: None,
         unresolved_effects: vec![],
+        slept_seconds: None,
     }
 }
 
@@ -514,6 +519,7 @@ fn restart_replay_of_same_result_is_idempotent_without_new_rows() {
             legacy_embedded_route_observation: None,
             route_observation: None,
             unresolved_effects: vec![],
+            slept_seconds: None,
         };
         assert_eq!(
             store
@@ -988,6 +994,7 @@ fn successful_output(result: &[u8]) -> ExecutionOutput {
         cancelled: false,
         output_truncated: false,
         elapsed: Duration::from_millis(1),
+        slept_seconds: None,
     }
 }
 

@@ -54,6 +54,7 @@ pub(crate) fn result(task: &TaskSpec, attempt_id: AttemptId) -> ResultEnvelope {
         legacy_embedded_route_observation: None,
         route_observation: None,
         unresolved_effects: vec![],
+        slept_seconds: None,
     }
 }
 pub(crate) fn sealed_result(

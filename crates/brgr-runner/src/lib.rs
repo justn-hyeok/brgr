@@ -100,7 +100,7 @@ use std::{
     path::Path,
     process::{ExitStatus, Stdio},
     sync::atomic::{AtomicBool, Ordering},
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
 
 /// Re-exported because manifests take it: a caller choosing a level should not
@@ -119,6 +119,16 @@ pub const OMP_ROLE_ADAPTER_V1: &str = "omp-role/v1";
 pub(crate) const CAPTURE_OVERHEAD_BYTES: u64 = 1;
 pub(crate) const JSONL_TRANSPORT_LIMIT_BYTES: u64 = 64 * 1024 * 1024;
 pub(crate) const JSONL_METADATA_SLACK_BYTES: u64 = 1024 * 1024;
+const SLEEP_GAP_THRESHOLD_SECONDS: u64 = 60;
+
+/// Estimate time spent suspended from paired wall and monotonic readings.
+/// A small threshold avoids reporting clock granularity and scheduling noise.
+fn slept_seconds(started: (Instant, SystemTime), ended: (Instant, SystemTime)) -> Option<u64> {
+    let awake = ended.0.saturating_duration_since(started.0);
+    let wall = ended.1.duration_since(started.1).ok()?;
+    let gap = wall.saturating_sub(awake).as_secs();
+    (gap > SLEEP_GAP_THRESHOLD_SECONDS).then_some(gap)
+}
 
 #[derive(Clone, Debug)]
 pub struct RunRequest<'a> {
@@ -146,6 +156,7 @@ pub struct ExecutionOutput {
     pub cancelled: bool,
     pub output_truncated: bool,
     pub elapsed: Duration,
+    pub slept_seconds: Option<u64>,
 }
 
 impl ExecutionOutput {
@@ -214,7 +225,7 @@ impl ProcessRunner {
         };
         let argv = render_argv(manifest, &request, &substitutions)?;
 
-        let started = Instant::now();
+        let started = (Instant::now(), SystemTime::now());
         let mut command = Command::new(&manifest.executable);
         command
             .args(argv)
@@ -245,7 +256,7 @@ impl ProcessRunner {
 
         let (status, timed_out, cancelled) = wait_for_exit(
             &mut child,
-            started,
+            started.0,
             request.deadline,
             request.cancel_path,
             &overflow,
@@ -254,7 +265,8 @@ impl ProcessRunner {
         if let Some(path) = request.pid_path {
             let _ = std::fs::remove_file(path);
         }
-        let remaining = request.deadline.saturating_sub(started.elapsed());
+        let elapsed = started.0.elapsed();
+        let remaining = request.deadline.saturating_sub(elapsed);
         let captures = timeout(remaining, async {
             let (stdout, stderr) = tokio::join!(&mut stdout_task, &mut stderr_task);
             Ok::<_, RunnerError>((join_capture(stdout)?, join_capture(stderr)?))
@@ -296,7 +308,8 @@ impl ProcessRunner {
             timed_out,
             cancelled,
             output_truncated,
-            elapsed: started.elapsed(),
+            elapsed: started.0.elapsed(),
+            slept_seconds: slept_seconds(started, (Instant::now(), SystemTime::now())),
         })
     }
 
@@ -392,6 +405,7 @@ impl ProcessRunner {
             cancelled: false,
             output_truncated,
             elapsed: started.elapsed(),
+            slept_seconds: None,
         })
     }
 }
@@ -573,6 +587,7 @@ async fn stop_process_group(child: &mut tokio::process::Child) -> Result<ExitSta
 #[cfg(test)]
 mod tests {
     use super::*;
+
     use crate::capture::read_jsonl_semantic;
     use crate::collect::{collect_result, extract_jsonl_assistant_final, observe_jsonl_model};
     use brgr_protocol::TaskSpec;
@@ -1833,5 +1848,22 @@ mod tests {
         let dumped = String::from_utf8_lossy(&narrow.stdout);
         assert!(!dumped.contains("python"));
         assert_ne!(dumped.trim(), "ok");
+    }
+
+    #[test]
+    fn slept_gap_is_recorded_only_above_threshold() {
+        let instant = Instant::now();
+        let wall = SystemTime::now();
+        let start = (instant, wall);
+        let above = (
+            instant + Duration::from_secs(10),
+            wall + Duration::from_secs(71),
+        );
+        assert_eq!(slept_seconds(start, above), Some(61));
+        let below = (
+            instant + Duration::from_secs(10),
+            wall + Duration::from_secs(70),
+        );
+        assert_eq!(slept_seconds(start, below), None);
     }
 }
