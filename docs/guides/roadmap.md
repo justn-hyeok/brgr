@@ -338,15 +338,17 @@ owner(Head)는 사용자가 직접 띄운 세션이라 래퍼로 풀 수 없다.
 5. 서명 없이도 믿을 수 있는 배포([#230](https://github.com/justn-hyeok/brgr/issues/230)).
 
 Apple 서명과 공증은 기준에 넣지 않는다. 홍보 문구의 모든 주장은 2와 3의 증거에
-연결한다. Herdr와 Orca를 깎아내리지 않는다. Unified Continuity(Phase 4)를 v3
-기준에 포함할지는 owner가 정한다.
+연결한다. Herdr와 Orca를 깎아내리지 않는다. Unified Continuity(Phase 4)는 v3
+기준에 넣지 않는다(owner 결정 2026-11-05).
+
+구현 이슈: 포트 #311, 데이터 모델 #312, tmux·cmux 어댑터 #313, 순수 터미널 #314.
 
 모르는 것: tmux와 cmux에 `idle`에 해당하는 신호가 있는지, Herdr의 어떤 동작이
 암묵적으로 신뢰성에 기여하는지, Herdr가 task 계약까지 가져올지.
 
 ## Phase 4. Unified Continuity
 
-릴리스 방향: 호스트 중립 다음. v3 기준에 포함할지는 owner가 정한다 · 상태: Phase 3.5 뒤
+릴리스 방향: 호스트 중립 다음, v3 기준에는 넣지 않음(owner 결정 2026-11-05) · 상태: Phase 3.5 뒤
 
 실행 중인 동적 workflow의 Head를 교체해도 작업이 계속되게 한다.
 

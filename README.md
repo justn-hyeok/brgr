@@ -4,9 +4,11 @@
 
 # brgr
 
-**Let Codex or Claude Code hand work to other coding agents, each running in
-its own [Herdr](https://github.com/herdrdev/herdr) pane beside you, without
-anyone clicking through their prompts.**
+**Hand work to any coding agent CLI and get back a sealed result that you
+decide on. The work outlives the session, pane or quota that started it.**
+
+Today brgr needs [Herdr](https://github.com/herdrdev/herdr): each worker runs in
+its own Herdr pane beside you, without anyone clicking through its prompts.
 
 ![Claude Code asks brgr for three Claude Code workers. They open stacked beside it, report back, are accepted, and their panes close.](docs/assets/demo.gif)
 
@@ -42,10 +44,11 @@ accept or reject.
   can start their own child workers, and sibling workers can debate when you ask
   for it.
 
-Workers can be Claude Code, Codex CLI, Gemini CLI, GitHub Copilot CLI, Pi,
-OpenCode, Cursor CLI, Devin CLI, Cline, OMP or Command Code; brgr calls each
-registered worker CLI a *harness*. The agent that starts workers, the
-*owner*, can be a Codex or Claude Code session.
+brgr calls each registered worker CLI a *harness*, and supports them in
+[tiers](docs/guides/reference.md#harness-tiers). Tier 1 is Claude Code, Codex
+CLI, Cursor CLI and Devin CLI. Tier 2 is Command Code, OMP, OpenCode and Cline.
+Tier 3 is GitHub Copilot CLI, Gemini CLI and Pi. The agent that starts workers,
+the *owner*, can be a Codex, Claude Code or Cursor session.
 
 > **Workers always run with full permissions** (`--yolo`,
 > `--dangerously-skip-permissions` and equivalents). That is the point of
@@ -54,7 +57,9 @@ registered worker CLI a *harness*. The agent that starts workers, the
 
 ## Requirements
 
-- Apple Silicon Mac with macOS 15 or newer
+- Apple Silicon Mac with macOS 15 or newer, or x86_64 Linux. Linux means Ubuntu
+  24.04 with Claude Code, Codex CLI, Cursor CLI and Devin CLI, as far as
+  [its evidence](docs/evidence/linux-real-agents-2026-11-05.md) goes.
 - [Herdr](https://github.com/herdrdev/herdr) 0.9 or newer, installed and
   running. Start your agent in a Herdr pane, so workers can open beside it.
 - A Rust toolchain (`cargo`) to install. Release archives exist but are unsigned
@@ -70,6 +75,7 @@ cargo install --locked brgr-cli
 # 2. Teach your agent how to use brgr
 brgr integrate claude install    # Claude Code: installs the brgr skill
 brgr integrate codex install     # Codex: installs the skill and session hooks
+                                 # (Codex asks you to review them on its next start)
 
 # 3. Register a worker. This runs one small prompt through it.
 mkdir -p ~/brgr-scratch
@@ -118,8 +124,8 @@ brgr land TASK --workspace . --reason "criteria verified"   # code: check, accep
 
 ## Status
 
-v2 is the current release line. Its author uses it daily, on macOS only, and
-it changes quickly; see the [changelog](CHANGELOG.md). One check from its
+v2 is the current release line. Its author uses it daily on macOS, it has been
+run end to end on Linux but not used daily there, and it changes quickly; see the [changelog](CHANGELOG.md). One check from its
 readiness record is still open: a full review of the code by someone other than
 the author. See [the readiness status](docs/readiness/status.md).
 
