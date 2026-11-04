@@ -205,6 +205,31 @@ fn compete_variants_at(
         .collect()
 }
 
+/// A cancel client either asks for the cancel, or finds the run already over:
+/// another client's cancel, or the worker, can settle it first, and `brgr
+/// cancel` refuses a terminal task. Anything else is a failure.
+fn assert_cancel_clients(f: &Fixture, round: usize, outputs: &[std::process::Output]) {
+    for (index, output) in outputs.iter().enumerate() {
+        let stderr =
+            fs::read_to_string(f.logs.join(format!("{round}-{index}.stderr"))).unwrap_or_default();
+        if output.status.success() {
+            let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert!(
+                matches!(
+                    value["state"].as_str(),
+                    Some("cancel_requested" | "force_stopped")
+                ),
+                "unexpected cancel response in round {round}: {value}"
+            );
+        } else {
+            assert!(
+                stderr.contains("is already terminal"),
+                "cancel client {index} failed in round {round}: {stderr}"
+            );
+        }
+    }
+}
+
 fn raw_store_error(text: &str) -> bool {
     [
         "database is locked",
@@ -232,24 +257,7 @@ fn concurrent_cancel_clients_settle_one_running_attempt() {
         let f = Fixture::new();
         let task = f.start_slow(round);
         let results = compete(&f, round, &["cancel", &task]);
-        for (index, output) in results.iter().enumerate() {
-            assert!(
-                output.status.success(),
-                "cancel client {index} failed: status={}, stdout={}, stderr={}",
-                output.status,
-                String::from_utf8_lossy(&output.stdout),
-                fs::read_to_string(f.logs.join(format!("{round}-{index}.stderr")))
-                    .unwrap_or_default()
-            );
-            let value: Value = serde_json::from_slice(&output.stdout).unwrap();
-            assert!(
-                matches!(
-                    value["state"].as_str(),
-                    Some("cancel_requested" | "force_stopped")
-                ),
-                "unexpected cancel response: {value}"
-            );
-        }
+        assert_cancel_clients(&f, round, &results);
         assert!(
             wait_until(|| brgr(&f.home)
                 .args(["--json", "result", &task])
@@ -299,20 +307,7 @@ fn cancel_races_worker_completion_on_shared_release() {
             "worker did not reach release in round {round}"
         );
         let outputs = compete_at(&f, round, &["cancel", &task], release.clone());
-        assert!(
-            outputs.iter().all(|o| o.status.success()),
-            "cancel client failed in round {round}: {:?}",
-            outputs
-                .iter()
-                .enumerate()
-                .map(|(i, o)| (
-                    o.status,
-                    String::from_utf8_lossy(&o.stdout).into_owned(),
-                    fs::read_to_string(f.logs.join(format!("{round}-{i}.stderr")))
-                        .unwrap_or_default()
-                ))
-                .collect::<Vec<_>>()
-        );
+        assert_cancel_clients(&f, round, &outputs);
         fs::write(&release, b"go").unwrap();
         assert!(
             wait_until(|| brgr(&f.home)
