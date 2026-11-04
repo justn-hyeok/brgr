@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- A worker's edit could vanish from its sealed diff on Linux, so `brgr land` reported success having applied nothing. brgr
+  copied the Git index before diffing and the copy got a fresh time, which told Git it could trust a file's size and
+  time; an edit that kept the file's size, in the same second as the checkout, then looked unchanged. The copy now
+  keeps the index's time (issue #289).
 - Tests only: warming a fake executable retries `ETXTBSY`, which failed one Linux run in twenty when a `fork` in another
   test thread still held the file open for writing.
 - `brgr run --objective-file PATH` accepts objectives up to 256 KiB without putting them in a single process argument; the workflow SDK uses and removes a private temporary file for tasks over 64 KiB (issue #229).

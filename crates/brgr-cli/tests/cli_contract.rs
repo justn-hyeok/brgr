@@ -5061,7 +5061,13 @@ fn land_three_way_is_a_failure_not_a_conflict_when_git_refuses_another_file() {
         ],
         &owner,
     );
-    assert!(!landed.status.success());
+    assert!(
+        !landed.status.success(),
+        "land succeeded over a dirty file.\nstdout: {}\nstderr: {}\nsealed diff: {:?}",
+        String::from_utf8_lossy(&landed.stdout),
+        String::from_utf8_lossy(&landed.stderr),
+        String::from_utf8_lossy(&run(&home, &["diff", &task], &owner).stdout),
+    );
     let stderr = String::from_utf8_lossy(&landed.stderr);
     assert!(!stderr.contains("resolve them"), "{stderr}");
     assert!(stderr.contains("does not match index"), "{stderr}");
