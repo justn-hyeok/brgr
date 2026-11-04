@@ -341,6 +341,8 @@ pub(crate) enum PluginCommand {
 
 #[derive(Subcommand)]
 pub(crate) enum ConfigCommand {
+    /// Interactively edit aliases and per-harness default models.
+    Edit,
     /// Create configuration and BRGR.md examples without overwriting user files.
     Init,
     Show,

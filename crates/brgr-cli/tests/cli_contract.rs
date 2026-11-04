@@ -1,5 +1,26 @@
 mod common;
 
+#[test]
+fn config_edit_without_terminal_or_with_json_refuses_promptly() {
+    for json in [false, true] {
+        let home = tempfile::tempdir().unwrap();
+        let mut command = assert_cmd::Command::from_std(common::brgr_command());
+        command.arg("--home").arg(home.path());
+        if json {
+            command.arg("--json");
+        }
+        command
+            .args(["config", "edit"])
+            .timeout(std::time::Duration::from_secs(5));
+        command
+            .assert()
+            .failure()
+            .stderr(predicates::str::contains("brgr config alias"))
+            .stderr(predicates::str::contains("brgr config set"));
+        assert!(!home.path().join("config.toml").exists());
+    }
+}
+
 use common::{
     HANG_GUARD, brgr_binary as brgr, brgr_command, output_when_not_busy, process_exists,
     wait_until, write_fast_script,

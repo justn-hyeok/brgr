@@ -720,6 +720,41 @@ impl Registry {
             // The CLI itself refuses an unknown name before any paid request.
             return Ok(());
         }
+        let selectors = self.catalog_selectors(manifest, requested).await?;
+        if !selectors.contains(requested) {
+            return Err(RegistryError::ModelNotInCatalog(requested.to_owned()));
+        }
+        Ok(())
+    }
+
+    /// Lists models for a settings picker using the same bounded probe as preflight.
+    ///
+    /// # Errors
+    /// Returns an error for an unreadable catalog or a CLI that does not list models.
+    pub async fn registered_models(&self, harness_id: &str) -> Result<Vec<String>, RegistryError> {
+        validate_harness_id(harness_id)?;
+        let manifest: HarnessManifest =
+            serde_json::from_slice(&fs::read(self.manifest_path(harness_id))?)?;
+        Ok(self
+            .catalog_selectors(&manifest, "")
+            .await?
+            .into_iter()
+            .collect())
+    }
+
+    async fn catalog_selectors(
+        &self,
+        manifest: &HarnessManifest,
+        requested: &str,
+    ) -> Result<std::collections::BTreeSet<String>, RegistryError> {
+        let catalog = manifest
+            .probe
+            .model_catalog
+            .as_ref()
+            .ok_or_else(|| RegistryError::ModelCatalogMissing(manifest.id.clone()))?;
+        if catalog.format == ModelCatalogFormat::CliValidated {
+            return Err(RegistryError::ModelCatalogMissing(manifest.id.clone()));
+        }
         if catalog.argv.is_empty() || catalog.argv.len() > 64 {
             return Err(RegistryError::InvalidModelCatalog);
         }
@@ -744,11 +779,7 @@ impl Registry {
             manifest.executable.clone()
         };
         let output = probe_catalog(&manifest.id, &catalog_executable, &argv).await?;
-        let selectors = parse_model_catalog(&catalog.format, &output.stdout)?;
-        if !selectors.contains(requested) {
-            return Err(RegistryError::ModelNotInCatalog(requested.to_owned()));
-        }
-        Ok(())
+        parse_model_catalog(&catalog.format, &output.stdout)
     }
 
     /// Validates a model against a registered harness catalog.
@@ -1775,6 +1806,10 @@ mod tests {
             .await
             .unwrap();
         assert!(receipt.scratch_result_digest.is_some());
+        assert_eq!(
+            registry.registered_models(&manifest.id).await.unwrap(),
+            vec!["future-model"]
+        );
         assert!(matches!(
             registry
                 .preflight_model(&manifest, Some("missing-model"))

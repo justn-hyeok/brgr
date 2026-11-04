@@ -194,6 +194,16 @@ registered harness and optional exact model and effort. Manage them with
 alias edits do not change existing tasks. Names may contain Korean text but
 cannot contain whitespace or control characters or start with `-`.
 
+In a terminal, `brgr config edit` opens a menu for adding, editing and removing
+aliases, choosing or clearing each harness's default model, and viewing harness
+health and tiers. Models come from the harness catalog when readable; otherwise
+enter an exact model name. Each completed change is saved immediately to the
+same config file as `brgr config set model MODEL --harness ID`. Esc or Back cancels the pending change;
+Ctrl+C exits. The editor skips the fixture and removed GJC harnesses. It requires
+a terminal and refuses `--json`; agents and scripts should use
+commands such as `brgr config alias list` and
+`brgr config set model MODEL --harness ID` instead.
+
 A worker receives `$BRGR_BIN`, its exact task/attempt identity, and a scoped
 owner session. Only a worker launched with `--enable-delegation` may call
 `brgr run OBJECTIVE` to create a child; pane mode does not enable delegation.

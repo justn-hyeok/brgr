@@ -27,6 +27,7 @@ brgr-store = { path = "crates/brgr-store", version = "2.15.18" }
 anyhow = "1.0"
 assert_cmd = "2.2.2"
 clap = { version = "4.6.6", features = ["derive", "env"] }
+dialoguer = { version = "0.12", default-features = false }
 libc = "0.2"
 predicates = "3.1"
 rusqlite = { version = "0.40.2", features = ["bundled"] }
