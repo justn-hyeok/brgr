@@ -627,6 +627,29 @@ mod tests {
         }
     }
 
+    /// Runs a just-written trampoline once. On Linux another thread's `fork` can
+    /// hold the file open for writing until its child execs, so the first run can
+    /// fail with `ETXTBSY` for a moment. It is retried only for that, with a hang
+    /// guard a correct run does not reach.
+    fn warm_executable(path: &Path) {
+        let started = std::time::Instant::now();
+        loop {
+            match std::process::Command::new(path).arg("--warm").status() {
+                Ok(status) => {
+                    assert!(status.success(), "trampoline --warm failed: {status}");
+                    return;
+                }
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::ExecutableFileBusy
+                        && started.elapsed() < std::time::Duration::from_mins(1) =>
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(error) => panic!("run trampoline --warm: {error}"),
+            }
+        }
+    }
+
     fn warmed_trampoline() -> &'static Path {
         WARMED_TRAMPOLINE.get_or_init(|| {
             let dir = std::env::temp_dir().join("brgr-fast-script");
@@ -637,11 +660,7 @@ mod tests {
             }
             std::fs::write(&trampoline, TRAMPOLINE_SOURCE).unwrap();
             std::fs::set_permissions(&trampoline, std::fs::Permissions::from_mode(0o755)).unwrap();
-            let status = std::process::Command::new(&trampoline)
-                .arg("--warm")
-                .status()
-                .expect("run trampoline --warm");
-            assert!(status.success(), "trampoline --warm failed: {status}");
+            warm_executable(&trampoline);
             // Drop write bits so a later `fs::write` through a hard link
             // cannot clobber every trampoline in this process.
             std::fs::set_permissions(&trampoline, std::fs::Permissions::from_mode(0o555)).unwrap();
