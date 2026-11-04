@@ -84,6 +84,30 @@ impl Store {
             })
             .transpose()
     }
+
+    /// Whether `owner_id` owns the task or any of its delegation ancestors.
+    /// The walk is bounded by the same eight-edge delegation limit as admission.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for missing or malformed task data, or a database failure.
+    pub fn is_task_owner_ancestor(
+        &self,
+        task_id: TaskId,
+        owner_id: &brgr_protocol::OwnerId,
+    ) -> Result<bool, StoreError> {
+        let mut current = task_id;
+        for _ in 0..=8 {
+            if self.task(current)?.owner_id == *owner_id {
+                return Ok(true);
+            }
+            let Some((parent, _, _)) = self.delegation_parent(current)? else {
+                return Ok(false);
+            };
+            current = parent;
+        }
+        Ok(false)
+    }
     /// Counts children whose latest revision has not been delivered and
     /// acknowledged by this parent worker.
     ///
@@ -91,8 +115,22 @@ impl Store {
     ///
     /// Returns an error if the metadata query fails.
     pub fn unsettled_children(&self, parent_attempt_id: AttemptId) -> Result<u64, StoreError> {
-        let count: i64 = self.connection.query_row(
-            "SELECT COUNT(*) FROM delegation_edges e
+        u64::try_from(self.unsettled_child_tasks(parent_attempt_id)?.len())
+            .map_err(|_| StoreError::NumericOverflow)
+    }
+
+    /// Lists the child tasks still requiring their parent worker's decision or
+    /// acknowledgment. A cancelled child is settled by the cancellation itself.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the metadata query fails or a stored task id is invalid.
+    pub fn unsettled_child_tasks(
+        &self,
+        parent_attempt_id: AttemptId,
+    ) -> Result<Vec<TaskId>, StoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT t.task_id FROM delegation_edges e
              JOIN tasks t ON t.task_id = e.child_task_id
                AND t.revision = (SELECT MAX(t2.revision) FROM tasks t2 WHERE t2.task_id = e.child_task_id)
              LEFT JOIN results r ON r.result_id = (
@@ -103,12 +141,20 @@ impl Store {
              LEFT JOIN inbox_items i ON i.result_id = r.result_id AND i.owner_id = t.owner_id
              LEFT JOIN decisions d ON d.result_id = r.result_id
              WHERE e.parent_attempt_id = ?1
+               AND NOT EXISTS (SELECT 1 FROM cancellation_intents c
+                               WHERE c.task_id = t.task_id AND c.revision = t.revision)
                AND (r.result_id IS NULL OR i.acknowledged IS NULL OR i.acknowledged = 0
-                 OR (json_extract(r.envelope_json, '$.outcome') = 'candidate' AND d.result_id IS NULL))",
-            [parent_attempt_id.to_string()],
-            |row| row.get(0),
+                 OR (json_extract(r.envelope_json, '$.outcome') = 'candidate' AND d.result_id IS NULL))
+             ORDER BY t.rowid",
         )?;
-        u64::try_from(count).map_err(|_| StoreError::NumericOverflow)
+        let rows = statement.query_map([parent_attempt_id.to_string()], |row| {
+            row.get::<_, String>(0)
+        })?;
+        rows.map(|row| {
+            row?.parse()
+                .map_err(|_| StoreError::InvalidDelegationParent)
+        })
+        .collect()
     }
 }
 

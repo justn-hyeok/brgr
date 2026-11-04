@@ -19,10 +19,20 @@ use serde_json::json;
 #[derive(Serialize)]
 struct BriefListItem {
     task_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    parent_task_id: Option<String>,
     state: String,
     harness: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model: Option<serde_json::Value>,
     elapsed_seconds: Option<u64>,
     objective_head: String,
+}
+
+struct VisibleTask {
+    spec: TaskSpec,
+    state: Option<AttemptState>,
+    parent_task_id: Option<TaskId>,
 }
 
 #[derive(Serialize)]
@@ -52,7 +62,7 @@ pub(crate) fn status(
     if tree {
         let root = task.context("--tree requires a task ID")?;
         let spec = store.task(root)?;
-        check_reader(&store, &spec.owner_id, observe)?;
+        check_task_reader(&store, root, &spec.owner_id, observe)?;
         return tree_status::show(&store, root, json_output);
     }
     if brief {
@@ -64,7 +74,7 @@ pub(crate) fn status(
         !verbose && human::use_human_output(json_output, human::stdout_is_terminal());
     if let Some(task_id) = task {
         let spec = store.task(task_id)?;
-        check_reader(&store, &spec.owner_id, observe)?;
+        check_task_reader(&store, task_id, &spec.owner_id, observe)?;
         let state = attempt_state_name(&store, task_id)?;
         let created_at = task_created_at(&store, spec.task_id);
         if human_display {
@@ -75,21 +85,22 @@ pub(crate) fn status(
         let launch = fs::read(paths.launch(task_id, spec.revision))
             .ok()
             .and_then(|bytes| serde_json::from_slice::<LaunchEnvelope>(&bytes).ok());
-        print_value(
-            &json!({
-                "task": spec,
-                "state": state,
-                "workspace": spec.workspace,
-                "base_commit": spec.evidence.base_commit,
-                "workspace_present": workspace::workspace_is_present(&spec.workspace),
-                "session": crate::pane_adapter::session_status(paths, task_id, spec.revision),
-                "calling_options": launch.as_ref().and_then(|value|value.calling_options.as_ref()),
-                "source_pane": launch.as_ref().and_then(|value|value.source_pane.as_ref()),
-                "source_session": launch.as_ref().and_then(|value|value.source_session.as_ref()),
-                "created_at": created_at,
-            }),
-            json_output,
-        );
+        let mut detail = json!({
+        "task": spec,
+            "state": state,
+            "workspace": spec.workspace,
+            "base_commit": spec.evidence.base_commit,
+            "workspace_present": workspace::workspace_is_present(&spec.workspace),
+            "session": crate::pane_adapter::session_status(paths, task_id, spec.revision),
+            "calling_options": launch.as_ref().and_then(|value|value.calling_options.as_ref()),
+            "source_pane": launch.as_ref().and_then(|value|value.source_pane.as_ref()),
+            "source_session": launch.as_ref().and_then(|value|value.source_session.as_ref()),
+            "created_at": created_at,
+        });
+        if let Some((parent, _, _)) = store.delegation_parent(task_id)? {
+            detail["parent_task_id"] = json!(parent);
+        }
+        print_value(&detail, json_output);
     } else {
         let session = current_session()?;
         let owner = env::var("BRGR_OWNER_ID")
@@ -97,42 +108,52 @@ pub(crate) fn status(
             .filter(|value| !value.trim().is_empty())
             .map(OwnerId::new)
             .transpose()?;
-        let tasks = store
-            .tasks_for_session(session.as_deref().unwrap_or(""), owner.as_ref(), 20)?
-            .into_iter()
-            .map(|spec| {
-                let state = store.attempt_state(spec.task_id).ok();
-                (spec, state)
-            })
-            .collect::<Vec<_>>();
+        let tasks =
+            visible_session_tasks(&store, session.as_deref().unwrap_or(""), owner.as_ref())?;
         if human_display {
             let rows = tasks
                 .iter()
-                .map(|(spec, state)| human::StatusRow {
-                    task_id: spec.task_id.to_string(),
-                    state: state.map_or_else(
-                        || "queued".to_owned(),
-                        |value| format!("{value:?}").to_lowercase(),
-                    ),
-                    harness: spec.route.harness_id.clone(),
-                    created_at: task_created_at(&store, spec.task_id),
-                    objective: spec.objective.clone(),
+                .map(|visible| {
+                    let VisibleTask {
+                        spec,
+                        state,
+                        parent_task_id,
+                    } = visible;
+                    Ok(human::StatusRow {
+                        task_id: spec.task_id.to_string(),
+                        state: state.map_or_else(
+                            || "queued".to_owned(),
+                            |value| format!("{value:?}").to_lowercase(),
+                        ),
+                        harness: spec.route.harness_id.clone(),
+                        model: spec.route.requested_model.clone(),
+                        parent_task_id: parent_task_id.map(|parent| parent.to_string()),
+                        created_at: task_created_at(&store, spec.task_id),
+                        objective: spec.objective.clone(),
+                    })
                 })
-                .collect::<Vec<_>>();
+                .collect::<Result<Vec<_>>>()?;
             print!("{}", human::status_table(&rows, human::unix_now()));
         } else {
-            print_value(
-                &json!(
-                    tasks
-                        .iter()
-                        .map(|(spec, state)| json!({
-                            "task": spec,
-                            "state": state.map(|value| format!("{value:?}").to_lowercase()),
-                        }))
-                        .collect::<Vec<_>>()
-                ),
-                json_output,
-            );
+            let items = tasks
+                .iter()
+                .map(|visible| {
+                    let VisibleTask {
+                        spec,
+                        state,
+                        parent_task_id,
+                    } = visible;
+                    let mut item = json!({
+                        "task": spec,
+                        "state": state.map(|value| format!("{value:?}").to_lowercase()),
+                    });
+                    if let Some(parent) = parent_task_id {
+                        item["parent_task_id"] = json!(parent);
+                    }
+                    Ok(item)
+                })
+                .collect::<Result<Vec<_>>>()?;
+            print_value(&json!(items), json_output);
         }
     }
     Ok(())
@@ -159,30 +180,44 @@ fn brief_list(store: &Store, json_output: bool) -> Result<()> {
         .map(OwnerId::new)
         .transpose()?;
     let now = human::unix_now();
-    let rows = store
-        .tasks_for_session(session.as_deref().unwrap_or(""), owner.as_ref(), 20)?
+    let tasks = visible_session_tasks(store, session.as_deref().unwrap_or(""), owner.as_ref())?;
+    let rows = tasks
         .into_iter()
-        .map(|spec| {
-            let state = store.attempt_state(spec.task_id).ok();
-            human::StatusRow {
-                task_id: spec.task_id.to_string(),
-                state: state.map_or_else(
-                    || "queued".to_owned(),
-                    |value| format!("{value:?}").to_lowercase(),
-                ),
-                harness: spec.route.harness_id,
-                created_at: task_created_at(store, spec.task_id),
-                objective: spec.objective,
-            }
+        .map(|visible| {
+            let VisibleTask {
+                spec,
+                state,
+                parent_task_id,
+            } = visible;
+            Ok({
+                human::StatusRow {
+                    task_id: spec.task_id.to_string(),
+                    parent_task_id: parent_task_id.map(|parent| parent.to_string()),
+                    state: state.map_or_else(
+                        || "queued".to_owned(),
+                        |value| format!("{value:?}").to_lowercase(),
+                    ),
+                    harness: spec.route.harness_id,
+                    model: spec.route.requested_model,
+                    created_at: task_created_at(store, spec.task_id),
+                    objective: spec.objective,
+                }
+            })
         })
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>>>()?;
     if json_output {
         let items = rows
             .iter()
             .map(|row| BriefListItem {
                 task_id: row.task_id.clone(),
+                parent_task_id: row.parent_task_id.clone(),
                 state: row.state.clone(),
                 harness: row.harness.clone(),
+                model: row.parent_task_id.as_ref().map(|_| {
+                    row.model
+                        .clone()
+                        .map_or(serde_json::Value::Null, serde_json::Value::String)
+                }),
                 elapsed_seconds: human::elapsed_seconds(row.created_at, now),
                 objective_head: human::objective_head(&row.objective),
             })
@@ -204,7 +239,7 @@ fn event_kind_name(kind: brgr_protocol::EventKind) -> String {
 
 fn brief_one(store: &Store, task_id: TaskId, observe: bool, json_output: bool) -> Result<()> {
     let spec = store.task(task_id)?;
-    check_reader(store, &spec.owner_id, observe)?;
+    check_task_reader(store, task_id, &spec.owner_id, observe)?;
     let state = attempt_state_name(store, task_id)?;
     let last_event = store
         .latest_event(task_id)?
@@ -256,6 +291,9 @@ fn task_detail(
     };
     Ok(human::TaskDetail {
         task_id: spec.task_id.to_string(),
+        parent_task_id: store
+            .delegation_parent(spec.task_id)?
+            .map(|(parent, _, _)| parent.to_string()),
         state: state.to_owned(),
         harness: spec.route.harness_id.clone(),
         model: spec.route.requested_model.clone(),
@@ -310,6 +348,68 @@ pub(crate) fn check_reader(store: &Store, owner: &OwnerId, observe: bool) -> Res
     }
 }
 
+fn check_task_reader(store: &Store, task: TaskId, owner: &OwnerId, observe: bool) -> Result<()> {
+    if observe {
+        crate::observe_owner(owner);
+        return Ok(());
+    }
+    if let Ok(()) = require_owner(store, owner).map(|_| ()) {
+        return Ok(());
+    }
+    let session = current_session()?.context("a Codex session is required")?;
+    if let Ok(caller) = env::var("BRGR_OWNER_ID")
+        && let Ok(caller) = OwnerId::new(caller)
+        && store.is_task_owner_ancestor(task, &caller)?
+        && store
+            .owner_binding(&caller)?
+            .is_some_and(|(bound, _)| bound == session)
+    {
+        return Ok(());
+    }
+    let mut current = task;
+    for _ in 0..=8 {
+        let spec = store.task(current)?;
+        if store
+            .owner_binding(&spec.owner_id)?
+            .is_some_and(|(bound, _)| bound == session)
+        {
+            return Ok(());
+        }
+        let Some((parent, _, _)) = store.delegation_parent(current)? else {
+            break;
+        };
+        current = parent;
+    }
+    require_owner(store, owner).map(|_| ())
+}
+
+fn visible_session_tasks(
+    store: &Store,
+    session: &str,
+    owner: Option<&OwnerId>,
+) -> Result<Vec<VisibleTask>> {
+    let roots = store.tasks_for_session(session, owner, 20)?;
+    let mut result = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for root in roots {
+        let mut nodes = store.subtree(root.task_id)?;
+        nodes.reverse();
+        for node in nodes {
+            if !seen.insert(node.task_id) {
+                continue;
+            }
+            let spec = store.task(node.task_id)?;
+            let state = store.attempt_state(node.task_id).ok();
+            result.push(VisibleTask {
+                spec,
+                state,
+                parent_task_id: node.parent_task_id,
+            });
+        }
+    }
+    Ok(result)
+}
+
 pub(crate) fn result(
     paths: &Paths,
     task: TaskId,
@@ -322,8 +422,11 @@ pub(crate) fn result(
     let (session_id, binding_epoch) = if observe {
         crate::observe_owner(&spec.owner_id);
         (String::new(), 0)
-    } else {
+    } else if ack {
         require_owner(&store, &spec.owner_id)?
+    } else {
+        check_task_reader(&store, task, &spec.owner_id, false)?;
+        (String::new(), 0)
     };
     let result = store.latest_result(task)?;
     let route_observation = store
@@ -441,8 +544,8 @@ pub(crate) fn cancel(
     match cancel_task(paths, task, tree, force)? {
         CancelOutcome::Requested { requested } => {
             print_value(
-                &json!({"task_id": task, "state": "cancel_requested", "tree": tree,
-                "requested": requested}),
+                &json!({"task_id": task, "state": "cancel_requested", "tree": true,
+                "requested": requested, "stopped_tasks": requested}),
                 json_output,
             );
             Ok(())
@@ -472,9 +575,18 @@ pub(crate) fn cancel_task(
     let store = Store::open(&paths.store)?;
     let spec = store.task(task)?;
     let proof = cancellation_proof(&store, &spec, force)?;
-    let nodes = cancel_nodes(&store, task, tree)?;
+    let nodes = cancel_nodes(&store, task, true)?;
     let active = active_cancel_targets(paths, &store, &nodes)?;
-    if active.is_empty() && !tree {
+    let mut descendant_has_pane = false;
+    for node in nodes.iter().filter(|node| node.depth > 0) {
+        let child = store.task(node.task_id)?;
+        descendant_has_pane |= paths.pane_receipt(node.task_id, child.revision).is_file()
+            || paths
+                .runs
+                .join(format!("{}.pane.json", node.task_id))
+                .is_file();
+    }
+    if active.is_empty() && !tree && !descendant_has_pane {
         return Ok(empty_cancel_outcome(paths, task, &spec, force));
     }
     // The intent records live inside the same transaction that checks the
@@ -482,8 +594,8 @@ pub(crate) fn cancel_task(
     // not by a session that lost it while this command ran. `--force` skips
     // that check: the control home is the access check.
     let recorded = match proof.as_ref() {
-        Some(proof) => store.record_cancellation_intents_bound(task, tree, proof)?,
-        None => store.record_cancellation_intents(task, tree)?,
+        Some(proof) => store.record_cancellation_intents_bound(task, true, proof)?,
+        None => store.record_cancellation_intents(task, true)?,
     };
     let mut requested = Vec::new();
     for node in &recorded {
@@ -492,12 +604,22 @@ pub(crate) fn cancel_task(
             requested.push(node.task_id);
         }
     }
-    if force && tree {
-        for node in &nodes {
-            if !requested.contains(&node.task_id) {
-                let child = store.task(node.task_id)?;
-                pane_adapter::close_leftover_pane(paths, node.task_id, child.revision, false);
-            }
+    for node in &nodes {
+        let requested_cancel = requested.contains(&node.task_id);
+        if !requested_cancel && node.depth == 0 && !force {
+            continue;
+        }
+        let child = store.task(node.task_id)?;
+        let launch: LaunchEnvelope =
+            serde_json::from_slice(&fs::read(paths.launch(node.task_id, child.revision))?)?;
+        if launch
+            .manifest
+            .as_ref()
+            .is_some_and(|manifest| manifest.adapter == brgr_runner::OMP_ROLE_ADAPTER_V1)
+        {
+            pane_cleanup::cancel_owned_pane(&paths.runs, node.task_id)?;
+        } else if !requested_cancel {
+            pane_adapter::close_leftover_pane(paths, node.task_id, child.revision, false);
         }
     }
     Ok(CancelOutcome::Requested { requested })
@@ -546,17 +668,8 @@ fn active_cancel_targets(
         if !task_needs_cancel(store, node.task_id)? {
             continue;
         }
-        let launch: LaunchEnvelope =
+        let _: LaunchEnvelope =
             serde_json::from_slice(&fs::read(paths.launch(node.task_id, child.revision))?)?;
-        if launch
-            .manifest
-            .as_ref()
-            .map_or(child.route.harness_id == "local.omp-herdr", |manifest| {
-                manifest.adapter == brgr_runner::OMP_ROLE_ADAPTER_V1
-            })
-        {
-            bail!("Herdr-backed OMP cancellation is not certified; use the process adapter");
-        }
         active.push(node.task_id);
     }
     Ok(active)

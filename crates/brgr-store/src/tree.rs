@@ -168,6 +168,8 @@ pub(super) fn active_child_count(
          JOIN tasks t ON t.task_id = e.child_task_id
            AND t.revision = (SELECT MAX(t2.revision) FROM tasks t2 WHERE t2.task_id = e.child_task_id)
          WHERE e.parent_attempt_id = ?1
+           AND NOT EXISTS (SELECT 1 FROM cancellation_intents c
+                           WHERE c.task_id = t.task_id AND c.revision = t.revision)
            AND (NOT EXISTS (SELECT 1 FROM results r
                             WHERE r.task_id = t.task_id AND r.revision = t.revision)
                 OR (EXISTS (SELECT 1 FROM results r

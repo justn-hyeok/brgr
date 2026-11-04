@@ -130,6 +130,12 @@ pub(crate) fn stop_external(
     if receipt.task != Some(attempt.task.task_id) || receipt.attempt != Some(attempt.attempt_id) {
         return Ok(false);
     }
+    // Before anything closes the pane: once the agent is gone its tools have no
+    // recorded parent to be found under.
+    crate::tui_host::stop_descendants(&paths.runs.join(format!(
+        "{}-r{}.native-state.json",
+        attempt.task.task_id, attempt.task.revision
+    )));
     let launch: LaunchEnvelope = serde_json::from_slice(&fs::read(
         paths.launch(attempt.task.task_id, attempt.task.revision),
     )?)?;

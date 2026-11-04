@@ -74,6 +74,7 @@ pub fn show(store: &Store, root: TaskId, json_output: bool) -> Result<()> {
             "parent_task_id": node.parent_task_id,
             "depth": node.depth,
             "harness": spec.route.harness_id,
+            "model": spec.route.requested_model,
             "state": format!("{state:?}").to_lowercase(),
             "outcome": result.as_ref().map(|value| value.outcome),
             "decision": decision.as_ref().map(|value| value.verdict),

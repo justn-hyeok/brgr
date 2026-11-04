@@ -63,7 +63,7 @@ headless. The separate `local.omp-herdr` route retains its legacy
 |---|---|
 | OMP process, Cursor CLI, Command Code, Devin CLI, Codex CLI, GitHub Copilot CLI, Gemini CLI, Pi | Certified bounded fresh-run contract; exact model/effort only where the activated recipe supports it |
 | Approved unfamiliar one-shot CLI | Supported after manifest contract test and authorized scratch activation |
-| `local.omp-herdr` presentation | Optional best effort; external worker stop is not certified and uncertain failure is `lost` |
+| `local.omp-herdr` presentation | Optional best effort; cancellation closes the recorded OMP pane only while its agent, terminal, and session identities still match; uncertain execution failure is `lost` |
 | Resume, in-flight steering, provider-side undo | Deferred; unsupported requests must fail rather than silently fall back |
 
 ### Harness tiers
@@ -195,14 +195,20 @@ alias edits do not change existing tasks. Names may contain Korean text but
 cannot contain whitespace or control characters or start with `-`.
 
 A worker receives `$BRGR_BIN`, its exact task/attempt identity, and a scoped
-owner session. It may call `brgr run OBJECTIVE` again to create a child; brgr records the
-parent edge and delivers the child result to that worker's inbox. The parent
-must read and accept/reject a candidate (or acknowledge another outcome)
-before its own successful result can become a candidate. `brgr wait TASK`
+owner session. Only a worker launched with `--enable-delegation` may call
+`brgr run OBJECTIVE` to create a child; pane mode does not enable delegation.
+brgr records the parent edge and delivers the child result to that worker's
+inbox. The parent must read and accept/reject a candidate (or acknowledge
+another outcome) before its own successful result can become a candidate.
+Parent cancellation includes live descendants; `--tree` remains accepted.
+Owners see descendants in `status` and `status --brief`, with parent, harness,
+and requested model, and may read descendant status/results without gaining
+accept/reject rights. `brgr wait TASK`
 waits for a child result without approving it. `brgr watch A B C` or `brgr watch --all` prints one JSON line per event until every watched task has a result. Watch never decides, approves, or replies. The `message` subcommands (`send`, `list`, `wait`, `ack`)
 let each side ask and answer questions on the active attempt; unanswered
-questions block a successful candidate. Standalone runs opt in with
-`--enable-delegation`; plugin workers enable it automatically. See
+questions block a successful candidate. Standalone owner runs are unchanged;
+plugin workers enable delegation automatically. A worker without the flag is
+refused before child admission. See
 [recursive worker contract](recursive-workers.md) for the verified scope
 and remaining gates, including the
 [live OMP → GJC → GJC receipt](../evidence/live-recursive-bridge-2026-09-23.md) and
@@ -255,7 +261,8 @@ and counts as the owner's acknowledgement of it. A lost run whose worker may sti
 be running is refused, with the worker's process named: a second run would share
 the task's pid record and hide the first worker from `prune`. `brgr status TASK --tree` shows time and question/approval waits;
 `brgr cancel TASK --tree` records cancellation for the subtree before stopping
-its active processes. `brgr cancel TASK --force` does the same when this session
+its active processes; `--tree` remains an accepted flag.
+`brgr cancel TASK --force` does the same when this session
 is not the bound owner: reaching the control home is the access check. It does
 not accept or reject a sealed result; an already-terminal task only closes a
 leftover pane brgr recorded as its own. See [the completion loop plan](completion-loop-plan.md)

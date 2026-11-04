@@ -944,8 +944,8 @@ pub(crate) async fn start_task(
     let pane_mode = source_pane.is_some() && activated.adapter != brgr_runner::OMP_ROLE_ADAPTER_V1;
     let store = Store::open(&paths.store)?;
     if let Some((parent_task, parent_attempt)) = options.parent {
-        store.validate_delegation_parent(parent_task, parent_attempt, &spec.owner_id)?;
         require_parent_may_delegate(paths, &store, parent_task, parent_attempt)?;
+        store.validate_delegation_parent(parent_task, parent_attempt, &spec.owner_id)?;
     }
     let session = current_session()?;
     bind_owner_session(&store, &spec.owner_id, session.as_deref())?;
@@ -976,7 +976,7 @@ pub(crate) async fn start_task(
         protocol_generation: "brgr-v1".to_owned(),
         keep_pane: matches!(options.pane, PaneDisposition::Keep),
         keep_worktree: matches!(options.worktree, WorktreeDisposition::Keep),
-        delegation_enabled: pane_mode || options.enable_delegation || options.parent.is_some(),
+        delegation_enabled: options.enable_delegation || options.parent.is_some(),
         manifest: Some(activated.clone()),
         executable_digest: Some(activation.executable_digest.clone()),
         pane_mode,
@@ -1529,8 +1529,8 @@ pub(crate) fn require_parent_may_delegate(
     )?;
     if !launch.delegation_enabled {
         bail!(
-            "the parent task was not started with delegation; its worker may message its \
-             owner but may not start child tasks"
+            "the parent task was not started with delegation; pass --enable-delegation \
+             when starting it to allow child tasks (workers may still message their owner)"
         );
     }
     Ok(())

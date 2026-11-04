@@ -183,9 +183,70 @@ pub(crate) fn alive(path: &Path) -> bool {
             .is_ok_and(|birth| birth == state.birth)
 }
 
+/// Stops everything under a running host. An agent's tools can sit in their own
+/// process groups, so closing the pane ends the agent and leaves them running. A
+/// Codex tool runs in Codex's shared daemon and is out of reach here.
+pub(crate) fn stop_descendants(path: &Path) {
+    if !alive(path) {
+        return;
+    }
+    let Some(state) = fs::read(path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<NativeState>(&bytes).ok())
+    else {
+        return;
+    };
+    let Ok(output) = std::process::Command::new("/bin/ps")
+        .args(["-A", "-o", "pid=,ppid="])
+        .output()
+    else {
+        return;
+    };
+    let table = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            Some((fields.next()?.parse().ok()?, fields.next()?.parse().ok()?))
+        })
+        .collect::<Vec<(u32, u32)>>();
+    for pid in descendants(&table, state.pid) {
+        let _ = std::process::Command::new("/bin/kill")
+            .args(["-TERM", &pid.to_string()])
+            .status();
+    }
+}
+
+/// Every process below `root` in a `(pid, parent)` table, children before
+/// their own children.
+fn descendants(table: &[(u32, u32)], root: u32) -> Vec<u32> {
+    let mut found = Vec::new();
+    let mut next = vec![root];
+    while let Some(parent) = next.pop() {
+        for (pid, _) in table
+            .iter()
+            .filter(|(pid, ppid)| *ppid == parent && *pid != root)
+        {
+            if !found.contains(pid) {
+                found.push(*pid);
+                next.push(*pid);
+            }
+        }
+    }
+    found
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn descendants_reach_every_level_and_nothing_else() {
+        let table = [(10, 1), (11, 10), (12, 11), (13, 12), (20, 1), (21, 20)];
+        let mut found = descendants(&table, 10);
+        found.sort_unstable();
+        assert_eq!(found, vec![11, 12, 13]);
+        assert!(descendants(&table, 13).is_empty());
+    }
 
     #[test]
     fn the_pane_shell_supplies_harness_variables_over_the_callers() {

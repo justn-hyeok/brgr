@@ -65,7 +65,7 @@ Siblings talk directly only when the user asks for a **debate**: `brgr debate st
 ## More
 
 - Parallel attempts: start the same objective on several harnesses, compare with `brgr diff TASK --stat`, accept the best and reject the rest so every pane closes.
-- Child tasks: `--enable-delegation` lets a worker start its own workers, and `--max-children <n>` caps them.
+- Child tasks: only a worker launched with `--enable-delegation` can start its own workers; pane mode does not enable it. `--max-children <n>` caps concurrent children. Owner `status` lists descendants with parent, harness, and model; ancestor owners may read child status/results but cannot accept or reject them. `cancel TASK` stops the task and descendants (`--tree` remains accepted).
 - Workspace: a clean Git repository gets a task worktree. `--snapshot-path <file>` carries chosen uncommitted files; `--evidence-file <file>` and `--capture-logs` add artifacts.
 - Isolation: to keep test tasks out of the real store, pass `--home DIR` on every brgr command. An exported `BRGR_HOME` does not reach a Codex session, whose shared daemon keeps its own environment.
 - Status: `brgr status --brief`, `brgr status TASK --tree`, `brgr cancel TASK --tree`. A different session stops a worker with `brgr cancel TASK --force` without deciding the result.
