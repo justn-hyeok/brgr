@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Creating a task worktree retries when `git worktree add` finds another worktree still being created (`failed to read .git/worktrees/…/commondir`). It used to fail the run.
 - A worker's edit could vanish from its sealed diff on Linux, so `brgr land` reported success having applied nothing. brgr
   copied the Git index before diffing and the copy got a fresh time, which told Git it could trust a file's size and
   time; an edit that kept the file's size, in the same second as the checkout, then looked unchanged. The copy now
