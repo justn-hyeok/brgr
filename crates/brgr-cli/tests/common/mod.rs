@@ -246,14 +246,20 @@ pub const INHERITED_WORKER_ENV: &[&str] = &[
 pub fn brgr_command() -> Command {
     let mut command = Command::new(brgr_binary());
     command.env("BRGR_TEST_TRUST_HERDR_PANE", "1");
+    isolate_test_command(&mut command);
+    command
+}
+
+/// Removes inherited worker/Herdr identity and supplies the isolated test PATH
+/// for any intermediary process that may execute brgr.
+pub fn isolate_test_command(command: &mut Command) {
     for name in INHERITED_WORKER_ENV {
         command.env_remove(name);
     }
-    clear_inherited_herdr_env(&mut command);
+    clear_inherited_herdr_env(command);
     // Harness children inherit PATH (but the runner removes HERDR_BIN_PATH),
     // so put a failing Herdr stub first while preserving every existing tool.
     command.env("PATH", test_path());
-    command
 }
 
 /// PATH used by intermediary test processes that may launch the brgr binary.

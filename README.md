@@ -119,10 +119,9 @@ brgr land TASK --workspace . --reason "criteria verified"   # code: check, accep
 ## Status
 
 v2 is the current release line. Its author uses it daily, on macOS only, and
-it changes quickly; see the [changelog](CHANGELOG.md). Two checks from its
-readiness record are still open: concurrency across several processes at once,
-and a full review of the code by someone other than the author. See
-[the readiness status](docs/readiness/status.md).
+it changes quickly; see the [changelog](CHANGELOG.md). One check from its
+readiness record is still open: a full review of the code by someone other than
+the author. See [the readiness status](docs/readiness/status.md).
 
 The [execution model roadmap](docs/guides/roadmap.md) plans continuity foundations,
 Head Migration, and Dynamic Workflows while preserving the existing run contract.
