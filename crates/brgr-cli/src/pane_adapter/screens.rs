@@ -131,6 +131,18 @@ pub(super) fn classify(screen: &str, workspace: &Path) -> Screen {
             keys,
         };
     }
+    // Claude Code's first-run offer has its cursor on "Yes, try it".
+    if let Some(selected) = selected
+        && lower.contains("try the new fullscreen renderer?")
+        && let Some(skip) = options.iter().position(|option| is_skip(&option.text))
+    {
+        let mut keys = keys_between(selected, skip);
+        keys.push("enter");
+        return Screen::Resolve {
+            rule: "renderer-offer-skip",
+            keys,
+        };
+    }
     if selected.is_none() {
         return if has_continue_notice(screen) {
             Screen::Resolve {
@@ -705,6 +717,31 @@ mod tests {
                 keys: vec!["enter"],
             }
         );
+    }
+
+    /// Captured from Claude Code 2.1.318 on its first run in a Herdr pane; the
+    /// cursor starts on "Yes, try it".
+    const CLAUDE_RENDERER_OFFER: &str =
+        include_str!("../../../../testdata/fixtures/screens/claude-2.1.318-renderer-offer.txt");
+
+    #[test]
+    fn claudes_renderer_offer_is_declined_by_moving_to_not_now() {
+        assert_eq!(
+            classify(CLAUDE_RENDERER_OFFER, Path::new("/somewhere")),
+            Screen::Resolve {
+                rule: "renderer-offer-skip",
+                keys: vec!["down", "enter"],
+            }
+        );
+    }
+
+    #[test]
+    fn a_question_about_a_fullscreen_renderer_without_that_offer_is_not_answered() {
+        let screen = "Should the fullscreen renderer be the default?\n❯ 1. Yes\n  2. Not now\n";
+        assert!(matches!(
+            classify(screen, Path::new("/somewhere")),
+            Screen::Unknown(_)
+        ));
     }
 
     /// Captured from GitHub Copilot CLI 1.0.86 in a Herdr pane.
