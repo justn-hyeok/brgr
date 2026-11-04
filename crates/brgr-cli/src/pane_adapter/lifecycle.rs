@@ -170,6 +170,7 @@ pub(crate) fn stop_external(
         legacy_embedded_route_observation: None,
         route_observation: Some(brgr_protocol::RouteObservation::unavailable()),
         unresolved_effects: Vec::new(),
+        slept_seconds: None,
     };
     if let Some(model) =
         crate::session_model::pane_session_model(paths, &attempt.task, attempt.attempt_id)

@@ -147,6 +147,7 @@ mod tests {
             cancelled: false,
             output_truncated: false,
             elapsed: Duration::ZERO,
+            slept_seconds: None,
         }
     }
 

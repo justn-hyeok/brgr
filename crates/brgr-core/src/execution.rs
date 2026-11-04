@@ -275,6 +275,10 @@ fn finish_execution_result(
             reason,
             execution.as_ref().ok(),
         );
+        result.slept_seconds = execution
+            .as_ref()
+            .ok()
+            .and_then(|output| output.slept_seconds);
         result.unresolved_effects.push(
             "The separately launched worker may still be running or may have caused external effects"
                 .to_owned(),
@@ -333,6 +337,7 @@ fn finish_execution_result(
                 artifacts,
                 None,
             );
+            result.slept_seconds = output.slept_seconds;
             result.unresolved_effects.extend(unresolved_effects);
             if let Some(observation) = route_observation(manifest, observed_model) {
                 result.route_observation = Some(observation);
@@ -479,6 +484,7 @@ pub(crate) fn terminal_with_requested_logs(
     }
     let mut result = result_for(spec, attempt_id, outcome, artifacts, Some(error));
     result.unresolved_effects = unresolved_effects;
+    result.slept_seconds = output.and_then(|value| value.slept_seconds);
     result
 }
 
@@ -572,6 +578,7 @@ pub(crate) fn result_for(
         legacy_embedded_route_observation: None,
         route_observation: Some(RouteObservation::unavailable()),
         unresolved_effects: vec![],
+        slept_seconds: None,
     }
 }
 
@@ -599,6 +606,7 @@ mod failure_reason_tests {
             cancelled: false,
             output_truncated: false,
             elapsed: std::time::Duration::ZERO,
+            slept_seconds: None,
         }
     }
 

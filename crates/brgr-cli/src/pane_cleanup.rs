@@ -370,6 +370,7 @@ mod tests {
             legacy_embedded_route_observation: None,
             route_observation: None,
             unresolved_effects: vec![],
+            slept_seconds: None,
         };
         mark_pending(temp.path(), task_id, &result).unwrap();
         let saved: PaneReceipt =
@@ -414,6 +415,7 @@ mod tests {
             legacy_embedded_route_observation: None,
             route_observation: None,
             unresolved_effects: vec![],
+            slept_seconds: None,
         };
         mark_pending(temp.path(), task_id, &result).unwrap();
         let store = Store::open(temp.path().join("store")).unwrap();
@@ -479,6 +481,7 @@ mod tests {
             legacy_embedded_route_observation: None,
             route_observation: None,
             unresolved_effects: vec![],
+            slept_seconds: None,
         };
         store.commit_terminal_result(&owner_id, &result).unwrap();
         store.bind_owner(&owner_id, "session-a", 1).unwrap();
@@ -679,6 +682,7 @@ mod tests {
             legacy_embedded_route_observation: None,
             route_observation: None,
             unresolved_effects: vec![],
+            slept_seconds: None,
         };
         store.commit_terminal_result(&owner_id, &result).unwrap();
         let receipt = PaneReceipt {

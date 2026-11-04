@@ -362,6 +362,7 @@ impl Supervisor {
                 cancelled: false,
                 output_truncated: false,
                 elapsed: std::time::Duration::ZERO,
+                slept_seconds: None,
             };
             match evidence::seal_requested_evidence(&self.store, &spec, &output) {
                 Ok((mut evidence, unresolved_effects)) => {

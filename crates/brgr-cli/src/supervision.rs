@@ -408,6 +408,7 @@ pub(crate) fn record_unstarted_terminal(
         } else {
             vec![]
         },
+        slept_seconds: None,
     };
     store.commit_terminal_result_final(&task.owner_id, &result)?;
     crate::error_memo::record_result(paths, &task.route.harness_id, &result);

@@ -495,6 +495,9 @@ pub(crate) struct RunArgs {
     pub(crate) capabilities: CapabilityArgs,
     #[command(flatten)]
     pub(crate) evidence: EvidenceArgs,
+    /// Deadline in seconds. A headless run counts awake time, so machine sleep
+    /// extends it, and its result records a gap over 60 seconds as
+    /// `slept_seconds`. A pane run's deadline is wall-clock time.
     #[arg(long)]
     pub(crate) deadline_seconds: Option<u64>,
     #[arg(long)]
