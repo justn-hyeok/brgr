@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Tests only: warming a fake executable retries `ETXTBSY`, which failed one Linux run in twenty when a `fork` in another
+  test thread still held the file open for writing.
 - `brgr run --objective-file PATH` accepts objectives up to 256 KiB without putting them in a single process argument; the workflow SDK uses and removes a private temporary file for tasks over 64 KiB (issue #229).
 - On Linux, caller pane verification now reads `HERDR_PANE_ID` from the ancestor's bounded `/proc/<pid>/environ` file instead of using macOS-only `ps -E`.
 - Tests only: the three slowest tests no longer wait out real intervals, which removes about two minutes from a
