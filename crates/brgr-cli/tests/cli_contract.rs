@@ -189,6 +189,171 @@ fn fixture_home() -> (TempDir, PathBuf, PathBuf) {
     (temp, home, workspace)
 }
 
+#[test]
+fn aliases_expand_immutably_and_support_korean_names() {
+    let (_temp, home, workspace) = fixture_home();
+    let set = run(
+        &home,
+        &[
+            "config",
+            "alias",
+            "set",
+            "코덱",
+            "--harness",
+            "local.fixture",
+            "--model",
+            "fixture-model",
+            "--effort",
+            "low",
+        ],
+        &[],
+    );
+    assert!(
+        set.status.success(),
+        "{}",
+        String::from_utf8_lossy(&set.stderr)
+    );
+    let listed = run(&home, &["config", "alias", "list"], &[]);
+    assert!(String::from_utf8_lossy(&listed.stdout).contains("코덱"));
+    let launched = run(
+        &home,
+        &[
+            "run",
+            "BRGR_FIXTURE_OK",
+            "--use",
+            "코덱",
+            "--workspace",
+            workspace.to_str().unwrap(),
+            "--foreground",
+        ],
+        &[],
+    );
+    assert!(
+        launched.status.success(),
+        "{}",
+        String::from_utf8_lossy(&launched.stderr)
+    );
+    let receipt = json_output(&launched);
+    let task = receipt["task_id"].as_str().unwrap();
+    let status = run(&home, &["status", task, "--verbose", "--observe"], &[]);
+    assert!(
+        status.status.success(),
+        "{}",
+        String::from_utf8_lossy(&status.stderr)
+    );
+    let detail: Value = serde_json::from_slice(&status.stdout).unwrap();
+    assert_eq!(detail["task"]["route"]["harness_id"], "local.fixture");
+    assert_eq!(detail["task"]["route"]["requested_model"], "fixture-model");
+    let changed = run(
+        &home,
+        &[
+            "config",
+            "alias",
+            "set",
+            "코덱",
+            "--harness",
+            "local.fixture",
+            "--model",
+            "changed-model",
+        ],
+        &[],
+    );
+    assert!(
+        changed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&changed.stderr)
+    );
+    let unchanged = run(&home, &["status", task, "--verbose", "--observe"], &[]);
+    let detail: Value = serde_json::from_slice(&unchanged.stdout).unwrap();
+    assert_eq!(detail["task"]["route"]["requested_model"], "fixture-model");
+    let removed = run(&home, &["config", "alias", "remove", "코덱"], &[]);
+    assert!(
+        removed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&removed.stderr)
+    );
+    assert!(
+        !String::from_utf8_lossy(&run(&home, &["config", "alias", "list"], &[]).stdout)
+            .contains("코덱")
+    );
+}
+
+#[test]
+fn unknown_alias_creates_no_task_and_conflicts_with_route_flags() {
+    let (_temp, home, workspace) = fixture_home();
+    let unknown = run(
+        &home,
+        &[
+            "run",
+            "BRGR_FIXTURE_OK",
+            "--use",
+            "missing",
+            "--workspace",
+            workspace.to_str().unwrap(),
+        ],
+        &[],
+    );
+    assert!(!unknown.status.success());
+    let stderr = String::from_utf8_lossy(&unknown.stderr);
+    assert!(
+        stderr.contains("unknown alias missing") && stderr.contains("(none)"),
+        "{stderr}"
+    );
+    let conflict = run(
+        &home,
+        &["run", "BRGR_FIXTURE_OK", "--use", "missing", "--model", "m"],
+        &[],
+    );
+    assert!(!conflict.status.success());
+    assert!(String::from_utf8_lossy(&conflict.stderr).contains("cannot be used with"));
+    let tasks = run(&home, &["status", "--brief"], &[]);
+    assert_eq!(json_output(&tasks), json!([]));
+}
+
+#[test]
+fn alias_set_refuses_unregistered_harness_and_preserves_existing_config() {
+    let (_temp, home, _workspace) = fixture_home();
+    let config = home.join("config.toml");
+    fs::write(
+        &config,
+        "[herdr]\nauto_worker_pane = true\n\n[defaults]\neffort = \"high\"\n",
+    )
+    .unwrap();
+    let refused = run(
+        &home,
+        &["config", "alias", "set", "x", "--harness", "local.unknown"],
+        &[],
+    );
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("not registered"));
+    let set = run(
+        &home,
+        &["config", "alias", "set", "x", "--harness", "local.fixture"],
+        &[],
+    );
+    assert!(
+        set.status.success(),
+        "{}",
+        String::from_utf8_lossy(&set.stderr)
+    );
+    let written = fs::read_to_string(&config).unwrap();
+    assert!(
+        written.contains("auto_worker_pane = true") && written.contains("effort = \"high\""),
+        "{written}"
+    );
+    let removed = run(&home, &["config", "alias", "remove", "x"], &[]);
+    assert!(
+        removed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&removed.stderr)
+    );
+    let written = fs::read_to_string(&config).unwrap();
+    assert!(
+        written.contains("auto_worker_pane = true") && written.contains("[defaults]"),
+        "{written}"
+    );
+}
+
 /// An echo harness returns the prompt it was given. The objective must still be
 /// its exact first line — some harnesses key on it, OMP on `FROM CODEX` — and
 /// the owner-messaging brief must follow, since every worker may ask.

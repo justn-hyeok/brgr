@@ -1,6 +1,7 @@
 mod admission;
 #[cfg(test)]
 mod adversary;
+mod aliases;
 mod bridge_host;
 mod caller_pane;
 mod cli;
@@ -403,7 +404,90 @@ async fn deliver_notice(paths: &Paths, command: Command) -> Result<()> {
     }
 }
 
+async fn config_alias_command(
+    paths: &Paths,
+    command: &cli::AliasCommand,
+    json_output: bool,
+) -> Result<()> {
+    use cli::AliasCommand;
+    let mut config = Config::load(&paths.config)?;
+    match command {
+        AliasCommand::List => {
+            if json_output {
+                print_value(&serde_json::to_value(aliases::list(&config))?, true);
+            } else if aliases::list(&config).is_empty() {
+                println!("No aliases configured.");
+            } else {
+                for (name, alias) in aliases::list(&config) {
+                    println!(
+                        "{name}: harness={}{}{}",
+                        alias.harness,
+                        alias
+                            .model
+                            .as_ref()
+                            .map(|value| format!(" model={value}"))
+                            .unwrap_or_default(),
+                        alias
+                            .effort
+                            .as_ref()
+                            .map(|value| format!(" effort={value}"))
+                            .unwrap_or_default()
+                    );
+                }
+            }
+        }
+        AliasCommand::Remove { name } => {
+            aliases::remove(&mut config, name)?;
+            config.save(&paths.config)?;
+        }
+        AliasCommand::Set {
+            name,
+            harness,
+            model,
+            effort,
+        } => {
+            let registry =
+                brgr_registry::Registry::open_with_control_home(&paths.registry, &paths.home)?;
+            let registered = registry.registered_harness_ids()?;
+            if !registered.iter().any(|id| id == harness) {
+                bail!(
+                    "harness {harness} is not registered; registered: {}",
+                    registered.join(", ")
+                );
+            }
+            if let Some(model) = model {
+                match registry.preflight_registered_model(harness, model).await {
+                    Ok(()) => {}
+                    Err(
+                        error @ (brgr_registry::RegistryError::ModelCatalogMissing(_)
+                        | brgr_registry::RegistryError::ModelCatalogExecutableMissing(_)
+                        | brgr_registry::RegistryError::InvalidModelCatalog
+                        | brgr_registry::RegistryError::ModelCatalogProbeFailed { .. }),
+                    ) => eprintln!(
+                        "brgr: could not read model catalog for {harness}: {error}; accepting model {model}"
+                    ),
+                    Err(error) => return Err(error.into()),
+                }
+            }
+            aliases::set(
+                &mut config,
+                name,
+                aliases::Alias {
+                    harness: harness.clone(),
+                    model: model.clone(),
+                    effort: effort.clone(),
+                },
+            )?;
+            config.save(&paths.config)?;
+        }
+    }
+    Ok(())
+}
+
 async fn config_command(paths: &Paths, command: &ConfigCommand, json_output: bool) -> Result<()> {
+    if let ConfigCommand::Alias { command } = command {
+        return config_alias_command(paths, command, json_output).await;
+    }
     let mut config = Config::load(&paths.config)?;
     match command {
         ConfigCommand::Init => return config::initialize(paths, json_output),
@@ -417,6 +501,7 @@ async fn config_command(paths: &Paths, command: &ConfigCommand, json_output: boo
         }
         ConfigCommand::Check => return config::check(paths, &config, json_output).await,
         ConfigCommand::Show => {}
+        ConfigCommand::Alias { .. } => unreachable!("handled above"),
         ConfigCommand::SetCodexExecutable { executable } => {
             config::validate_codex_executable(executable)?;
             config.herdr.codex_executable = Some(executable.clone());

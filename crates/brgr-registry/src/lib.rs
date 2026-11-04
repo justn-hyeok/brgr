@@ -751,6 +751,23 @@ impl Registry {
         Ok(())
     }
 
+    /// Validates a model against a registered harness catalog.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RegistryError`] if the harness is unknown or the catalog is
+    /// unavailable, malformed, or does not contain the requested model.
+    pub async fn preflight_registered_model(
+        &self,
+        harness_id: &str,
+        requested: &str,
+    ) -> Result<(), RegistryError> {
+        validate_harness_id(harness_id)?;
+        let manifest: HarnessManifest =
+            serde_json::from_slice(&fs::read(self.manifest_path(harness_id))?)?;
+        self.preflight_model(&manifest, Some(requested)).await
+    }
+
     fn persist_activation(
         &self,
         manifest: &HarnessManifest,
