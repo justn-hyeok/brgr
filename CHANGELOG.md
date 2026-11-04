@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Behavior change:** a pane agent that stops by itself and writes no report even after a reminder now ends `failed`, not `lost`, so a workflow's `retries` can run it again. A pane or process that disappeared stays `lost` (issue #225).
+
 ## 2.15.18 — 2026-11-05
 
 brgr now runs on x86_64 Linux with real agents, debate no longer stalls, and a worker's children have a real boundary. GJC is gone.

@@ -256,6 +256,45 @@ fn delegated_pane_finish(
 }
 
 #[test]
+fn only_an_agent_that_gave_no_report_fails_where_other_pane_ends_stay_lost() {
+    let output = ExecutionOutput {
+        exit_code: Some(crate::AGENT_GAVE_NO_REPORT_EXIT),
+        stdout: vec![],
+        stderr: b"Error: the agent finished without writing its report\n".to_vec(),
+        result: vec![],
+        observed_model: None,
+        timed_out: false,
+        cancelled: false,
+        output_truncated: false,
+        elapsed: Duration::from_millis(1),
+        slept_seconds: None,
+    };
+    let result = delegated_pane_finish(output.clone(), None);
+    assert_eq!(result.outcome, TerminalOutcome::Failed);
+    assert!(result.unresolved_effects.is_empty());
+    assert!(result.error.unwrap().contains("without writing its report"));
+
+    for other in [
+        ExecutionOutput {
+            exit_code: Some(1),
+            ..output.clone()
+        },
+        ExecutionOutput {
+            timed_out: true,
+            ..output.clone()
+        },
+        ExecutionOutput {
+            cancelled: true,
+            ..output
+        },
+    ] {
+        let result = delegated_pane_finish(other, None);
+        assert_eq!(result.outcome, TerminalOutcome::Lost);
+        assert!(!result.unresolved_effects.is_empty());
+    }
+}
+
+#[test]
 fn a_run_records_the_model_its_own_session_log_names() {
     let output = ExecutionOutput {
         exit_code: Some(0),

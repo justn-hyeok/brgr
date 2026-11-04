@@ -358,7 +358,7 @@ async fn execute(paths: &Paths, command: Command, json_output: bool) -> Result<(
         command @ (Command::Notify { .. } | Command::NotifyWorkflow { .. }) => {
             deliver_notice(paths, command).await
         }
-        Command::PaneRun(args) => pane_adapter::run_pane_adapter(paths, &args),
+        Command::PaneRun(args) => pane_adapter::pane_run_command(paths, &args),
         Command::TuiHost { config } => tui_host::run(&config),
         Command::Session { task } => pane_adapter::serve_session(paths, task),
         Command::SealReport { task, revision } => {

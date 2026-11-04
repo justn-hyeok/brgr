@@ -292,11 +292,13 @@ result exists, whether a decision exists). `brgr status --brief --json` is a
 compact array with keys `task_id`, `state`, `harness`, `elapsed_seconds`,
 `objective_head`.
 
-`--deadline-seconds` counts awake time for a headless run, on macOS and on Linux,
-so machine sleep extends the wall-clock duration before the run times out. When
-wall-clock time exceeds awake time by more than 60 seconds, the sealed result
-records the gap as `slept_seconds`. A pane run's deadline is wall-clock time, so
-it includes machine sleep and its result has no such field.
+`--deadline-seconds` counts awake time for a pane or headless run, on macOS and on
+Linux, so machine sleep extends the wall-clock duration before the run times out.
+When wall-clock time exceeds awake time by more than 60 seconds, the sealed result
+records the gap as `slept_seconds`. Two places still use wall-clock time: the time
+remaining in `status --tree`, and the recovery of a pane run whose supervisor died,
+which has no awake clock to read and stops the worker once the wall clock passes
+its deadline.
 
 Install the local binary and Codex integration, then start a new Codex session:
 
@@ -780,7 +782,9 @@ deadline never fails the run; the script decides what to do with `timed_out`.
 default 0. Nothing is retried unless the script sets it. A retry happens only
 when the sealed outcome is exactly `failed`. `lost`, `cancelled`, a deadline
 `timed_out`, and any unrecognized outcome are returned as they are and never
-retried: a run of uncertain state may have side effects. Each retry is a new
+retried: a run of uncertain state may have side effects. A pane agent that stops
+by itself and writes no report even after one reminder is `failed`, so it is
+retried; one whose pane or process disappeared is `lost`, so it is not. Each retry is a new
 journaled step whose key is the base key plus a reserved suffix (`KEY~retry1`,
 then `KEY~retry2`, `KEY~retry3`). User keys cannot contain `~`. A resumed
 script replays each journaled attempt and does not launch a key that already
