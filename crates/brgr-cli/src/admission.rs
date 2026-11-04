@@ -151,17 +151,40 @@ pub(crate) async fn run_task(paths: &Paths, mut args: RunArgs, json_output: bool
     let _awake = crate::sleep_guard::keep_awake();
     let config = Config::load(&paths.config)?;
     let registry = Registry::open_with_control_home(&paths.registry, &paths.home)?;
+    let selected_alias = if let Some(name) = args.use_alias.take() {
+        Some(
+            crate::aliases::get(&config, &name)
+                .cloned()
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "unknown alias {name}; known aliases: {}",
+                        crate::aliases::known(crate::aliases::list(&config))
+                    )
+                })?,
+        )
+    } else {
+        None
+    };
     let harness = default_harness(
         &registry,
-        args.harness
-            .take()
-            .or(config.defaults.harness.clone())
+        selected_alias
+            .as_ref()
+            .map(|alias| alias.harness.clone())
+            .or_else(|| args.harness.take().or(config.defaults.harness.clone()))
             .as_deref(),
     )?;
     let mut calling = config.calling(&harness);
     warn_stored_permissions(&config);
-    calling.model = args.model.take().or(calling.model);
-    calling.effort = args.effort.take().or(calling.effort);
+    calling.model = selected_alias
+        .as_ref()
+        .and_then(|alias| alias.model.clone())
+        .or_else(|| args.model.take())
+        .or(calling.model);
+    calling.effort = selected_alias
+        .as_ref()
+        .and_then(|alias| alias.effort.clone())
+        .or_else(|| args.effort.take())
+        .or(calling.effort);
     calling.permission = ignored_permission(args.permission.is_some());
     calling.deadline_seconds = args.deadline_seconds.or(calling.deadline_seconds);
     config::validate_argv(&calling.argv)?;
@@ -219,7 +242,15 @@ pub(crate) async fn run_task(paths: &Paths, mut args: RunArgs, json_output: bool
     };
     spec.validate()?;
     activated.validate_task_route(&spec)?;
-    preflight_with_notice(&registry, &activated, &spec).await?;
+    preflight_with_notice(
+        &registry,
+        &activated,
+        &spec,
+        selected_alias
+            .as_ref()
+            .is_some_and(|alias| alias.model.is_some()),
+    )
+    .await?;
     let mode = resolve_execution_mode(requested_mode, &activated, &spec)?;
     with_slow_notice(
         "preparing the worktree and starting the worker",
@@ -296,12 +327,31 @@ async fn preflight_with_notice(
     registry: &Registry,
     activated: &HarnessManifest,
     spec: &TaskSpec,
+    alias_selected: bool,
 ) -> Result<()> {
-    with_slow_notice(
+    let result = with_slow_notice(
         "checking the requested model against the harness catalog",
         registry.preflight_model(activated, spec.route.requested_model.as_deref()),
     )
-    .await?;
+    .await;
+    if let Err(error) = result {
+        if alias_selected
+            && matches!(
+                error,
+                brgr_registry::RegistryError::ModelCatalogMissing(_)
+                    | brgr_registry::RegistryError::ModelCatalogExecutableMissing(_)
+                    | brgr_registry::RegistryError::InvalidModelCatalog
+                    | brgr_registry::RegistryError::ModelCatalogProbeFailed { .. }
+            )
+        {
+            eprintln!(
+                "brgr: could not read model catalog for {}; continuing with the model saved in the alias",
+                spec.route.harness_id
+            );
+        } else {
+            return Err(error.into());
+        }
+    }
     Ok(())
 }
 

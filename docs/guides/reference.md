@@ -185,6 +185,15 @@ created. Set `brgr config set worker-placement tab` for new tabs or `adjacent`
 for a split beside the exact caller. Settings live at `$BRGR_HOME/config.toml`
 and do not move existing panes. Legacy auto-worker settings remain readable.
 
+Named routes live under `[aliases]` in `config.toml`; each entry stores a
+registered harness and optional exact model and effort. Manage them with
+`brgr config alias set NAME --harness ID` (optionally add `--model MODEL` and
+`--effort EFFORT`), `brgr config alias list`, and
+`brgr config alias remove NAME`. Select one with
+`brgr run OBJECTIVE --use NAME`. The run stores the expanded route, so later
+alias edits do not change existing tasks. Names may contain Korean text but
+cannot contain whitespace or control characters or start with `-`.
+
 A worker receives `$BRGR_BIN`, its exact task/attempt identity, and a scoped
 owner session. It may call `brgr run OBJECTIVE` again to create a child; brgr records the
 parent edge and delivers the child result to that worker's inbox. The parent

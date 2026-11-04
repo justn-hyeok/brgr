@@ -50,6 +50,8 @@ pub struct Config {
     pub defaults: CallingOptions,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub harnesses: BTreeMap<String, CallingOptions>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub aliases: BTreeMap<String, crate::aliases::Alias>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]

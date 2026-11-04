@@ -413,6 +413,28 @@ pub(crate) enum ConfigCommand {
     },
     /// Stop telling heads to hand off.
     ClearHandoffCondition,
+    /// Create, list, or remove named harness/model routes.
+    Alias {
+        #[command(subcommand)]
+        command: AliasCommand,
+    },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum AliasCommand {
+    Set {
+        name: String,
+        #[arg(long)]
+        harness: String,
+        #[arg(long)]
+        model: Option<String>,
+        #[arg(long)]
+        effort: Option<String>,
+    },
+    List,
+    Remove {
+        name: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -485,6 +507,8 @@ pub(crate) struct RunArgs {
     pub(crate) model: Option<String>,
     #[arg(long)]
     pub(crate) effort: Option<String>,
+    #[arg(long = "use", conflicts_with_all = ["harness", "model", "effort"])]
+    pub(crate) use_alias: Option<String>,
     #[arg(long = "criterion")]
     pub(crate) criteria: Vec<String>,
     #[arg(long = "scope")]
