@@ -1,0 +1,18 @@
+ ▐▛███▛█   Claude Code v2.1.318
+▝▜██████▀  Haiku 5.5 · Claude Max
+ ▝▝   ▝▝   ~/repo
+
+▎ [✻] [✻] [✻] · Share Claude Code and earn $10 in usage credits · /passes
+  1 more notice hidden
+
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Try the new fullscreen renderer?
+
+  · Flicker-free output
+  · Mouse support — click to move your cursor or expand results
+  · Selected text auto-copies to your clipboard
+
+  ❯ 1. Yes, try it
+    2. Not now
+
+  Enter to confirm · Esc to cancel
