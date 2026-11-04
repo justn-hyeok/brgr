@@ -145,7 +145,7 @@ of the task objective and is local display text only. Change it with
 `brgr config set pane-name-template TEMPLATE`, restore the default with
 `brgr config clear-pane-name-template`, or set an empty template to stop naming
 panes.
-Owned-workspace trust, "press Enter to continue" notices, update offers (skipped), Claude Code's fullscreen renderer offer (declined) and an applied self-update are answered automatically; any other screen is reported and fails the run after three minutes. Other native
+Owned-workspace trust, "press Enter to continue" notices, update offers (skipped), Claude Code's fullscreen renderer offer (declined), Codex's hook review (trusted) and an applied self-update are answered automatically; any other screen is reported and fails the run after three minutes. Other native
 input uses `brgr input TASK --key KEY` or `--text TEXT`; conversation messages
 stay queued while the TUI is busy or displaying a native dialog.
 
