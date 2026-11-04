@@ -66,6 +66,16 @@ headless. The separate `local.omp-herdr` route retains its legacy
 | `local.omp-herdr` presentation | Optional best effort; external worker stop is not certified and uncertain failure is `lost` |
 | Resume, in-flight steering, provider-side undo | Deferred; unsupported requests must fail rather than silently fall back |
 
+### Harness tiers
+
+| Tier | Harnesses | What it means |
+|---|---|---|
+| 1 | Claude Code, Codex CLI, Cursor CLI, Devin CLI | Each release runs a real round through it first, and a failure stops the release |
+| 2 | Command Code, OMP, OpenCode, Cline | The recipe and screen rules are kept up, and it runs for real when its recipe changes. Bugs get fixed but do not stop a release |
+| 3 | GitHub Copilot CLI, Gemini CLI, Pi | The recipe and contract tests only, with fixes on report |
+
+Devin CLI is a worker only: it cannot be an owner.
+
 `local.devin` runs `devin` in documented prompt-file print mode with smart
 permissions and the non-interactive workspace-trust override. When the installed
 CLI documents `--model <MODEL>`, `brgr run OBJECTIVE --model MODEL` passes that
