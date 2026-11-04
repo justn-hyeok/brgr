@@ -1463,7 +1463,7 @@ mod tests {
         let cancel = workspace.path().join("cancel");
         std::fs::write(&cancel, b"cancel").unwrap();
         let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../testdata/fixtures/gjc")
+            .join("../../testdata/fixtures/brgr-fixture")
             .canonicalize()
             .unwrap();
         let mut manifest = echo_manifest(4_096);

@@ -359,15 +359,15 @@ pub fn json_output(output: &std::process::Output) -> Value {
     serde_json::from_slice(&output.stdout).unwrap()
 }
 
-/// The gjc fixture harness every contract test registers.
-pub fn gjc_fixture() -> PathBuf {
+/// The deterministic fixture harness every contract test registers.
+pub fn brgr_fixture() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../testdata/fixtures/gjc")
+        .join("../../testdata/fixtures/brgr-fixture")
         .canonicalize()
         .unwrap()
 }
 
-/// Certifies the gjc fixture against `scratch` so `local.gjc` can be run.
+/// Certifies the deterministic fixture against `scratch` so `local.fixture` can be run.
 pub fn add_fixture(home: &Path, fixture: &Path, scratch: &Path) {
     fs::create_dir_all(scratch).unwrap();
     let receipt = json_output(&run(

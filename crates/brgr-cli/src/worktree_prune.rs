@@ -8,7 +8,7 @@
 //! the only safety authority. `git worktree remove` refuses a worktree with
 //! modified or untracked files, and is forced only when brgr has shown every
 //! such change is disposable: an untracked tool-state or cache directory
-//! (`.gjc/`, `.commandcode/`, `.agent-progress/`, `.build/` and the like), or a
+//! (`.fixture/`, `.commandcode/`, `.agent-progress/`, `.build/` and the like), or a
 //! worktree whose patch is byte-for-byte the diff the store sealed with the
 //! result. A task branch goes when every commit on it
 //! survives elsewhere: in `HEAD`, or on another branch or remote-tracking
@@ -701,7 +701,7 @@ const DISPOSABLE: [&str; 13] = [
     ".mypy_cache",
     ".venv",
     ".gradle",
-    ".gjc",
+    ".fixture",
     ".commandcode",
     ".agent-progress",
     ".build",
@@ -710,7 +710,7 @@ const DISPOSABLE: [&str; 13] = [
 /// The worker tool-state directories. Unlike the package managers' and
 /// compilers' directories above, these are disposable even when git lists them
 /// as untracked, because a worker harness writes them and nothing else does.
-const TOOL_STATE: [&str; 4] = [".gjc", ".commandcode", ".agent-progress", ".build"];
+const TOOL_STATE: [&str; 4] = [".fixture", ".commandcode", ".agent-progress", ".build"];
 
 /// An untracked directory a worker tool owns, or a file git listed inside one.
 /// `--untracked-files=all` reports files, not the enclosing untracked
@@ -1701,16 +1701,16 @@ mod tests {
 
     #[test]
     fn only_an_untracked_harness_directory_is_a_cache() {
-        assert!(harness_cache("?? .gjc/"));
+        assert!(harness_cache("?? .fixture/"));
         assert!(harness_cache("?? .commandcode/"));
         assert!(harness_cache("?? .agent-progress/"));
         assert!(harness_cache("?? .build/"));
-        assert!(harness_cache("?? .gjc/session.json"));
+        assert!(harness_cache("?? .fixture/session.json"));
         assert!(!harness_cache("?? .claude/"));
         assert!(!harness_cache("?? .cursor/"));
-        assert!(!harness_cache(" M .gjc/config.json"));
+        assert!(!harness_cache(" M .fixture/config.json"));
         assert!(!harness_cache("?? src/main.rs"));
-        assert!(!harness_cache("?? .gjcx/"));
+        assert!(!harness_cache("?? .fixturex/"));
         assert!(!harness_cache("?? .build"));
         assert!(!harness_cache("?? .build-notes.txt"));
         assert!(!harness_cache("?? .buildx/"));
@@ -1722,7 +1722,7 @@ mod tests {
         assert!(regenerable("node_modules/"));
         assert!(regenerable("packages/web/.next/"));
         assert!(regenerable("target/"));
-        assert!(regenerable(".gjc/"));
+        assert!(regenerable(".fixture/"));
         assert!(regenerable(".commandcode/"));
         assert!(regenerable(".agent-progress/"));
         assert!(regenerable(".build/"));
@@ -1750,7 +1750,7 @@ mod tests {
             ".agent-progress/",
             ".build/",
             ".commandcode/",
-            ".gjc/",
+            ".fixture/",
             "ios/.build/",
         ] {
             assert!(regenerable(path), "{path}");
@@ -1779,7 +1779,7 @@ mod tests {
         for status in [
             "?? vendor/.build/x",
             "?? .agent-progress/state.json",
-            "?? a/b/.gjc/c",
+            "?? a/b/.fixture/c",
         ] {
             assert!(harness_cache(status), "{status}");
         }

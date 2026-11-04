@@ -31,10 +31,10 @@ impl Fixture {
         fs::create_dir_all(&scratch).unwrap();
         fs::create_dir_all(&logs).unwrap();
         let fixture_source = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../testdata/fixtures/gjc")
+            .join("../../testdata/fixtures/brgr-fixture")
             .canonicalize()
             .unwrap();
-        let fixture = temp.path().join("gjc");
+        let fixture = temp.path().join("fixture");
         let fixture_text = fs::read_to_string(&fixture_source).unwrap();
         let marker = "# A worker that leaves a file of its own, or only its harness cache.";
         let wait = r#"if [ -n "$prompt_file" ] && /usr/bin/grep -q 'CONCURRENCY_RELEASE' "$prompt_file"; then
@@ -76,7 +76,7 @@ fi
                 "run",
                 "SLOW concurrency settle",
                 "--harness",
-                "local.gjc",
+                "local.fixture",
                 "--workspace",
             ])
             .arg(&self.scratch)
@@ -106,7 +106,7 @@ fi
                 "run",
                 prompt,
                 "--harness",
-                "local.gjc",
+                "local.fixture",
                 "--workspace",
             ])
             .arg(&self.scratch)
@@ -452,7 +452,7 @@ fn concurrent_status_watch_reconcile_crash_windows_once() {
                 "run",
                 "BRGR_FIXTURE_OK",
                 "--harness",
-                "local.gjc",
+                "local.fixture",
                 "--workspace",
             ])
             .arg(&f.scratch)

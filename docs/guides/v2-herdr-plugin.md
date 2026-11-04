@@ -1,5 +1,7 @@
 # brgr v2 Herdr plugin contract
 
+GJC support has since been removed; the run records below are historical.
+
 The public v2 package is `herdr-plugin.toml` plus the Rust `brgr` binary built
 from this repository. Herdr is the workspace and pane host. The v1 managed-run
 path remains available through the same binary: fresh bounded execution,

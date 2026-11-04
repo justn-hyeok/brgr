@@ -394,7 +394,7 @@ mod tests {
         let rows = vec![row(
             "2b2c279a-b8e1-43a8-846c-cb8344a301d7",
             "terminal",
-            "local.gjc",
+            "local.fixture",
             Some(940),
             "Review this change",
         )];
@@ -403,7 +403,7 @@ mod tests {
         assert_eq!(lines.len(), 1, "{text}");
         assert!(lines[0].starts_with("2b2c279a-b8e1-43a8-846c-cb8344a301d7"));
         assert!(lines[0].contains("terminal"));
-        assert!(lines[0].contains("local.gjc"));
+        assert!(lines[0].contains("local.fixture"));
         assert!(lines[0].contains("1m"));
         assert!(lines[0].contains("Review this change"));
         assert!(!text.contains('\u{1b}'));
@@ -439,7 +439,7 @@ mod tests {
             row(
                 "2b2c279a-b8e1-43a8-846c-cb8344a301d7",
                 "terminal",
-                "local.gjc",
+                "local.fixture",
                 Some(940),
                 "Review this change",
             ),
@@ -461,7 +461,7 @@ mod tests {
         assert!(lines[0].contains("OBJECTIVE"), "{text}");
         assert_eq!(&lines[1][..8], "2b2c279a");
         assert!(lines[1].contains("terminal"));
-        assert!(lines[1].contains("local.gjc"));
+        assert!(lines[1].contains("local.fixture"));
         assert!(lines[1].contains("1m"));
         assert!(lines[1].contains("Review this change"));
         assert_eq!(&lines[2][..8], "aaaaaaaa");
@@ -551,7 +551,7 @@ mod tests {
         let detail = TaskDetail {
             task_id: "2b2c279a-b8e1-43a8-846c-cb8344a301d7".to_owned(),
             state: "terminal".to_owned(),
-            harness: "local.gjc".to_owned(),
+            harness: "local.fixture".to_owned(),
             model: Some("swe-1.6".to_owned()),
             workspace: "/tmp/work tree".to_owned(),
             created_at: Some(940),
@@ -562,7 +562,7 @@ mod tests {
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines[0], "task: 2b2c279a-b8e1-43a8-846c-cb8344a301d7");
         assert_eq!(lines[1], "state: terminal");
-        assert_eq!(lines[2], "harness: local.gjc");
+        assert_eq!(lines[2], "harness: local.fixture");
         assert_eq!(lines[3], "model: swe-1.6");
         assert_eq!(lines[4], "workspace: /tmp/work tree");
         assert_eq!(lines[5], "elapsed: 1m");
@@ -580,7 +580,7 @@ mod tests {
         let detail = TaskDetail {
             task_id: "2b2c279a-b8e1-43a8-846c-cb8344a301d7".to_owned(),
             state: "running".to_owned(),
-            harness: "local.gjc".to_owned(),
+            harness: "local.fixture".to_owned(),
             model: None,
             workspace: "/tmp/work".to_owned(),
             created_at: None,
@@ -604,7 +604,7 @@ mod tests {
         let detail = TaskDetail {
             task_id: "2b2c279a-b8e1-43a8-846c-cb8344a301d7".to_owned(),
             state: "running".to_owned(),
-            harness: "local.gjc\u{1b}[31m".to_owned(),
+            harness: "local.fixture\u{1b}[31m".to_owned(),
             model: None,
             workspace: "/tmp/work\n/etc".to_owned(),
             created_at: None,
@@ -613,7 +613,7 @@ mod tests {
         };
         let text = task_detail(&detail, 1_000);
         assert!(!text.contains('\u{1b}'), "{text:?}");
-        assert!(text.contains("harness: local.gjc [31m"));
+        assert!(text.contains("harness: local.fixture [31m"));
         assert!(text.contains("workspace: /tmp/work /etc"));
     }
 
@@ -622,14 +622,14 @@ mod tests {
         let receipt = RunReceipt {
             state: "starting".to_owned(),
             outcome: None,
-            harness: "local.gjc".to_owned(),
+            harness: "local.fixture".to_owned(),
             workspace: "/tmp/work".to_owned(),
             task_id: "2b2c279a-b8e1-43a8-846c-cb8344a301d7".to_owned(),
         };
         let text = run_receipt(&receipt);
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines[0], "state: starting");
-        assert_eq!(lines[1], "harness: local.gjc");
+        assert_eq!(lines[1], "harness: local.fixture");
         assert_eq!(lines[2], "workspace: /tmp/work");
         assert_eq!(
             lines.last(),
@@ -642,7 +642,7 @@ mod tests {
         let receipt = RunReceipt {
             state: "terminal".to_owned(),
             outcome: Some("candidate".to_owned()),
-            harness: "local.gjc".to_owned(),
+            harness: "local.fixture".to_owned(),
             workspace: "/tmp/work".to_owned(),
             task_id: "2b2c279a-b8e1-43a8-846c-cb8344a301d7".to_owned(),
         };

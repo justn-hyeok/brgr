@@ -525,7 +525,7 @@ mod tests {
     fn other_harness_kinds_have_no_session_model() {
         let dir = TempDir::new().unwrap();
         let paths = paths(&dir);
-        for kind in ["gjc", "gemini", "cursor"] {
+        for kind in ["fixture", "gemini", "cursor"] {
             let task = TaskId::new();
             let task_spec = spec("/repo/work", task);
             let launch = serde_json::json!({

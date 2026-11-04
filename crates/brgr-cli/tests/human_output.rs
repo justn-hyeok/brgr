@@ -15,7 +15,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use common::{add_fixture, gjc_fixture, json_output, run};
+use common::{add_fixture, brgr_fixture, json_output, run};
 use serde_json::Value;
 use tempfile::TempDir;
 
@@ -49,7 +49,7 @@ fn fixture_home() -> (TempDir, std::path::PathBuf, std::path::PathBuf) {
     let home = temp.path().join("brgr");
     let workspace = temp.path().join("work");
     fs::create_dir_all(&workspace).unwrap();
-    add_fixture(&home, &gjc_fixture(), &temp.path().join("scratch"));
+    add_fixture(&home, &brgr_fixture(), &temp.path().join("scratch"));
     (temp, home, workspace)
 }
 
@@ -490,14 +490,14 @@ fn uuid_suffix() -> String {
     format!("{nanos:x}")
 }
 
-/// A home with a certified GJC fixture and a current Codex integration, so
+/// A home with a certified Fixture fixture and a current Codex integration, so
 /// `brgr doctor` is healthy until a test drifts the executable.
 fn doctor_fixture() -> (TempDir, PathBuf, PathBuf, PathBuf) {
     let temp = TempDir::new().unwrap();
     let home = temp.path().join("brgr");
     let codex_home = temp.path().join("codex");
-    let executable = temp.path().join("gjc");
-    fs::copy(gjc_fixture(), &executable).unwrap();
+    let executable = temp.path().join("fixture");
+    fs::copy(brgr_fixture(), &executable).unwrap();
     fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
     add_fixture(&home, &executable, &temp.path().join("scratch"));
     let envs = [("CODEX_HOME", codex_home.to_str().unwrap())];
@@ -575,7 +575,7 @@ fn doctor_exit_error_names_the_unhealthy_harness() {
     assert!(!changed.status.success(), "{changed:?}");
     let stderr = String::from_utf8_lossy(&changed.stderr);
     assert!(
-        stderr.contains("brgr doctor found an unavailable personal-use path: local.gjc"),
+        stderr.contains("brgr doctor found an unavailable personal-use path: local.fixture"),
         "{stderr}"
     );
 }
@@ -596,15 +596,17 @@ fn doctor_json_keeps_existing_fields_and_adds_problems() {
     assert_eq!(report["status"], "needs_attention");
     assert_eq!(report["store"], true);
     assert_eq!(report["registry"], true);
-    assert_eq!(report["harnesses"][0]["id"], "local.gjc");
+    assert_eq!(report["harnesses"][0]["id"], "local.fixture");
     assert_eq!(report["harnesses"][0]["health"], "executable_changed");
     let problems = report["problems"]
         .as_array()
         .expect("problems array is present");
     assert!(
-        problems.iter().any(|problem| problem["name"] == "local.gjc"
-            && problem["reason"] == "recertify"
-            && problem["command"] == "brgr harness recertify local.gjc"),
+        problems
+            .iter()
+            .any(|problem| problem["name"] == "local.fixture"
+                && problem["reason"] == "recertify"
+                && problem["command"] == "brgr harness recertify local.fixture"),
         "{problems:?}"
     );
     let old = existing_doctor_fields(&report);

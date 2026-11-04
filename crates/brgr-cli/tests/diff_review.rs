@@ -19,10 +19,10 @@ use std::{
 use serde_json::Value;
 use tempfile::TempDir;
 
-/// A gjc-shaped worker that edits `README` and adds a line to `notes.txt`.
+/// A fixture-shaped worker that edits `README` and adds a line to `notes.txt`.
 const EDITING_WORKER: &str = r#"#!/bin/sh
 case "$1" in
-  --version) echo 'gjc v-diff-review-fixture'; exit 0;;
+  --version) echo 'fixture v-diff-review-fixture'; exit 0;;
   --help) printf '%s\n' '-p, --print' '--mode=<value>' '--no-session' '--no-mcp' '--model' '--thinking'; exit 0;;
 esac
 for item in "$@"; do case "$item" in @*) prompt=${item#@};; esac; done
@@ -196,7 +196,7 @@ impl Fixture {
         let home = temp.path().join("home");
         let repository = temp.path().join("repo");
         let scratch = temp.path().join("scratch");
-        let worker = temp.path().join("gjc");
+        let worker = temp.path().join("fixture");
         fs::create_dir_all(&repository).unwrap();
         fs::create_dir_all(&scratch).unwrap();
         write_fast_script(&worker, EDITING_WORKER);

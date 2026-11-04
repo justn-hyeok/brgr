@@ -612,10 +612,10 @@ await parallel([
 writeFileSync(process.env.BRGR_HOME + "/pipeline-parallel-ok", "1");
 "#;
 
-const HOLD_REV2_GJC: &str = r#"#!/bin/sh
+const HOLD_REV2_FIXTURE: &str = r#"#!/bin/sh
 set -eu
 case "${1:-}" in
-  --version) printf 'gjc v-hold-rev2\n'; exit 0;;
+  --version) printf 'fixture v-hold-rev2\n'; exit 0;;
   --help) printf '%s\n' '-p, --print' '--mode=<value>' '--no-session' '--no-mcp' '--model' '--thinking'; exit 0;;
 esac
 prompt_file=
@@ -635,10 +635,10 @@ fi
 printf '%s\n' '{"type":"agent_end","stopReason":"completed"}'
 "#;
 
-const FAILING_GJC: &str = r#"#!/bin/sh
+const FAILING_FIXTURE: &str = r#"#!/bin/sh
 set -eu
 case "${1:-}" in
-  --version) printf 'gjc v-fail-fixture\n'; exit 0;;
+  --version) printf 'fixture v-fail-fixture\n'; exit 0;;
   --help) printf '%s\n' '-p, --print' '--mode=<value>' '--no-session' '--no-mcp' '--model' '--thinking'; exit 0;;
 esac
 prompt_file=
@@ -653,10 +653,10 @@ fi
 exit 7
 "#;
 
-const FAIL_ONCE_GJC: &str = r#"#!/bin/sh
+const FAIL_ONCE_FIXTURE: &str = r#"#!/bin/sh
 set -eu
 case "${1:-}" in
-  --version) printf 'gjc v-fail-once\n'; exit 0;;
+  --version) printf 'fixture v-fail-once\n'; exit 0;;
   --help) printf '%s\n' '-p, --print' '--mode=<value>' '--no-session' '--no-mcp' '--model' '--thinking'; exit 0;;
 esac
 count_file="${BRGR_HOME:-}/step-attempts"
@@ -682,10 +682,10 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
 printf '%s\n' '{"type":"agent_end","stopReason":"completed"}'
 "#;
 
-const ASKING_GJC: &str = r#"#!/bin/sh
+const ASKING_FIXTURE: &str = r#"#!/bin/sh
 set -u
 case "${1:-}" in
-  --version) echo 'gjc v-asking-fixture'; exit 0;;
+  --version) echo 'fixture v-asking-fixture'; exit 0;;
   --help) printf '%s\n' '-p, --print' '--mode=<value>' '--no-session' '--no-mcp' '--model' '--thinking'; exit 0;;
 esac
 prompt_file=
@@ -705,10 +705,10 @@ printf '{"type":"message_end","message":{"role":"assistant","content":[{"type":"
 printf '%s\n' '{"type":"agent_end","stopReason":"completed"}'
 "#;
 
-const HOLD_GJC: &str = r#"#!/bin/sh
+const HOLD_FIXTURE: &str = r#"#!/bin/sh
 set -eu
 case "${1:-}" in
-  --version) printf 'gjc v-hold-fixture\n'; exit 0;;
+  --version) printf 'fixture v-hold-fixture\n'; exit 0;;
   --help) printf '%s\n' '-p, --print' '--mode=<value>' '--no-session' '--no-mcp' '--model' '--thinking'; exit 0;;
 esac
 prompt_file=
@@ -825,7 +825,7 @@ struct Fixture {
     scripts: PathBuf,
 }
 
-fn fixture_from_gjc(executable: &Path) -> Fixture {
+fn fixture_from_fixture(executable: &Path) -> Fixture {
     let temp = TempDir::new().unwrap();
     let root = temp.path().to_path_buf();
     let home = root.join("brgr");
@@ -843,15 +843,15 @@ fn fixture_from_gjc(executable: &Path) -> Fixture {
     }
 }
 
-fn default_gjc() -> PathBuf {
+fn default_fixture() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../testdata/fixtures/gjc")
+        .join("../../testdata/fixtures/brgr-fixture")
         .canonicalize()
         .unwrap()
 }
 
 fn fixture_home() -> Fixture {
-    fixture_from_gjc(&default_gjc())
+    fixture_from_fixture(&default_fixture())
 }
 
 fn fixture_with_script(source: &str) -> Fixture {
@@ -860,7 +860,7 @@ fn fixture_with_script(source: &str) -> Fixture {
     let home = root.join("brgr");
     let workspace = root.join("repo");
     let scripts = root.join("scripts");
-    let executable = root.join("gjc");
+    let executable = root.join("fixture");
     fs::create_dir_all(&workspace).unwrap();
     fs::create_dir_all(&scripts).unwrap();
     seed_git_repo(&workspace);
@@ -1471,7 +1471,7 @@ fn resume_after_the_driver_dies_still_creates_exactly_three_tasks() {
 #[test]
 fn a_question_blocks_the_run_until_the_owner_replies() {
     require_node();
-    let fixture = fixture_with_script(ASKING_GJC);
+    let fixture = fixture_with_script(ASKING_FIXTURE);
     init_sdk(&fixture);
     let script = write_script(&fixture, "ask.mjs", QUESTION_SCRIPT);
     let run_id = start_workflow(&fixture, &script);
@@ -1497,7 +1497,7 @@ fn a_question_blocks_the_run_until_the_owner_replies() {
 #[test]
 fn a_launch_that_hits_the_parallel_cap_while_blocked_keeps_waiting() {
     require_node();
-    let fixture = fixture_with_script(ASKING_GJC);
+    let fixture = fixture_with_script(ASKING_FIXTURE);
     init_sdk(&fixture);
     mark_cap_hits_in_sdk(&fixture);
     let script = write_script(&fixture, "cap-blocked.mjs", CAP_WHILE_BLOCKED_SCRIPT);
@@ -1524,7 +1524,7 @@ fn a_launch_that_hits_the_parallel_cap_while_blocked_keeps_waiting() {
 #[test]
 fn a_failed_worker_is_returned_and_the_script_branches_on_it() {
     require_node();
-    let fixture = fixture_with_script(FAILING_GJC);
+    let fixture = fixture_with_script(FAILING_FIXTURE);
     init_sdk(&fixture);
     let script = write_script(&fixture, "fail.mjs", FAILED_SCRIPT);
     let run_id = start_workflow(&fixture, &script);
@@ -1616,7 +1616,7 @@ fn a_changed_objective_under_an_automatic_key_diverges_and_launches_nothing_new(
 #[test]
 fn a_script_receives_the_newest_revision_when_the_owner_revises_a_sealed_step() {
     require_node();
-    let fixture = fixture_with_script(HOLD_REV2_GJC);
+    let fixture = fixture_with_script(HOLD_REV2_FIXTURE);
     init_sdk(&fixture);
     let script = write_script(&fixture, "revise.mjs", REVISE_SCRIPT);
     let run_id = create_workflow(&fixture, &["--max-parallel", "1"]);
@@ -1666,7 +1666,7 @@ fn a_script_receives_the_newest_revision_when_the_owner_revises_a_sealed_step() 
 #[test]
 fn resume_after_a_revise_returns_the_newest_revision_result() {
     require_node();
-    let fixture = fixture_with_script(HOLD_REV2_GJC);
+    let fixture = fixture_with_script(HOLD_REV2_FIXTURE);
     init_sdk(&fixture);
     let script = write_script(&fixture, "revise-resume.mjs", REVISE_SCRIPT);
     let run_id = create_workflow(&fixture, &[]);
@@ -1922,7 +1922,7 @@ fn a_changed_deadline_under_an_existing_step_key_diverges_and_launches_nothing_n
 #[test]
 fn resume_after_the_driver_dies_does_not_reset_the_step_deadline() {
     require_node();
-    let fixture = fixture_with_script(HOLD_GJC);
+    let fixture = fixture_with_script(HOLD_FIXTURE);
     init_sdk(&fixture);
     let script = write_script(&fixture, "deadline-resume.mjs", DEADLINE_RESUME_SCRIPT);
     let run_id = start_workflow(&fixture, &script);
@@ -1961,7 +1961,7 @@ fn resume_after_the_driver_dies_does_not_reset_the_step_deadline() {
 
 #[test]
 fn status_created_at_follows_the_store_clock_not_the_launch_file() {
-    let fixture = fixture_with_script(HOLD_GJC);
+    let fixture = fixture_with_script(HOLD_FIXTURE);
     let launched = json_output(&run(
         &fixture.home,
         &fixture.workspace,
@@ -2052,7 +2052,7 @@ fn status_created_at_is_null_until_an_attempt_starts() {
 #[test]
 fn a_step_awaiting_input_is_not_cancelled_by_the_deadline() {
     require_node();
-    let fixture = fixture_with_script(ASKING_GJC);
+    let fixture = fixture_with_script(ASKING_FIXTURE);
     init_sdk(&fixture);
     let script = write_script(&fixture, "ask-deadline.mjs", QUESTION_DEADLINE_SCRIPT);
     let run_id = start_workflow(&fixture, &script);
@@ -2379,7 +2379,7 @@ esac
 #[test]
 fn owner_cancel_after_the_deadline_on_resume_is_not_timed_out() {
     require_node();
-    let fixture = fixture_with_script(HOLD_GJC);
+    let fixture = fixture_with_script(HOLD_FIXTURE);
     init_sdk(&fixture);
     let script = write_script(
         &fixture,
@@ -2663,7 +2663,7 @@ esac
 
 #[test]
 fn a_foreign_owner_cannot_cancel_a_workflow_step() {
-    let fixture = fixture_with_script(HOLD_GJC);
+    let fixture = fixture_with_script(HOLD_FIXTURE);
     let run_id = create_workflow(&fixture, &[]);
     let launched = launch_workflow_step(&fixture, &run_id, "hold", "HOLD until release");
     let task = json_output(&launched)["task_id"]
@@ -2816,7 +2816,7 @@ esac
 #[test]
 fn a_step_that_fails_once_then_succeeds_returns_attempts_two() {
     require_node();
-    let fixture = fixture_with_script(FAIL_ONCE_GJC);
+    let fixture = fixture_with_script(FAIL_ONCE_FIXTURE);
     init_sdk(&fixture);
     enable_fail_once(&fixture);
     let script = write_script(&fixture, "retry-once.mjs", RETRY_ONCE_SCRIPT);
@@ -2836,7 +2836,7 @@ fn a_step_that_fails_once_then_succeeds_returns_attempts_two() {
 #[test]
 fn a_step_that_fails_more_than_retries_returns_the_last_failure() {
     require_node();
-    let fixture = fixture_with_script(FAILING_GJC);
+    let fixture = fixture_with_script(FAILING_FIXTURE);
     init_sdk(&fixture);
     let script = write_script(&fixture, "retry-exhausted.mjs", RETRY_EXHAUSTED_SCRIPT);
     let run_id = start_workflow(&fixture, &script);
@@ -2907,7 +2907,7 @@ fn a_cancelled_outcome_is_not_retried() {
 #[test]
 fn resume_mid_retry_does_not_launch_a_duplicate() {
     require_node();
-    let fixture = fixture_with_script(FAIL_ONCE_GJC);
+    let fixture = fixture_with_script(FAIL_ONCE_FIXTURE);
     init_sdk(&fixture);
     enable_fail_once(&fixture);
     fs::write(fixture.home.join("hold-retries"), b"1").unwrap();
@@ -2961,7 +2961,7 @@ fn retries_zero_or_absent_does_not_relaunch_a_failed_step() {
         ("retry-zero.mjs", RETRY_ZERO_SCRIPT),
         ("retry-absent.mjs", RETRY_ABSENT_SCRIPT),
     ] {
-        let fixture = fixture_with_script(FAILING_GJC);
+        let fixture = fixture_with_script(FAILING_FIXTURE);
         init_sdk(&fixture);
         let script = write_script(&fixture, name, source);
         let run_id = start_workflow(&fixture, &script);
@@ -3471,7 +3471,7 @@ fn a_three_stage_pipeline_passes_each_result_to_the_next_stage() {
 #[test]
 fn a_failed_pipeline_stage_stops_and_does_not_journal_later_stages() {
     require_node();
-    let fixture = fixture_with_script(FAILING_GJC);
+    let fixture = fixture_with_script(FAILING_FIXTURE);
     init_sdk(&fixture);
     let script = write_script(&fixture, "pipeline-fail.mjs", PIPELINE_FAIL_SCRIPT);
     let run_id = start_workflow(&fixture, &script);

@@ -137,9 +137,9 @@ fn seed_git_repo(repository: &Path) {
     git(&["commit", "-m", "seed"]);
 }
 
-fn gjc_fixture() -> PathBuf {
+fn brgr_fixture() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../testdata/fixtures/gjc")
+        .join("../../testdata/fixtures/brgr-fixture")
         .canonicalize()
         .unwrap()
 }
@@ -195,8 +195,8 @@ fn fixture_with_executable(executable: &Path) -> Fixture {
     }
 }
 
-fn fixture_gjc() -> Fixture {
-    fixture_with_executable(&gjc_fixture())
+fn fixture_fixture() -> Fixture {
+    fixture_with_executable(&brgr_fixture())
 }
 
 fn fixture_claude() -> Fixture {
@@ -504,7 +504,7 @@ fn a_workflow_step_without_headless_opens_beside_the_verified_source_pane() {
 #[test]
 fn workflow_run_without_a_pane_warns_and_a_headless_step_still_completes() {
     require_node();
-    let fixture = fixture_gjc();
+    let fixture = fixture_fixture();
     init_sdk(&fixture);
     let script = write_script(&fixture, "headless.mjs", HEADLESS_SCRIPT);
     let (run_id, started) = start_workflow(&fixture, &script, &[]);
@@ -526,7 +526,7 @@ fn workflow_run_without_a_pane_warns_and_a_headless_step_still_completes() {
 #[test]
 fn the_pane_file_is_private_replaced_on_resume_and_dropped_when_stale() {
     require_node();
-    let fixture = fixture_gjc();
+    let fixture = fixture_fixture();
     let script = write_script(&fixture, "pause.mjs", PAUSE_SCRIPT);
     let (_dir, _fake, first) = herdr_for(&fixture, SOURCE_PANE);
     let (run_id, started) = start_workflow(&fixture, &script, &first);
@@ -567,7 +567,7 @@ fn the_pane_file_is_private_replaced_on_resume_and_dropped_when_stale() {
 #[test]
 fn the_sdk_does_not_pass_source_pane_for_a_headless_step() {
     require_node();
-    let fixture = fixture_gjc();
+    let fixture = fixture_fixture();
     init_sdk(&fixture);
     let argv_log = fixture.root.join("sdk-argv.log");
     let fake_bin = fixture.root.join("fake-brgr");
@@ -616,7 +616,7 @@ esac
 #[test]
 fn a_brgr_error_is_not_prefixed_with_a_second_error() {
     require_node();
-    let fixture = fixture_gjc();
+    let fixture = fixture_fixture();
     init_sdk(&fixture);
     let script = write_script(&fixture, "error.mjs", ERROR_SCRIPT);
     let (run_id, started) = start_workflow(&fixture, &script, &[]);
