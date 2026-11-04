@@ -50,6 +50,10 @@ CLI, Cursor CLI and Devin CLI. Tier 2 is Command Code, OMP, OpenCode and Cline.
 Tier 3 is GitHub Copilot CLI, Gemini CLI and Pi. The agent that starts workers,
 the *owner*, can be a Codex, Claude Code or Cursor session.
 
+Run `brgr config edit` in a terminal to manage aliases and per-harness default
+models. Agents and scripts can use commands such as `brgr config alias list`
+and `brgr config set model MODEL --harness ID`.
+
 > **Workers always run with full permissions** (`--yolo`,
 > `--dangerously-skip-permissions` and equivalents). That is the point of
 > unattended orchestration, so only point brgr at code you trust. A clean Git

@@ -7,6 +7,8 @@ mod caller_pane;
 mod cli;
 mod codex_integration;
 mod config;
+mod config_edit;
+mod config_edit_view;
 mod context_signal;
 mod debate;
 mod error_memo;
@@ -334,6 +336,9 @@ async fn execute(paths: &Paths, command: Command, json_output: bool) -> Result<(
         Command::Integrate { command } => integrate(paths, command, json_output),
         Command::Doctor => doctor(paths, json_output).await,
         Command::Errors { command } => error_memo::run(paths, command.as_ref()),
+        Command::Config {
+            command: ConfigCommand::Edit,
+        } => config_edit_view::run(paths, json_output).await,
         Command::Config { command } => config_command(paths, &command, json_output).await,
         Command::Prune {
             apply,
@@ -503,7 +508,7 @@ async fn config_command(paths: &Paths, command: &ConfigCommand, json_output: boo
         }
         ConfigCommand::Check => return config::check(paths, &config, json_output).await,
         ConfigCommand::Show => {}
-        ConfigCommand::Alias { .. } => unreachable!("handled above"),
+        ConfigCommand::Alias { .. } | ConfigCommand::Edit => unreachable!("handled above"),
         ConfigCommand::SetCodexExecutable { executable } => {
             config::validate_codex_executable(executable)?;
             config.herdr.codex_executable = Some(executable.clone());
