@@ -575,7 +575,7 @@ fn drive(
 
     let mut blocked = false;
     let mut watch = ScreenWatch::new(&run.kind);
-    let mut idle = IdleReport::new();
+    let mut idle = IdleReport::new(instruction.clone());
     let mut still = Stillness::default();
     loop {
         let receipt: PaneReceipt = serde_json::from_slice(&fs::read(
@@ -681,6 +681,7 @@ struct IdleReport {
     report_grace: Duration,
     unseen_work_grace: Duration,
     prompted: Instant,
+    instruction: String,
     worked: bool,
     reminded: bool,
     idle_since: Option<Instant>,
@@ -689,9 +690,10 @@ struct IdleReport {
 }
 
 impl IdleReport {
-    fn new() -> Self {
+    fn new(instruction: String) -> Self {
         let (report_grace, unseen_work_grace) = report_waits();
         Self {
+            instruction,
             report_grace,
             unseen_work_grace,
             prompted: Instant::now(),
@@ -702,7 +704,7 @@ impl IdleReport {
         }
     }
 
-    /// Herdr never classifies some harnesses (Fixture, Command Code), so their
+    /// Herdr never classifies some harnesses (Command Code), so their
     /// status is `unknown` and idleness cannot be read. A report file that has
     /// not changed for the grace period is sealed for them; nothing is sent to
     /// the agent, since it may still be working.
@@ -770,11 +772,26 @@ impl IdleReport {
             run.task,
             run.revision
         );
-        send_prompt(herdr, name, pane, run, &nudge, notices.paths)?;
+        let reminder = reminder_text(self.worked, &self.instruction, &nudge);
+        send_prompt(herdr, name, pane, run, &reminder, notices.paths)?;
         self.reminded = true;
         self.worked = false;
         self.idle_since = None;
         Ok(())
+    }
+}
+
+/// What to send an agent that stopped with no report. One never seen working may
+/// never have had its prompt, which a screen can swallow (seen live on Codex's
+/// hook review), so it gets the prompt again rather than an order to report on
+/// work it was never given.
+fn reminder_text(worked: bool, instruction: &str, nudge: &str) -> String {
+    if worked {
+        nudge.to_owned()
+    } else {
+        format!(
+            "Your earlier prompt may not have reached you. If you have already done this, only write the report.\n\n{instruction}"
+        )
     }
 }
 
@@ -1409,6 +1426,17 @@ mod interactive_model_tests {
         assert!(
             !without_model.iter().any(|arg| arg.contains("--model")),
             "{without_model:?}"
+        );
+    }
+
+    #[test]
+    fn an_agent_never_seen_working_gets_its_prompt_again() {
+        let text = reminder_text(false, "Do the task", "Write the report");
+        assert!(text.contains("Do the task"), "{text}");
+        assert!(!text.contains("Write the report"), "{text}");
+        assert_eq!(
+            reminder_text(true, "Do the task", "Write the report"),
+            "Write the report"
         );
     }
 }
