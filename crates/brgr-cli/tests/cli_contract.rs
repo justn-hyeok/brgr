@@ -7000,6 +7000,152 @@ fn wait_reconciles_a_crashed_detached_supervisor_to_lost() {
     assert_eq!(waited["result_id"], result["result"]["result_id"]);
 }
 
+#[test]
+fn wait_and_watch_report_a_killed_supervisor_within_the_reconcile_interval() {
+    for mode in ["wait", "watch"] {
+        let temp = TempDir::new().unwrap();
+        let home = temp.path().join("brgr");
+        let repository = temp.path().join("repo");
+        fs::create_dir_all(&repository).unwrap();
+        seed_git_repo(&repository);
+        let slow = temp.path().join("slow");
+        add_slow_prompt_file_harness(&home, &slow);
+        let owner = [("BRGR_OWNER_ID", "codex:wait-watch-killed")];
+        let started = json_output(&run(
+            &home,
+            &[
+                "run",
+                "HOLD_RUN",
+                "--harness",
+                "local.slow-agent",
+                "--workspace",
+                repository.to_str().unwrap(),
+            ],
+            &owner,
+        ));
+        let task = started["task_id"].as_str().unwrap();
+        let worker_started = slow.join("started");
+        assert!(
+            wait_until(|| worker_started.is_file()),
+            "worker never started"
+        );
+        let supervisor_record = home.join("runs").join(format!("{task}.supervisor.json"));
+        let supervisor: Value =
+            serde_json::from_slice(&fs::read(&supervisor_record).unwrap()).unwrap();
+        let supervisor_pid = supervisor["identity"]["handle"].as_str().unwrap();
+        assert!(
+            Command::new("/bin/kill")
+                .args(["-9", supervisor_pid])
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(wait_until(|| !process_exists(supervisor_pid)));
+        let worker_pid = fs::read_to_string(home.join("runs").join(format!("{task}.pid"))).unwrap();
+        assert!(
+            Command::new("/bin/kill")
+                .args(["-9", worker_pid.trim()])
+                .status()
+                .unwrap()
+                .success()
+        );
+
+        let started = Instant::now();
+        let output = if mode == "wait" {
+            run(&home, &["wait", task, "--timeout-seconds", "20"], &owner)
+        } else {
+            run(&home, &["watch", task, "--timeout-seconds", "20"], &owner)
+        };
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(6),
+            "{mode} exceeded the five-second reconciliation interval"
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        if mode == "wait" {
+            assert_eq!(json_output(&output)["outcome"], "lost");
+        } else {
+            assert!(
+                stdout
+                    .lines()
+                    .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                    .any(|event| event["event"] == "result" && event["outcome"] == "lost"),
+                "{stdout}"
+            );
+        }
+    }
+}
+
+#[test]
+fn wait_returns_promptly_when_a_sealed_result_arrives() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("brgr");
+    let repository = temp.path().join("repo");
+    fs::create_dir_all(&repository).unwrap();
+    seed_git_repo(&repository);
+    let slow = temp.path().join("slow");
+    add_slow_prompt_file_harness(&home, &slow);
+    let owner = [("BRGR_OWNER_ID", "codex:wait-prompt-result")];
+    let started = json_output(&run(
+        &home,
+        &[
+            "run",
+            "HOLD_RUN",
+            "--harness",
+            "local.slow-agent",
+            "--workspace",
+            repository.to_str().unwrap(),
+        ],
+        &owner,
+    ));
+    let task = started["task_id"].as_str().unwrap();
+    assert!(
+        wait_until(|| slow.join("started").is_file()),
+        "worker never started"
+    );
+
+    let mut command = brgr_command();
+    command
+        .arg("--home")
+        .arg(&home)
+        .args(["--json", "wait", task, "--timeout-seconds", "20"])
+        .env("BRGR_SESSION_ID", "fixture-session");
+    for (key, value) in owner {
+        command.env(key, value);
+    }
+    let mut waiter = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    thread::sleep(Duration::from_millis(300));
+    let released = Instant::now();
+    fs::write(slow.join("release"), "release").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(8);
+    while waiter.try_wait().unwrap().is_none() {
+        assert!(
+            Instant::now() < deadline,
+            "wait did not return after the result was sealed"
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
+    let output = waiter.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        released.elapsed() < Duration::from_secs(5),
+        "wait delayed a sealed result until a reconciliation tick"
+    );
+    assert_eq!(json_output(&output)["outcome"], "candidate");
+}
+
 #[cfg(debug_assertions)]
 #[test]
 fn detached_crash_windows_reconcile_without_duplicate_or_overlapping_attempts() {
