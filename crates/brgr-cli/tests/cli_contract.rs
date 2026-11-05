@@ -6938,7 +6938,6 @@ fn a_cancel_of_a_lost_revision_does_not_cancel_the_next_one() {
     let task = launch["task_id"].as_str().unwrap();
     let store = brgr_store::Store::open(home.join("store")).unwrap();
     active_attempt(&store, task);
-    json_output(&run(&home, &["cancel", task], &owner));
     let worker_pid = fs::read_to_string(home.join("runs").join(format!("{task}.pid")))
         .unwrap()
         .trim()
@@ -6960,6 +6959,9 @@ fn a_cancel_of_a_lost_revision_does_not_cancel_the_next_one() {
         .args(["-9", &worker_pid])
         .status()
         .unwrap();
+    // After the kill: a live supervisor would stop the worker and remove its pid
+    // file, and the revision would end cancelled, not lost.
+    json_output(&run(&home, &["cancel", task], &owner));
     let terminal = settle(&home, task, &owner).expect("cancelled dead supervisor did not settle");
     assert_eq!(terminal["result"]["outcome"], "lost");
 
