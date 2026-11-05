@@ -2094,7 +2094,7 @@ const RETRY_DECISIONS: &[(&str, bool)] = &[
     // command the user can simply run again.
     ("acknowledge", false),
     ("acknowledge_bound", false),
-    ("acknowledge_older_failures_bound", false),
+    ("acknowledge_failures_through_revision", false),
     ("acknowledge_message", false),
     ("acknowledge_message_bound", false),
     ("bind_owner", false),
@@ -2528,7 +2528,7 @@ fn record_task_refuses_a_new_over_limit_objective() {
 }
 
 #[test]
-fn acknowledge_older_failures_bound_leaves_an_older_candidate_untouched() {
+fn acknowledge_failures_through_revision_leaves_an_older_candidate_untouched() {
     let root = TempDir::new().unwrap();
     let mut store = Store::open(root.path()).unwrap();
     let task = task();
@@ -2557,7 +2557,7 @@ fn acknowledge_older_failures_bound_leaves_an_older_candidate_untouched() {
     store.bind_owner(&task.owner_id, "session-a", 1).unwrap();
 
     store
-        .acknowledge_older_failures_bound(&task.owner_id, task.task_id, 3, "session-a", 1)
+        .acknowledge_failures_through_revision(&task.owner_id, task.task_id, 3, "session-a", 1)
         .unwrap();
 
     let inbox = store.inbox(&task.owner_id, true).unwrap();
@@ -2632,4 +2632,177 @@ fn sealing_recreates_only_staging_and_shard_with_private_permissions() {
             );
         }
     }
+}
+
+/// A retryable spawn failure leaves attempt 1 as a failed result in the same
+/// revision as the retried attempt 2. `result --ack` must clear both, or the
+/// failure banner repeats forever.
+#[test]
+fn acknowledge_sweeps_an_earlier_failed_attempt_in_the_same_revision() {
+    let root = TempDir::new().unwrap();
+    let mut store = Store::open(root.path()).unwrap();
+    let task = task();
+    store.record_task(&task, "digest-1").unwrap();
+    let attempt_one = AttemptId::new();
+    store.claim_attempt(task.task_id, 1, attempt_one).unwrap();
+    let failed_one = ResultEnvelope {
+        outcome: TerminalOutcome::Failed,
+        error: Some("spawn failed".to_owned()),
+        ..result(&task, attempt_one)
+    };
+    store
+        .commit_terminal_result(&task.owner_id, &failed_one)
+        .unwrap();
+    store.grant_pre_spawn_retry(attempt_one).unwrap();
+    let attempt_two = AttemptId::new();
+    store.claim_attempt(task.task_id, 1, attempt_two).unwrap();
+    let failed_two = ResultEnvelope {
+        outcome: TerminalOutcome::Failed,
+        error: Some("worker died".to_owned()),
+        ..result(&task, attempt_two)
+    };
+    store
+        .commit_terminal_result_final(&task.owner_id, &failed_two)
+        .unwrap();
+    store.bind_owner(&task.owner_id, "session-a", 1).unwrap();
+
+    // The two calls `result --ack` makes.
+    store
+        .acknowledge_bound(&task.owner_id, failed_two.result_id, "session-a", 1)
+        .unwrap();
+    store
+        .acknowledge_failures_through_revision(
+            &task.owner_id,
+            task.task_id,
+            task.revision,
+            "session-a",
+            1,
+        )
+        .unwrap();
+
+    assert!(
+        store.inbox(&task.owner_id, false).unwrap().is_empty(),
+        "a failed result of the acknowledged revision stayed unacknowledged"
+    );
+}
+
+/// The same retry sequence ending in a candidate: the sweep acknowledges the
+/// earlier failed attempt and leaves the candidate awaiting its decision.
+#[test]
+fn acknowledge_sweep_leaves_a_same_revision_candidate_decidable() {
+    let root = TempDir::new().unwrap();
+    let mut store = Store::open(root.path()).unwrap();
+    let task = task();
+    store.record_task(&task, "digest-1").unwrap();
+    let attempt_one = AttemptId::new();
+    store.claim_attempt(task.task_id, 1, attempt_one).unwrap();
+    let failed_one = ResultEnvelope {
+        outcome: TerminalOutcome::Failed,
+        error: Some("spawn failed".to_owned()),
+        ..result(&task, attempt_one)
+    };
+    store
+        .commit_terminal_result(&task.owner_id, &failed_one)
+        .unwrap();
+    store.grant_pre_spawn_retry(attempt_one).unwrap();
+    let attempt_two = AttemptId::new();
+    store.claim_attempt(task.task_id, 1, attempt_two).unwrap();
+    let candidate = sealed_result(&store, &task, attempt_two);
+    store
+        .commit_terminal_result_final(&task.owner_id, &candidate)
+        .unwrap();
+    store.bind_owner(&task.owner_id, "session-a", 1).unwrap();
+
+    // The two calls `result --ack` makes.
+    store
+        .acknowledge_bound(&task.owner_id, candidate.result_id, "session-a", 1)
+        .unwrap();
+    store
+        .acknowledge_failures_through_revision(
+            &task.owner_id,
+            task.task_id,
+            task.revision,
+            "session-a",
+            1,
+        )
+        .unwrap();
+
+    let inbox = store.inbox(&task.owner_id, true).unwrap();
+    let failed_item = inbox
+        .iter()
+        .find(|item| item.result.result_id == failed_one.result_id)
+        .expect("failed result missing from inbox");
+    assert!(
+        failed_item.acknowledged,
+        "the earlier failed attempt of the same revision was not acknowledged"
+    );
+    assert!(
+        store
+            .decision_for_result(candidate.result_id)
+            .unwrap()
+            .is_none(),
+        "the sweep recorded a decision the owner never made"
+    );
+    let decision = Decision {
+        schema: SCHEMA_V1.to_owned(),
+        decision_id: DecisionId::new(),
+        owner_id: task.owner_id.clone(),
+        task_id: task.task_id,
+        revision: task.revision,
+        result_id: candidate.result_id,
+        result_digest: Store::result_digest(&candidate).unwrap(),
+        session_id: Some("session-a".to_owned()),
+        binding_epoch: Some(1),
+        verdict: DecisionVerdict::Accepted,
+        reason: "meets contract".to_owned(),
+    };
+    assert_eq!(
+        store.record_decision(&decision).unwrap(),
+        WriteOutcome::Inserted,
+        "the candidate was not decidable after the sweep"
+    );
+}
+
+/// A failed result of a later revision than the acknowledged one is not the
+/// sweep's to clear.
+#[test]
+fn acknowledge_sweep_leaves_a_later_revision_failure_unacknowledged() {
+    let root = TempDir::new().unwrap();
+    let mut store = Store::open(root.path()).unwrap();
+    let task = task();
+    store.record_task(&task, "digest-1").unwrap();
+    let attempt_one = AttemptId::new();
+    store.claim_attempt(task.task_id, 1, attempt_one).unwrap();
+    let failed_one = ResultEnvelope {
+        outcome: TerminalOutcome::Failed,
+        error: Some("worker died".to_owned()),
+        ..result(&task, attempt_one)
+    };
+    store
+        .commit_terminal_result_final(&task.owner_id, &failed_one)
+        .unwrap();
+
+    let mut revised = task.clone();
+    revised.revision = 2;
+    revised.create_request_id = "request-2".to_owned();
+    store.record_task(&revised, "digest-2").unwrap();
+    let attempt_two = AttemptId::new();
+    store.claim_attempt(task.task_id, 2, attempt_two).unwrap();
+    let failed_two = ResultEnvelope {
+        outcome: TerminalOutcome::Failed,
+        error: Some("worker died again".to_owned()),
+        ..result(&revised, attempt_two)
+    };
+    store
+        .commit_terminal_result_final(&task.owner_id, &failed_two)
+        .unwrap();
+    store.bind_owner(&task.owner_id, "session-a", 1).unwrap();
+
+    store
+        .acknowledge_failures_through_revision(&task.owner_id, task.task_id, 1, "session-a", 1)
+        .unwrap();
+
+    let pending = store.inbox(&task.owner_id, false).unwrap();
+    assert_eq!(pending.len(), 1, "{pending:?}");
+    assert_eq!(pending[0].result.result_id, failed_two.result_id);
 }

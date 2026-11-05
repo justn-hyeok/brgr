@@ -448,7 +448,7 @@ pub(crate) fn result(
         .collect::<Result<Vec<_>>>()?;
     if ack {
         store.acknowledge_bound(&spec.owner_id, result.result_id, &session_id, binding_epoch)?;
-        store.acknowledge_older_failures_bound(
+        store.acknowledge_failures_through_revision(
             &spec.owner_id,
             task,
             spec.revision,
