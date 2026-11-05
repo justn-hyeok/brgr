@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- `brgr cancel` no longer leaves a Devin worker's tools running. Whichever process closed the pane first could lose the host that says what ran under it.
 - A Codex worker no longer stops with `CODEX_THREAD_ID and BRGR_SESSION_ID disagree` or fails to seal its report when its shared daemon inherited another session's identity. Both could stop it from starting a child.
 - A Codex worker under a custom `--home` or `BRGR_HOME` now uses that home. Its commands run in Codex's shared daemon, which lost the setting, so they silently created tasks in the default home.
 - **Behavior change:** a pane agent that stops by itself and writes no report even after a reminder now ends `failed`, not `lost`, so a workflow's `retries` can run it again. A pane or process that disappeared stays `lost` (issue #225).
