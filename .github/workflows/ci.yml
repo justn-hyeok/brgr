@@ -29,8 +29,8 @@ jobs:
           RUST_TEST_THREADS: "8"
       - run: cargo test --workspace --doc --locked
 
-  # The platform brgr ships for, on every push to main. The release tag runs the
-  # tests here again before anything is published.
+  # On every push to main. A release tag waits for this job to pass on its commit
+  # before anything is published.
   macos:
     if: github.event_name == 'push'
     runs-on: macos-15

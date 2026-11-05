@@ -9,7 +9,7 @@ and development.
 Install the current public v2 plugin from GitHub:
 
 ```bash
-herdr plugin install justn-hyeok/brgr --ref v2.10.6
+herdr plugin install justn-hyeok/brgr --ref v2.15.19
 ```
 
 The plugin builds `brgr` from the pinned Cargo lockfile, so a Rust toolchain is
@@ -76,8 +76,8 @@ headless. The separate `local.omp-herdr` route retains its legacy
 
 Devin CLI is a worker only: it cannot be an owner.
 
-`local.devin` runs `devin` in documented prompt-file print mode with smart
-permissions and the non-interactive workspace-trust override. When the installed
+`local.devin` runs `devin` in documented prompt-file print mode with
+`--permission-mode dangerous` and the non-interactive workspace-trust override. When the installed
 CLI documents `--model <MODEL>`, `brgr run OBJECTIVE --model MODEL` passes that
 name through as `--model=VALUE` in print mode and in the pane; the CLI checks
 the name itself. There is no parser for `devin models`: that listing is grouped
@@ -155,7 +155,7 @@ of the task objective and is local display text only. Change it with
 `brgr config set pane-name-template TEMPLATE`, restore the default with
 `brgr config clear-pane-name-template`, or set an empty template to stop naming
 panes.
-Owned-workspace trust, "press Enter to continue" notices, update offers (skipped), Claude Code's fullscreen renderer offer (declined), Codex's hook review (trusted) and an applied self-update are answered automatically; any other screen is reported and fails the run after three minutes. Other native
+Owned-workspace trust, "press Enter to continue" notices, update offers (skipped), Claude Code's Bypass Permissions warning and new-MCP-server prompt (accepted), its fullscreen renderer offer (declined), Codex's hook review (trusted), an applied self-update and oh-my-zsh's update offer in a new pane's shell (declined) are answered automatically; any other screen is reported and fails the run after three minutes. Other native
 input uses `brgr input TASK --key KEY` or `--text TEXT`; conversation messages
 stay queued while the TUI is busy or displaying a native dialog.
 
@@ -205,8 +205,9 @@ commands such as `brgr config alias list` and
 `brgr config set model MODEL --harness ID` instead.
 
 A worker receives `$BRGR_BIN`, its exact task/attempt identity, and a scoped
-owner session. Only a worker launched with `--enable-delegation` may call
-`brgr run OBJECTIVE` to create a child; pane mode does not enable delegation.
+owner session. A worker launched with `--enable-delegation` may call `brgr run OBJECTIVE` to
+create a child, and that child may do the same; pane mode does not enable
+delegation by itself.
 brgr records the parent edge and delivers the child result to that worker's
 inbox. The parent must read and accept/reject a candidate (or acknowledge
 another outcome) before its own successful result can become a candidate.
@@ -247,7 +248,7 @@ the owner-session check, and prints a note on stderr that it did. It only reads:
 it cannot be combined with `result --ack`, and `accept`, `reject`, `land`, `apply`
 and `bind` still need the owner's session. `brgr status TASK --json` prints one object on stdout; every note brgr adds goes to
 stderr. Its fields are `task` (the stored task: `task.workspace` is the worktree,
-`task.evidence.base_commit` the commit it started from), `state`, `workspace`
+`task.evidence.base_commit` the commit it started from), `state`, `created_at`, `parent_task_id` (for a child), `workspace`
 and `base_commit` (copies of those two), `workspace_present` (the worktree still
 exists), `session`, `calling_options`, `source_pane` and `source_session`. `brgr apply TASK --workspace PATH` checks a sealed
 diff; `--execute` applies it only after an explicit accepted result. The diff
@@ -480,7 +481,7 @@ machine was asleep, and its retry waits longer.
 `brgr doctor` probes every registered harness as well as the Codex integration
 and store. On a terminal it starts with `ok`, or one `needs_attention` line per
 problem naming the item and, when doctor already has one, the next command
-(for a changed harness, `brgr harness recertify local.gjc`). `brgr doctor --json`
+(for a changed harness, `brgr harness recertify local.claude-code`). `brgr doctor --json`
 and a pipe keep the JSON, with a top-level `problems` array. A nonzero exit
 still means something needs attention, and the error names those items. Re-certify
 an unhealthy harness with an authorized scratch run before starting new work.
@@ -809,7 +810,7 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo run -p brgr-cli -- --help
 ```
 
-The local store defaults to `~/Library/Application Support/brgr`. Harness
+The local store defaults to `~/Library/Application Support/brgr` on macOS and `$XDG_DATA_HOME/brgr` or `~/.local/share/brgr` on Linux. Harness
 output, help text, manifests, and reports are treated as untrusted data.
 Before upgrading, retain a recoverable copy of the private registry and store.
 An older `v1.0.5` binary cannot load a newly activated manifest containing

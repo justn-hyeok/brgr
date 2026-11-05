@@ -4,7 +4,8 @@
 non-author review (2-5). Multi-process concurrency (2-4) closed on 2026-11-04.
 
 The rest of this page moved from the top of the README on 2026-10-05,
-unchanged. The [v1 readiness checklist](v1-readiness-checklist-2026-09-14.md)
+unchanged, so it is out of date in two ways: Linux x86_64 archives now ship too,
+and Claude Code and Cursor sessions can also be owners that decide. The [v1 readiness checklist](v1-readiness-checklist-2026-09-14.md)
 holds the full record.
 
 v2 packages brgr as a Herdr 0.9+ plugin for Apple Silicon macOS 15 or newer.
