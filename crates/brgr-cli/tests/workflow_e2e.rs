@@ -312,6 +312,18 @@ try {
 }
 "#;
 
+const CANCELLED_MID_WAIT_SCRIPT: &str = r#"
+import { writeFileSync } from "node:fs";
+import { agent } from "./brgr-workflow.mjs";
+
+try {
+  await agent({ task: "queued", key: "queued", mode: "headless" });
+  writeFileSync(process.env.BRGR_HOME + "/agent-error.txt", "agent() returned");
+} catch (error) {
+  writeFileSync(process.env.BRGR_HOME + "/agent-error.txt", String(error && error.message));
+}
+"#;
+
 const RETRY_ONCE_SCRIPT: &str = r#"
 import { writeFileSync } from "node:fs";
 import { agent } from "./brgr-workflow.mjs";
@@ -2856,6 +2868,71 @@ esac
     let message = fs::read_to_string(fixture.home.join("agent-error.txt")).unwrap();
     assert!(
         message.contains("cancelled") && !message.contains("agent() returned"),
+        "unexpected stop: {message}"
+    );
+}
+
+#[test]
+fn agent_stops_waiting_when_the_run_is_cancelled_mid_wait() {
+    require_node();
+    let fixture = fixture_home();
+    init_sdk(&fixture);
+    // No deadline: readCreatedAt is skipped, so the wait loop's own
+    // requireActive is the only check that notices the run is gone.
+    let fake_bin = write_fake_brgr(
+        &fixture,
+        r#"
+task="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+dir="$(dirname "$0")"
+case " $* " in
+  *" run "*) printf '{"task_id":"%s"}\n' "$task";;
+  *" workflow status "*)
+    if [ -f "$dir/cancelled" ]; then
+      printf '{"state":"cancelled"}\n'
+    else
+      printf '{"state":"running"}\n'
+    fi
+    ;;
+  *" wait "*) printf '{"task_id":"%s","state":"awaiting_input"}\n' "$task";;
+  *) printf '{"ok":true}\n';;
+esac
+"#,
+    );
+    let script = write_script(
+        &fixture,
+        "cancelled-mid-wait.mjs",
+        CANCELLED_MID_WAIT_SCRIPT,
+    );
+    let mut child = spawn_sdk_script(&fixture, &fake_bin, &script);
+    assert!(
+        wait_until(Duration::from_secs(30), || {
+            fake_argv_log(&fixture)
+                .lines()
+                .any(|line| line.contains(" wait "))
+        }),
+        "agent() never issued brgr wait: log={}",
+        fake_argv_log(&fixture)
+    );
+    fs::write(fixture.scripts.join("cancelled"), b"1\n").unwrap();
+    let status = wait_for_child(&mut child, Duration::from_secs(30));
+    let mut node_stderr = String::new();
+    if status.is_none()
+        && let Some(mut pipe) = child.stderr.take()
+    {
+        let _ = std::io::Read::read_to_string(&mut pipe, &mut node_stderr);
+    }
+    assert!(
+        status.is_some(),
+        "agent() kept polling after the run was cancelled: log={} node stderr={node_stderr}",
+        fake_argv_log(&fixture)
+    );
+    wait_for_file(
+        &fixture.home.join("agent-error.txt"),
+        Duration::from_secs(2),
+    );
+    let message = fs::read_to_string(fixture.home.join("agent-error.txt")).unwrap();
+    assert!(
+        message.contains("is cancelled") && !message.contains("agent() returned"),
         "unexpected stop: {message}"
     );
 }
