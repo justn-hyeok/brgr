@@ -677,6 +677,28 @@ mod tests {
     }
 
     #[test]
+    fn evidence_files_stay_relative_to_the_workspace() {
+        let mut task = sample_task();
+        task.evidence.files = vec!["report.md".to_owned(), "sub/dir.txt".to_owned()];
+        task.validate().unwrap();
+
+        for path in [
+            "../outside.txt",
+            "a/../b.txt",
+            "/etc/passwd",
+            ".git/config",
+            "sub/.git/HEAD",
+        ] {
+            task.evidence.files = vec![path.to_owned()];
+            assert_eq!(
+                task.validate(),
+                Err(ProtocolError::InvalidEvidenceSpec),
+                "evidence path {path:?} was accepted"
+            );
+        }
+    }
+
+    #[test]
     fn acceptance_criteria_are_bounded_by_count_and_bytes() {
         let mut task = sample_task();
         task.acceptance_criteria = vec!["x".repeat(MAX_CRITERION_BYTES)];

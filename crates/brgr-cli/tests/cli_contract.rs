@@ -8513,6 +8513,62 @@ fn sealed_evidence_is_reviewed_before_separate_conflict_checked_integration() {
     assert!(!repository.join("report.md").exists());
 }
 
+/// A worker's `report.md` symlinked at a file outside the worktree is refused
+/// as requested evidence; nothing of the outside file is sealed.
+#[test]
+fn a_symlinked_evidence_file_is_refused_and_its_target_is_not_sealed() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("brgr");
+    let repository = temp.path().join("repo");
+    let executable = temp.path().join("fixture");
+    let outside = temp.path().join("outside.txt");
+    fs::create_dir_all(&repository).unwrap();
+    seed_git_repo(&repository);
+    fs::write(&outside, b"OUTSIDE_THE_WORKTREE_BYTES").unwrap();
+    let script = format!(
+        "#!/bin/sh\ncase \"$1\" in\n --version) echo 'fixture v-symlink-evidence'; exit 0;;\n --help) printf '%s\\n' '-p, --print' '--mode=<value>' '--no-session' '--no-mcp' '--model' '--thinking'; exit 0;;\nesac\nfor item in \"$@\"; do case \"$item\" in @*) prompt=${{item#@}};; esac; done\nif /usr/bin/grep -q SYMLINK_EVIDENCE \"$prompt\"; then\n /bin/ln -s '{}' report.md\nfi\nprintf '%s\\n' '{{\"type\":\"message_end\",\"message\":{{\"role\":\"assistant\",\"content\":[{{\"type\":\"text\",\"text\":\"SYMLINK_OK\"}}]}}}}'\nprintf '%s\\n' '{{\"type\":\"agent_end\",\"stopReason\":\"completed\"}}'\n",
+        outside.display()
+    );
+    write_fast_script(&executable, &script);
+    add_fixture(&home, &executable, &temp.path().join("scratch"));
+    let owner = [("BRGR_OWNER_ID", "codex:symlink-evidence")];
+    let outcome = json_output(&run(
+        &home,
+        &[
+            "run",
+            "SYMLINK_EVIDENCE",
+            "--workspace",
+            repository.to_str().unwrap(),
+            "--evidence-file",
+            "report.md",
+            "--foreground",
+        ],
+        &owner,
+    ));
+    assert_eq!(outcome["outcome"], "failed", "{outcome}");
+    let error = outcome["error"].as_str().unwrap();
+    assert!(
+        error.contains("requested evidence leaves the task workspace: report.md"),
+        "{error}"
+    );
+    for entry in fs::read_dir(home.join("store").join("artifacts").join("sha256"))
+        .into_iter()
+        .flatten()
+        .flatten()
+    {
+        for file in fs::read_dir(entry.path()).into_iter().flatten().flatten() {
+            let bytes = fs::read(file.path()).unwrap();
+            assert!(
+                !bytes
+                    .windows(b"OUTSIDE_THE_WORKTREE_BYTES".len())
+                    .any(|window| window == b"OUTSIDE_THE_WORKTREE_BYTES"),
+                "{} held the outside file's bytes",
+                file.path().display()
+            );
+        }
+    }
+}
+
 #[test]
 fn selected_input_is_excluded_from_worker_patch_and_source_edit_survives_apply() {
     let temp = TempDir::new().unwrap();

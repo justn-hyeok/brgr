@@ -1126,3 +1126,54 @@ fn a_result_without_capture_diff_has_no_stash_note() {
     assert_eq!(result.outcome, TerminalOutcome::Candidate);
     assert!(result.unresolved_effects.is_empty());
 }
+
+#[cfg(unix)]
+#[test]
+fn requested_evidence_through_a_symlink_is_refused_not_sealed() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::open(root.path()).unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let secret = b"OUTSIDE_THE_WORKSPACE_BYTES";
+    std::fs::write(outside.path().join("secret.txt"), secret).unwrap();
+    std::os::unix::fs::symlink(
+        outside.path().join("secret.txt"),
+        workspace.path().join("report.md"),
+    )
+    .unwrap();
+    let mut spec = task_spec(TaskId::new(), 1);
+    spec.workspace = workspace.path().to_string_lossy().into_owned();
+    spec.evidence.files = vec!["report.md".to_owned()];
+
+    let error =
+        crate::evidence::seal_requested_evidence(&store, &spec, &successful_output(b"report"))
+            .expect_err("requested evidence through a symlink was sealed");
+    assert_eq!(
+        error,
+        "requested evidence leaves the task workspace: report.md"
+    );
+    for path in sealed_files(&root.path().join("artifacts")) {
+        assert_ne!(
+            std::fs::read(&path).unwrap().as_slice(),
+            secret,
+            "{} held the outside file's bytes",
+            path.display()
+        );
+    }
+}
+
+fn sealed_files(root: &std::path::Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return files;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            files.extend(sealed_files(&path));
+        } else {
+            files.push(path);
+        }
+    }
+    files
+}
