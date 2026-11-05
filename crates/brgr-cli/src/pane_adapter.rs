@@ -242,6 +242,21 @@ fn pane_argv(
         agent_args.extend(options.argv.clone());
     }
     agent_args.extend_from_slice(activated.permission_arguments(launch.spec.permission)?);
+    if interactive.herdr_kind == "codex" {
+        // Codex runs a worker's tool commands in a shared daemon that keeps
+        // the environment of whoever started it, so an environment variable
+        // cannot carry a custom `--home` to them. Session config does.
+        agent_args.splice(
+            0..0,
+            [
+                "-c".to_owned(),
+                crate::herdr_plugin::codex_env_config(
+                    "BRGR_HOME",
+                    paths.home.to_str().context("brgr home is not UTF-8")?,
+                )?,
+            ],
+        );
+    }
     if launch.spec.route.requested_model.is_some() && !session_model_supported(interactive) {
         agent_args.extend(activated.launch.model_argv.iter().cloned());
     }

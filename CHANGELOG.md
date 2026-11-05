@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- A Codex pane worker's launch now passes the run's control home as `-c shell_environment_policy.set.BRGR_HOME="…"`, so its tool commands use a custom `--home`/`BRGR_HOME` even when Codex's shared daemon carries another one (issue #362).
+
 ## 2.15.21 — 2026-11-05
 
 A regression in v2.15.20 left failures no command could clear. Also fixes a five-second stall in `status`, `wait` and `watch`, and dispatchers that outlived their home.

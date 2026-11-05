@@ -79,7 +79,9 @@ fn run(home: &Path, args: &[&str], envs: &[(&str, &str)]) -> std::process::Outpu
     if matches!(args.first(), Some(&"run" | &"revise"))
         && !args.contains(&"local.omp-herdr")
         && !(envs.iter().any(|(name, _)| *name == "HERDR_PANE_ID")
-            && (args.contains(&"local.claude-code") || args.contains(&"local.opencode")))
+            && (args.contains(&"local.claude-code")
+                || args.contains(&"local.codex")
+                || args.contains(&"local.opencode")))
     {
         command.arg("--headless");
     }
@@ -1121,6 +1123,16 @@ test "$standalone" = yes || { echo 'ran in the shared background service' >&2; e
 echo "OPENCODE_2_MODEL=$model"
 "#;
 
+/// A Codex stand-in: it documents the `exec` recipe's flags and answers a
+/// print-mode run.
+const CODEX_FIXTURE: &str = r#"#!/bin/sh
+case "$1 $2" in
+  '--version '*) echo 'codex-cli 0.0.0'; exit 0;;
+  'exec --help') printf '%s\n' '--dangerously-bypass-approvals-and-sandbox' '--skip-git-repo-check' '--ephemeral' '-m, --model <MODEL>' '-c, --config <key=value>'; exit 0;;
+esac
+echo CODEX_PRINT_MODE_OK
+"#;
+
 /// A Herdr stand-in. It opens a pane, starts an agent, and — standing in for
 /// the agent too — writes the report named in the prompt, then goes from
 /// working to idle. Every call and the pane's environment are recorded beside
@@ -1315,12 +1327,14 @@ fn pane_fixture_named(home: &str, workspace: &str) -> PaneFixture {
     fs::create_dir_all(&bin).unwrap();
     for (name, body) in [
         ("claude", CLAUDE_FIXTURE),
+        ("codex", CODEX_FIXTURE),
         ("opencode", OPENCODE_FIXTURE),
         ("herdr", PANE_HERDR_FIXTURE),
     ] {
         write_fast_script(&bin.join(name), body);
     }
     add_fixture(&home, &bin.join("claude"), &temp.path().join("scratch"));
+    add_fixture(&home, &bin.join("codex"), &temp.path().join("scratch"));
     add_fixture(&home, &bin.join("opencode"), &temp.path().join("scratch"));
     PaneFixture {
         home,
@@ -1889,6 +1903,94 @@ fn a_pane_run_works_with_spaces_in_the_home_and_workspace_paths() {
         "{}",
         fixture.state("pane-cwd")
     );
+}
+
+/// Codex runs a worker's tool commands in a shared daemon that keeps the
+/// environment of whoever started it, so the pane launch carries the run's home
+/// as session config instead (issue #362).
+#[test]
+fn a_codex_pane_worker_gets_the_control_home_as_session_config() {
+    let fixture = pane_fixture();
+    let ran = fixture.run_on("local.codex", &[]);
+    assert_eq!(ran["outcome"], "candidate", "{ran}");
+    let args = fixture.state("start-args");
+    let home = fixture.home.canonicalize().unwrap();
+    let expected = format!(
+        "-c\nshell_environment_policy.set.BRGR_HOME={}",
+        serde_json::to_string(home.to_str().unwrap()).unwrap()
+    );
+    assert!(args.contains(&expected), "{args}");
+    assert_eq!(
+        args.matches("shell_environment_policy.set.").count(),
+        1,
+        "{args}"
+    );
+}
+
+/// The same override survives a home path with a space and a double quote:
+/// the value is JSON-quoted, so the pane's command line still parses.
+#[test]
+fn a_codex_pane_worker_gets_a_home_with_spaces_and_quotes() {
+    let fixture = pane_fixture_named("Application Support/br\"gr", "work space");
+    let ran = fixture.run_on("local.codex", &[]);
+    assert_eq!(ran["outcome"], "candidate", "{ran}");
+    let args = fixture.state("start-args");
+    let home = fixture.home.canonicalize().unwrap();
+    let expected = format!(
+        "shell_environment_policy.set.BRGR_HOME={}",
+        serde_json::to_string(home.to_str().unwrap()).unwrap()
+    );
+    assert!(args.contains(&expected), "{args}");
+}
+
+/// A `revise` rebuilds the launch, so the second revision's Codex pane launch
+/// carries the same home override.
+#[test]
+fn a_revised_codex_pane_worker_still_gets_the_home_override() {
+    let fixture = pane_fixture();
+    let ran = fixture.run_on("local.codex", &[]);
+    assert_eq!(ran["outcome"], "candidate", "{ran}");
+    let task = ran["task_id"].as_str().unwrap();
+    let herdr = [
+        ("BRGR_OWNER_ID", "codex:pane-test"),
+        ("HERDR_ENV", "1"),
+        ("HERDR_PANE_ID", "w9:p1"),
+        ("HERDR_BIN_PATH", fixture.herdr.to_str().unwrap()),
+    ];
+    json_output(&run(
+        &fixture.home,
+        &["reject", task, "--reason", "revise"],
+        &herdr,
+    ));
+    // Not through `run`, which adds `--headless` to every revise.
+    let revised = json_output(
+        &brgr_command()
+            .arg("--home")
+            .arg(&fixture.home)
+            .args(["--json", "revise", task, "Explain again", "--foreground"])
+            .env("BRGR_SESSION_ID", "fixture-session")
+            .envs(herdr)
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(revised["outcome"], "candidate", "{revised}");
+    assert_eq!(revised["revision"], 2);
+    let args = fixture.state("start-args");
+    assert!(
+        args.contains("shell_environment_policy.set.BRGR_HOME="),
+        "{args}"
+    );
+}
+
+/// Only Codex needs its home as session config: another harness's pane launch
+/// is unchanged.
+#[test]
+fn a_non_codex_pane_worker_has_no_home_config_override() {
+    let fixture = pane_fixture();
+    let ran = fixture.run(&[]);
+    assert_eq!(ran["outcome"], "candidate", "{ran}");
+    let args = fixture.state("start-args");
+    assert!(!args.contains("shell_environment_policy"), "{args}");
 }
 
 #[test]
