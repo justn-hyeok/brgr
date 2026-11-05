@@ -2648,7 +2648,8 @@ fn include_ignored_reaches_the_reclaim_a_pane_cleanup_runs() {
 }
 
 /// A Codex worker's commands run in a shared daemon that lost `BRGR_HOME`. Its
-/// worktree's path still names the home, and a typed `--home` still wins.
+/// worktree's path still names the home. A home someone chose, by `--home` or
+/// `BRGR_HOME`, still wins.
 #[test]
 fn a_command_from_a_worker_directory_uses_the_workers_home() {
     let root = tempfile::tempdir().unwrap();
@@ -2677,6 +2678,15 @@ fn a_command_from_a_worker_directory_uses_the_workers_home() {
         .unwrap();
     assert!(typed.status.success(), "{typed:?}");
     assert!(elsewhere.join("config.toml").is_file());
+
+    let exported = root.join("exported");
+    let from_environment = brgr()
+        .env("BRGR_HOME", &exported)
+        .args(["config", "init"])
+        .output()
+        .unwrap();
+    assert!(from_environment.status.success(), "{from_environment:?}");
+    assert!(exported.join("config.toml").is_file());
 }
 
 /// A worker that changed files and then never wrote its report has failed, but
