@@ -473,6 +473,11 @@ mod tests {
             slept_seconds: None,
         };
         mark_pending(temp.path(), task_id, &result).unwrap();
+        let saved: PaneReceipt =
+            serde_json::from_slice(&fs::read(receipt_path(temp.path(), task_id)).unwrap()).unwrap();
+        assert_eq!(saved.state, CleanupState::Retained);
+        assert_eq!(saved.result_id, None);
+        assert_eq!(saved.result_digest, None);
         let store = Store::open(temp.path().join("store")).unwrap();
         assert_eq!(status(&store, temp.path(), task_id).unwrap(), "retained");
         assert_eq!(

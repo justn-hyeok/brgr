@@ -3508,10 +3508,16 @@ fn a_three_stage_pipeline_passes_each_result_to_the_next_stage() {
     );
     assert_eq!(sealed["results"][0]["outcome"], "completed", "{sealed}");
     let second = status["steps"][1]["task_id"].as_str().unwrap();
-    let objective = task_objective(&fixture, second);
-    assert!(
-        objective.contains("BRGR_FIXTURE_OK"),
-        "second stage task did not include the first report: {objective}"
+    assert_eq!(
+        task_objective(&fixture, second),
+        "BRGR_FIXTURE_OK uses BRGR_FIXTURE_OK",
+        "second stage task must include the first stage report"
+    );
+    let third = status["steps"][2]["task_id"].as_str().unwrap();
+    assert_eq!(
+        task_objective(&fixture, third),
+        "BRGR_FIXTURE_OK third BRGR_FIXTURE_OK",
+        "third stage task must include the second stage report"
     );
 }
 
