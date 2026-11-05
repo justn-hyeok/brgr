@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 2.15.21 — 2026-11-05
+
+A regression in v2.15.20 left failures no command could clear. Also fixes a five-second stall in `status`, `wait` and `watch`, and dispatchers that outlived their home.
+
 - Continue notices are answered only when the visible line contains the notice itself, not prose that quotes or discusses it.
 - `revise` acknowledges the replaced failure as soon as its new revision is admitted, and `result --ack` can clear older failed or lost revisions left by v2.15.20.
 - Notification dispatchers now stop when their original store database is removed or replaced without recreating it.
