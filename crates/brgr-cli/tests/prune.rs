@@ -786,6 +786,85 @@ fn accepting_a_clean_task_reclaims_its_worktree_and_branch_at_once() {
     assert_eq!(detail["result"]["outcome"], "candidate");
 }
 
+#[test]
+fn accepting_a_task_started_in_a_subdirectory_reclaims_its_worktree() {
+    let fixture = Fixture::new();
+    fs::create_dir_all(fixture.repository.join("sub")).unwrap();
+    fs::write(fixture.repository.join("sub/seed"), b"seed\n").unwrap();
+    fixture.git(&["add", "sub/seed"]);
+    fixture.git(&["commit", "-m", "subdirectory"]);
+    let mut command = fixture.command();
+    command.current_dir(fixture.repository.join("sub"));
+    let receipt = json(
+        &command
+            .args(["run", "clean", "--foreground"])
+            .output()
+            .unwrap(),
+    );
+    let task = receipt["task_id"].as_str().unwrap().to_owned();
+    let worktree = fixture.worktree(&task);
+    assert!(worktree.join("sub").is_dir());
+    fixture.accept(&task);
+    assert!(!worktree.exists(), "worktree survived its decision");
+}
+
+#[test]
+fn prune_reclaims_a_kept_task_started_in_a_subdirectory() {
+    let fixture = Fixture::new();
+    fs::create_dir_all(fixture.repository.join("sub")).unwrap();
+    fs::write(fixture.repository.join("sub/seed"), b"seed\n").unwrap();
+    fixture.git(&["add", "sub/seed"]);
+    fixture.git(&["commit", "-m", "subdirectory"]);
+    let mut command = fixture.command();
+    command.current_dir(fixture.repository.join("sub"));
+    let receipt = json(
+        &command
+            .args(["run", "clean", "--foreground", "--keep-worktree"])
+            .output()
+            .unwrap(),
+    );
+    let task = receipt["task_id"].as_str().unwrap().to_owned();
+    let worktree = fixture.worktree(&task);
+    fixture.accept(&task);
+    assert!(worktree.is_dir(), "--keep-worktree was ignored");
+
+    let report = fixture.prune(&["--apply"]);
+
+    assert_eq!(report["removed"], 1, "{report}");
+    assert!(!worktree.exists(), "prune retained the task worktree");
+}
+
+#[test]
+fn prune_does_not_match_a_task_workspace_under_a_sibling_directory() {
+    let fixture = Fixture::new();
+    let task = fixture.run_task("safe matching");
+    let worktree = fixture.worktree(&task);
+    let sibling = worktree.with_file_name(format!("{}-other", Fixture::slug(&task)));
+    let subdirectory = sibling.join("sub");
+    fs::create_dir_all(&subdirectory).unwrap();
+    let store =
+        rusqlite::Connection::open(fixture.home.join("store").join("brgr.sqlite3")).unwrap();
+    store
+        .execute(
+            "UPDATE tasks SET spec_json = json_set(spec_json, '$.workspace', ?1) WHERE task_id = ?2",
+            rusqlite::params![subdirectory.to_string_lossy(), task],
+        )
+        .unwrap();
+
+    let report = fixture.prune(&[]);
+
+    assert_eq!(report["removable"], 0, "{report}");
+    assert!(
+        reason_of(&report, "safe matching", &Fixture::slug(&task))
+            .contains("no task revision was admitted"),
+        "{report}"
+    );
+    assert!(
+        worktree.is_dir(),
+        "a sibling workspace falsely authorized removal"
+    );
+}
+
 /// The decision and a pane's session loop both reclaim after a decision; while
 /// one holds the revision's reclaim lock the other steps aside without a note.
 #[test]
