@@ -485,19 +485,66 @@ fn write_json_atomic(path: &Path, value: &Value) -> Result<()> {
 fn write_bytes_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     let parent = path.parent().context("path has no parent")?;
     fs::create_dir_all(parent)?;
-    let mut temporary = NamedTempFile::new_in(parent)?;
+    let target = match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => fs::canonicalize(path)
+            .with_context(|| format!("refusing dangling symlink {}", path.display()))?,
+        _ => path.to_path_buf(),
+    };
+    let target_parent = target.parent().context("path has no parent")?;
+    fs::create_dir_all(target_parent)?;
+    let mut temporary = NamedTempFile::new_in(target_parent)?;
     temporary.write_all(bytes)?;
-    temporary
-        .as_file_mut()
-        .set_permissions(fs::Permissions::from_mode(0o600))?;
+    if target == path {
+        temporary
+            .as_file_mut()
+            .set_permissions(fs::Permissions::from_mode(0o600))?;
+    } else {
+        let mode = fs::metadata(&target)?.permissions().mode() & 0o777;
+        temporary
+            .as_file_mut()
+            .set_permissions(fs::Permissions::from_mode(mode))?;
+    }
     temporary.as_file_mut().sync_all()?;
-    temporary.persist(path)?;
+    temporary.persist(&target)?;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn writing_hooks_keeps_a_symlink_and_updates_its_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("dotfiles-hooks.json");
+        let link = dir.path().join("hooks.json");
+        fs::write(&target, "{}\n").unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        write_json_atomic(&link, &json!({"hooks": {}})).unwrap();
+
+        assert!(
+            fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(
+            fs::read_to_string(&target).unwrap(),
+            "{\n  \"hooks\": {}\n}\n"
+        );
+    }
+
+    #[test]
+    fn writing_hooks_refuses_a_dangling_symlink_with_its_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let link = dir.path().join("hooks.json");
+        std::os::unix::fs::symlink(dir.path().join("missing.json"), &link).unwrap();
+
+        let error = write_json_atomic(&link, &json!({"hooks": {}})).unwrap_err();
+
+        assert!(format!("{error:#}").contains(&link.display().to_string()));
+    }
 
     /// Splits one skill command into argv, filling its placeholders with
     /// sample values so the command line can be parsed.
