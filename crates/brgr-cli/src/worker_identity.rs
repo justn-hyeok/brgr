@@ -77,20 +77,16 @@ pub(crate) fn attempt() -> Option<String> {
         .or_else(|| env::var("BRGR_PARENT_ATTEMPT_ID").ok())
 }
 
-/// The home to use when `chosen` came from nowhere or from the environment. A
-/// `--home` that differs from the environment was typed for this command, so it
-/// stands.
+/// The home to use when neither `--home` nor `BRGR_HOME` chose one, which is how
+/// a Codex worker's command arrives. A choice someone made stands, wherever the
+/// command runs.
 pub(crate) fn resolve_home(chosen: Option<PathBuf>) -> Option<PathBuf> {
-    if chosen.is_some()
-        && chosen.as_deref().map(Path::as_os_str) != env::var_os("BRGR_HOME").as_deref()
-    {
-        return chosen;
-    }
-    env::current_dir()
-        .ok()
-        .and_then(|directory| directory.canonicalize().ok())
-        .and_then(|directory| home_in_directory(&directory))
-        .or(chosen)
+    chosen.or_else(|| {
+        env::current_dir()
+            .ok()
+            .and_then(|directory| directory.canonicalize().ok())
+            .and_then(|directory| home_in_directory(&directory))
+    })
 }
 
 /// The home whose worktree holds `directory`: a directory with `.brgr/tasks` at

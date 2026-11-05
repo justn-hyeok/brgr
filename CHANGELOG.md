@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- `BRGR_HOME` now wins inside a task worktree. Only a command with neither it nor `--home` takes its home from the worktree's path.
+
 ## 2.15.19 — 2026-11-05
 
 Workers on macOS: real rounds found four defects that tests had not. `brgr config edit` arrives, and a workflow's `retries` now works in a pane.
