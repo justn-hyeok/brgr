@@ -1,8 +1,8 @@
 use std::{
     collections::BTreeMap,
-    fs::{self, File},
+    fs::{self, File, OpenOptions},
     io::{Read as _, Write as _},
-    os::unix::fs::PermissionsExt as _,
+    os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _},
     path::{Path, PathBuf},
 };
 
@@ -294,7 +294,7 @@ impl Config {
         Ok(config)
     }
 
-    pub fn save(&self, path: &Path) -> Result<()> {
+    fn save(&self, path: &Path) -> Result<()> {
         let parent = path
             .parent()
             .context("brgr config has no parent directory")?;
@@ -307,6 +307,31 @@ impl Config {
             .set_permissions(fs::Permissions::from_mode(0o600))?;
         temporary.persist(path)?;
         Ok(())
+    }
+
+    /// Serialize config changes across brgr processes. The lock lives beside
+    /// the config in the control home and is never replaced with the config.
+    pub(crate) fn update(
+        path: &Path,
+        control_home: &Path,
+        change: impl FnOnce(&mut Self) -> Result<bool>,
+    ) -> Result<Self> {
+        fs::create_dir_all(control_home)?;
+        let lock_path = control_home.join("config.lock");
+        let lock = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .mode(0o600)
+            .open(lock_path)?;
+        lock.lock().context("locking brgr config")?;
+
+        let mut config = Self::load(path)?;
+        if change(&mut config)? {
+            config.save(path)?;
+        }
+        Ok(config)
     }
 }
 
@@ -430,10 +455,11 @@ pub(crate) fn validate_manifest_argv(
 
 pub(crate) fn initialize(paths: &crate::Paths, json_output: bool) -> Result<()> {
     let instructions = paths.home.join("BRGR.md");
-    let config_created = !paths.config.exists();
-    if config_created {
-        Config::default().save(&paths.config)?;
-    }
+    let mut config_created = false;
+    Config::update(&paths.config, &paths.home, |_| {
+        config_created = !paths.config.exists();
+        Ok(config_created)
+    })?;
     let mut instructions_created = false;
     match fs::OpenOptions::new()
         .write(true)
@@ -553,6 +579,19 @@ mod tests {
         let linked = root.path().join("linked.toml");
         std::os::unix::fs::symlink(&path, &linked).unwrap();
         assert!(Config::load(&linked).is_err());
+    }
+
+    #[test]
+    fn config_update_refuses_invalid_toml_without_overwriting_it() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        fs::create_dir_all(&home).unwrap();
+        let path = home.join("config.toml");
+        let invalid = b"[herdr\nworker_placement = 'tab'\n";
+        fs::write(&path, invalid).unwrap();
+
+        assert!(Config::update(&path, &home, |_| Ok(true)).is_err());
+        assert_eq!(fs::read(&path).unwrap(), invalid);
     }
 
     #[test]

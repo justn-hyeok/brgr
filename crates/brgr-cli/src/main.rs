@@ -417,9 +417,9 @@ async fn config_alias_command(
     json_output: bool,
 ) -> Result<()> {
     use cli::AliasCommand;
-    let mut config = Config::load(&paths.config)?;
     match command {
         AliasCommand::List => {
+            let config = Config::load(&paths.config)?;
             if json_output {
                 print_value(&serde_json::to_value(aliases::list(&config))?, true);
             } else if aliases::list(&config).is_empty() {
@@ -444,8 +444,10 @@ async fn config_alias_command(
             }
         }
         AliasCommand::Remove { name } => {
-            aliases::remove(&mut config, name)?;
-            config.save(&paths.config)?;
+            update_config(paths, |config| {
+                aliases::remove(config, name)?;
+                Ok(())
+            })?;
         }
         AliasCommand::Set {
             name,
@@ -476,17 +478,46 @@ async fn config_alias_command(
                     Err(error) => return Err(error.into()),
                 }
             }
-            aliases::set(
-                &mut config,
-                name,
-                aliases::Alias {
-                    harness: harness.clone(),
-                    model: model.clone(),
-                    effort: effort.clone(),
-                },
-            )?;
-            config.save(&paths.config)?;
+            update_config(paths, |config| {
+                aliases::set(
+                    config,
+                    name,
+                    aliases::Alias {
+                        harness: harness.clone(),
+                        model: model.clone(),
+                        effort: effort.clone(),
+                    },
+                )?;
+                Ok(())
+            })?;
         }
+    }
+    Ok(())
+}
+
+fn update_config(paths: &Paths, change: impl FnOnce(&mut Config) -> Result<()>) -> Result<Config> {
+    Config::update(&paths.config, &paths.home, |config| {
+        change(config)?;
+        Ok(true)
+    })
+}
+
+fn validate_issue_reporting(repo: &str, min_count: u64) -> Result<()> {
+    if repo.split('/').count() != 2 || repo.contains(char::is_whitespace) {
+        bail!("repository must be OWNER/NAME");
+    }
+    if min_count == 0 {
+        bail!("--min-count must be at least 1");
+    }
+    Ok(())
+}
+
+fn validate_handoff_condition(kind: &str, quota_percent: u8) -> Result<()> {
+    if kind.is_empty() || kind.contains(char::is_whitespace) {
+        bail!("--kind must be a Herdr agent kind such as codex");
+    }
+    if !(1..=99).contains(&quota_percent) {
+        bail!("a threshold is a percentage from 1 to 99");
     }
     Ok(())
 }
@@ -495,65 +526,66 @@ async fn config_command(paths: &Paths, command: &ConfigCommand, json_output: boo
     if let ConfigCommand::Alias { command } = command {
         return config_alias_command(paths, command, json_output).await;
     }
-    let mut config = Config::load(&paths.config)?;
-    match command {
+    let config = match command {
         ConfigCommand::Init => return config::initialize(paths, json_output),
         ConfigCommand::Set {
             key,
             value,
             harness,
-        } => {
+        } => update_config(paths, |config| {
             config.set(key, value, harness.as_deref())?;
-            config.save(&paths.config)?;
+            Ok(())
+        })?,
+        ConfigCommand::Check => {
+            let config = Config::load(&paths.config)?;
+            return config::check(paths, &config, json_output).await;
         }
-        ConfigCommand::Check => return config::check(paths, &config, json_output).await,
-        ConfigCommand::Show => {}
+        ConfigCommand::Show => Config::load(&paths.config)?,
         ConfigCommand::Alias { .. } | ConfigCommand::Edit => unreachable!("handled above"),
         ConfigCommand::SetCodexExecutable { executable } => {
             config::validate_codex_executable(executable)?;
-            config.herdr.codex_executable = Some(executable.clone());
-            config.save(&paths.config)?;
+            update_config(paths, |config| {
+                config.herdr.codex_executable = Some(executable.clone());
+                Ok(())
+            })?
         }
-        ConfigCommand::ClearCodexExecutable => {
+        ConfigCommand::ClearCodexExecutable => update_config(paths, |config| {
             config.herdr.codex_executable = None;
-            config.save(&paths.config)?;
-        }
-        ConfigCommand::SetWorkerPlacement { placement } => {
+            Ok(())
+        })?,
+        ConfigCommand::SetWorkerPlacement { placement } => update_config(paths, |config| {
             config.herdr.worker_placement = *placement;
-            config.save(&paths.config)?;
-        }
-        ConfigCommand::ClearPaneNameTemplate => {
+            Ok(())
+        })?,
+        ConfigCommand::ClearPaneNameTemplate => update_config(paths, |config| {
             config.reset_pane_name_template();
-            config.save(&paths.config)?;
-        }
-        ConfigCommand::SetAutoWorkerPane { enabled } => {
+            Ok(())
+        })?,
+        ConfigCommand::SetAutoWorkerPane { enabled } => update_config(paths, |config| {
             config.herdr.auto_worker_pane = *enabled;
-            config.save(&paths.config)?;
-        }
-        ConfigCommand::SetPaneMode { enabled } => {
+            Ok(())
+        })?,
+        ConfigCommand::SetPaneMode { enabled } => update_config(paths, |config| {
             config.herdr.prefer_print_mode = !*enabled;
-            config.save(&paths.config)?;
-        }
-        ConfigCommand::SetAutoRecertify { enabled } => {
+            Ok(())
+        })?,
+        ConfigCommand::SetAutoRecertify { enabled } => update_config(paths, |config| {
             config.recertify.auto = *enabled;
-            config.save(&paths.config)?;
-        }
+            Ok(())
+        })?,
         ConfigCommand::SetIssueReporting { repo, min_count } => {
-            if repo.split('/').count() != 2 || repo.contains(char::is_whitespace) {
-                bail!("repository must be OWNER/NAME");
-            }
-            if *min_count == 0 {
-                bail!("--min-count must be at least 1");
-            }
-            config.issues.auto_file = true;
-            config.issues.repo = Some(repo.clone());
-            config.issues.min_count = *min_count;
-            config.save(&paths.config)?;
+            validate_issue_reporting(repo, *min_count)?;
+            update_config(paths, |config| {
+                config.issues.auto_file = true;
+                config.issues.repo = Some(repo.clone());
+                config.issues.min_count = *min_count;
+                Ok(())
+            })?
         }
-        ConfigCommand::ClearIssueReporting => {
+        ConfigCommand::ClearIssueReporting => update_config(paths, |config| {
             config.issues.auto_file = false;
-            config.save(&paths.config)?;
-        }
+            Ok(())
+        })?,
         ConfigCommand::SetHandoffCondition {
             kind,
             exit_old,
@@ -561,27 +593,24 @@ async fn config_command(paths: &Paths, command: &ConfigCommand, json_output: boo
             agent_args,
             auto,
         } => {
-            if kind.is_empty() || kind.contains(char::is_whitespace) {
-                bail!("--kind must be a Herdr agent kind such as codex");
-            }
-            if !(1..=99).contains(quota_percent) {
-                bail!("a threshold is a percentage from 1 to 99");
-            }
-            config.handoff = config::HandoffConfig {
-                kind: Some(kind.clone()),
-                exit_old: *exit_old,
-                context_percent: None,
-                quota_percent: Some(*quota_percent),
-                agent_args: agent_args.clone(),
-                auto: *auto,
-            };
-            config.save(&paths.config)?;
+            validate_handoff_condition(kind, *quota_percent)?;
+            update_config(paths, |config| {
+                config.handoff = config::HandoffConfig {
+                    kind: Some(kind.clone()),
+                    exit_old: *exit_old,
+                    context_percent: None,
+                    quota_percent: Some(*quota_percent),
+                    agent_args: agent_args.clone(),
+                    auto: *auto,
+                };
+                Ok(())
+            })?
         }
-        ConfigCommand::ClearHandoffCondition => {
+        ConfigCommand::ClearHandoffCondition => update_config(paths, |config| {
             config.handoff = config::HandoffConfig::default();
-            config.save(&paths.config)?;
-        }
-    }
+            Ok(())
+        })?,
+    };
     if json_output {
         print_value(&serde_json::to_value(&config)?, true);
     } else {

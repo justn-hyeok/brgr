@@ -143,15 +143,46 @@ fn save(
     harnesses: &[Harness],
     action: Action,
 ) -> Result<()> {
-    match config_edit::apply(config, harnesses, action) {
+    match save_config(paths, harnesses, action)? {
         Ok((next, message)) => {
-            next.save(&paths.config)?;
             *config = next;
             term.write_line(&message)?;
         }
         Err(error) => term.write_line(&format!("Not saved: {error}"))?,
     }
     Ok(())
+}
+
+fn save_config(
+    paths: &Paths,
+    harnesses: &[Harness],
+    action: Action,
+) -> Result<std::result::Result<(Config, String), config_edit::EditError>> {
+    let mut message = None;
+    let mut edit_error = None;
+    let next = Config::update(
+        &paths.config,
+        &paths.home,
+        |fresh| match config_edit::apply(fresh, harnesses, action) {
+            Ok((updated, saved_message)) => {
+                *fresh = updated;
+                message = Some(saved_message);
+                Ok(true)
+            }
+            Err(error) => {
+                edit_error = Some(error);
+                Ok(false)
+            }
+        },
+    )?;
+    if let Some(error) = edit_error {
+        Ok(Err(error))
+    } else {
+        Ok(Ok((
+            next,
+            message.expect("successful config edit has a save message"),
+        )))
+    }
 }
 
 pub(crate) async fn run(paths: &Paths, json: bool) -> Result<()> {
@@ -240,5 +271,51 @@ async fn edit(paths: &Paths, term: &Term) -> Result<()> {
             }
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn saving_an_edit_keeps_a_setting_changed_elsewhere() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = Paths::new(Some(temp.path().to_path_buf())).unwrap();
+        Config::update(&paths.config, &paths.home, |starting| {
+            starting.issues.auto_file = true;
+            starting.issues.repo = Some("owner/repo".into());
+            Ok(true)
+        })
+        .unwrap();
+
+        Config::update(&paths.config, &paths.home, |changed_elsewhere| {
+            changed_elsewhere.issues.auto_file = false;
+            Ok(true)
+        })
+        .unwrap();
+
+        let harnesses = [Harness {
+            id: "local.codex".into(),
+            health: "healthy".into(),
+            models: Some(vec!["gpt-6".into()]),
+        }];
+        save_config(
+            &paths,
+            &harnesses,
+            Action::DefaultModel {
+                harness: "local.codex".into(),
+                model: Some("gpt-6".into()),
+            },
+        )
+        .unwrap()
+        .unwrap();
+
+        let saved = Config::load(&paths.config).unwrap();
+        assert!(!saved.issues.auto_file);
+        assert_eq!(
+            saved.harnesses["local.codex"].model.as_deref(),
+            Some("gpt-6")
+        );
     }
 }
