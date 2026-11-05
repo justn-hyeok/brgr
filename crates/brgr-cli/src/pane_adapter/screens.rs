@@ -1273,4 +1273,36 @@ esac
         watch.observe(&Screen::Clear).unwrap();
         assert!(watch.since.is_none());
     }
+
+    #[test]
+    fn an_answered_screen_resets_the_deadline() {
+        let mut watch = ScreenWatch::with_limit("claude", Duration::from_hours(1));
+        watch.observe(&Screen::Unknown("x".to_owned())).unwrap();
+        watch
+            .observe(&Screen::Resolve {
+                rule: "continue-notice",
+                keys: vec!["enter"],
+            })
+            .unwrap();
+        assert!(watch.since.is_none());
+    }
+
+    #[test]
+    fn the_unknown_screen_deadline_is_three_minutes() {
+        assert_eq!(SCREEN_DEADLINE, Duration::from_mins(3));
+    }
+
+    /// Synthetic: an offer whose skip option is worded "Later" is still moved
+    /// to and answered, never confirmed.
+    #[test]
+    fn an_update_offer_is_skipped_by_its_later_option() {
+        let screen = "Update available\n› 1. Update now\n  2. Later\n";
+        assert_eq!(
+            classify(screen, work()),
+            Screen::Resolve {
+                rule: "update-offer-skip",
+                keys: vec!["down", "enter"],
+            }
+        );
+    }
 }

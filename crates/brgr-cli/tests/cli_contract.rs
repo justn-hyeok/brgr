@@ -1174,7 +1174,7 @@ if (root/'start-fails').exists():
 pathlib.Path(config['state']).write_text(json.dumps({'pid':pid,'birth':birth,'phase':'running','exit_code':None}))
 kind=pathlib.Path(config['executable']).name
 (root/'start-args').write_text('\n'.join(['agent','start','--kind',kind,*config['argv']]))
-(root/'start-attempts').write_text('native host started once\n')
+with (root/'start-attempts').open('a') as attempts: attempts.write('native host started\n')
 (root/'state').write_text('blocked' if (root/'start-blocked').exists() else 'idle')
 PY
     test $? = 0 || exit 9
