@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- `brgr wait` and `brgr watch` poll sealed results every 200 ms and run recovery and cleanup at most once every five seconds.
+
 ## 2.15.20 — 2026-11-05
 
 Fixes from the gate 2-5 review: revisions, heads, installers and stopping a process.
