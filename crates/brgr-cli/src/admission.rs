@@ -67,6 +67,8 @@ pub(crate) struct StartOptions<'a> {
     pub(crate) mode: Resolution,
     pub(crate) calling_options: config::CallingOptions,
     pub(crate) instructions_digest: Option<String>,
+    /// A failed or lost result to acknowledge after this revision is recorded.
+    pub(crate) acknowledge_previous: Option<(OwnerId, brgr_protocol::ResultId, String, u64)>,
     pub(crate) workflow: Option<WorkflowStepAdmission>,
     pub(crate) reuse_clean_unadmitted_worktree: bool,
 }
@@ -281,6 +283,7 @@ pub(crate) async fn run_task(paths: &Paths, mut args: RunArgs, json_output: bool
                 mode,
                 calling_options: calling,
                 instructions_digest,
+                acknowledge_previous: None,
                 workflow,
                 reuse_clean_unadmitted_worktree: false,
             },
@@ -555,12 +558,12 @@ pub(crate) async fn revise_task(paths: &Paths, args: ReviseArgs, json_output: bo
             mode,
             calling_options: calling,
             instructions_digest,
+            acknowledge_previous: revisable.unacknowledged,
             workflow: None,
             reuse_clean_unadmitted_worktree: true,
         },
     )
     .await?;
-    revisable.acknowledge_previous(&store);
     Ok(())
 }
 
@@ -602,15 +605,6 @@ struct Revisable {
     /// A failed or lost result has no decision to record; revising it is the
     /// owner's answer, so it is acknowledged once the revision is admitted.
     unacknowledged: Option<(OwnerId, brgr_protocol::ResultId, String, u64)>,
-}
-
-impl Revisable {
-    /// Best effort: bookkeeping must not fail an already admitted revision.
-    fn acknowledge_previous(&self, store: &Store) {
-        if let Some((owner, result_id, session, epoch)) = &self.unacknowledged {
-            let _ = store.acknowledge_bound(owner, *result_id, session, *epoch);
-        }
-    }
 }
 
 /// A rejected candidate can be revised, and so can a failed or lost result,
@@ -1053,12 +1047,19 @@ pub(crate) async fn start_task(
             return Err(error);
         }
     };
-    drop(admission);
     match commit {
         AdmissionCommit::Created => {}
         AdmissionCommit::Replayed => return Ok(()),
         AdmissionCommit::ParallelLimit(run_id) => workflow::exit_parallel_limit(&run_id),
     }
+    if let Some((owner, result_id, session, epoch)) = &options.acknowledge_previous
+        && let Err(error) = store.acknowledge_bound(owner, *result_id, session, *epoch)
+    {
+        // Admission is already durable; do not turn an acknowledgement error
+        // into a refusal that would hide the new revision from its owner.
+        eprintln!("brgr: previous result acknowledgement remains pending: {error}");
+    }
+    drop(admission);
     start_after_admission(
         paths,
         &mut store,

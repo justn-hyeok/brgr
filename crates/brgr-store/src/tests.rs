@@ -2094,6 +2094,7 @@ const RETRY_DECISIONS: &[(&str, bool)] = &[
     // command the user can simply run again.
     ("acknowledge", false),
     ("acknowledge_bound", false),
+    ("acknowledge_older_failures_bound", false),
     ("acknowledge_message", false),
     ("acknowledge_message_bound", false),
     ("bind_owner", false),
@@ -2524,4 +2525,56 @@ fn record_task_refuses_a_new_over_limit_objective() {
         "error must name the limit: {shown}"
     );
     assert!(!shown.contains(&item.objective), "{shown}");
+}
+
+#[test]
+fn acknowledge_older_failures_bound_leaves_an_older_candidate_untouched() {
+    let root = TempDir::new().unwrap();
+    let mut store = Store::open(root.path()).unwrap();
+    let task = task();
+    store.record_task(&task, "digest-1").unwrap();
+    let attempt_one = AttemptId::new();
+    store.create_attempt(task.task_id, 1, attempt_one).unwrap();
+    let candidate = sealed_result(&store, &task, attempt_one);
+    store
+        .commit_terminal_result(&task.owner_id, &candidate)
+        .unwrap();
+
+    let mut revised = task.clone();
+    revised.revision = 2;
+    revised.create_request_id = "request-2".to_owned();
+    store.record_task(&revised, "digest-2").unwrap();
+    let attempt_two = AttemptId::new();
+    store.create_attempt(task.task_id, 2, attempt_two).unwrap();
+    let failed = ResultEnvelope {
+        outcome: TerminalOutcome::Failed,
+        error: Some("worker died".to_owned()),
+        ..result(&revised, attempt_two)
+    };
+    store
+        .commit_terminal_result(&task.owner_id, &failed)
+        .unwrap();
+    store.bind_owner(&task.owner_id, "session-a", 1).unwrap();
+
+    store
+        .acknowledge_older_failures_bound(&task.owner_id, task.task_id, 3, "session-a", 1)
+        .unwrap();
+
+    let inbox = store.inbox(&task.owner_id, true).unwrap();
+    let candidate_item = inbox
+        .iter()
+        .find(|item| item.result.result_id == candidate.result_id)
+        .expect("candidate missing from inbox");
+    assert!(
+        !candidate_item.acknowledged,
+        "a candidate awaiting a decision was acknowledged"
+    );
+    let failed_item = inbox
+        .iter()
+        .find(|item| item.result.result_id == failed.result_id)
+        .expect("failed result missing from inbox");
+    assert!(
+        failed_item.acknowledged,
+        "the older failed result was not acknowledged"
+    );
 }
