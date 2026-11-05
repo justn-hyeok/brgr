@@ -782,4 +782,75 @@ mod tests {
             .unwrap();
         assert!(decision_is_complete(&store, &receipt).unwrap());
     }
+
+    /// A close that Herdr refuses must not be recorded as closed: the receipt
+    /// is the only ownership record a later retry has. The fake Herdr fails
+    /// the first `pane close` while the pane still exists, then honours the
+    /// retry and reports the pane gone.
+    #[test]
+    fn a_failed_pane_close_keeps_its_receipt_for_the_retry() {
+        let temp = tempfile::tempdir().unwrap();
+        let task_id = TaskId::new();
+        let receipt = PaneReceipt {
+            task_id,
+            attempt_id: AttemptId::new(),
+            owner_id: OwnerId::new("codex:test").unwrap(),
+            agent: "brgr-owned".to_owned(),
+            pane_id: "w9:p2".to_owned(),
+            parent_pane_id: "w9:p1".to_owned(),
+            terminal_id: "term-owned".to_owned(),
+            session_value: "session-owned".to_owned(),
+            launcher_receipt: temp.path().join("launcher.json"),
+            keep_pane: false,
+            state: CleanupState::CleanupPending,
+            result_id: None,
+            result_digest: None,
+        };
+        write_json_atomic(&receipt_path(temp.path(), task_id), &receipt).unwrap();
+        let binary = temp.path().join("herdr");
+        crate::fast_script::write_fast_script(
+            &binary,
+            concat!(
+                "#!/bin/sh\n",
+                "d=\"$(/usr/bin/dirname \"$0\")/herdr-state\"\n",
+                "/bin/mkdir -p \"$d\"\n",
+                "case \"$1 $2\" in\n",
+                " 'agent get') echo '{\"result\":{\"agent\":{\"name\":\"brgr-owned\",\"agent\":\"omp\",\"pane_id\":\"w9:p2\",\"terminal_id\":\"term-owned\",\"agent_status\":\"idle\",\"agent_session\":{\"value\":\"session-owned\"}}}}';;\n",
+                " 'pane get')\n",
+                "  if [ -e \"$d/pane-closed\" ]; then\n",
+                "   echo '{\"error\":{\"code\":\"pane_not_found\",\"message\":\"pane is gone\"}}' >&2; exit 1\n",
+                "  fi\n",
+                "  echo '{\"result\":{\"pane\":{\"pane_id\":\"w9:p2\",\"terminal_id\":\"term-owned\",\"agent\":\"omp\",\"tab_id\":\"w9:t1\"}}}';;\n",
+                " 'pane close')\n",
+                "  if [ -e \"$d/close-fails\" ]; then\n",
+                "   echo '{\"error\":{\"code\":\"close_failed\",\"message\":\"close refused\"}}' >&2; exit 1\n",
+                "  fi\n",
+                "  : > \"$d/pane-closed\"\n",
+                "  echo '{\"result\":{\"type\":\"ok\"}}';;\n",
+                " *) exit 2;;\n",
+                "esac\n",
+            ),
+        );
+        let state = temp.path().join("herdr-state");
+        fs::create_dir_all(&state).unwrap();
+        fs::write(state.join("close-fails"), "").unwrap();
+        crate::caller_pane::tests::HERDR.with(|slot| *slot.borrow_mut() = Some(binary.clone()));
+        let failed = cancel_owned_pane(temp.path(), task_id);
+        crate::caller_pane::tests::HERDR.with(|slot| *slot.borrow_mut() = None);
+        assert!(failed.is_err(), "a refused close must not succeed");
+        let saved: PaneReceipt =
+            serde_json::from_slice(&fs::read(receipt_path(temp.path(), task_id)).unwrap()).unwrap();
+        assert_ne!(
+            saved.state,
+            CleanupState::Closed,
+            "a failed close was recorded as closed"
+        );
+        fs::remove_file(state.join("close-fails")).unwrap();
+        crate::caller_pane::tests::HERDR.with(|slot| *slot.borrow_mut() = Some(binary));
+        cancel_owned_pane(temp.path(), task_id).unwrap();
+        crate::caller_pane::tests::HERDR.with(|slot| *slot.borrow_mut() = None);
+        let saved: PaneReceipt =
+            serde_json::from_slice(&fs::read(receipt_path(temp.path(), task_id)).unwrap()).unwrap();
+        assert_eq!(saved.state, CleanupState::Closed);
+    }
 }

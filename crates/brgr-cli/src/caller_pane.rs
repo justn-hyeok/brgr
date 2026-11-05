@@ -465,7 +465,7 @@ fn pane_in_environment(pid: u32) -> Option<String> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     #[cfg(target_os = "linux")]
     use std::process::Stdio;
@@ -562,7 +562,7 @@ mod tests {
     }
 
     thread_local! {
-        pub(super) static HERDR: std::cell::RefCell<Option<std::path::PathBuf>> =
+        pub(crate) static HERDR: std::cell::RefCell<Option<std::path::PathBuf>> =
             const { std::cell::RefCell::new(None) };
     }
 

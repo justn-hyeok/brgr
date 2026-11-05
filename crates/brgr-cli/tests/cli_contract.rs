@@ -1799,6 +1799,54 @@ fn the_pane_cleanup_failure_report_names_the_state_that_decides_it() {
     }
 }
 
+/// A shell that has not drawn its prompt yet makes `herdr agent start` answer
+/// `agent_pane_busy`. The start is retried until the shell is ready instead of
+/// failing the run. Every registered recipe is a native host today, so the
+/// claude fixture is activated again from a manifest whose interactive recipe
+/// is not, which is the only route through `agent start`.
+#[test]
+fn agent_pane_busy_is_retried_until_the_shell_is_ready() {
+    let fixture = pane_fixture();
+    fs::create_dir_all(&fixture.state).unwrap();
+    fs::write(fixture.state.join("busy"), "1").unwrap();
+    let claude = fixture.herdr.with_file_name("claude");
+    let mut manifest = json_output(&run(
+        &fixture.home,
+        &["harness", "draft", claude.to_str().unwrap()],
+        &[],
+    ));
+    manifest["launch"]["interactive"]
+        .as_object_mut()
+        .unwrap()
+        .remove("native_host");
+    manifest["probe"]["model_catalog"] = Value::Null;
+    manifest["launch"]["env_allow"] = json!(["HOME", "PATH", "LANG", "TMPDIR"]);
+    manifest["launch"]["argv"] = json!(["-p", "--output-format", "text", "${input.prompt}"]);
+    let manifest_path = fixture.state.join("claude-agent.json");
+    fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+    let manifest_path = manifest_path.canonicalize().unwrap();
+    let scratch = fixture.home.parent().unwrap().join("agent-scratch");
+    fs::create_dir_all(&scratch).unwrap();
+    json_output(&run(
+        &fixture.home,
+        &[
+            "harness",
+            "activate",
+            "--manifest",
+            manifest_path.to_str().unwrap(),
+            "--workspace",
+            scratch.to_str().unwrap(),
+            "--prompt",
+            "BRGR_FIXTURE_OK",
+        ],
+        &[],
+    ));
+    let ran = fixture.run(&[]);
+    assert_eq!(ran["outcome"], "candidate", "{ran}");
+    let calls = fixture.state("calls.log");
+    assert_eq!(calls.matches("agent start").count(), 2, "{calls}");
+}
+
 /// A native run starts its host once.
 #[test]
 fn native_tui_bootstrap_starts_once() {
