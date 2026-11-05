@@ -369,6 +369,41 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn seal_path_refuses_a_symlink() {
+        let root = TempDir::new().unwrap();
+        let store = ArtifactStore::open(root.path()).unwrap();
+        let target = root.path().join("target.txt");
+        fs::write(&target, b"target bytes").unwrap();
+        let link = root.path().join("report.md");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let error = store.seal_path(&link, "text/plain", 1_024).unwrap_err();
+        assert!(
+            matches!(error, StoreError::ArtifactNotRegularFile { .. }),
+            "unexpected seal error: {error:?}"
+        );
+    }
+
+    #[test]
+    fn resealing_after_the_stored_copy_is_tampered_fails() {
+        let root = TempDir::new().unwrap();
+        let store = ArtifactStore::open(root.path()).unwrap();
+        let first = store
+            .seal_reader(Cursor::new(b"report"), "text/plain", 100)
+            .unwrap();
+        fs::write(root.path().join(&first.store_relative_path), b"tamper").unwrap();
+
+        let error = store
+            .seal_reader(Cursor::new(b"report"), "text/plain", 100)
+            .unwrap_err();
+        assert!(
+            matches!(error, StoreError::ArtifactDigestCollision(_)),
+            "unexpected seal error: {error:?}"
+        );
+    }
+
     #[test]
     fn opened_artifact_must_match_the_checked_inode_and_size() {
         let root = TempDir::new().unwrap();
