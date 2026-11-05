@@ -54,6 +54,8 @@ pub enum RunnerError {
     MissingTerminalEvent,
     #[error("JSONL output has no final assistant text")]
     MissingAssistantText,
+    #[error("last assistant message failed: {0}")]
+    AssistantError(String),
     #[error("JSONL assistant model identity is unavailable")]
     ObservedModelUnavailable,
     #[error("JSONL assistant model changed during one run")]
