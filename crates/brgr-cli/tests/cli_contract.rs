@@ -2157,6 +2157,129 @@ fn auto_mode_with_a_herdr_pane_selects_pane_and_reports_why() {
 }
 
 #[test]
+fn opencode_auto_falls_back_to_headless_and_explicit_pane_is_refused_before_admission() {
+    let fixture = pane_fixture();
+    let herdr = fixture.herdr.to_str().unwrap();
+    let output = brgr_command()
+        .arg("--home")
+        .arg(&fixture.home)
+        .args([
+            "--json",
+            "run",
+            "Explain the build",
+            "--harness",
+            "local.opencode",
+            "--mode",
+            "auto",
+            "--workspace",
+        ])
+        .arg(&fixture.workspace)
+        .args(["--foreground"])
+        .env_remove("BRGR_SESSION_ID")
+        .env_remove("CODEX_THREAD_ID")
+        .env_remove("CLAUDE_CODE_SESSION_ID")
+        .env_remove("CURSOR_CONVERSATION_ID")
+        .env_remove("BRGR_TEST_TRUST_HERDR_PANE")
+        .env("OPENCODE_SESSION_ID", "ses_opencode_fixture")
+        .arg("--owner-session")
+        .arg("ses_opencode_fixture")
+        .env("HERDR_ENV", "1")
+        .env("HERDR_PANE_ID", "w9:p1")
+        .env("HERDR_BIN_PATH", herdr)
+        .output()
+        .unwrap();
+    let receipt: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(receipt["outcome"], "candidate", "{receipt}");
+    assert_eq!(receipt["mode"], "headless", "{receipt}");
+    assert_eq!(receipt["mode_reason"], "no herdr pane in this environment");
+    assert!(receipt["source_pane"].is_null());
+    assert!(!fixture.state("calls.log").contains("pane split"));
+    let task = receipt["task_id"].as_str().unwrap();
+    let store = brgr_store::Store::open(fixture.home.join("store")).unwrap();
+    assert_eq!(
+        store.task(task.parse().unwrap()).unwrap().owner_id.as_str(),
+        "opencode:ses_opencode_fixture"
+    );
+
+    let explicit = brgr_command()
+        .arg("--home")
+        .arg(&fixture.home)
+        .args([
+            "--json",
+            "run",
+            "Refuse the build",
+            "--harness",
+            "local.opencode",
+            "--mode",
+            "pane",
+            "--workspace",
+        ])
+        .arg(&fixture.workspace)
+        .arg("--foreground")
+        .env_remove("BRGR_SESSION_ID")
+        .env_remove("CODEX_THREAD_ID")
+        .env_remove("CLAUDE_CODE_SESSION_ID")
+        .env_remove("CURSOR_CONVERSATION_ID")
+        .env_remove("BRGR_TEST_TRUST_HERDR_PANE")
+        .env("OPENCODE_SESSION_ID", "ses_opencode_fixture")
+        .arg("--owner-session")
+        .arg("ses_opencode_fixture")
+        .env("HERDR_ENV", "1")
+        .env("HERDR_PANE_ID", "w9:p1")
+        .env("HERDR_BIN_PATH", herdr)
+        .output()
+        .unwrap();
+    assert!(!explicit.status.success());
+    let error = String::from_utf8_lossy(&explicit.stderr);
+    assert!(error.contains("--mode headless"), "{error}");
+    assert!(!error.contains("Codex"), "{error}");
+    assert!(!error.contains("--as"), "{error}");
+    let store = brgr_store::Store::open(fixture.home.join("store")).unwrap();
+    assert_eq!(store.tasks(100).unwrap().len(), 1);
+}
+
+#[test]
+fn codex_owner_session_without_thread_id_keeps_the_pending_pane_path() {
+    let fixture = pane_fixture();
+    let output = brgr_command()
+        .arg("--home")
+        .arg(&fixture.home)
+        .args([
+            "--json",
+            "--as",
+            "codex-session-fixture",
+            "run",
+            "Explain the build",
+            "--harness",
+            "local.claude-code",
+            "--mode",
+            "auto",
+            "--workspace",
+        ])
+        .arg(&fixture.workspace)
+        .env_remove("BRGR_SESSION_ID")
+        .env_remove("CODEX_THREAD_ID")
+        .env_remove("CLAUDE_CODE_SESSION_ID")
+        .env_remove("CURSOR_CONVERSATION_ID")
+        .env_remove("OPENCODE_SESSION_ID")
+        .env_remove("BRGR_TEST_TRUST_HERDR_PANE")
+        .env("HERDR_ENV", "1")
+        .env("HERDR_PANE_ID", "w9:p1")
+        .env("HERDR_BIN_PATH", fixture.herdr.to_str().unwrap())
+        .output()
+        .unwrap();
+    let receipt: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(receipt["state"], "starting", "{receipt}");
+    assert_eq!(receipt["mode"], "pane", "{receipt}");
+    let task = receipt["task_id"].as_str().unwrap();
+    let launch: Value = serde_json::from_slice(
+        &fs::read(fixture.home.join("launches").join(format!("{task}.json"))).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(launch["source_pane"], "session:codex-session-fixture");
+}
+
+#[test]
 fn revise_accepts_an_explicit_mode() {
     let fixture = pane_fixture();
     let initial = fixture.run_on("local.opencode", &["--headless"]);

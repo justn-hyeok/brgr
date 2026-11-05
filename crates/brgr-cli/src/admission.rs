@@ -905,11 +905,9 @@ fn source_pane(
     }
     // A Codex call cannot be placed while it runs, so its pane is looked up
     // once the call has finished; the worker pane opens then, beside it.
-    caller_source_pane(spec)
-        .context(
-            "default TUI execution needs an exact Herdr source; run it from a Herdr pane, or from a Codex session start the command with `--as SESSION` (the session in your calling context) so brgr can find your pane",
-        )
-        .map(Some)
+    caller_source_pane(spec).map(Some).ok_or_else(|| {
+        anyhow::anyhow!("a pane run needs an exact Herdr source pane; run it from a Herdr pane, or use `--mode headless`")
+    })
 }
 
 fn caller_source_pane(spec: &TaskSpec) -> Option<String> {
@@ -917,13 +915,33 @@ fn caller_source_pane(spec: &TaskSpec) -> Option<String> {
         return Some(pane);
     }
     crate::caller_pane::verified().or_else(|| {
-        (spec.owner_id.as_str().starts_with("codex:")
+        (codex_pending_session_allowed(spec)
             && std::env::var("HERDR_ENV").as_deref() == Ok("1")
             && crate::caller_pane::binary().is_some())
         .then(|| crate::current_session().ok().flatten())
         .flatten()
         .map(|session| crate::caller_pane::pending_marker(&session))
     })
+}
+
+fn codex_pending_session_allowed(spec: &TaskSpec) -> bool {
+    let nonempty = |name: &str| std::env::var(name).is_ok_and(|value| !value.trim().is_empty());
+    if nonempty("CODEX_THREAD_ID") {
+        return true;
+    }
+    let other_harness_session = [
+        "OPENCODE_SESSION_ID",
+        "CLAUDE_CODE_SESSION_ID",
+        "CURSOR_CONVERSATION_ID",
+    ]
+    .into_iter()
+    .any(nonempty);
+    !other_harness_session
+        && crate::invocation::current()
+            .session
+            .as_deref()
+            .is_some_and(|session| !session.trim().is_empty())
+        && spec.owner_id.as_str().starts_with("codex:")
 }
 
 // Admission ordering is security-sensitive and remains explicit here.
