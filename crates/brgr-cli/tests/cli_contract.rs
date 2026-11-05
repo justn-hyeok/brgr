@@ -8947,6 +8947,133 @@ fn a_lost_run_whose_worker_still_runs_cannot_be_revised_until_it_stops() {
 }
 
 #[test]
+fn status_does_not_wait_for_a_newer_revision_and_reclaims_the_old_worktree_afterward() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("brgr");
+    let repository = temp.path().join("repo");
+    fs::create_dir_all(&repository).unwrap();
+    seed_git_repo(&repository);
+    let harness_root = temp.path().join("revision-gate");
+    fs::create_dir_all(harness_root.join("scratch")).unwrap();
+    let executable = harness_root.join("slow-agent");
+    write_fast_script(
+        &executable,
+        "#!/bin/sh\ncase \"$1\" in\n  --version) echo 'revision gate 1';;\n  --help) echo '  --prompt-file <path>  fresh run';;\n  --prompt-file)\n    if [ ! -e \"${0%/*}/probe\" ]; then : > \"${0%/*}/probe\"; elif [ ! -e \"${0%/*}/first-run\" ]; then : > \"${0%/*}/first-run\"; else : > \"${0%/*}/started\"; while [ ! -e \"${0%/*}/release\" ]; do /bin/sleep 0.1; done; fi\n    /bin/cat \"$2\";;\n  *) exit 2;;\nesac\n",
+    );
+    json_output(&run(
+        &home,
+        &[
+            "harness",
+            "add",
+            executable.to_str().unwrap(),
+            "--workspace",
+            harness_root.join("scratch").to_str().unwrap(),
+            "--prompt",
+            "scratch",
+        ],
+        &[],
+    ));
+    let owner = [("BRGR_OWNER_ID", "codex:reconcile-revision")];
+    let repo = repository.to_str().unwrap();
+
+    let first = json_output(&run(
+        &home,
+        &[
+            "run",
+            "first revision",
+            "--harness",
+            "local.slow-agent",
+            "--workspace",
+            repo,
+            "--keep-worktree",
+            "--foreground",
+        ],
+        &owner,
+    ));
+    let task = first["task_id"].as_str().unwrap();
+    let task_id = task.parse::<brgr_protocol::TaskId>().unwrap();
+    let first_spec = brgr_store::Store::open(home.join("store"))
+        .unwrap()
+        .task(task_id)
+        .unwrap();
+    let first_worktree = PathBuf::from(first_spec.workspace);
+    let _ = fs::remove_file(harness_root.join("release"));
+
+    json_output(&run(&home, &["reject", task, "--reason", "revise"], &owner));
+    let second = json_output(&run(
+        &home,
+        &["revise", task, "second revision", "--workspace", repo],
+        &owner,
+    ));
+    assert_eq!(second["revision"], 2);
+    assert!(
+        wait_until(|| harness_root.join("started").is_file()),
+        "revision 2 worker did not start"
+    );
+
+    let first_launch = home.join("launches").join(format!("{task}.json"));
+    let mut launch: Value = serde_json::from_slice(&fs::read(&first_launch).unwrap()).unwrap();
+    launch["keep_worktree"] = json!(false);
+    launch["pane_mode"] = json!(true);
+    fs::write(&first_launch, serde_json::to_vec(&launch).unwrap()).unwrap();
+    fs::write(
+        home.join("runs").join(format!("{task}-r1.pane.json")),
+        serde_json::to_vec(&json!({
+            "pane": "fixture-pane",
+            "binary": "/bin/false",
+            "task": task,
+            "revision": 1,
+            "cleanup": "closed"
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let second_launch = home.join("launches").join(format!("{task}-r2.json"));
+    let mut launch: Value = serde_json::from_slice(&fs::read(&second_launch).unwrap()).unwrap();
+    launch["keep_worktree"] = json!(false);
+    fs::write(&second_launch, serde_json::to_vec(&launch).unwrap()).unwrap();
+
+    let started = Instant::now();
+    let status = run(&home, &["status", task], &owner);
+    assert!(
+        status.status.success(),
+        "{}",
+        String::from_utf8_lossy(&status.stderr)
+    );
+    let status_elapsed = started.elapsed();
+    let first_worktree_retained = first_worktree.is_dir();
+    fs::write(harness_root.join("release"), "go").unwrap();
+    assert!(
+        wait_until(|| {
+            let result = run(&home, &["result", task], &owner);
+            result.status.success()
+                && serde_json::from_slice::<Value>(&result.stdout)
+                    .is_ok_and(|value| value["result"]["revision"] == 2)
+        }),
+        "revision 2 did not finish"
+    );
+    json_output(&run(&home, &["accept", task], &owner));
+    let reclaimed = run(&home, &["status", task], &owner);
+    assert!(
+        reclaimed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&reclaimed.stderr)
+    );
+    assert!(
+        !first_worktree.exists(),
+        "revision 1 worktree was not reclaimed after revision 2 was decided"
+    );
+    assert!(
+        first_worktree_retained,
+        "revision 1 worktree was removed while revision 2 was running"
+    );
+    assert!(
+        status_elapsed < Duration::from_secs(4),
+        "status took {status_elapsed:?} while revision 2 was running"
+    );
+}
+
+#[test]
 fn foreground_admission_lock_is_released_before_slow_harness_execution() {
     let temp = TempDir::new().unwrap();
     let home = temp.path().join("brgr");

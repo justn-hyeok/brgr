@@ -1003,6 +1003,39 @@ fn a_decision_waits_for_a_worker_that_is_still_exiting() {
     );
 }
 
+/// An acknowledgement settles a failed run as a decision settles a candidate,
+/// and nothing retries a headless reclaim later, so it waits the same way.
+#[test]
+fn an_acknowledgement_waits_for_a_worker_that_is_still_exiting() {
+    let fixture = Fixture::new();
+    let receipt = fixture.json(&[
+        "run",
+        "SLOW exiting",
+        "--workspace",
+        fixture.repo_arg(),
+        "--deadline-seconds",
+        "1",
+        "--foreground",
+    ]);
+    assert_ne!(receipt["outcome"], "candidate", "{receipt}");
+    let task = receipt["task_id"].as_str().unwrap().to_owned();
+    let launched = Command::new("/bin/sh")
+        .args(["-c", "/bin/sleep 2 >/dev/null 2>&1 & echo $!"])
+        .output()
+        .unwrap();
+    let pid = String::from_utf8(launched.stdout).unwrap();
+    fs::write(
+        fixture.home.join("runs").join(format!("{task}.pid")),
+        pid.trim(),
+    )
+    .unwrap();
+    fixture.acknowledge(&task);
+    assert!(
+        !fixture.worktree(&task).exists(),
+        "the acknowledgement skipped reclaiming while the worker exited"
+    );
+}
+
 /// `--keep-worktree` on the task carries over to its revisions.
 #[test]
 fn a_revision_keeps_its_worktree_when_the_task_asked_to() {
