@@ -11242,3 +11242,66 @@ fn a_config_section_for_gjc_keeps_loading() {
     json_output(&run(&home, &["config", "show"], &[]));
     json_output(&run(&home, &["config", "check"], &[]));
 }
+
+/// The internal commands a dead home's launchers can still fire (issue #350)
+/// exit quietly and create nothing; `Paths::new` is never reached.
+#[test]
+fn internal_command_for_a_missing_home_exits_without_creating_it() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("missing-home");
+    let cases: [&[&str]; 4] = [
+        &["__notify", "11111111-1111-4111-8111-111111111111"],
+        &["__notify-workflow", "a-run-id"],
+        &["__session", "11111111-1111-4111-8111-111111111111"],
+        &["__supervise", "/nonexistent/launch.json"],
+    ];
+    for args in cases {
+        let output = brgr_command()
+            .arg("--home")
+            .arg(&home)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(output.stdout.is_empty(), "{args:?} wrote to stdout");
+        assert!(output.stderr.is_empty(), "{args:?} wrote to stderr");
+        assert!(!home.exists(), "{args:?} created {}", home.display());
+    }
+}
+
+/// A dangling symlink counts as missing: `Path::exists` follows it, and brgr
+/// must not create the directory it points at either.
+#[test]
+fn internal_command_for_a_dangling_home_symlink_exits_without_creating_it() {
+    let temp = TempDir::new().unwrap();
+    let target = temp.path().join("gone");
+    let home = temp.path().join("home-link");
+    std::os::unix::fs::symlink(&target, &home).unwrap();
+    let output = brgr_command()
+        .arg("--home")
+        .arg(&home)
+        .args(["__notify", "11111111-1111-4111-8111-111111111111"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!home.exists());
+    assert!(!target.exists());
+}
+
+/// Nothing else changes: a user-facing command still creates its home on
+/// first use.
+#[test]
+fn a_user_command_for_a_missing_home_still_creates_it() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("missing-home");
+    run(&home, &["status", "--brief"], &[]);
+    assert!(home.is_dir());
+}
