@@ -276,10 +276,12 @@ pub fn test_path() -> std::ffi::OsString {
 fn codex_stub_dir() -> &'static Path {
     CODEX_STUB_DIR
         .get_or_init(|| {
-            let directory = std::env::temp_dir()
-                .join(format!("brgr-codex-stub-{}", std::process::id()));
+            // Statics are never dropped, so a pid-named directory would leak
+            // in `$TMPDIR` once per test process. Every process writes the
+            // same script, so they share one directory instead.
+            let directory = std::env::temp_dir().join("brgr-test-codex-stub");
             fs::create_dir_all(&directory).unwrap();
-            write_fast_script(
+            install_shared_script(
                 &directory.join("codex"),
                 "#!/bin/sh\nif [ -n \"${BRGR_TEST_CODEX_CALLS:-}\" ]; then printf '%s\\n' \"$@\" >> \"$BRGR_TEST_CODEX_CALLS\"; fi\nprintf '%s\\n' 'codex stub v-test'\n",
             );
@@ -290,12 +292,35 @@ fn codex_stub_dir() -> &'static Path {
 
 fn herdr_stub_dir() -> &'static Path {
     HERDR_STUB_DIR.get_or_init(|| {
-        let directory =
-            env::temp_dir().join(format!("brgr-test-herdr-stub-{}", std::process::id()));
+        // The script body is the same for every process, so the directory is
+        // shared for the same reason as `codex_stub_dir`.
+        let directory = env::temp_dir().join("brgr-test-herdr-stub");
         fs::create_dir_all(&directory).unwrap();
-        write_fast_script(&directory.join("herdr"), "#!/bin/sh\nexit 1\n");
+        install_shared_script(&directory.join("herdr"), "#!/bin/sh\nexit 1\n");
         directory
     })
+}
+
+/// Atomically installs `body` at `path`, leaving the file alone when it
+/// already holds the same content. The body goes to a pid-named sibling and
+/// is renamed over `path`, so a concurrent test process never runs a
+/// half-written script, and a process already executing `path` keeps its own
+/// inode. The write is direct, not [`write_fast_script`]: the trampoline's
+/// second `.body` file cannot be renamed in the same atomic step.
+fn install_shared_script(path: &Path, body: &str) {
+    if fs::read(path).is_ok_and(|bytes| bytes == body.as_bytes()) {
+        return;
+    }
+    let mut temporary = path.file_name().unwrap().to_os_string();
+    temporary.push(format!(".{}", std::process::id()));
+    let temporary = path.with_file_name(temporary);
+    fs::write(&temporary, body).unwrap();
+    fs::set_permissions(&temporary, fs::Permissions::from_mode(0o755)).unwrap();
+    // Run the temporary once before publishing it: a successful exec proves
+    // no forking thread still holds it open for writing (ETXTBSY on Linux).
+    // Exit status is ignored; the herdr stub exits 1 on purpose.
+    output_when_not_busy(&mut Command::new(&temporary));
+    fs::rename(&temporary, path).unwrap();
 }
 
 /// Removes inherited Herdr environment variables from this process.
@@ -402,4 +427,20 @@ pub fn add_fixture(home: &Path, fixture: &Path, scratch: &Path) {
         &[],
     ));
     assert!(receipt["scratch_result_digest"].as_str().is_some());
+}
+
+#[test]
+fn stub_dirs_are_shared_not_per_process() {
+    // A pid-named directory leaks in `$TMPDIR` once per test process
+    // because statics are never dropped; the stubs share fixed names.
+    assert_eq!(
+        codex_stub_dir().file_name().unwrap(),
+        "brgr-test-codex-stub"
+    );
+    assert!(codex_stub_dir().join("codex").exists());
+    assert_eq!(
+        herdr_stub_dir().file_name().unwrap(),
+        "brgr-test-herdr-stub"
+    );
+    assert!(herdr_stub_dir().join("herdr").exists());
 }
