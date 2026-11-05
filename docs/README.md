@@ -96,6 +96,7 @@ when it was observed, and none of these is updated afterwards.
 [PTY proxy spike on Linux](evidence/pty-proxy-spike-linux-2026-11-04.md) ·
 [Real agents on Linux](evidence/linux-real-agents-2026-11-05.md) ·
 [Debate, handoff and delegation in real panes](evidence/debate-handoff-delegation-2026-11-05.md) ·
+[The same on macOS](evidence/debate-handoff-delegation-macos-2026-11-05.md) ·
 [2-4 clean-environment procedure](evidence/gate-24-cleanmac-procedure-2026-09-21.md) ·
 [2-4 clean-environment evidence](evidence/gate-24-cleanmac-evidence-2026-09-21.md) ·
 [2-5 review packet](evidence/gate-25-review-packet-2026-09-21.md) ·
