@@ -1451,12 +1451,19 @@ mod tests {
     async fn oversized_jsonl_event_stops_its_process_group_before_deadline() {
         let workspace = tempfile::tempdir().unwrap();
         let executable = workspace.path().join("oversized-jsonl");
+        let grandchild_pid = workspace.path().join("grandchild.pid");
         write_fast_script(
             &executable,
-            // One event over the limit, written in an instant (a CPU-bound loop
-            // here took longer than the deadline on a loaded machine), then a
-            // collector that would never finish on its own.
-            "#!/bin/sh\n/usr/bin/head -c 1200000 /dev/zero | /usr/bin/tr '\\0' x\nexec /bin/sleep 600\n",
+            // A grandchild in the same group records its pid before the flood
+            // starts, then sleeps; the leader never waits for it or kills it,
+            // so only a group-wide signal can end it. One event over the
+            // limit, written in an instant (a CPU-bound loop here took longer
+            // than the deadline on a loaded machine), then a collector that
+            // would never finish on its own.
+            &format!(
+                "#!/bin/sh\n/bin/sh -c 'echo $$ > \"$1\"; exec /bin/sleep 600' sh '{0}' </dev/null >/dev/null 2>&1 &\nwhile [ ! -s '{0}' ]; do /bin/sleep 0.05; done\n/usr/bin/head -c 1200000 /dev/zero | /usr/bin/tr '\\0' x\nexec /bin/sleep 600\n",
+                grandchild_pid.display()
+            ),
         );
         let mut manifest = echo_manifest(16);
         manifest.executable = executable;
@@ -1485,38 +1492,43 @@ mod tests {
         // Stopped by the oversized event, long before the deadline and the
         // ten-minute sleep.
         assert!(started.elapsed() < Duration::from_secs(30));
+        assert_group_member_died(&grandchild_pid).await;
     }
 
     #[tokio::test]
     async fn cancellation_stops_a_process_group_with_a_grandchild() {
         let workspace = tempfile::tempdir().unwrap();
         let cancel = workspace.path().join("cancel");
-        std::fs::write(&cancel, b"cancel").unwrap();
-        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../testdata/fixtures/brgr-fixture")
-            .canonicalize()
-            .unwrap();
+        let grandchild_pid = workspace.path().join("grandchild.pid");
+        let executable = workspace.path().join("slow-agent");
+        write_fast_script(
+            &executable,
+            // A grandchild in the same group records its pid, then the leader
+            // writes the cancel file itself so the stop can only fire once
+            // the group has a member that outlives a leader-only signal. The
+            // leader never waits for the grandchild or kills it.
+            &format!(
+                "#!/bin/sh\n/bin/sh -c 'echo $$ > \"$1\"; exec /bin/sleep 600' sh '{0}' </dev/null >/dev/null 2>&1 &\nwhile [ ! -s '{0}' ]; do /bin/sleep 0.05; done\n/usr/bin/touch '{1}'\nexec /bin/sleep 600\n",
+                grandchild_pid.display(),
+                cancel.display()
+            ),
+        );
         let mut manifest = echo_manifest(4_096);
-        manifest.executable = fixture;
+        manifest.executable = executable;
         manifest.result.source = ResultSource::JsonlAssistantFinal;
-        manifest.launch.argv = vec![
-            "-p".to_owned(),
-            "--mode=json".to_owned(),
-            "@${input.prompt_file}".to_owned(),
-        ];
 
         let started = Instant::now();
         let output = ProcessRunner::run(
             &manifest,
             RunRequest {
                 workspace: workspace.path(),
-                prompt: "SLOW",
+                prompt: "ignored",
                 criteria: None,
                 instructions: None,
                 model: None,
                 effort: None,
                 permission: None,
-                deadline: Duration::from_secs(10),
+                deadline: Duration::from_secs(30),
                 cancel_path: Some(&cancel),
                 pid_path: None,
             },
@@ -1525,10 +1537,11 @@ mod tests {
         .unwrap();
 
         assert!(output.cancelled);
-        // Not the ten-second deadline, and not the fixture's thirty-second
-        // sleep: the cancel file is what ended it. The bound is a hang guard.
+        // Not the deadline, and not the script's ten-minute sleep: the cancel
+        // file the script wrote is what ended it. The bound is a hang guard.
         assert!(!output.timed_out);
         assert!(started.elapsed() < Duration::from_mins(1));
+        assert_group_member_died(&grandchild_pid).await;
     }
 
     #[tokio::test]
@@ -1723,6 +1736,39 @@ mod tests {
             .unwrap()
             .status
             .success()
+    }
+
+    /// Proves the process a spawned group member recorded in `pid_path` is
+    /// dead. The member's leader neither waits for it nor kills it, so only a
+    /// group-wide signal can end it; a leader-only signal leaves it behind
+    /// and this fails. The waits are polling with hang-guard bounds for a
+    /// loaded machine, and a survivor is put down before the panic so a
+    /// broken run leaves nothing behind.
+    async fn assert_group_member_died(pid_path: &Path) {
+        let appeared = Instant::now();
+        let pid = loop {
+            match std::fs::read_to_string(pid_path) {
+                Ok(text) if !text.trim().is_empty() => break text.trim().to_owned(),
+                _ => {
+                    assert!(
+                        appeared.elapsed() < Duration::from_secs(20),
+                        "no group member recorded its pid in {}",
+                        pid_path.display()
+                    );
+                    sleep(Duration::from_millis(10)).await;
+                }
+            }
+        };
+        let waited = Instant::now();
+        while process_is_alive(&pid) && waited.elapsed() < Duration::from_secs(20) {
+            sleep(Duration::from_millis(25)).await;
+        }
+        if process_is_alive(&pid) {
+            let _ = std::process::Command::new("/bin/kill")
+                .args(["-KILL", &pid])
+                .output();
+            panic!("process {pid} survived the stop of its process group");
+        }
     }
 
     /// A probe child whose parent is killed must not outlive it: nothing is left
