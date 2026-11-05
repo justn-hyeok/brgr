@@ -297,8 +297,10 @@ pub(crate) fn integrate(paths: &Paths, command: IntegrateCommand, json_output: b
 }
 
 pub(crate) async fn doctor(paths: &Paths, json_output: bool) -> Result<()> {
-    reconcile_pending(paths)?;
     let store_ok = Store::open(&paths.store).is_ok();
+    if store_ok {
+        reconcile_pending(paths)?;
+    }
     let registry = Registry::open_with_control_home(&paths.registry, &paths.home);
     let registry_ok = registry.is_ok();
     let harnesses = match registry {

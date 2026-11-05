@@ -650,3 +650,32 @@ fn doctor_healthy_json_has_an_empty_problems_array() {
     assert_eq!(doctor_object_keys(&report), DOCTOR_JSON_KEYS, "{report}");
     assert_eq!(report["problems"], serde_json::json!([]));
 }
+
+#[test]
+fn doctor_with_a_corrupt_store_still_prints_the_report() {
+    let (_temp, home, _executable, codex_home) = doctor_fixture();
+    let envs = doctor_envs(&codex_home);
+    let database = home.join("store").join("brgr.sqlite3");
+    fs::create_dir_all(database.parent().unwrap()).unwrap();
+    let garbage = b"this is not a sqlite database";
+    fs::write(&database, garbage).unwrap();
+
+    let changed = run(&home, &["--json", "doctor"], &envs);
+    assert!(!changed.status.success(), "{changed:?}");
+    let report: Value = serde_json::from_slice(&changed.stdout)
+        .unwrap_or_else(|_| panic!("not JSON: {}", String::from_utf8_lossy(&changed.stdout)));
+    assert_eq!(report["status"], "needs_attention");
+    assert_eq!(report["store"], false);
+    assert_eq!(report["registry"], true);
+    assert_eq!(report["harnesses"][0]["id"], "local.fixture");
+    let problems = report["problems"]
+        .as_array()
+        .expect("problems array is present");
+    assert!(
+        problems
+            .iter()
+            .any(|problem| problem["name"] == "store" && problem["reason"] == "unavailable"),
+        "{problems:?}"
+    );
+    assert_eq!(fs::read(&database).unwrap(), garbage);
+}
