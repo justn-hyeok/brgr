@@ -1029,6 +1029,16 @@ fn create_workflow(fixture: &Fixture, extra: &[&str]) -> String {
         .to_owned()
 }
 
+/// Kills the agent script if a test unwinds, so the wait gate it spawned sees its parent exit.
+struct KillOnDrop(std::process::Child);
+
+impl Drop for KillOnDrop {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
 fn write_wait_gate(fixture: &Fixture) -> PathBuf {
     let path = fixture.scripts.join("wait-gate-brgr");
     write_fast_script(
@@ -1056,7 +1066,8 @@ if [ "${{1:-}}" = "--json" ] && [ "${{2:-}}" = "wait" ]; then
     done
     "$real" --json result -- "$task" > "$first_result"
     printf '1\n' > "$home/wait-returned"
-    while [ ! -e "$home/allow-wait-return" ]; do
+    gate_ppid=$(ps -o ppid= -p $$ | tr -d ' ')
+    while [ ! -e "$home/allow-wait-return" ] && kill -0 "$gate_ppid" 2>/dev/null; do
       /bin/sleep 0.05
     done
     cat "$first_wait"
@@ -1658,7 +1669,7 @@ fn a_script_receives_the_newest_revision_when_the_owner_revises_a_sealed_step() 
     let script = write_script(&fixture, "revise.mjs", REVISE_SCRIPT);
     let run_id = create_workflow(&fixture, &["--max-parallel", "1"]);
     let gate = write_wait_gate(&fixture);
-    let mut child = spawn_agent_script(&fixture, &script, &run_id, &gate);
+    let mut child = KillOnDrop(spawn_agent_script(&fixture, &script, &run_id, &gate));
     wait_for_file(&fixture.home.join("wait-returned"), Duration::from_secs(90));
     let task = wait_for_first_step(&fixture, &run_id);
     reject_and_revise(&fixture, &task);
@@ -1688,7 +1699,7 @@ fn a_script_receives_the_newest_revision_when_the_owner_revises_a_sealed_step() 
     fs::write(fixture.home.join("allow-wait-return"), b"1").unwrap();
     release_revision_two(&fixture);
     let sealed = agent_result(&fixture);
-    let status = child.wait().unwrap();
+    let status = child.0.wait().unwrap();
     assert!(status.success(), "agent script failed: {status}");
     assert_eq!(sealed["revision"], 2, "{sealed}");
     assert_eq!(sealed["outcome"], "completed", "{sealed}");
@@ -1708,7 +1719,7 @@ fn resume_after_a_revise_returns_the_newest_revision_result() {
     let script = write_script(&fixture, "revise-resume.mjs", REVISE_SCRIPT);
     let run_id = create_workflow(&fixture, &[]);
     let gate = write_wait_gate(&fixture);
-    let mut first = spawn_agent_script(&fixture, &script, &run_id, &gate);
+    let first = KillOnDrop(spawn_agent_script(&fixture, &script, &run_id, &gate));
     wait_for_file(&fixture.home.join("wait-returned"), Duration::from_secs(90));
     let task = wait_for_first_step(&fixture, &run_id);
     reject_and_revise(&fixture, &task);
@@ -1716,8 +1727,7 @@ fn resume_after_a_revise_returns_the_newest_revision_result() {
         !fixture.home.join("agent-result.json").is_file(),
         "the script received a result before resume"
     );
-    let _ = first.kill();
-    let _ = first.wait();
+    drop(first);
     let mut resumed = spawn_agent_script(&fixture, &script, &run_id, Path::new(brgr()));
     release_revision_two(&fixture);
     let sealed = agent_result(&fixture);
