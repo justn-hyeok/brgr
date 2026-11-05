@@ -717,8 +717,11 @@ accept, reject, apply, or land.
 
 Write the SDK and a short example with `brgr workflow init`. Start the driver
 with `brgr workflow run SCRIPT`. Inspect a run with `brgr workflow status RUN`.
-If the driver dies, `brgr workflow resume RUN` starts the same script from the
-top; journaled steps replay instead of creating a second task. Stop a run with
+Status reports `driver_alive` as `true` or `false`; `null` means brgr cannot
+identify the driver from a current process record. When a non-finished run's
+driver is dead, status names `brgr workflow resume RUN`. Resume starts the same
+script from the top; journaled steps replay instead of creating a second task.
+Status only reads the run and never resumes it. Stop a run with
 `brgr workflow cancel RUN`. While a worker has asked a question, the SDK calls
 `brgr workflow set-state RUN blocked` once, then `brgr workflow set-state RUN running`
 after the owner replies.

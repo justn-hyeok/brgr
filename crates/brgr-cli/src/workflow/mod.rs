@@ -105,6 +105,7 @@ fn status(paths: &Paths, run: &str, json_output: bool) -> Result<()> {
     let run_id = WorkflowRunId::new(run)?;
     let run = store.workflow_run(&run_id)?;
     require_owner(&store, &run.owner_id)?;
+    let driver_alive = driver::driver_alive(paths, &run_id);
     let steps = store
         .workflow_steps(&run_id)?
         .into_iter()
@@ -129,11 +130,18 @@ fn status(paths: &Paths, run: &str, json_output: bool) -> Result<()> {
             })
         })
         .collect::<Vec<_>>();
+    if driver_alive == Some(false) && !run.state.is_terminal() {
+        eprintln!(
+            "workflow driver for {} is not running; resume with brgr workflow resume {}",
+            run.run_id, run.run_id
+        );
+    }
     print_value(
         &json!({
             "run_id": run.run_id.to_string(),
             "owner": run.owner_id.as_str(),
             "state": run.state.as_str(),
+            "driver_alive": driver_alive,
             "max_parallel": run.max_parallel,
             "script_digest": run.script_digest,
             "steps": steps,

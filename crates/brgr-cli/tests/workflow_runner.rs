@@ -202,7 +202,11 @@ fn process_alive(pid: u32) -> bool {
 }
 
 fn read_pid(path: &Path) -> u32 {
-    fs::read_to_string(path).unwrap().trim().parse().unwrap()
+    serde_json::from_slice::<Value>(&fs::read(path).unwrap()).unwrap()["pid"]
+        .as_u64()
+        .unwrap()
+        .try_into()
+        .unwrap()
 }
 
 #[test]

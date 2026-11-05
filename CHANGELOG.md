@@ -3,6 +3,7 @@
 ## Unreleased
 
 - A refused `brgr revise` no longer acknowledges the failed or lost result it was meant to replace.
+- `workflow status` reports driver liveness and names the resume command for a dead driver without changing run state.
 - Error memo issue text now masks filesystem paths whole, including paths with spaces, and groups path-varying failures under one fingerprint.
 - `brgr head claim --abandoned` can recover a committed or resumed takeover after its current head disappears, recording the old takeover as `superseded`; older sessions are fenced by the binding epoch.
 - Codex hooks installs write through symlinks, status line backups never overwrite, and environment-assignment status lines are refused before editing settings.
