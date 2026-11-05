@@ -65,8 +65,10 @@ pub(super) fn update_receipt(path: &Path, update: impl FnOnce(&mut PaneReceipt))
 pub(crate) fn seal_native_report(paths: &Paths, task: TaskId, revision: u32) -> Result<()> {
     let path = paths.pane_receipt(task, revision);
     let receipt: PaneReceipt = serde_json::from_slice(&fs::read(&path)?)?;
-    let attempt: AttemptId = env::var("BRGR_PARENT_ATTEMPT_ID")?.parse()?;
-    if env::var("BRGR_PARENT_TASK_ID")? != task.to_string()
+    let attempt: AttemptId = crate::worker_identity::attempt()
+        .context("no worker attempt is known here")?
+        .parse()?;
+    if crate::worker_identity::task().as_deref() != Some(task.to_string().as_str())
         || receipt.task != Some(task)
         || receipt.attempt != Some(attempt)
         || receipt.revision != revision
