@@ -71,6 +71,7 @@ fn is_taken_head(store: &Store, owner_id: &OwnerId, session: &str) -> bool {
                         | TakeoverState::Resumed
                         | TakeoverState::Retired
                         | TakeoverState::RetireFailed
+                        | TakeoverState::Superseded
                 )
         })
     })

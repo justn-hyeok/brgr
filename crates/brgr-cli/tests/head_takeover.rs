@@ -140,6 +140,257 @@ fn takeover_epoch(home: &Path, takeover_id: &str) -> u64 {
         .committed_epoch()
 }
 
+#[test]
+fn a_new_session_can_recover_an_abandoned_claim_and_decide_its_candidate() {
+    let (_temp, home, workspace) = fixture_home();
+    let task_id = start_task(&home, &workspace);
+    let b = [
+        ("BRGR_OWNER_ID", "codex:head-takeover"),
+        ("BRGR_SESSION_ID", "session-b"),
+    ];
+    let first = json_output(&run(
+        &home,
+        &[
+            "head",
+            "claim",
+            &task_id,
+            "--abandoned",
+            "--goal",
+            "B takes over",
+            "--key",
+            "claim-b",
+        ],
+        &b,
+    ));
+    let takeover_b = first["takeover"]["takeover_id"].as_str().unwrap();
+    let result = json_output(&run(&home, &["result", &task_id], &b))["result"]["result_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let c = [
+        ("BRGR_OWNER_ID", "codex:head-takeover"),
+        ("BRGR_SESSION_ID", "session-c"),
+    ];
+    let second = run(
+        &home,
+        &[
+            "head",
+            "claim",
+            &task_id,
+            "--abandoned",
+            "--goal",
+            "C recovers",
+            "--key",
+            "claim-c",
+        ],
+        &c,
+    );
+    assert!(
+        second.status.success(),
+        "C could not recover B: {}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    assert_eq!(takeover_state(&home, takeover_b), "superseded");
+    assert!(takeover_epoch(&home, takeover_b) < 3);
+    let store = brgr_store::Store::open(home.join("store")).unwrap();
+    let old = store
+        .takeover(takeover_b.parse().unwrap())
+        .unwrap()
+        .unwrap();
+    assert!(
+        old.failure_reason
+            .as_deref()
+            .unwrap()
+            .contains("superseded by abandoned claim")
+    );
+    let stale = run(&home, &["reject", &task_id, "--reason", "stale B"], &b);
+    assert!(
+        !stale.status.success(),
+        "stale B decided candidate: {}",
+        String::from_utf8_lossy(&stale.stderr)
+    );
+    let decided = json_output(&run(
+        &home,
+        &["reject", &task_id, "--reason", "C decided"],
+        &c,
+    ));
+    assert_eq!(decided["result_id"], result);
+}
+
+#[test]
+fn an_abandoned_claim_refuses_an_uncommitted_takeover() {
+    let (_temp, home, workspace) = fixture_home();
+    let task_id = start_task(&home, &workspace);
+    let requested = json_output(&run(
+        &home,
+        &[
+            "head",
+            "request",
+            &task_id,
+            "--to",
+            "session-b",
+            "--key",
+            "pending",
+        ],
+        &head_env(),
+    ));
+    let id = requested["takeover_id"].as_str().unwrap();
+    let c = [
+        ("BRGR_OWNER_ID", "codex:head-takeover"),
+        ("BRGR_SESSION_ID", "session-c"),
+    ];
+    let refused = run(
+        &home,
+        &["head", "claim", &task_id, "--abandoned", "--goal", "C"],
+        &c,
+    );
+    assert!(
+        !refused.status.success(),
+        "claim superseded requested takeover"
+    );
+    assert_eq!(takeover_state(&home, id), "requested");
+}
+
+#[test]
+fn an_abandoned_claim_refuses_a_prepared_takeover() {
+    let (_temp, home, workspace) = fixture_home();
+    let task_id = start_task(&home, &workspace);
+    let takeover_id = request_and_prepare(&home, &task_id, "prepared-pending");
+    let c = [
+        ("BRGR_OWNER_ID", "codex:head-takeover"),
+        ("BRGR_SESSION_ID", "session-c"),
+    ];
+    let refused = run(
+        &home,
+        &["head", "claim", &task_id, "--abandoned", "--goal", "C"],
+        &c,
+    );
+    assert!(
+        !refused.status.success(),
+        "claim superseded prepared takeover"
+    );
+    assert_eq!(takeover_state(&home, &takeover_id), "prepared");
+}
+
+#[test]
+fn an_abandoned_claim_supersedes_a_committed_request_takeover() {
+    let (_temp, home, workspace) = fixture_home();
+    let task_id = start_task(&home, &workspace);
+    let id = request_and_prepare(&home, &task_id, "request-flow");
+    json_output(&run(&home, &["head", "commit", &id], &incoming_env()));
+    let c = [
+        ("BRGR_OWNER_ID", "codex:head-takeover"),
+        ("BRGR_SESSION_ID", "session-c"),
+    ];
+    let claimed = json_output(&run(
+        &home,
+        &[
+            "head",
+            "claim",
+            &task_id,
+            "--abandoned",
+            "--goal",
+            "recover",
+        ],
+        &c,
+    ));
+    assert_eq!(takeover_state(&home, &id), "superseded");
+    assert_eq!(claimed["takeover"]["state"], "committed");
+}
+
+#[test]
+fn an_abandoned_claim_supersedes_a_resumed_takeover() {
+    let (_temp, home, workspace) = fixture_home();
+    let task_id = start_task(&home, &workspace);
+    let first = json_output(&run(
+        &home,
+        &[
+            "head",
+            "claim",
+            &task_id,
+            "--abandoned",
+            "--goal",
+            "B",
+            "--key",
+            "resumed-b",
+        ],
+        &incoming_env(),
+    ));
+    let takeover_id = first["takeover"]["takeover_id"].as_str().unwrap();
+    json_output(&run(
+        &home,
+        &["reject", &task_id, "--reason", "B resumed"],
+        &incoming_env(),
+    ));
+    assert_eq!(takeover_state(&home, takeover_id), "resumed");
+    let c = [
+        ("BRGR_OWNER_ID", "codex:head-takeover"),
+        ("BRGR_SESSION_ID", "session-c"),
+    ];
+    json_output(&run(
+        &home,
+        &[
+            "head",
+            "claim",
+            &task_id,
+            "--abandoned",
+            "--goal",
+            "C",
+            "--key",
+            "resumed-c",
+        ],
+        &c,
+    ));
+    assert_eq!(takeover_state(&home, takeover_id), "superseded");
+}
+
+#[test]
+fn concurrent_abandoned_claims_bind_the_head_once() {
+    let (_temp, home, workspace) = fixture_home();
+    let task_id = start_task(&home, &workspace);
+    let mut commands = Vec::new();
+    for session in ["session-c", "session-d"] {
+        let mut command = brgr_command();
+        command
+            .arg("--home")
+            .arg(&home)
+            .args([
+                "--json",
+                "head",
+                "claim",
+                &task_id,
+                "--abandoned",
+                "--goal",
+                "recover",
+            ])
+            .env("BRGR_OWNER_ID", "codex:head-takeover")
+            .env("BRGR_SESSION_ID", session);
+        commands.push(command);
+    }
+    let outputs = commands
+        .into_iter()
+        .map(|mut command| std::thread::spawn(move || command.output().unwrap()))
+        .collect::<Vec<_>>()
+        .into_iter()
+        .map(|thread| thread.join().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        outputs
+            .iter()
+            .filter(|output| output.status.success())
+            .count(),
+        1,
+        "{outputs:?}"
+    );
+    let binding = brgr_store::Store::open(home.join("store"))
+        .unwrap()
+        .owner_binding(&brgr_protocol::OwnerId::new("codex:head-takeover").unwrap())
+        .unwrap()
+        .unwrap();
+    assert!(matches!(binding.0.as_str(), "session-c" | "session-d"));
+    assert_eq!(binding.1, 2);
+}
+
 fn incoming_env() -> [(&'static str, &'static str); 2] {
     [
         ("BRGR_OWNER_ID", "codex:head-takeover"),
