@@ -7456,6 +7456,95 @@ fn wait_and_watch_report_a_killed_supervisor_within_the_reconcile_interval() {
     }
 }
 
+/// The sibling above kills the supervisor before `wait` starts, so the first
+/// immediate reconcile catches it. This one kills it after the first
+/// reconcile has passed, so only a later tick can find it.
+#[test]
+fn wait_reports_a_supervisor_killed_mid_wait_within_the_reconcile_interval() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("brgr");
+    let repository = temp.path().join("repo");
+    fs::create_dir_all(&repository).unwrap();
+    seed_git_repo(&repository);
+    let slow = temp.path().join("slow");
+    add_slow_prompt_file_harness(&home, &slow);
+    let owner = [("BRGR_OWNER_ID", "codex:wait-mid-kill")];
+    let started = json_output(&run(
+        &home,
+        &[
+            "run",
+            "HOLD_RUN",
+            "--harness",
+            "local.slow-agent",
+            "--workspace",
+            repository.to_str().unwrap(),
+        ],
+        &owner,
+    ));
+    let task = started["task_id"].as_str().unwrap();
+    assert!(
+        wait_until(|| slow.join("started").is_file()),
+        "worker never started"
+    );
+
+    let mut command = brgr_command();
+    command
+        .arg("--home")
+        .arg(&home)
+        .args(["--json", "wait", task, "--timeout-seconds", "60"])
+        .env("BRGR_SESSION_ID", "fixture-session");
+    for (key, value) in owner {
+        command.env(key, value);
+    }
+    let mut waiter = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    // Past the waiter's first immediate reconcile; the next one is a full
+    // interval away.
+    thread::sleep(Duration::from_secs(1));
+
+    let killed = Instant::now();
+    let supervisor_record = home.join("runs").join(format!("{task}.supervisor.json"));
+    let supervisor: Value = serde_json::from_slice(&fs::read(&supervisor_record).unwrap()).unwrap();
+    let supervisor_pid = supervisor["identity"]["handle"].as_str().unwrap();
+    assert!(
+        Command::new("/bin/kill")
+            .args(["-9", supervisor_pid])
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(wait_until(|| !process_exists(supervisor_pid)));
+    let worker_pid = fs::read_to_string(home.join("runs").join(format!("{task}.pid"))).unwrap();
+    assert!(
+        Command::new("/bin/kill")
+            .args(["-9", worker_pid.trim()])
+            .status()
+            .unwrap()
+            .success()
+    );
+
+    // One reconcile interval plus margin: the kill lands just after a tick,
+    // so the report arrives on the following one.
+    let deadline = killed + Duration::from_secs(8);
+    while waiter.try_wait().unwrap().is_none() {
+        assert!(
+            Instant::now() < deadline,
+            "wait did not report the killed supervisor within the reconcile interval"
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
+    let output = waiter.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(json_output(&output)["outcome"], "lost");
+}
+
 #[test]
 fn wait_returns_promptly_when_a_sealed_result_arrives() {
     let temp = TempDir::new().unwrap();
@@ -7517,6 +7606,76 @@ fn wait_returns_promptly_when_a_sealed_result_arrives() {
     );
     assert!(
         released.elapsed() < Duration::from_secs(5),
+        "wait delayed a sealed result until a reconciliation tick"
+    );
+    assert_eq!(json_output(&output)["outcome"], "candidate");
+}
+
+/// The sibling above releases the result 300 ms in, inside the first
+/// reconcile window, so a wait that checked results only on the five-second
+/// tick could still pass. This one releases after that window: a tick-only
+/// wait needs about four more seconds, over this bound.
+#[test]
+fn wait_returns_promptly_when_a_result_arrives_after_the_first_reconcile() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("brgr");
+    let repository = temp.path().join("repo");
+    fs::create_dir_all(&repository).unwrap();
+    seed_git_repo(&repository);
+    let slow = temp.path().join("slow");
+    add_slow_prompt_file_harness(&home, &slow);
+    let owner = [("BRGR_OWNER_ID", "codex:wait-prompt-result-late")];
+    let started = json_output(&run(
+        &home,
+        &[
+            "run",
+            "HOLD_RUN",
+            "--harness",
+            "local.slow-agent",
+            "--workspace",
+            repository.to_str().unwrap(),
+        ],
+        &owner,
+    ));
+    let task = started["task_id"].as_str().unwrap();
+    assert!(
+        wait_until(|| slow.join("started").is_file()),
+        "worker never started"
+    );
+
+    let mut command = brgr_command();
+    command
+        .arg("--home")
+        .arg(&home)
+        .args(["--json", "wait", task, "--timeout-seconds", "20"])
+        .env("BRGR_SESSION_ID", "fixture-session");
+    for (key, value) in owner {
+        command.env(key, value);
+    }
+    let mut waiter = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    thread::sleep(Duration::from_secs(1));
+    let released = Instant::now();
+    fs::write(slow.join("release"), "release").unwrap();
+    let deadline = released + Duration::from_secs(8);
+    while waiter.try_wait().unwrap().is_none() {
+        assert!(
+            Instant::now() < deadline,
+            "wait did not return after the result was sealed"
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
+    let output = waiter.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        released.elapsed() < Duration::from_secs(3),
         "wait delayed a sealed result until a reconciliation tick"
     );
     assert_eq!(json_output(&output)["outcome"], "candidate");
@@ -9292,6 +9451,134 @@ fn status_does_not_wait_for_a_newer_revision_and_reclaims_the_old_worktree_after
     assert!(
         status_elapsed < Duration::from_secs(4),
         "status took {status_elapsed:?} while revision 2 was running"
+    );
+}
+
+/// The sibling above keeps revision 1's worktree through `worker_exit_is_safe`
+/// while revision 2 runs. This one covers the state after revision 2 has
+/// finished as an undecided candidate with no worker running: the pending
+/// newer revision still keeps the old worktree.
+#[test]
+fn status_keeps_the_old_worktree_while_a_finished_newer_revision_is_undecided() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("brgr");
+    let repository = temp.path().join("repo");
+    fs::create_dir_all(&repository).unwrap();
+    seed_git_repo(&repository);
+    let harness_root = temp.path().join("revision-gate");
+    fs::create_dir_all(harness_root.join("scratch")).unwrap();
+    let executable = harness_root.join("slow-agent");
+    write_fast_script(
+        &executable,
+        "#!/bin/sh\ncase \"$1\" in\n  --version) echo 'revision gate 1';;\n  --help) echo '  --prompt-file <path>  fresh run';;\n  --prompt-file)\n    if [ ! -e \"${0%/*}/probe\" ]; then : > \"${0%/*}/probe\"; elif [ ! -e \"${0%/*}/first-run\" ]; then : > \"${0%/*}/first-run\"; else : > \"${0%/*}/started\"; while [ ! -e \"${0%/*}/release\" ]; do /bin/sleep 0.1; done; fi\n    /bin/cat \"$2\";;\n  *) exit 2;;\nesac\n",
+    );
+    json_output(&run(
+        &home,
+        &[
+            "harness",
+            "add",
+            executable.to_str().unwrap(),
+            "--workspace",
+            harness_root.join("scratch").to_str().unwrap(),
+            "--prompt",
+            "scratch",
+        ],
+        &[],
+    ));
+    let owner = [("BRGR_OWNER_ID", "codex:reconcile-undecided")];
+    let repo = repository.to_str().unwrap();
+
+    let first = json_output(&run(
+        &home,
+        &[
+            "run",
+            "first revision",
+            "--harness",
+            "local.slow-agent",
+            "--workspace",
+            repo,
+            "--keep-worktree",
+            "--foreground",
+        ],
+        &owner,
+    ));
+    let task = first["task_id"].as_str().unwrap();
+    let task_id = task.parse::<brgr_protocol::TaskId>().unwrap();
+    let first_spec = brgr_store::Store::open(home.join("store"))
+        .unwrap()
+        .task(task_id)
+        .unwrap();
+    let first_worktree = PathBuf::from(first_spec.workspace);
+    let _ = fs::remove_file(harness_root.join("release"));
+
+    json_output(&run(&home, &["reject", task, "--reason", "revise"], &owner));
+    let second = json_output(&run(
+        &home,
+        &["revise", task, "second revision", "--workspace", repo],
+        &owner,
+    ));
+    assert_eq!(second["revision"], 2);
+    assert!(
+        wait_until(|| harness_root.join("started").is_file()),
+        "revision 2 worker did not start"
+    );
+
+    let first_launch = home.join("launches").join(format!("{task}.json"));
+    let mut launch: Value = serde_json::from_slice(&fs::read(&first_launch).unwrap()).unwrap();
+    launch["keep_worktree"] = json!(false);
+    launch["pane_mode"] = json!(true);
+    fs::write(&first_launch, serde_json::to_vec(&launch).unwrap()).unwrap();
+    fs::write(
+        home.join("runs").join(format!("{task}-r1.pane.json")),
+        serde_json::to_vec(&json!({
+            "pane": "fixture-pane",
+            "binary": "/bin/false",
+            "task": task,
+            "revision": 1,
+            "cleanup": "closed"
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let second_launch = home.join("launches").join(format!("{task}-r2.json"));
+    let mut launch: Value = serde_json::from_slice(&fs::read(&second_launch).unwrap()).unwrap();
+    launch["keep_worktree"] = json!(false);
+    fs::write(&second_launch, serde_json::to_vec(&launch).unwrap()).unwrap();
+
+    // Revision 2 finishes as a candidate and waits for the owner's decision;
+    // its worker is gone.
+    fs::write(harness_root.join("release"), "go").unwrap();
+    assert!(
+        wait_until(|| {
+            let result = run(&home, &["result", task], &owner);
+            result.status.success()
+                && serde_json::from_slice::<Value>(&result.stdout)
+                    .is_ok_and(|value| value["result"]["revision"] == 2)
+        }),
+        "revision 2 did not finish"
+    );
+
+    let status = run(&home, &["status", task], &owner);
+    assert!(
+        status.status.success(),
+        "{}",
+        String::from_utf8_lossy(&status.stderr)
+    );
+    assert!(
+        first_worktree.is_dir(),
+        "revision 1 worktree was reclaimed while revision 2 awaited a decision"
+    );
+
+    json_output(&run(&home, &["accept", task], &owner));
+    let reclaimed = run(&home, &["status", task], &owner);
+    assert!(
+        reclaimed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&reclaimed.stderr)
+    );
+    assert!(
+        !first_worktree.exists(),
+        "revision 1 worktree was not reclaimed after revision 2 was decided"
     );
 }
 

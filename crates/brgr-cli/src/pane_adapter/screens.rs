@@ -1086,6 +1086,8 @@ mod tests {
         for prose in [
             "The tool prints \"press enter to continue\" when it stops.\n",
             "I saw press enter to continue in the log.\n",
+            "Then it says press enter to continue.\n",
+            "Press Enter to continue or Esc to cancel\n",
         ] {
             assert_eq!(classify(prose, work()), Screen::Clear, "{prose:?}");
         }

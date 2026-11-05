@@ -64,6 +64,16 @@ fn open_existing_does_not_create_a_missing_database() {
 }
 
 #[test]
+fn open_existing_does_not_create_a_database_in_an_empty_store_directory() {
+    let root = TempDir::new().unwrap();
+    let store_root = root.path().join("store");
+    std::fs::create_dir(&store_root).unwrap();
+
+    assert!(Store::open_existing(&store_root).is_err());
+    assert!(!store_root.join("brgr.sqlite3").exists());
+}
+
+#[test]
 fn open_existing_refuses_an_uninitialized_database() {
     let root = TempDir::new().unwrap();
     let database_path = root.path().join("brgr.sqlite3");
