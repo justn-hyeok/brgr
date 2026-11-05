@@ -526,7 +526,6 @@ pub(crate) async fn revise_task(paths: &Paths, args: ReviseArgs, json_output: bo
     calling.permission = replacement.permission;
     calling.deadline_seconds = Some(replacement.budget.deadline_seconds);
     config::validate_manifest_argv(&calling.argv, &activated)?;
-    revisable.acknowledge_previous(&store);
     // The legacy cancel marker has no revision. Once a new revision is
     // admitted, a marker left by an older settled revision must not cancel it.
     let _ = fs::remove_file(paths.cancel(args.task));
@@ -560,7 +559,9 @@ pub(crate) async fn revise_task(paths: &Paths, args: ReviseArgs, json_output: bo
             reuse_clean_unadmitted_worktree: true,
         },
     )
-    .await
+    .await?;
+    revisable.acknowledge_previous(&store);
+    Ok(())
 }
 
 /// A revision of a headless run stays headless, as its retention flags carry
@@ -599,12 +600,12 @@ fn resolve_execution_mode(
 struct Revisable {
     next_revision: u32,
     /// A failed or lost result has no decision to record; revising it is the
-    /// owner's answer, so it is acknowledged once the revision is ready.
+    /// owner's answer, so it is acknowledged once the revision is admitted.
     unacknowledged: Option<(OwnerId, brgr_protocol::ResultId, String, u64)>,
 }
 
 impl Revisable {
-    /// Best effort: a revision already started must not fail over bookkeeping.
+    /// Best effort: bookkeeping must not fail an already admitted revision.
     fn acknowledge_previous(&self, store: &Store) {
         if let Some((owner, result_id, session, epoch)) = &self.unacknowledged {
             let _ = store.acknowledge_bound(owner, *result_id, session, *epoch);

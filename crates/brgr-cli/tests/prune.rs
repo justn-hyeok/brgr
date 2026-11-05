@@ -186,6 +186,59 @@ fn an_acknowledged_failure_is_reclaimed_and_an_unacknowledged_one_is_kept() {
     );
 }
 
+#[test]
+fn a_refused_revise_keeps_the_failure_unacknowledged_and_worktree_kept() {
+    let fixture = Fixture::new();
+    let task = fixture.run_failing_task("retry after a refused revision");
+
+    let before = fixture.prune(&[]);
+    assert_eq!(
+        status_of(&before, &Fixture::slug(&task)),
+        "kept",
+        "{before}"
+    );
+
+    let dirty = fixture.repository.join("uncommitted.txt");
+    fs::write(&dirty, b"uncommitted source change\n").unwrap();
+    let refused = fixture
+        .command()
+        .args(["revise", &task, "try again", "--foreground"])
+        .output()
+        .unwrap();
+    assert!(!refused.status.success(), "revise unexpectedly succeeded");
+    assert!(
+        String::from_utf8_lossy(&refused.stderr)
+            .contains("source worktree contains uncommitted changes"),
+        "revise failed for an unexpected reason: {}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+
+    let after_refusal = fixture.command().args(["prune"]).output().unwrap();
+    let stderr = String::from_utf8_lossy(&after_refusal.stderr);
+    assert!(
+        stderr.contains("run(s) failed or were lost and are not acknowledged"),
+        "the failure banner disappeared after refused revise: {stderr}"
+    );
+    let after_refusal: Value = serde_json::from_slice(&after_refusal.stdout).unwrap();
+    assert_eq!(
+        status_of(&after_refusal, &Fixture::slug(&task)),
+        "kept",
+        "{after_refusal}"
+    );
+
+    fs::remove_file(dirty).unwrap();
+    let revised = fixture.json(&["revise", &task, "try again", "--foreground"]);
+    assert_eq!(revised["outcome"], "candidate", "{revised}");
+    assert_eq!(revised["revision"], 2, "{revised}");
+
+    let after_admission = fixture.command().args(["prune"]).output().unwrap();
+    let stderr = String::from_utf8_lossy(&after_admission.stderr);
+    assert!(
+        !stderr.contains("run(s) failed or were lost and are not acknowledged"),
+        "the failure banner remained after revise was admitted: {stderr}"
+    );
+}
+
 /// Acknowledging a lost result does not stop its worker. A harness process
 /// left behind by a dead supervisor keeps its pid file, and while that process
 /// lives the worktree stays.
