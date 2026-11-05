@@ -237,17 +237,18 @@ impl Store {
         Ok(())
     }
 
-    /// Acknowledges older failed or lost results for one task without changing
-    /// a candidate that is still awaiting an owner decision.
+    /// Acknowledges failed or lost results for one task up to and including
+    /// one revision, without changing a candidate that is still awaiting an
+    /// owner decision.
     ///
     /// # Errors
     ///
     /// Returns an error for a stale session or a database/serialization failure.
-    pub fn acknowledge_older_failures_bound(
+    pub fn acknowledge_failures_through_revision(
         &self,
         owner_id: &OwnerId,
         task_id: TaskId,
-        before_revision: u32,
+        through_revision: u32,
         session_id: &str,
         binding_epoch: u64,
     ) -> Result<(), StoreError> {
@@ -265,11 +266,11 @@ impl Store {
                  FROM results r
                  JOIN inbox_items i ON i.result_id = r.result_id
                  WHERE i.owner_id = ?1 AND i.acknowledged = 0
-                   AND r.task_id = ?2 AND r.revision < ?3
+                   AND r.task_id = ?2 AND r.revision <= ?3
                  ORDER BY r.rowid",
             )?;
             let rows = statement.query_map(
-                params![owner_id.as_str(), task_id.to_string(), before_revision],
+                params![owner_id.as_str(), task_id.to_string(), through_revision],
                 |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
             )?;
             rows.map(|row| {
