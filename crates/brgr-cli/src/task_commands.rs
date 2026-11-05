@@ -458,7 +458,7 @@ pub(crate) fn result(
         if let Err(error) = crate::pane_adapter::cleanup_settled(paths, task, spec.revision) {
             eprintln!("brgr cleanup pending: {error:#}");
         }
-        crate::worktree_prune::reclaim_and_report(paths, task, spec.revision);
+        crate::worktree_prune::reclaim_after_decision_and_report(paths, task, spec.revision);
     }
     print_value(
         &json!({"result": result, "artifacts": artifacts, "route_observation": route_observation}),
@@ -848,7 +848,7 @@ pub(crate) fn record_verdict(
     } else if let Err(error) = pane_cleanup::close_if_eligible(&store, &paths.runs, task) {
         eprintln!("brgr pane cleanup remains pending: {error}");
     }
-    crate::worktree_prune::reclaim_and_report(paths, task, spec.revision);
+    crate::worktree_prune::reclaim_after_decision_and_report(paths, task, spec.revision);
     Ok(persisted)
 }
 
