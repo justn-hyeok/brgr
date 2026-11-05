@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Notification dispatchers now stop when their original store database is removed or replaced without recreating it.
 - `brgr wait` and `brgr watch` poll sealed results every 200 ms and run recovery and cleanup at most once every five seconds.
 
 ## 2.15.20 — 2026-11-05

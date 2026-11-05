@@ -36,6 +36,46 @@ use tempfile::TempDir;
 use super::*;
 
 #[test]
+fn open_existing_enables_connection_foreign_keys_and_full_synchronous_mode() {
+    let root = TempDir::new().unwrap();
+    Store::open(root.path()).unwrap();
+
+    let store = Store::open_existing(root.path()).unwrap();
+    let foreign_keys: i64 = store
+        .connection
+        .query_row("PRAGMA foreign_keys", [], |row| row.get(0))
+        .unwrap();
+    let synchronous: i64 = store
+        .connection
+        .query_row("PRAGMA synchronous", [], |row| row.get(0))
+        .unwrap();
+
+    assert_eq!(foreign_keys, 1);
+    assert_eq!(synchronous, 2);
+}
+
+#[test]
+fn open_existing_does_not_create_a_missing_database() {
+    let root = TempDir::new().unwrap();
+    let store_root = root.path().join("store");
+
+    assert!(Store::open_existing(&store_root).is_err());
+    assert!(!store_root.exists());
+}
+
+#[test]
+fn open_existing_refuses_an_uninitialized_database() {
+    let root = TempDir::new().unwrap();
+    let database_path = root.path().join("brgr.sqlite3");
+    drop(rusqlite::Connection::open(&database_path).unwrap());
+
+    assert!(matches!(
+        Store::open_existing(root.path()),
+        Err(StoreError::UninitializedStore)
+    ));
+}
+
+#[test]
 fn duplicate_terminal_event_keeps_one_inbox_item() {
     let root = TempDir::new().unwrap();
     let mut store = Store::open(root.path()).unwrap();
