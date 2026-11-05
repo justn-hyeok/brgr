@@ -410,15 +410,16 @@ fn competing_accept_accept_reject_records_one_decision() {
         let store = brgr_store::Store::open(f.home.join("store")).unwrap();
         let id = task.parse().unwrap();
         let result = store.latest_result(id).unwrap();
-        match store
+        let verdict = store
             .decision_for_result(result.result_id)
             .unwrap()
             .unwrap()
-            .verdict
-        {
+            .verdict;
+        match verdict {
             brgr_protocol::DecisionVerdict::Accepted => accepted += 1,
             brgr_protocol::DecisionVerdict::Rejected => rejected += 1,
         }
+        assert_decision_losers(&f, round, &outputs, verdict);
         assert_eq!(
             store
                 .inbox(
@@ -431,6 +432,34 @@ fn competing_accept_accept_reject_records_one_decision() {
         );
     }
     eprintln!("decision race split: accepted={accepted}, rejected={rejected}");
+}
+
+/// Whichever verdict won, every client offering the other verdict must have
+/// failed with a decision-conflict refusal.
+fn assert_decision_losers(
+    f: &Fixture,
+    round: usize,
+    outputs: &[std::process::Output],
+    verdict: brgr_protocol::DecisionVerdict,
+) {
+    let stderr_of = |index: usize| {
+        fs::read_to_string(f.logs.join(format!("{round}-{index}.stderr"))).unwrap_or_default()
+    };
+    let losers: &[usize] = match verdict {
+        brgr_protocol::DecisionVerdict::Accepted => &[2],
+        brgr_protocol::DecisionVerdict::Rejected => &[0, 1, 3],
+    };
+    for &index in losers {
+        assert!(
+            !outputs[index].status.success(),
+            "a conflicting decision must lose to the {verdict:?} verdict in round {round}"
+        );
+        assert!(
+            stderr_of(index).contains("already has a different decision"),
+            "the losing decision must report a decision conflict in round {round}: {}",
+            stderr_of(index)
+        );
+    }
 }
 
 #[test]

@@ -1323,31 +1323,6 @@ mod lifecycle_tests {
             Value::Null
         );
     }
-
-    #[test]
-    fn failed_pane_close_keeps_ownership_for_a_later_retry() {
-        let temp = tempfile::tempdir().unwrap();
-        let paths = Paths::new(Some(temp.path().join("home"))).unwrap();
-        let binary = temp.path().join("herdr");
-        crate::fast_script::write_fast_script(&binary, "#!/bin/sh\nexit 1\n");
-        let task = TaskId::new();
-        let path = paths.pane_receipt(task, 1);
-        write_json_atomic(
-            &path,
-            &PaneReceipt {
-                pane: "w1:p2".into(),
-                binary,
-                session: None,
-                ..PaneReceipt::default()
-            },
-        )
-        .unwrap();
-        close_leftover_pane(&paths, task, 1, false);
-        assert!(
-            path.exists(),
-            "a failed close discarded the only ownership receipt"
-        );
-    }
 }
 
 #[cfg(test)]

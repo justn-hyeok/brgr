@@ -345,7 +345,7 @@ fn an_abandoned_claim_supersedes_a_resumed_takeover() {
 }
 
 #[test]
-fn a_claim_that_read_an_older_binding_loses_to_one_that_committed() {
+fn a_claim_that_read_an_older_binding_is_refused() {
     // Two processes can also run one after the other, and then the later claim
     // rightly supersedes the earlier. Only a claim that read the binding before
     // another committed must lose, so this drives that order directly.
@@ -354,24 +354,23 @@ fn a_claim_that_read_an_older_binding_loses_to_one_that_committed() {
     let store = brgr_store::Store::open(home.join("store")).unwrap();
     let owner = brgr_protocol::OwnerId::new("codex:head-takeover").unwrap();
     let (from, epoch) = store.owner_binding(&owner).unwrap().unwrap();
-    let claim = |to_session, idempotency_key| brgr_store::AbandonedClaim {
+    let stale_claim = |idempotency_key| brgr_store::AbandonedClaim {
         from_session: &from,
-        to_session,
+        to_session: "session-c",
         idempotency_key,
         goal: "recover",
         notes: "",
         expected_epoch: epoch,
     };
-    store
-        .claim_abandoned_takeover(&owner, &claim("session-c", "claim-c"))
-        .unwrap();
+    store.rebind_owner(&owner, "session-c").unwrap();
+    store.rebind_owner(&owner, &from).unwrap();
     assert!(matches!(
-        store.claim_abandoned_takeover(&owner, &claim("session-d", "claim-d")),
+        store.claim_abandoned_takeover(&owner, &stale_claim("claim-stale")),
         Err(brgr_store::StoreError::OwnerBindingConflict)
     ));
     let binding = store.owner_binding(&owner).unwrap().unwrap();
-    assert_eq!(binding.0, "session-c");
-    assert_eq!(binding.1, epoch + 1);
+    assert_eq!(binding.0, from);
+    assert_eq!(binding.1, epoch + 2);
 }
 
 fn incoming_env() -> [(&'static str, &'static str); 2] {

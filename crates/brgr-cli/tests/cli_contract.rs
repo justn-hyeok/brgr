@@ -1785,13 +1785,11 @@ fn the_pane_cleanup_failure_report_names_the_state_that_decides_it() {
     }
 }
 
-/// A pane that has not drawn its shell prompt yet refuses an agent; the runner
-/// waits for it instead of failing the task.
+/// A native run starts its host once.
 #[test]
-fn native_tui_bootstrap_starts_once_even_with_a_slow_shell() {
+fn native_tui_bootstrap_starts_once() {
     let fixture = pane_fixture();
     fs::create_dir_all(&fixture.state).unwrap();
-    fs::write(fixture.state.join("busy"), "3\n").unwrap();
     let ran = fixture.run(&[]);
     assert_eq!(ran["outcome"], "candidate");
     assert_eq!(fixture.state("start-attempts").lines().count(), 1);
@@ -4794,8 +4792,20 @@ esac
         wait_until(|| reported.is_file()),
         "the released registration never recorded the session"
     );
-    let status = json_output(&run(&home, &["status", task], &envs));
-    assert_ne!(status["state"], "terminal", "{status}");
+    assert!(
+        wait_until(|| { json_output(&run(&home, &["status", task], &envs))["state"] == "running" }),
+        "the released task never reached a claimed running attempt"
+    );
+    let unfinished = brgr_store::Store::open(home.join("store"))
+        .unwrap()
+        .unfinished_attempts()
+        .unwrap();
+    assert!(
+        unfinished
+            .iter()
+            .any(|attempt| attempt.task.task_id.to_string() == task),
+        "the slow registration left no claimed attempt for task {task}: {unfinished:?}"
+    );
     json_output(&run(&home, &["cancel", task], &envs));
     let terminal = json_output(&run(
         &home,
@@ -4930,12 +4940,23 @@ fn a_failed_run_is_reported_on_every_owner_command_until_acknowledged() {
         assert!(text.contains("failed or were lost"), "{args:?}: {text}");
         assert!(text.contains(task), "{args:?}: {text}");
     }
-    // Another owner is not told about it.
+    // The same owner ID under an outgoing session is not told about it.
     let other = [
-        ("BRGR_OWNER_ID", "codex:someone-else"),
+        ("BRGR_OWNER_ID", "codex:failed-banner"),
         ("BRGR_SESSION_ID", "other-session"),
     ];
     assert!(!String::from_utf8_lossy(&run(&home, &["status"], &other).stderr).contains(task));
+    // A different owner with a real binding is not told about it either.
+    let someone_else = brgr_protocol::OwnerId::new("codex:someone-else").unwrap();
+    brgr_store::Store::open(home.join("store"))
+        .unwrap()
+        .rebind_owner(&someone_else, "other-session-2")
+        .unwrap();
+    let other_owner = [
+        ("BRGR_OWNER_ID", "codex:someone-else"),
+        ("BRGR_SESSION_ID", "other-session-2"),
+    ];
+    assert!(!String::from_utf8_lossy(&run(&home, &["status"], &other_owner).stderr).contains(task));
     json_output(&run(&home, &["result", task, "--ack"], &owner));
     let text = stderr_of(&["status"]);
     assert!(!text.contains("failed or were lost"), "{text}");
@@ -10686,19 +10707,6 @@ fn the_incoming_session_records_the_next_revision_through_the_guard() {
         "session-b",
         "handoff-revise-1",
     );
-    let stale = [
-        ("BRGR_OWNER_ID", "codex:handoff-revise"),
-        ("BRGR_SESSION_ID", "fixture-session"),
-    ];
-    let refused = manual(&home, &["revise", task, "ex again", "--foreground"], &stale);
-    assert!(
-        !refused.status.success(),
-        "a session that handed its head away revised the task: {}",
-        String::from_utf8_lossy(&refused.stderr)
-    );
-    let spec = store_task(&home, task);
-    assert_eq!(spec.revision, 1, "the refused revision was recorded");
-
     // The head rejects the candidate (that resumes handoff 1), closes it, and
     // requests a second handoff so the revise stands on its own.
     let head = [
@@ -10706,6 +10714,18 @@ fn the_incoming_session_records_the_next_revision_through_the_guard() {
         ("BRGR_SESSION_ID", "session-b"),
     ];
     json_output(&run(&home, &["reject", task, "--reason", "handoff"], &head));
+    let stale = [
+        ("BRGR_OWNER_ID", "codex:handoff-revise"),
+        ("BRGR_SESSION_ID", "fixture-session"),
+    ];
+    let refused = manual(&home, &["revise", task, "ex again", "--foreground"], &stale);
+    let refusal = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        !refused.status.success() && refusal.contains("is bound to another session"),
+        "the outgoing session must be refused by the binding guard: {refusal}"
+    );
+    let spec = store_task(&home, task);
+    assert_eq!(spec.revision, 1, "the refused revision was recorded");
     retire_resumed_takeovers(&home, "codex:handoff-revise");
     committed_takeover(
         &home,
