@@ -21,6 +21,7 @@ const TRAMPOLINE_SOURCE: &str = concat!(
 
 static WARMED_TRAMPOLINE: OnceLock<PathBuf> = OnceLock::new();
 static HERDR_STUB_DIR: OnceLock<PathBuf> = OnceLock::new();
+static CODEX_STUB_DIR: OnceLock<PathBuf> = OnceLock::new();
 
 /// Writes a `#!/bin/sh` test executable without macOS's first-exec cost.
 ///
@@ -265,10 +266,26 @@ pub fn isolate_test_command(command: &mut Command) {
 /// PATH used by intermediary test processes that may launch the brgr binary.
 pub fn test_path() -> std::ffi::OsString {
     std::env::join_paths(
-        std::iter::once(herdr_stub_dir().to_path_buf())
+        std::iter::once(codex_stub_dir().to_path_buf())
+            .chain(std::iter::once(herdr_stub_dir().to_path_buf()))
             .chain(env::split_paths(&env::var_os("PATH").unwrap_or_default())),
     )
     .unwrap()
+}
+
+fn codex_stub_dir() -> &'static Path {
+    CODEX_STUB_DIR
+        .get_or_init(|| {
+            let directory = std::env::temp_dir()
+                .join(format!("brgr-codex-stub-{}", std::process::id()));
+            fs::create_dir_all(&directory).unwrap();
+            write_fast_script(
+                &directory.join("codex"),
+                "#!/bin/sh\nif [ -n \"${BRGR_TEST_CODEX_CALLS:-}\" ]; then printf '%s\\n' \"$@\" >> \"$BRGR_TEST_CODEX_CALLS\"; fi\nprintf '%s\\n' 'codex stub v-test'\n",
+            );
+            directory
+        })
+        .as_path()
 }
 
 fn herdr_stub_dir() -> &'static Path {

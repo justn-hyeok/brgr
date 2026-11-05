@@ -513,6 +513,21 @@ fn doctor_envs(codex_home: &Path) -> [(&str, &str); 1] {
     [("CODEX_HOME", codex_home.to_str().unwrap())]
 }
 
+#[test]
+fn doctor_runs_only_the_codex_stub_from_the_test_path() {
+    let (_temp, home, _executable, codex_home) = doctor_fixture();
+    let calls = home.join("codex-calls");
+    let envs = [
+        ("CODEX_HOME", codex_home.to_str().unwrap()),
+        ("BRGR_TEST_CODEX_CALLS", calls.to_str().unwrap()),
+    ];
+
+    let report = json_output(&run(&home, &["--json", "doctor"], &envs));
+
+    assert_eq!(report["status"], "ok");
+    assert_eq!(fs::read_to_string(calls).unwrap(), "--version\n");
+}
+
 fn drift_harness_executable(executable: &Path) {
     writeln!(
         fs::OpenOptions::new()
