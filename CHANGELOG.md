@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- A new pane whose shell asks oh-my-zsh's update question no longer loses the first letter of the command, which failed every worker and handoff until someone answered it. brgr now waits for the shell and declines the offer.
 - `brgr cancel` no longer leaves a Devin worker's tools running. Whichever process closed the pane first could lose the host that says what ran under it.
 - A Codex worker no longer stops with `CODEX_THREAD_ID and BRGR_SESSION_ID disagree` or fails to seal its report when its shared daemon inherited another session's identity. Both could stop it from starting a child.
 - A Codex worker under a custom `--home` or `BRGR_HOME` now uses that home. Its commands run in Codex's shared daemon, which lost the setting, so they silently created tasks in the default home.

@@ -2473,7 +2473,8 @@ fn an_unverified_caller_is_never_split_beside_and_the_error_says_what_to_give() 
 fn pane_mode_skips_an_update_offer_before_it_prompts() {
     let fixture = pane_fixture();
     fs::create_dir_all(&fixture.state).unwrap();
-    fs::write(fixture.state.join("menu"), "3\n").unwrap();
+    // Waiting for the shell to settle reads the screen three times first.
+    fs::write(fixture.state.join("menu"), "6\n").unwrap();
     let ran = fixture.run(&[]);
     assert_eq!(ran["outcome"], "candidate", "{ran}");
     let calls = fixture.state("calls.log");
