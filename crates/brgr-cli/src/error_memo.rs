@@ -1084,6 +1084,107 @@ mod tests {
     }
 
     #[test]
+    fn an_id_inside_a_longer_token_is_masked() {
+        let out = redact(
+            "attempt 38d33b4e-7368-4f7a-a050-822378f2b12a-r1 timed out",
+            400,
+        );
+        assert!(!out.contains("38d33b4e"), "{out}");
+        assert!(out.contains("<id>-r1"), "{out}");
+        assert_eq!(
+            classify("attempt 38d33b4e-7368-4f7a-a050-822378f2b12a-r1 timed out"),
+            "attempt <id>-r1 timed out"
+        );
+    }
+
+    #[test]
+    fn an_issue_list_hit_is_reused_and_no_new_issue_is_created() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = Paths::new(Some(temp.path().join("home"))).unwrap();
+        let gh = temp.path().join("gh");
+        crate::fast_script::write_fast_script(
+            &gh,
+            "#!/bin/sh\necho \"$@\" >> \"${0%.body}.calls\"\ncase \"$2\" in\n list) echo '[{\"url\":\"https://github.com/o/r/issues/42\"}]';;\n create) /bin/cat >/dev/null; echo https://github.com/o/r/issues/99;;\nesac\n",
+        );
+        GH_PROGRAM.with(|program| *program.borrow_mut() = Some(gh));
+        Config::update(&paths.config, &paths.home, |config| {
+            config.issues.auto_file = true;
+            config.issues.repo = Some("o/r".to_owned());
+            config.issues.min_count = 2;
+            Ok(true)
+        })
+        .unwrap();
+        let mut ledger = Ledger::default();
+        ledger.entries.push(Entry {
+            fingerprint: "ff00ff00ff00".to_owned(),
+            class: "a settled failure".to_owned(),
+            count: 3,
+            ..Entry::default()
+        });
+        save(&paths, &ledger).unwrap();
+        file_issues(&paths).unwrap();
+        let calls = fs::read_to_string(temp.path().join("gh.calls")).unwrap();
+        assert!(calls.contains("issue list"), "{calls}");
+        assert!(!calls.contains("issue create"), "{calls}");
+        assert_eq!(
+            load(&paths).entries[0].issue_url.as_deref(),
+            Some("https://github.com/o/r/issues/42")
+        );
+    }
+
+    #[test]
+    fn a_filed_issue_is_commented_on_only_at_five_twenty_five_and_a_hundred() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = Paths::new(Some(temp.path().join("home"))).unwrap();
+        let gh = temp.path().join("gh");
+        crate::fast_script::write_fast_script(
+            &gh,
+            "#!/bin/sh\necho \"$@\" >> \"${0%.body}.calls\"\n/bin/cat >/dev/null\n",
+        );
+        GH_PROGRAM.with(|program| *program.borrow_mut() = Some(gh));
+        Config::update(&paths.config, &paths.home, |config| {
+            config.issues.auto_file = true;
+            config.issues.repo = Some("o/r".to_owned());
+            Ok(true)
+        })
+        .unwrap();
+        let mut ledger = Ledger::default();
+        ledger.entries.push(Entry {
+            fingerprint: "ff00ff00ff00".to_owned(),
+            class: "a settled failure".to_owned(),
+            count: 1,
+            issue_url: Some("https://github.com/o/r/issues/9".to_owned()),
+            ..Entry::default()
+        });
+        save(&paths, &ledger).unwrap();
+        let comments = || {
+            fs::read_to_string(temp.path().join("gh.calls"))
+                .unwrap_or_default()
+                .matches("issue comment")
+                .count()
+        };
+        let mut expected = 0;
+        for (count, commented) in [
+            (4, false),
+            (5, true),
+            (6, false),
+            (24, false),
+            (25, true),
+            (26, false),
+            (99, false),
+            (100, true),
+            (101, false),
+        ] {
+            let mut ledger = load(&paths);
+            ledger.entries[0].count = count;
+            save(&paths, &ledger).unwrap();
+            file_issues(&paths).unwrap();
+            expected += usize::from(commented);
+            assert_eq!(comments(), expected, "count {count}");
+        }
+    }
+
+    #[test]
     fn recording_twice_keeps_one_entry_and_writes_the_memo() {
         let temp = tempfile::tempdir().unwrap();
         let paths = Paths::new(Some(temp.path().join("home"))).unwrap();
