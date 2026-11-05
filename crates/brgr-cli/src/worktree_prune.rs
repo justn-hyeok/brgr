@@ -554,10 +554,16 @@ fn objection(
     // directory under the right name that is not that path — a copy, a clone,
     // one someone made — was not put here by brgr. This also settles a prefix
     // shared by two tasks, which the name alone cannot.
-    let Some(task) = matches
-        .into_iter()
-        .find(|task| resolve(Path::new(&task.workspace)) == resolved)
-    else {
+    let candidate_slug = file_name(worktree);
+    let Some((candidate_prefix, candidate_revision)) = parse_slug(&candidate_slug) else {
+        return Some("directory name is not a brgr task slug; refusing to touch it".to_owned());
+    };
+    let Some(task) = matches.into_iter().find(|task| {
+        let workspace = resolve(Path::new(&task.workspace));
+        task.task_id.to_string().starts_with(candidate_prefix)
+            && task.revision == candidate_revision
+            && (workspace == resolved || workspace.starts_with(&resolved))
+    }) else {
         return Some("no task revision was admitted in this directory".to_owned());
     };
     found.owner = Some(task.owner_id.as_str().to_owned());
@@ -1401,14 +1407,12 @@ pub(crate) fn reclaim_task(paths: &Paths, task: TaskId, revision: u32) -> Option
     if launch.keep_worktree || (launch.keep_pane && launch.pane_mode) {
         return None;
     }
-    let worktree = resolve(Path::new(&launch.spec.workspace));
+    let workspace = resolve(Path::new(&launch.spec.workspace));
     // Only a checkout brgr made under its own root; a non-Git task ran in
     // place, in the user's own directory.
     let root = canonical(&paths.worktrees)?;
+    let worktree = task_worktree(&workspace, &root, task, revision)?;
     let parent = worktree.parent()?;
-    if parent.parent() != Some(root.as_path()) || !worktree.is_dir() {
-        return None;
-    }
     if left_to_the_pane_cleanup(paths, task, revision) {
         return None;
     }
@@ -1515,6 +1519,28 @@ pub(crate) fn reclaim_task(paths: &Paths, task: TaskId, revision: u32) -> Option
         }
         (None, _, _) => None,
     }
+}
+
+fn task_worktree(workspace: &Path, root: &Path, task: TaskId, revision: u32) -> Option<PathBuf> {
+    if !workspace.is_dir() {
+        return None;
+    }
+    workspace
+        .ancestors()
+        .find(|path| {
+            let Some((prefix, slug_revision)) = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .and_then(parse_slug)
+            else {
+                return false;
+            };
+            path.parent().and_then(Path::parent) == Some(root)
+                && slug_revision == revision
+                && task.to_string().starts_with(prefix)
+        })
+        .map(Path::to_path_buf)
+        .filter(|worktree| worktree.is_dir())
 }
 
 /// How long a decision waits for a worker that is exiting after sealing its

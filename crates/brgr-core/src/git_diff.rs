@@ -86,6 +86,11 @@ pub(crate) fn bounded_git_diff_with_executable(
     )?;
     let real_index = String::from_utf8(real_index).map_err(|error| error.to_string())?;
     let real_index = Path::new(real_index.trim_end_matches('\n'));
+    let repository = repository_root(
+        executable,
+        workspace,
+        deadline.saturating_sub(started.elapsed()),
+    )?;
     // A repository without a commit or a staged file has no index yet.
     if real_index.is_file() {
         fs::copy(real_index, &index).map_err(|error| error.to_string())?;
@@ -100,7 +105,13 @@ pub(crate) fn bounded_git_diff_with_executable(
             .and_then(|file| file.set_modified(modified))
             .map_err(|error| error.to_string())?;
     }
-    let listing = git(deadline.saturating_sub(started.elapsed())).run(
+    let listing = Git {
+        executable,
+        workspace: &repository,
+        index: Some(&index),
+        remaining: deadline.saturating_sub(started.elapsed()),
+    }
+    .run(
         &["ls-files", "--others", "--exclude-standard", "-z"],
         None,
         MAX_LISTING_BYTES,
@@ -108,7 +119,13 @@ pub(crate) fn bounded_git_diff_with_executable(
     )?;
     let untracked = untracked_to_add(&listing, excluded);
     if !untracked.is_empty() {
-        git(deadline.saturating_sub(started.elapsed())).run(
+        Git {
+            executable,
+            workspace: &repository,
+            index: Some(&index),
+            remaining: deadline.saturating_sub(started.elapsed()),
+        }
+        .run(
             &[
                 "--literal-pathspecs",
                 "add",
@@ -150,6 +167,27 @@ pub(crate) fn bounded_git_diff_with_executable(
         max_bytes,
         "requested Git diff",
     )
+}
+
+fn repository_root(
+    executable: &Path,
+    workspace: &Path,
+    remaining: Duration,
+) -> Result<std::path::PathBuf, String> {
+    let output = Git {
+        executable,
+        workspace,
+        index: None,
+        remaining,
+    }
+    .run(
+        &["rev-parse", "--show-toplevel"],
+        None,
+        4_096,
+        "Git repository root lookup",
+    )?;
+    let output = String::from_utf8(output).map_err(|error| error.to_string())?;
+    Ok(Path::new(output.trim_end_matches('\n')).to_path_buf())
 }
 
 /// The NUL-separated untracked paths, less the requested evidence files: a
@@ -426,6 +464,29 @@ mod tests {
 
         assert!(patch.contains("b/sub/new.txt"), "patch: {patch}");
         assert!(!patch.contains("deleted file"), "patch: {patch}");
+    }
+
+    #[test]
+    fn a_subdirectory_workspace_captures_new_files_across_the_worktree() {
+        let root = repository();
+        let root = root.path();
+        fs::create_dir_all(root.join("sub")).unwrap();
+        fs::write(root.join("sub/tracked.txt"), "base\n").unwrap();
+        git(root, &["add", "sub/tracked.txt"]);
+        git(root, &["commit", "-qm", "sub"]);
+        fs::write(root.join("README"), "changed outside\n").unwrap();
+        fs::write(root.join("outside_new.txt"), "outside\n").unwrap();
+        fs::write(root.join("sub/inside_new.txt"), "inside\n").unwrap();
+        // A task's own directory is under its workspace, as is what it excludes.
+        fs::create_dir_all(root.join("sub/.brgr/tasks/task-r1")).unwrap();
+        fs::write(root.join("sub/.brgr/tasks/task-r1/report.md"), "report\n").unwrap();
+
+        let patch = diff(&root.join("sub"), &[".brgr/tasks/task-r1".to_owned()]);
+
+        assert!(patch.contains("+changed outside"), "patch: {patch}");
+        assert!(patch.contains("b/outside_new.txt"), "patch: {patch}");
+        assert!(patch.contains("b/sub/inside_new.txt"), "patch: {patch}");
+        assert!(!patch.contains(".brgr/tasks"), "patch: {patch}");
     }
 
     #[test]
