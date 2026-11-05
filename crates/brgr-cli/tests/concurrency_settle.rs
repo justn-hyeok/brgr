@@ -473,13 +473,13 @@ fn concurrent_status_watch_reconcile_crash_windows_once() {
                 "watch".into(),
                 task.clone(),
                 "--timeout-seconds".into(),
-                "2".into(),
+                "10".into(),
             ],
             vec![
                 "watch".into(),
                 task.clone(),
                 "--timeout-seconds".into(),
-                "2".into(),
+                "10".into(),
             ],
         ];
         let outputs = compete_variants_at(

@@ -480,16 +480,12 @@ pub(crate) async fn wait_for_result(
     let spec = store.task(task)?;
     require_owner(&store, &spec.owner_id)?;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_seconds);
-    let mut last_reconcile = tokio::time::Instant::now() - Duration::from_secs(1);
+    let mut reconcile_schedule = crate::supervision::WaitReconcileSchedule::now();
     let debate = crate::message::DebateWait::start(paths);
     loop {
         if debate.message_pending(&store)? {
             print_value(&crate::message::debate_pending_receipt(), json_output);
             return Ok(());
-        }
-        if last_reconcile.elapsed() >= Duration::from_secs(1) {
-            reconcile_pending(paths)?;
-            last_reconcile = tokio::time::Instant::now();
         }
         match store.latest_result(task) {
             Ok(result) => {
@@ -506,6 +502,9 @@ pub(crate) async fn wait_for_result(
             }
             Err(StoreError::NoResultYet(_)) => {}
             Err(error) => return Err(error.into()),
+        }
+        if reconcile_schedule.should_reconcile() {
+            reconcile_pending(paths)?;
         }
         if let Ok(attempt) = store.latest_message_attempt(task) {
             let questions = store.unanswered_questions(
