@@ -235,6 +235,61 @@ pub fn close_if_eligible(store: &Store, runs: &Path, task_id: TaskId) -> Result<
     Ok("cleanup_pending_close_unconfirmed".to_owned())
 }
 
+/// Stops the exact brgr-owned OMP pane for a task cancellation. Cancellation
+/// may close a working agent; unlike normal cleanup it does not require a
+/// result decision or an idle pane.
+pub(crate) fn cancel_owned_pane(runs: &Path, task_id: TaskId) -> Result<()> {
+    let path = receipt_path(runs, task_id);
+    if !path.exists() {
+        return Ok(());
+    }
+    let mut receipt: PaneReceipt = serde_json::from_slice(&fs::read(&path)?)?;
+    if receipt.task_id != task_id {
+        bail!("cancellation pane receipt belongs to another task");
+    }
+    if receipt.state == CleanupState::Closed {
+        return Ok(());
+    }
+    if pane_absent(&receipt.pane_id)? {
+        receipt.state = CleanupState::Closed;
+        write_json_atomic(&path, &receipt)?;
+        return Ok(());
+    }
+    let live = live_agent(&receipt.agent)?;
+    if !live_matches(&receipt, &live) {
+        bail!("refusing to cancel a Herdr agent whose identity changed");
+    }
+    let pane = live_pane(&receipt.pane_id)?;
+    if pane.get("pane_id").and_then(Value::as_str) != Some(receipt.pane_id.as_str())
+        || pane.get("terminal_id").and_then(Value::as_str) != Some(receipt.terminal_id.as_str())
+        || pane.get("agent").and_then(Value::as_str) != Some("omp")
+    {
+        bail!("refusing to cancel a Herdr pane whose identity changed");
+    }
+    let herdr = crate::caller_pane::binary().context("Herdr executable is not available")?;
+    let closed = Command::new(herdr)
+        .args(["pane", "close", &receipt.pane_id])
+        .output()?;
+    for _ in 0..10 {
+        if pane_absent(&receipt.pane_id)? {
+            receipt.state = CleanupState::Closed;
+            write_json_atomic(&path, &receipt)?;
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    if !closed.status.success() {
+        bail!(
+            "Herdr did not close the cancelled OMP pane {}",
+            receipt.pane_id
+        );
+    }
+    bail!(
+        "Herdr did not confirm closure of the cancelled OMP pane {}",
+        receipt.pane_id
+    )
+}
+
 fn pane_absent(pane_id: &str) -> Result<bool> {
     let herdr = crate::caller_pane::binary().context("Herdr executable is not available")?;
     let output = Command::new(herdr)
@@ -370,6 +425,7 @@ mod tests {
             legacy_embedded_route_observation: None,
             route_observation: None,
             unresolved_effects: vec![],
+            slept_seconds: None,
         };
         mark_pending(temp.path(), task_id, &result).unwrap();
         let saved: PaneReceipt =
@@ -414,6 +470,7 @@ mod tests {
             legacy_embedded_route_observation: None,
             route_observation: None,
             unresolved_effects: vec![],
+            slept_seconds: None,
         };
         mark_pending(temp.path(), task_id, &result).unwrap();
         let store = Store::open(temp.path().join("store")).unwrap();
@@ -479,6 +536,7 @@ mod tests {
             legacy_embedded_route_observation: None,
             route_observation: None,
             unresolved_effects: vec![],
+            slept_seconds: None,
         };
         store.commit_terminal_result(&owner_id, &result).unwrap();
         store.bind_owner(&owner_id, "session-a", 1).unwrap();
@@ -679,6 +737,7 @@ mod tests {
             legacy_embedded_route_observation: None,
             route_observation: None,
             unresolved_effects: vec![],
+            slept_seconds: None,
         };
         store.commit_terminal_result(&owner_id, &result).unwrap();
         let receipt = PaneReceipt {

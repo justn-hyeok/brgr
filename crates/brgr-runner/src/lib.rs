@@ -100,7 +100,7 @@ use std::{
     path::Path,
     process::{ExitStatus, Stdio},
     sync::atomic::{AtomicBool, Ordering},
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
 
 /// Re-exported because manifests take it: a caller choosing a level should not
@@ -119,6 +119,16 @@ pub const OMP_ROLE_ADAPTER_V1: &str = "omp-role/v1";
 pub(crate) const CAPTURE_OVERHEAD_BYTES: u64 = 1;
 pub(crate) const JSONL_TRANSPORT_LIMIT_BYTES: u64 = 64 * 1024 * 1024;
 pub(crate) const JSONL_METADATA_SLACK_BYTES: u64 = 1024 * 1024;
+const SLEEP_GAP_THRESHOLD_SECONDS: u64 = 60;
+
+/// Estimate time spent suspended from paired wall and monotonic readings.
+/// A small threshold avoids reporting clock granularity and scheduling noise.
+fn slept_seconds(started: (Instant, SystemTime), ended: (Instant, SystemTime)) -> Option<u64> {
+    let awake = ended.0.saturating_duration_since(started.0);
+    let wall = ended.1.duration_since(started.1).ok()?;
+    let gap = wall.saturating_sub(awake).as_secs();
+    (gap > SLEEP_GAP_THRESHOLD_SECONDS).then_some(gap)
+}
 
 #[derive(Clone, Debug)]
 pub struct RunRequest<'a> {
@@ -146,6 +156,7 @@ pub struct ExecutionOutput {
     pub cancelled: bool,
     pub output_truncated: bool,
     pub elapsed: Duration,
+    pub slept_seconds: Option<u64>,
 }
 
 impl ExecutionOutput {
@@ -214,7 +225,7 @@ impl ProcessRunner {
         };
         let argv = render_argv(manifest, &request, &substitutions)?;
 
-        let started = Instant::now();
+        let started = (Instant::now(), SystemTime::now());
         let mut command = Command::new(&manifest.executable);
         command
             .args(argv)
@@ -245,7 +256,7 @@ impl ProcessRunner {
 
         let (status, timed_out, cancelled) = wait_for_exit(
             &mut child,
-            started,
+            started.0,
             request.deadline,
             request.cancel_path,
             &overflow,
@@ -254,7 +265,8 @@ impl ProcessRunner {
         if let Some(path) = request.pid_path {
             let _ = std::fs::remove_file(path);
         }
-        let remaining = request.deadline.saturating_sub(started.elapsed());
+        let elapsed = started.0.elapsed();
+        let remaining = request.deadline.saturating_sub(elapsed);
         let captures = timeout(remaining, async {
             let (stdout, stderr) = tokio::join!(&mut stdout_task, &mut stderr_task);
             Ok::<_, RunnerError>((join_capture(stdout)?, join_capture(stderr)?))
@@ -296,7 +308,8 @@ impl ProcessRunner {
             timed_out,
             cancelled,
             output_truncated,
-            elapsed: started.elapsed(),
+            elapsed: started.0.elapsed(),
+            slept_seconds: slept_seconds(started, (Instant::now(), SystemTime::now())),
         })
     }
 
@@ -392,6 +405,7 @@ impl ProcessRunner {
             cancelled: false,
             output_truncated,
             elapsed: started.elapsed(),
+            slept_seconds: None,
         })
     }
 }
@@ -558,21 +572,37 @@ async fn stop_process_group(child: &mut tokio::process::Child) -> Result<ExitSta
     let grace_started = Instant::now();
     while grace_started.elapsed() < Duration::from_millis(500) {
         if let Some(status) = child.try_wait()? {
+            sleep(Duration::from_millis(500).saturating_sub(grace_started.elapsed())).await;
+            kill_process_group(pid, "KILL");
             return Ok(status);
         }
         sleep(Duration::from_millis(25)).await;
     }
+    kill_process_group(pid, "KILL");
+    Ok(child.wait().await?)
+}
+
+fn kill_process_group(pid: u32, signal: &str) {
+    if !std::process::Command::new("/bin/kill")
+        .arg("-0")
+        .arg("--")
+        .arg(format!("-{pid}"))
+        .output()
+        .is_ok_and(|output| output.status.success())
+    {
+        return;
+    }
     let _ = std::process::Command::new("/bin/kill")
-        .arg("-KILL")
+        .arg(format!("-{signal}"))
         .arg("--")
         .arg(format!("-{pid}"))
         .status();
-    Ok(child.wait().await?)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
     use crate::capture::read_jsonl_semantic;
     use crate::collect::{collect_result, extract_jsonl_assistant_final, observe_jsonl_model};
     use brgr_protocol::TaskSpec;
@@ -627,6 +657,29 @@ mod tests {
         }
     }
 
+    /// Runs a just-written trampoline once. On Linux another thread's `fork` can
+    /// hold the file open for writing until its child execs, so the first run can
+    /// fail with `ETXTBSY` for a moment. It is retried only for that, with a hang
+    /// guard a correct run does not reach.
+    fn warm_executable(path: &Path) {
+        let started = std::time::Instant::now();
+        loop {
+            match std::process::Command::new(path).arg("--warm").status() {
+                Ok(status) => {
+                    assert!(status.success(), "trampoline --warm failed: {status}");
+                    return;
+                }
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::ExecutableFileBusy
+                        && started.elapsed() < std::time::Duration::from_mins(1) =>
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(error) => panic!("run trampoline --warm: {error}"),
+            }
+        }
+    }
+
     fn warmed_trampoline() -> &'static Path {
         WARMED_TRAMPOLINE.get_or_init(|| {
             let dir = std::env::temp_dir().join("brgr-fast-script");
@@ -637,11 +690,7 @@ mod tests {
             }
             std::fs::write(&trampoline, TRAMPOLINE_SOURCE).unwrap();
             std::fs::set_permissions(&trampoline, std::fs::Permissions::from_mode(0o755)).unwrap();
-            let status = std::process::Command::new(&trampoline)
-                .arg("--warm")
-                .status()
-                .expect("run trampoline --warm");
-            assert!(status.success(), "trampoline --warm failed: {status}");
+            warm_executable(&trampoline);
             // Drop write bits so a later `fs::write` through a hard link
             // cannot clobber every trampoline in this process.
             std::fs::set_permissions(&trampoline, std::fs::Permissions::from_mode(0o555)).unwrap();
@@ -1444,7 +1493,7 @@ mod tests {
         let cancel = workspace.path().join("cancel");
         std::fs::write(&cancel, b"cancel").unwrap();
         let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../testdata/fixtures/gjc")
+            .join("../../testdata/fixtures/brgr-fixture")
             .canonicalize()
             .unwrap();
         let mut manifest = echo_manifest(4_096);
@@ -1480,6 +1529,35 @@ mod tests {
         // sleep: the cancel file is what ended it. The bound is a hang guard.
         assert!(!output.timed_out);
         assert!(started.elapsed() < Duration::from_mins(1));
+    }
+
+    #[tokio::test]
+    async fn cancellation_kills_a_term_ignoring_child_after_leader_exits() {
+        let child_pid_path =
+            std::env::temp_dir().join(format!("brgr-child-{}.pid", std::process::id()));
+        let mut command = Command::new("/bin/sh");
+        command.arg("-c")
+            .arg("(/bin/sh -c 'trap \"\" TERM; echo $$ > \"$1\"; exec /bin/sleep 600' sh \"$1\") & trap 'exit 0' TERM; wait")
+            .arg("sh")
+            .arg(&child_pid_path)
+            .kill_on_drop(true);
+        command.as_std_mut().process_group(0);
+        let mut leader = command.spawn().unwrap();
+        assert!(leader.id().is_some());
+        let started = Instant::now();
+        while !child_pid_path.exists() && started.elapsed() < Duration::from_secs(5) {
+            sleep(Duration::from_millis(10)).await;
+        }
+        let child_pid = std::fs::read_to_string(&child_pid_path)
+            .unwrap()
+            .trim()
+            .to_owned();
+        let _ = stop_process_group(&mut leader).await.unwrap();
+        assert!(
+            !process_is_alive(&child_pid),
+            "TERM-ignoring child survived run"
+        );
+        let _ = std::fs::remove_file(child_pid_path);
     }
 
     #[test]
@@ -1777,6 +1855,32 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn empty_last_assistant_message_does_not_seal_an_interim_message() {
+        let events = concat!(
+            "{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Let me look at the files first.\"}]}}\n",
+            "{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[]}}\n",
+            "{\"type\":\"agent_end\",\"stopReason\":\"completed\"}\n",
+        );
+        assert!(matches!(
+            extract_jsonl_assistant_final(events.as_bytes()),
+            Err(RunnerError::MissingAssistantText)
+        ));
+    }
+
+    #[test]
+    fn error_stopped_jsonl_does_not_seal_an_interim_message_and_keeps_error() {
+        let events = concat!(
+            "{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Let me look at the files first.\"}]}}\n",
+            "{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[],\"errorMessage\":\"Connect error resource_exhausted\"}}\n",
+            "{\"type\":\"agent_end\",\"stopReason\":\"error\"}\n",
+        );
+        assert!(matches!(
+            extract_jsonl_assistant_final(events.as_bytes()),
+            Err(RunnerError::AssistantError(message)) if message == "Connect error resource_exhausted"
+        ));
+    }
+
     #[tokio::test]
     async fn probe_with_path_can_hide_an_env_interpreter() {
         let root = tempfile::tempdir().unwrap();
@@ -1814,5 +1918,22 @@ mod tests {
         let dumped = String::from_utf8_lossy(&narrow.stdout);
         assert!(!dumped.contains("python"));
         assert_ne!(dumped.trim(), "ok");
+    }
+
+    #[test]
+    fn slept_gap_is_recorded_only_above_threshold() {
+        let instant = Instant::now();
+        let wall = SystemTime::now();
+        let start = (instant, wall);
+        let above = (
+            instant + Duration::from_secs(10),
+            wall + Duration::from_secs(71),
+        );
+        assert_eq!(slept_seconds(start, above), Some(61));
+        let below = (
+            instant + Duration::from_secs(10),
+            wall + Duration::from_secs(70),
+        );
+        assert_eq!(slept_seconds(start, below), None);
     }
 }

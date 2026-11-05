@@ -186,6 +186,59 @@ fn an_acknowledged_failure_is_reclaimed_and_an_unacknowledged_one_is_kept() {
     );
 }
 
+#[test]
+fn a_refused_revise_keeps_the_failure_unacknowledged_and_worktree_kept() {
+    let fixture = Fixture::new();
+    let task = fixture.run_failing_task("retry after a refused revision");
+
+    let before = fixture.prune(&[]);
+    assert_eq!(
+        status_of(&before, &Fixture::slug(&task)),
+        "kept",
+        "{before}"
+    );
+
+    let dirty = fixture.repository.join("uncommitted.txt");
+    fs::write(&dirty, b"uncommitted source change\n").unwrap();
+    let refused = fixture
+        .command()
+        .args(["revise", &task, "try again", "--foreground"])
+        .output()
+        .unwrap();
+    assert!(!refused.status.success(), "revise unexpectedly succeeded");
+    assert!(
+        String::from_utf8_lossy(&refused.stderr)
+            .contains("source worktree contains uncommitted changes"),
+        "revise failed for an unexpected reason: {}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+
+    let after_refusal = fixture.command().args(["prune"]).output().unwrap();
+    let stderr = String::from_utf8_lossy(&after_refusal.stderr);
+    assert!(
+        stderr.contains("run(s) failed or were lost and are not acknowledged"),
+        "the failure banner disappeared after refused revise: {stderr}"
+    );
+    let after_refusal: Value = serde_json::from_slice(&after_refusal.stdout).unwrap();
+    assert_eq!(
+        status_of(&after_refusal, &Fixture::slug(&task)),
+        "kept",
+        "{after_refusal}"
+    );
+
+    fs::remove_file(dirty).unwrap();
+    let revised = fixture.json(&["revise", &task, "try again", "--foreground"]);
+    assert_eq!(revised["outcome"], "candidate", "{revised}");
+    assert_eq!(revised["revision"], 2, "{revised}");
+
+    let after_admission = fixture.command().args(["prune"]).output().unwrap();
+    let stderr = String::from_utf8_lossy(&after_admission.stderr);
+    assert!(
+        !stderr.contains("run(s) failed or were lost and are not acknowledged"),
+        "the failure banner remained after revise was admitted: {stderr}"
+    );
+}
+
 /// Acknowledging a lost result does not stop its worker. A harness process
 /// left behind by a dead supervisor keeps its pid file, and while that process
 /// lives the worktree stays.
@@ -367,7 +420,20 @@ fn a_stray_checkout_of_another_repository_is_never_asked_which_repository_it_is(
     let other = fixture.temp.path().join("other");
     fs::create_dir_all(&other).unwrap();
     git(&other, &["init", "-q"]);
-    git(&other, &["commit", "-q", "--allow-empty", "-m", "init"]);
+    git(
+        &other,
+        &[
+            "-c",
+            "user.name=brgr-test",
+            "-c",
+            "user.email=brgr-test@example.com",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "init",
+        ],
+    );
     git(&other, &["branch", "brgr/task-cafed00d"]);
     let stray = fixture.worktrees_root().join("repo").join("+backup");
     git(
@@ -773,6 +839,85 @@ fn accepting_a_clean_task_reclaims_its_worktree_and_branch_at_once() {
     assert_eq!(detail["result"]["outcome"], "candidate");
 }
 
+#[test]
+fn accepting_a_task_started_in_a_subdirectory_reclaims_its_worktree() {
+    let fixture = Fixture::new();
+    fs::create_dir_all(fixture.repository.join("sub")).unwrap();
+    fs::write(fixture.repository.join("sub/seed"), b"seed\n").unwrap();
+    fixture.git(&["add", "sub/seed"]);
+    fixture.git(&["commit", "-m", "subdirectory"]);
+    let mut command = fixture.command();
+    command.current_dir(fixture.repository.join("sub"));
+    let receipt = json(
+        &command
+            .args(["run", "clean", "--foreground"])
+            .output()
+            .unwrap(),
+    );
+    let task = receipt["task_id"].as_str().unwrap().to_owned();
+    let worktree = fixture.worktree(&task);
+    assert!(worktree.join("sub").is_dir());
+    fixture.accept(&task);
+    assert!(!worktree.exists(), "worktree survived its decision");
+}
+
+#[test]
+fn prune_reclaims_a_kept_task_started_in_a_subdirectory() {
+    let fixture = Fixture::new();
+    fs::create_dir_all(fixture.repository.join("sub")).unwrap();
+    fs::write(fixture.repository.join("sub/seed"), b"seed\n").unwrap();
+    fixture.git(&["add", "sub/seed"]);
+    fixture.git(&["commit", "-m", "subdirectory"]);
+    let mut command = fixture.command();
+    command.current_dir(fixture.repository.join("sub"));
+    let receipt = json(
+        &command
+            .args(["run", "clean", "--foreground", "--keep-worktree"])
+            .output()
+            .unwrap(),
+    );
+    let task = receipt["task_id"].as_str().unwrap().to_owned();
+    let worktree = fixture.worktree(&task);
+    fixture.accept(&task);
+    assert!(worktree.is_dir(), "--keep-worktree was ignored");
+
+    let report = fixture.prune(&["--apply"]);
+
+    assert_eq!(report["removed"], 1, "{report}");
+    assert!(!worktree.exists(), "prune retained the task worktree");
+}
+
+#[test]
+fn prune_does_not_match_a_task_workspace_under_a_sibling_directory() {
+    let fixture = Fixture::new();
+    let task = fixture.run_task("safe matching");
+    let worktree = fixture.worktree(&task);
+    let sibling = worktree.with_file_name(format!("{}-other", Fixture::slug(&task)));
+    let subdirectory = sibling.join("sub");
+    fs::create_dir_all(&subdirectory).unwrap();
+    let store =
+        rusqlite::Connection::open(fixture.home.join("store").join("brgr.sqlite3")).unwrap();
+    store
+        .execute(
+            "UPDATE tasks SET spec_json = json_set(spec_json, '$.workspace', ?1) WHERE task_id = ?2",
+            rusqlite::params![subdirectory.to_string_lossy(), task],
+        )
+        .unwrap();
+
+    let report = fixture.prune(&[]);
+
+    assert_eq!(report["removable"], 0, "{report}");
+    assert!(
+        reason_of(&report, "safe matching", &Fixture::slug(&task))
+            .contains("no task revision was admitted"),
+        "{report}"
+    );
+    assert!(
+        worktree.is_dir(),
+        "a sibling workspace falsely authorized removal"
+    );
+}
+
 /// The decision and a pane's session loop both reclaim after a decision; while
 /// one holds the revision's reclaim lock the other steps aside without a note.
 #[test]
@@ -1096,7 +1241,7 @@ fn an_unarchived_report_keeps_the_worktree() {
 fn a_harness_cache_alone_does_not_keep_the_worktree() {
     let fixture = Fixture::new();
     let task = fixture.run_with("CACHE", &[]);
-    assert!(fixture.worktree(&task).join(".gjc").is_dir());
+    assert!(fixture.worktree(&task).join(".fixture").is_dir());
     fixture.accept(&task);
     assert!(!fixture.worktree(&task).exists());
 }
@@ -1803,7 +1948,7 @@ fn json(output: &std::process::Output) -> Value {
 
 fn harness_fixture() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../testdata/fixtures/gjc")
+        .join("../../testdata/fixtures/brgr-fixture")
         .canonicalize()
         .unwrap()
 }

@@ -1,5 +1,7 @@
 # Recursive worker bridge
 
+GJC support has since been removed; the run records below are historical.
+
 Current native TUI behavior is described in [orchestration](orchestration.md).
 The dated receipts below preserve the earlier process-bridge evidence.
 
@@ -11,12 +13,27 @@ OMP-to-GJC or GJC-to-GJC adapter.
 ## Delegation contract
 
 - `brgr run --enable-delegation` gives a one-shot worker `$BRGR_BIN`,
-  `BRGR_HOME`, its parent task/attempt IDs, and an owner session. A worker's
-  `brgr run` creates a durable parent edge; nesting is capped at eight edges.
-- `brgr wait TASK --timeout-seconds N` observes a terminal result. `result`,
-  `accept`, `reject`, and acknowledgment retain their existing exact-owner and
-  sealed-result checks. A parent that exits with unsettled children gets a
-  failed result rather than an accepted candidate.
+  `BRGR_HOME`, its parent task/attempt IDs, and an owner session. Only a worker
+  whose launch enabled delegation may create children; pane mode does not grant
+  this permission implicitly. A worker `brgr run` is refused before admission
+  with a pointer to `--enable-delegation` when the permission is absent.
+  `--max-children` still caps concurrent children, and owner runs are unchanged.
+  Nesting is capped at eight edges.
+- Owner `brgr status` and `brgr status --brief` include every descendant of the
+  owner's tasks, with its parent, harness, and requested model. An ancestor's
+  owner can read descendant `status TASK` and `result TASK` after a worker exits.
+  This grants read access only: child `accept` and `reject` remain with the
+  worker that owns that child.
+- `brgr cancel TASK` requests cancellation for the task and all live
+  descendants. `--tree` remains accepted. The receipt lists all task IDs whose
+  cancellation was requested; pane workers and their session processes are
+  cleaned up as the attempts settle.
+- `brgr wait TASK --timeout-seconds N` observes a terminal result. Ancestor
+  owners can read `result TASK`; `accept`, `reject`, and acknowledgment retain
+  their existing exact-owner and sealed-result checks. A parent that exits with an undecided or
+  unacknowledged child result gets a failed result naming the child and the
+  `result --ack`, `accept`, or `reject` command that settles it. A child
+  cancelled by its parent is already settled.
 - `brgr message send|list|wait|ack` exchanges bounded, durable messages on the
   exact active task attempt. Either side can ask a question or reply. A reply
   must reference an opposite-direction question on that attempt. Unanswered

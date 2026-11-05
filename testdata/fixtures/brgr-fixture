@@ -3,7 +3,7 @@ set -eu
 
 case "${1:-}" in
   --version)
-    printf 'gjc v-fixture\n'
+    printf 'fixture v-fixture\n'
     exit 0
     ;;
   --help)
@@ -60,8 +60,8 @@ if [ -n "$prompt_file" ] && /usr/bin/grep -q 'NESTED' "$prompt_file"; then
   )
 fi
 if [ -n "$prompt_file" ] && /usr/bin/grep -q 'CACHE' "$prompt_file"; then
-  /bin/mkdir -p .gjc
-  printf '{}\n' > .gjc/session.json
+  /bin/mkdir -p .fixture
+  printf '{}\n' > .fixture/session.json
 fi
 printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"BRGR_FIXTURE_OK"}]}}'
 printf '%s\n' '{"type":"agent_end","stopReason":"completed"}'

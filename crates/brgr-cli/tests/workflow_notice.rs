@@ -2,7 +2,7 @@
 
 mod common;
 
-use common::{brgr_command, write_fast_script};
+use common::{brgr_command, wait_until, write_fast_script};
 
 use std::{
     fs,
@@ -48,9 +48,9 @@ fn json_output(output: &std::process::Output) -> Value {
     serde_json::from_slice(&output.stdout).unwrap()
 }
 
-fn gjc_fixture() -> PathBuf {
+fn brgr_fixture() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../testdata/fixtures/gjc")
+        .join("../../testdata/fixtures/brgr-fixture")
         .canonicalize()
         .unwrap()
 }
@@ -62,7 +62,7 @@ fn add_fixture(home: &Path, scratch: &Path) {
         &[
             "harness",
             "add",
-            gjc_fixture().to_str().unwrap(),
+            brgr_fixture().to_str().unwrap(),
             "--workspace",
             scratch.to_str().unwrap(),
             "--prompt",
@@ -240,6 +240,13 @@ fn a_completed_run_notice_is_delivered_to_the_owner_pane_exactly_once() {
     );
     let field = format!("\"run_id\":\"{run_id}\"");
     assert_eq!(prompt.matches(field.as_str()).count(), 1, "{prompt}");
+    // The prompt lands first and the notice is marked delivered just after it.
+    assert!(
+        wait_until(|| workflow_notices(&fixture.home, &run_id)
+            .first()
+            .is_some_and(|notice| notice.2.is_some())),
+        "the delivered notice stayed pending"
+    );
     let notices = workflow_notices(&fixture.home, &run_id);
     assert_eq!(notices.len(), 1, "{notices:?}");
     assert_eq!(notices[0].1, "completed");
@@ -303,8 +310,15 @@ fn a_busy_owner_pane_keeps_the_notice_pending_until_idle() {
     fs::write(&fixture.agent_state, "idle").unwrap();
     let prompt = wait_for_prompt(&fixture.prompts, &run_id, Duration::from_mins(1));
     assert!(prompt.contains("\"state\":\"blocked\""), "{prompt}");
-    let delivered = json_output(&run(&fixture.home, &["workflow", "status", &run_id], &envs));
-    assert_eq!(delivered["notices"][0]["delivered"], true, "{delivered}");
+    // The prompt lands first and the notice is marked delivered just after it.
+    let mut status = Value::Null;
+    assert!(
+        wait_until(|| {
+            status = json_output(&run(&fixture.home, &["workflow", "status", &run_id], &envs));
+            status["notices"][0]["delivered"] == true
+        }),
+        "the delivered notice stayed pending: {status}"
+    );
 }
 
 #[test]

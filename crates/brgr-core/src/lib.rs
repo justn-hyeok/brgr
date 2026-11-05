@@ -69,7 +69,7 @@ mod git_stash;
 mod state;
 
 pub use evidence::task_patch;
-pub use execution::{LAST_ERROR_EVENT, LAST_STDERR};
+pub use execution::{AGENT_GAVE_NO_REPORT_EXIT, LAST_ERROR_EVENT, LAST_STDERR};
 pub use state::{Attempt, CoreError, TaskRevision};
 
 use execution::{AttemptControl, result_for, run_single_attempt, sha256};
@@ -362,6 +362,7 @@ impl Supervisor {
                 cancelled: false,
                 output_truncated: false,
                 elapsed: std::time::Duration::ZERO,
+                slept_seconds: None,
             };
             match evidence::seal_requested_evidence(&self.store, &spec, &output) {
                 Ok((mut evidence, unresolved_effects)) => {

@@ -147,12 +147,13 @@ mod tests {
             cancelled: false,
             output_truncated: false,
             elapsed: Duration::ZERO,
+            slept_seconds: None,
         }
     }
 
     #[test]
     fn a_json_stream_failure_with_empty_stderr_quotes_the_error_event() {
-        // GJC 0.18.9 on a spent provider quota: exit 1, nothing on stderr.
+        // Fixture 0.18.9 on a spent provider quota: exit 1, nothing on stderr.
         let stdout = concat!(
             "{\"type\":\"session\",\"id\":\"x\"}\n",
             "{\"type\":\"turn_end\",\"message\":{\"role\":\"assistant\",\"content\":[],",

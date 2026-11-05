@@ -34,6 +34,7 @@ pub(crate) struct Cli {
 }
 
 #[derive(Subcommand)]
+#[allow(clippy::large_enum_variant)] // Run's flat clap argument set is intentionally owned at dispatch.
 pub(crate) enum Command {
     /// Start a bounded fresh run and seal its result for owner review.
     Run(RunArgs),
@@ -105,6 +106,7 @@ pub(crate) enum Command {
         command: message::MessageCommand,
     },
     /// Explicit direct conversation between sibling TUI workers.
+    /// Start or participate in an explicit sibling conversation.
     Debate {
         #[command(subcommand)]
         command: crate::debate::DebateCommand,
@@ -141,6 +143,9 @@ pub(crate) enum Command {
         session: Option<String>,
     },
     /// Move an owner's head from one session to another.
+    #[command(
+        after_help = "Most owners run only `handoff`, whose new head is told every later step, or `claim` for a head that is gone. The others are the steps these run."
+    )]
     Head {
         #[command(subcommand)]
         command: crate::head::HeadCommand,
@@ -339,6 +344,8 @@ pub(crate) enum PluginCommand {
 
 #[derive(Subcommand)]
 pub(crate) enum ConfigCommand {
+    /// Interactively edit aliases and per-harness default models.
+    Edit,
     /// Create configuration and BRGR.md examples without overwriting user files.
     Init,
     Show,
@@ -364,8 +371,8 @@ pub(crate) enum ConfigCommand {
         #[arg(action = clap::ArgAction::Set)]
         enabled: bool,
     },
-    /// Run harnesses as their own TUI in a Herdr pane (true, the default) or
-    /// headless in print mode (false).
+    /// Has no effect, kept so old scripts still run. Workers open in a Herdr
+    /// pane; pass `--headless` to a run to choose print mode.
     SetPaneMode {
         #[arg(action = clap::ArgAction::Set)]
         enabled: bool,
@@ -412,6 +419,28 @@ pub(crate) enum ConfigCommand {
     },
     /// Stop telling heads to hand off.
     ClearHandoffCondition,
+    /// Create, list, or remove named harness/model routes.
+    Alias {
+        #[command(subcommand)]
+        command: AliasCommand,
+    },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum AliasCommand {
+    Set {
+        name: String,
+        #[arg(long)]
+        harness: String,
+        #[arg(long)]
+        model: Option<String>,
+        #[arg(long)]
+        effort: Option<String>,
+    },
+    List,
+    Remove {
+        name: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -457,7 +486,18 @@ pub(crate) enum ArtifactCommand {
 
 #[derive(Args)]
 pub(crate) struct RunArgs {
-    pub(crate) objective: String,
+    #[arg(
+        required_unless_present = "objective_file",
+        conflicts_with = "objective_file"
+    )]
+    pub(crate) objective: Option<String>,
+    /// Read the task objective from a regular UTF-8 file (up to 256 KiB).
+    #[arg(
+        long,
+        required_unless_present = "objective",
+        conflicts_with = "objective"
+    )]
+    pub(crate) objective_file: Option<PathBuf>,
     /// Select the native pane or one-shot headless route explicitly.
     #[arg(long, value_enum)]
     pub(crate) mode: Option<ModeRequest>,
@@ -473,6 +513,8 @@ pub(crate) struct RunArgs {
     pub(crate) model: Option<String>,
     #[arg(long)]
     pub(crate) effort: Option<String>,
+    #[arg(long = "use", conflicts_with_all = ["harness", "model", "effort"])]
+    pub(crate) use_alias: Option<String>,
     #[arg(long = "criterion")]
     pub(crate) criteria: Vec<String>,
     #[arg(long = "scope")]
@@ -483,6 +525,8 @@ pub(crate) struct RunArgs {
     pub(crate) capabilities: CapabilityArgs,
     #[command(flatten)]
     pub(crate) evidence: EvidenceArgs,
+    /// Deadline in seconds. It counts awake time, so machine sleep extends it,
+    /// and the result records a gap over 60 seconds as `slept_seconds`.
     #[arg(long)]
     pub(crate) deadline_seconds: Option<u64>,
     #[arg(long)]

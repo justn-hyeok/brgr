@@ -92,6 +92,15 @@ pub(super) fn spawn_session_server(paths: &Paths, task: TaskId) -> Result<()> {
     Ok(())
 }
 
+fn stop_cancelled(paths: &Paths, task: TaskId, revision: u32) {
+    crate::tui_host::stop_descendants(
+        &paths
+            .runs
+            .join(format!("{task}-r{revision}.native-state.json")),
+    );
+    close_leftover_pane(paths, task, revision, false);
+}
+
 pub(crate) fn serve_session(paths: &Paths, task: TaskId) -> Result<()> {
     let lock = fs::OpenOptions::new()
         .read(true)
@@ -113,6 +122,10 @@ pub(crate) fn serve_session(paths: &Paths, task: TaskId) -> Result<()> {
         }
         let store = Store::open(&paths.store)?;
         let spec = store.task(task)?;
+        if store.cancellation_requested(task)? {
+            stop_cancelled(paths, task, spec.revision);
+            return Ok(());
+        }
         let path = paths.pane_receipt(task, spec.revision);
         let Ok(bytes) = fs::read(&path) else {
             return Ok(());
@@ -432,7 +445,6 @@ fn editor_ready(screen: &str, kind: &str) -> bool {
     }
     let brand = match kind {
         "claude" => "Claude Code",
-        "gjc" => "GJC",
         "command-code" => "Command",
         _ => "",
     };
@@ -782,7 +794,7 @@ pub(super) fn start_native(
             || status.is_none()
             || matches!(status.as_deref(), Some("unknown"))
             || working_but_idle
-            || matches!(run.kind.as_str(), "gjc" | "command-code"))
+            || run.kind.as_str() == "command-code")
             && (prompt || detected_ready)
             && !menu_on_screen(herdr, pane);
         if settle.held(ready, Instant::now()) {

@@ -3,7 +3,9 @@
 use std::{
     env,
     fmt::Write as _,
-    fs::{self},
+    fs::{self, File, OpenOptions},
+    io::Read,
+    os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
 };
 
@@ -66,6 +68,7 @@ pub(crate) struct StartOptions<'a> {
     pub(crate) calling_options: config::CallingOptions,
     pub(crate) instructions_digest: Option<String>,
     pub(crate) workflow: Option<WorkflowStepAdmission>,
+    pub(crate) reuse_clean_unadmitted_worktree: bool,
 }
 
 /// One `brgr run --workflow --step` admission, computed before any worktree.
@@ -140,21 +143,49 @@ pub(crate) enum ExecutionDisposition {
 // exceeds the local line-count heuristic.
 #[allow(clippy::too_many_lines)]
 pub(crate) async fn run_task(paths: &Paths, mut args: RunArgs, json_output: bool) -> Result<()> {
+    let objective = match (args.objective.take(), args.objective_file.take()) {
+        (Some(objective), None) => objective,
+        (None, Some(path)) => read_objective_file(&path)?,
+        _ => bail!("provide exactly one of OBJECTIVE or --objective-file"),
+    };
     let requested_mode = requested_mode(args.mode, crate::invocation::current().headless)?;
     let _awake = crate::sleep_guard::keep_awake();
     let config = Config::load(&paths.config)?;
     let registry = Registry::open_with_control_home(&paths.registry, &paths.home)?;
+    let selected_alias = if let Some(name) = args.use_alias.take() {
+        Some(
+            crate::aliases::get(&config, &name)
+                .cloned()
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "unknown alias {name}; known aliases: {}",
+                        crate::aliases::known(crate::aliases::list(&config))
+                    )
+                })?,
+        )
+    } else {
+        None
+    };
     let harness = default_harness(
         &registry,
-        args.harness
-            .take()
-            .or(config.defaults.harness.clone())
+        selected_alias
+            .as_ref()
+            .map(|alias| alias.harness.clone())
+            .or_else(|| args.harness.take().or(config.defaults.harness.clone()))
             .as_deref(),
     )?;
     let mut calling = config.calling(&harness);
     warn_stored_permissions(&config);
-    calling.model = args.model.take().or(calling.model);
-    calling.effort = args.effort.take().or(calling.effort);
+    calling.model = selected_alias
+        .as_ref()
+        .and_then(|alias| alias.model.clone())
+        .or_else(|| args.model.take())
+        .or(calling.model);
+    calling.effort = selected_alias
+        .as_ref()
+        .and_then(|alias| alias.effort.clone())
+        .or_else(|| args.effort.take())
+        .or(calling.effort);
     calling.permission = ignored_permission(args.permission.is_some());
     calling.deadline_seconds = args.deadline_seconds.or(calling.deadline_seconds);
     config::validate_argv(&calling.argv)?;
@@ -171,19 +202,20 @@ pub(crate) async fn run_task(paths: &Paths, mut args: RunArgs, json_output: bool
     } else {
         owner_from_environment()?
     };
-    let workflow = workflow_step_from_run(&args, &harness, &calling, &source_workspace)?;
+    let workflow =
+        workflow_step_from_run(&args, &objective, &harness, &calling, &source_workspace)?;
     let create_request_id = match &workflow {
         Some(step) => format!("wf-{}-{}", step.run_id, step.step_key),
         None => format!("run-{task_id}"),
     };
-    let criteria = acceptance_criteria(&args.objective, args.criteria);
+    let criteria = acceptance_criteria(&objective, args.criteria);
     let spec = TaskSpec {
         schema: SCHEMA_V1.to_owned(),
         task_id,
         revision: 1,
         create_request_id,
         owner_id,
-        objective: args.objective,
+        objective,
         workspace: source_workspace.to_string_lossy().into_owned(),
         route: Route {
             harness_id: harness,
@@ -211,7 +243,15 @@ pub(crate) async fn run_task(paths: &Paths, mut args: RunArgs, json_output: bool
     };
     spec.validate()?;
     activated.validate_task_route(&spec)?;
-    preflight_with_notice(&registry, &activated, &spec).await?;
+    preflight_with_notice(
+        &registry,
+        &activated,
+        &spec,
+        selected_alias
+            .as_ref()
+            .is_some_and(|alias| alias.model.is_some()),
+    )
+    .await?;
     let mode = resolve_execution_mode(requested_mode, &activated, &spec)?;
     with_slow_notice(
         "preparing the worktree and starting the worker",
@@ -242,10 +282,43 @@ pub(crate) async fn run_task(paths: &Paths, mut args: RunArgs, json_output: bool
                 calling_options: calling,
                 instructions_digest,
                 workflow,
+                reuse_clean_unadmitted_worktree: false,
             },
         )),
     )
     .await
+}
+
+fn read_objective_file(path: &Path) -> Result<String> {
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+        .with_context(|| format!("cannot open objective file {}", path.display()))?;
+    read_objective(file, path)
+}
+
+fn read_objective(mut file: File, path: &Path) -> Result<String> {
+    use std::os::unix::fs::FileTypeExt;
+    let metadata = file
+        .metadata()
+        .with_context(|| format!("cannot inspect objective file {}", path.display()))?;
+    if !metadata.is_file() || metadata.file_type().is_fifo() {
+        bail!("objective file {} is not a regular file", path.display());
+    }
+    let limit = u64::try_from(brgr_protocol::MAX_OBJECTIVE_BYTES)?;
+    if metadata.len() > limit {
+        bail!("objective must be at most {limit} bytes");
+    }
+    let mut bytes = Vec::new();
+    file.by_ref()
+        .take(limit.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .with_context(|| format!("cannot read objective file {}", path.display()))?;
+    if u64::try_from(bytes.len())? > limit {
+        bail!("objective must be at most {limit} bytes");
+    }
+    String::from_utf8(bytes).context("objective file must contain valid UTF-8")
 }
 
 /// How long a stage of starting a task may run before brgr says what it is
@@ -256,12 +329,31 @@ async fn preflight_with_notice(
     registry: &Registry,
     activated: &HarnessManifest,
     spec: &TaskSpec,
+    alias_selected: bool,
 ) -> Result<()> {
-    with_slow_notice(
+    let result = with_slow_notice(
         "checking the requested model against the harness catalog",
         registry.preflight_model(activated, spec.route.requested_model.as_deref()),
     )
-    .await?;
+    .await;
+    if let Err(error) = result {
+        if alias_selected
+            && matches!(
+                error,
+                brgr_registry::RegistryError::ModelCatalogMissing(_)
+                    | brgr_registry::RegistryError::ModelCatalogExecutableMissing(_)
+                    | brgr_registry::RegistryError::InvalidModelCatalog
+                    | brgr_registry::RegistryError::ModelCatalogProbeFailed { .. }
+            )
+        {
+            eprintln!(
+                "brgr: could not read model catalog for {}; continuing with the model saved in the alias",
+                spec.route.harness_id
+            );
+        } else {
+            return Err(error.into());
+        }
+    }
     Ok(())
 }
 
@@ -434,7 +526,9 @@ pub(crate) async fn revise_task(paths: &Paths, args: ReviseArgs, json_output: bo
     calling.permission = replacement.permission;
     calling.deadline_seconds = Some(replacement.budget.deadline_seconds);
     config::validate_manifest_argv(&calling.argv, &activated)?;
-    revisable.acknowledge_previous(&store);
+    // The legacy cancel marker has no revision. Once a new revision is
+    // admitted, a marker left by an older settled revision must not cancel it.
+    let _ = fs::remove_file(paths.cancel(args.task));
     start_task(
         paths,
         replacement,
@@ -462,9 +556,12 @@ pub(crate) async fn revise_task(paths: &Paths, args: ReviseArgs, json_output: bo
             calling_options: calling,
             instructions_digest,
             workflow: None,
+            reuse_clean_unadmitted_worktree: true,
         },
     )
-    .await
+    .await?;
+    revisable.acknowledge_previous(&store);
+    Ok(())
 }
 
 /// A revision of a headless run stays headless, as its retention flags carry
@@ -503,12 +600,12 @@ fn resolve_execution_mode(
 struct Revisable {
     next_revision: u32,
     /// A failed or lost result has no decision to record; revising it is the
-    /// owner's answer, so it is acknowledged once the revision is ready.
+    /// owner's answer, so it is acknowledged once the revision is admitted.
     unacknowledged: Option<(OwnerId, brgr_protocol::ResultId, String, u64)>,
 }
 
 impl Revisable {
-    /// Best effort: a revision already started must not fail over bookkeeping.
+    /// Best effort: bookkeeping must not fail an already admitted revision.
     fn acknowledge_previous(&self, store: &Store) {
         if let Some((owner, result_id, session, epoch)) = &self.unacknowledged {
             let _ = store.acknowledge_bound(owner, *result_id, session, *epoch);
@@ -624,6 +721,10 @@ pub(crate) async fn load_harness(
     harness: &str,
     auto_recertify: bool,
 ) -> Result<(HarnessManifest, ActivationReceipt)> {
+    // Before the probe, whose failure would suggest re-certifying it.
+    if harness == brgr_registry::REMOVED_HARNESS_ID {
+        return Err(brgr_registry::RegistryError::RemovedGjcSupport.into());
+    }
     let probed = registry.health_probed(harness).await?;
     let probed = recertify_if_allowed(registry, harness, probed, auto_recertify).await?;
     require_healthy_harness(
@@ -805,22 +906,43 @@ fn source_pane(
     }
     // A Codex call cannot be placed while it runs, so its pane is looked up
     // once the call has finished; the worker pane opens then, beside it.
-    caller_source_pane(spec)
-        .context(
-            "default TUI execution needs an exact Herdr source; run it from a Herdr pane, or from a Codex session start the command with `--as SESSION` (the session in your calling context) so brgr can find your pane",
-        )
-        .map(Some)
+    caller_source_pane(spec).map(Some).ok_or_else(|| {
+        anyhow::anyhow!("a pane run needs an exact Herdr source pane; run it from a Herdr pane, or use `--mode headless`")
+    })
 }
 
 fn caller_source_pane(spec: &TaskSpec) -> Option<String> {
+    if let Some(pane) = crate::worker_identity::pane() {
+        return Some(pane);
+    }
     crate::caller_pane::verified().or_else(|| {
-        (spec.owner_id.as_str().starts_with("codex:")
+        (codex_pending_session_allowed(spec)
             && std::env::var("HERDR_ENV").as_deref() == Ok("1")
             && crate::caller_pane::binary().is_some())
         .then(|| crate::current_session().ok().flatten())
         .flatten()
         .map(|session| crate::caller_pane::pending_marker(&session))
     })
+}
+
+fn codex_pending_session_allowed(spec: &TaskSpec) -> bool {
+    let nonempty = |name: &str| std::env::var(name).is_ok_and(|value| !value.trim().is_empty());
+    if nonempty("CODEX_THREAD_ID") {
+        return true;
+    }
+    let other_harness_session = [
+        "OPENCODE_SESSION_ID",
+        "CLAUDE_CODE_SESSION_ID",
+        "CURSOR_CONVERSATION_ID",
+    ]
+    .into_iter()
+    .any(nonempty);
+    !other_harness_session
+        && crate::invocation::current()
+            .session
+            .as_deref()
+            .is_some_and(|session| !session.trim().is_empty())
+        && spec.owner_id.as_str().starts_with("codex:")
 }
 
 // Admission ordering is security-sensitive and remains explicit here.
@@ -847,8 +969,8 @@ pub(crate) async fn start_task(
     let pane_mode = source_pane.is_some() && activated.adapter != brgr_runner::OMP_ROLE_ADAPTER_V1;
     let store = Store::open(&paths.store)?;
     if let Some((parent_task, parent_attempt)) = options.parent {
-        store.validate_delegation_parent(parent_task, parent_attempt, &spec.owner_id)?;
         require_parent_may_delegate(paths, &store, parent_task, parent_attempt)?;
+        store.validate_delegation_parent(parent_task, parent_attempt, &spec.owner_id)?;
     }
     let session = current_session()?;
     bind_owner_session(&store, &spec.owner_id, session.as_deref())?;
@@ -867,45 +989,70 @@ pub(crate) async fn start_task(
     )? {
         return Ok(());
     }
+    // Keep this repository-wide lock through orphan inspection, launch-file
+    // creation, the admission write, and any rollback so revises cannot race
+    // over the same revision path.
     let admission = workspace::acquire_admission_lock(&paths.worktrees, options.source_workspace)?;
     let task_id = spec.task_id;
     let harness_id = spec.route.harness_id.clone();
-    let workspace = prepare_task_workspace(paths, &mut spec, &activated.adapter, &options)?;
-    spec.workspace = workspace.to_string_lossy().into_owned();
-    spec.validate()?;
-    let launch = LaunchEnvelope {
-        spec,
-        harness_id,
-        protocol_generation: "brgr-v1".to_owned(),
-        keep_pane: matches!(options.pane, PaneDisposition::Keep),
-        keep_worktree: matches!(options.worktree, WorktreeDisposition::Keep),
-        delegation_enabled: pane_mode || options.enable_delegation || options.parent.is_some(),
-        manifest: Some(activated.clone()),
-        executable_digest: Some(activation.executable_digest.clone()),
-        pane_mode,
-        claimant: Claimant::Supervisor,
-        source_pane,
-        source_session: session.clone(),
-        calling_options: Some(options.calling_options.clone()),
-        instructions_digest: options.instructions_digest.clone(),
+    let revision = spec.revision;
+    let (workspace, workspace_created) =
+        prepare_task_workspace(paths, &mut spec, &activated.adapter, &options)?;
+    let launch_path = paths.launch(task_id, revision);
+    let mut launch_created = false;
+    let prepared = (|| -> Result<_> {
+        spec.workspace = workspace.to_string_lossy().into_owned();
+        spec.validate()?;
+        let launch = LaunchEnvelope {
+            spec,
+            harness_id,
+            protocol_generation: "brgr-v1".to_owned(),
+            keep_pane: matches!(options.pane, PaneDisposition::Keep),
+            keep_worktree: matches!(options.worktree, WorktreeDisposition::Keep),
+            delegation_enabled: options.enable_delegation || options.parent.is_some(),
+            manifest: Some(activated.clone()),
+            executable_digest: Some(activation.executable_digest.clone()),
+            pane_mode,
+            claimant: Claimant::Supervisor,
+            source_pane,
+            source_session: session.clone(),
+            calling_options: Some(options.calling_options.clone()),
+            instructions_digest: options.instructions_digest.clone(),
+        };
+        write_json_new(&launch_path, &launch)?;
+        launch_created = true;
+        let mut store = Store::open(&paths.store)?;
+        let request_digest_text = task_request_digest(&launch.spec)?;
+        let recorded = RecordedLaunch {
+            paths,
+            launch: &launch,
+            launch_path: &launch_path,
+            workspace: &workspace,
+        };
+        let commit = commit_recorded_task(
+            &recorded,
+            &mut store,
+            &request_digest_text,
+            &options,
+            proof.as_ref(),
+        )?;
+        Ok((launch, store, commit))
+    })();
+    let (launch, mut store, commit) = match prepared {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            discard_unrecorded_admission(
+                paths,
+                &workspace,
+                &launch_path,
+                task_id,
+                revision,
+                workspace_created,
+                launch_created,
+            );
+            return Err(error);
+        }
     };
-    let launch_path = paths.launch(task_id, launch.spec.revision);
-    write_json_new(&launch_path, &launch)?;
-    let mut store = Store::open(&paths.store)?;
-    let request_digest_text = task_request_digest(&launch.spec)?;
-    let recorded = RecordedLaunch {
-        paths,
-        launch: &launch,
-        launch_path: &launch_path,
-        workspace: &workspace,
-    };
-    let commit = commit_recorded_task(
-        &recorded,
-        &mut store,
-        &request_digest_text,
-        &options,
-        proof.as_ref(),
-    )?;
     drop(admission);
     match commit {
         AdmissionCommit::Created => {}
@@ -939,6 +1086,7 @@ struct RecordedLaunch<'a> {
 
 fn workflow_step_from_run(
     args: &RunArgs,
+    objective: &str,
     harness: &str,
     calling: &config::CallingOptions,
     workspace: &Path,
@@ -953,7 +1101,7 @@ fn workflow_step_from_run(
         run_id: WorkflowRunId::new(run.clone())?,
         step_key,
         input_digest: sha256_hex(&serde_json::to_vec(&WorkflowStepInput {
-            objective: &args.objective,
+            objective,
             harness,
             model: &calling.model,
             effort: &calling.effort,
@@ -1107,7 +1255,10 @@ impl RecordedLaunch<'_> {
             self.paths,
             self.workspace,
             self.launch_path,
-            &self.launch.spec,
+            self.launch.spec.task_id,
+            self.launch.spec.revision,
+            true,
+            true,
         );
     }
 }
@@ -1116,15 +1267,22 @@ fn discard_unrecorded_admission(
     paths: &Paths,
     workspace: &Path,
     launch_path: &Path,
-    spec: &TaskSpec,
+    task_id: TaskId,
+    revision: u32,
+    discard_workspace: bool,
+    discard_launch: bool,
 ) {
-    let _ = fs::remove_file(launch_path);
+    if discard_launch {
+        let _ = fs::remove_file(launch_path);
+    }
     let _ = fs::remove_file(
         paths
             .runs
-            .join(format!("{}-r{}.snapshot.json", spec.task_id, spec.revision)),
+            .join(format!("{task_id}-r{revision}.snapshot.json")),
     );
-    workspace::discard_prepared_worktree(&paths.worktrees, workspace);
+    if discard_workspace {
+        workspace::discard_prepared_worktree(&paths.worktrees, workspace);
+    }
 }
 
 fn print_existing_task_receipt(
@@ -1338,7 +1496,7 @@ pub(crate) fn prepare_task_workspace(
     spec: &mut TaskSpec,
     adapter: &str,
     options: &StartOptions<'_>,
-) -> Result<PathBuf> {
+) -> Result<(PathBuf, bool)> {
     spec.evidence.base_commit = None;
     spec.evidence.base_tree = None;
     let selected = if options.snapshot_paths.is_empty() {
@@ -1349,13 +1507,14 @@ pub(crate) fn prepare_task_workspace(
             options.snapshot_paths,
         )?)
     };
-    let workspace = workspace::prepare_workspace(
+    let (workspace, created) = workspace::prepare_workspace_with_reuse(
         &paths.worktrees,
         options.source_workspace,
         spec.task_id,
         spec.revision,
         adapter,
         matches!(options.snapshot, WorkspaceSnapshot::AllowCleanHead) || selected.is_some(),
+        options.reuse_clean_unadmitted_worktree,
     )?;
     if spec.evidence.capture_diff {
         spec.evidence.base_commit = Some(workspace::git_head(&workspace)?);
@@ -1379,7 +1538,7 @@ pub(crate) fn prepare_task_workspace(
             &serde_json::to_value(snapshot.receipt(spec.task_id, spec.revision))?,
         )?;
     }
-    Ok(workspace)
+    Ok((workspace, created))
 }
 
 pub(crate) fn validate_source_home(
@@ -1431,8 +1590,8 @@ pub(crate) fn require_parent_may_delegate(
     )?;
     if !launch.delegation_enabled {
         bail!(
-            "the parent task was not started with delegation; its worker may message its \
-             owner but may not start child tasks"
+            "the parent task was not started with delegation; pass --enable-delegation \
+             when starting it to allow child tasks (workers may still message their owner)"
         );
     }
     Ok(())

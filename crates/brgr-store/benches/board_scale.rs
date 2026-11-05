@@ -117,6 +117,7 @@ fn seed_settled_task(store: &mut Store, owner: &OwnerId, index: usize) {
         legacy_embedded_route_observation: None,
         route_observation: None,
         unresolved_effects: vec![],
+        slept_seconds: None,
     };
     store
         .commit_terminal_result(&task.owner_id, &result)

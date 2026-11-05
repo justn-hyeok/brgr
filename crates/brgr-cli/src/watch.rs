@@ -51,7 +51,7 @@ pub(crate) async fn watch(
     }
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_seconds);
-    let mut last_reconcile = tokio::time::Instant::now() - Duration::from_secs(1);
+    let mut reconcile_schedule = crate::supervision::WaitReconcileSchedule::now();
     let mut watched = tasks
         .into_iter()
         .map(|task| Watched {
@@ -62,12 +62,13 @@ pub(crate) async fn watch(
         })
         .collect::<Vec<_>>();
 
+    let debate = crate::message::DebateWait::start(paths);
     loop {
-        if last_reconcile.elapsed() >= Duration::from_secs(1) {
-            // Same recovery cadence as `wait`: a dead supervisor becomes a lost
-            // result the stream can report. This command never decides or acks.
-            reconcile_pending(paths)?;
-            last_reconcile = tokio::time::Instant::now();
+        if debate.message_pending(&store)? {
+            let mut event = crate::message::debate_pending_receipt();
+            event["event"] = json!("debate_message_pending");
+            emit(&event)?;
+            return Ok(());
         }
         let mut all_done = true;
         for task in &mut watched {
@@ -76,6 +77,11 @@ pub(crate) async fn watch(
         if all_done {
             emit(&json!({"event": "done"}))?;
             return Ok(());
+        }
+        if reconcile_schedule.should_reconcile() {
+            // A dead supervisor becomes a lost result within this bounded
+            // interval; results are still polled every 200 ms above.
+            reconcile_pending(paths)?;
         }
         if tokio::time::Instant::now() >= deadline {
             emit(&json!({"event": "timeout"}))?;

@@ -10,6 +10,8 @@ use crate::workflow::{WorkflowRunId, WorkflowStepKey};
 /// Failures surfaced by durable metadata and artifact operations.
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
+    #[error("database is not an initialized brgr store")]
+    UninitializedStore,
     #[error("database operation failed: {0}")]
     Database(#[from] rusqlite::Error),
     #[error("filesystem operation failed: {0}")]

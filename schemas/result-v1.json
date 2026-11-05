@@ -26,6 +26,7 @@
       }
     },
     "error": { "type": ["string", "null"] },
+    "slept_seconds": { "type": "integer", "minimum": 61 },
     "route_observation": {
       "$comment": "Only present in bytes written by an unreleased intermediate v1 build; current results commit route evidence separately.",
       "type": "object",

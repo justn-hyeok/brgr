@@ -2,27 +2,84 @@
 
 ## Unreleased
 
-- Tests only: the three slowest tests no longer wait out real intervals, which removes about two minutes from a
-  full run. A fake worker's `grep ASK` also matched the word `TASK` in its prompt, so a step nobody questioned sat
-  in `message wait` for its 60-second limit; it now matches the whole word. The workflow admission test holds its
-  first step on a file instead of a 30-second sleep, and the harness health test injects a short deadline for its
-  timeout case. No shipped behavior changes.
-- Herdr commands for worktree creation, pane cleanup, and OMP agent lookup now honor `HERDR_BIN_PATH` like the others. Tests no longer reach a real Herdr from inside a Herdr pane (issue #270).
-- `brgr accept` could print `brgr cleanup pending: No such file or directory (os error 2)` for a
-  pane worker (issue #265). The pane's session loop and the deciding command both archive the
-  handled report and restore the Cursor hook, with no lock between them, so one could remove a
-  file after the other had checked it; a decision's own worktree reclaim could also run before the
-  report was archived and keep the worktree for good. A file the other process already handled is
-  now the step's success, proven by the archive holding the sealed bytes, never by skipping the
-  digest check; a report missing for any other reason is reported once, naming the path; the
-  reclaim leaves a worktree whose report is not archived yet to the cleanup that archives it; and
-  every remaining `cleanup pending` error names the file that failed.
-- Tests only (#224): every test wait is decided by an event the test controls, with a one-minute hang guard
-  where a window once measured machine speed. `watch` fixtures hold on a release file and the tests act on
-  the watch's own output; killed supervisors and drivers are waited for by pid; store and runner bounds are
-  the budget or deadline only the code under test can reach; the workflow resume-deadline test moves the
-  store's clock past an hour-long deadline instead of sleeping through a short one; `brgr-core`'s
-  fake `git` executables use the warmed trampoline.
+- Notification dispatchers now stop when their original store database is removed or replaced without recreating it.
+- `brgr wait` and `brgr watch` poll sealed results every 200 ms and run recovery and cleanup at most once every five seconds.
+
+## 2.15.20 — 2026-11-05
+
+Fixes from the gate 2-5 review: revisions, heads, installers and stopping a process.
+
+- A refused `brgr revise` no longer acknowledges the failed or lost result it was meant to replace.
+- `workflow status` reports driver liveness and names the resume command for a dead driver without changing run state.
+- Config edits and set commands now lock, reread, and atomically update the current file so concurrent changes are retained.
+- Error memo issue text now masks filesystem paths whole, including paths with spaces, and groups path-varying failures under one fingerprint.
+- `brgr head claim --abandoned` can recover a committed or resumed takeover after its current head disappears, recording the old takeover as `superseded`; older sessions are fenced by the binding epoch.
+- Codex hooks installs write through symlinks, status line backups never overwrite, and environment-assignment status lines are refused before editing settings.
+- **Behavior change:** OpenCode `--mode auto` now falls back to headless when its Herdr caller pane cannot be verified; an explicit pane request is refused before admission.
+- Runner cancellation now kills remaining process-group members after the TERM grace period, and JSONL results use only the last assistant message.
+- `brgr revise` recovers only clean, unadmitted revision worktrees and removes worktrees and launch files left by an in-process admission failure.
+- **Behavior change:** `BRGR_HOME` now wins inside a task worktree. Only a command with neither it nor `--home` takes its home from the worktree's path.
+- A cancel marker left by a cancelled or lost revision no longer cancels the next revision.
+- Captured diffs and worktree reclaim now include tasks started from a repository subdirectory.
+
+## 2.15.19 — 2026-11-05
+
+Workers on macOS: real rounds found four defects that tests had not. `brgr config edit` arrives, and a workflow's `retries` now works in a pane.
+
+- A new pane whose shell asks oh-my-zsh's update question no longer loses the first letter of the command, which failed every worker and handoff until someone answered it. brgr now waits for the shell and declines the offer.
+- `brgr cancel` no longer leaves a Devin worker's tools running. Whichever process closed the pane first could lose the host that says what ran under it.
+- A Codex worker no longer stops with `CODEX_THREAD_ID and BRGR_SESSION_ID disagree` or fails to seal its report when its shared daemon inherited another session's identity. Both could stop it from starting a child.
+- A Codex worker under a custom `--home` or `BRGR_HOME` now uses that home. Its commands run in Codex's shared daemon, which lost the setting, so they silently created tasks in the default home.
+- **Behavior change:** a pane agent that stops by itself and writes no report even after a reminder now ends `failed`, not `lost`, so a workflow's `retries` can run it again. A pane or process that disappeared stays `lost` (issue #225).
+- `brgr config edit` picks harnesses, models and aliases in the terminal (issue #308).
+- An agent whose first prompt a screen swallowed gets the prompt again instead of an order to report (issue #316).
+- The docs now say a pane deadline counts awake time, which it always did while the supervisor lived.
+
+## 2.15.18 — 2026-11-05
+
+brgr now runs on x86_64 Linux with real agents, debate no longer stalls, and a worker's children have a real boundary. GJC is gone.
+
+- Linux release archive, checksums and plugin support, with real heads and workers checked on Ubuntu 24.04 (issue #284).
+- A debate member blocked in `message wait`, `wait` or `watch` now returns early for a debate message, and `debate wait` says when a debate starts during it. `debate status` shows unread age, worker state and blocking waits, `debate send` refuses a finished member, and every debate subcommand has help (issue #301).
+- A Codex worker now knows who it is. Its commands run in Codex's shared daemon, which never had its identity; a task directory in a brgr worktree now names the worker and its pane.
+- **Behavior change:** pane mode no longer enables delegation by itself. A worker needs `--enable-delegation` to start children (issue #302).
+- **Behavior change:** `brgr cancel TASK` stops the whole subtree, and tools under the agent. `status` and `result` reach every descendant for an ancestor's owner. A child its parent cancelled no longer fails that parent (issue #302).
+- `brgr debate wait` exits 0 with a `timeout` receipt instead of an error.
+- `brgr config alias set|list|remove` and `brgr run --use NAME` name a harness and model (issue #308).
+- Screen rules for Codex's hook review and Claude Code's fullscreen renderer offer. Without them a worker on a fresh install stopped there (issues #303, #284).
+- A headless result records `slept_seconds` when the machine slept (issue #259).
+- **Removed:** GJC. A registered `local.gjc` and its config section keep loading, and it no longer runs (issue #307).
+- Harness tiers: tier 1 is Claude Code, Codex CLI, Cursor CLI and Devin CLI (issue #307).
+
+## 2.15.17 — 2026-11-04
+
+A Linux worker's edit can no longer vanish from its sealed diff, `accept` no longer warns about cleanup another process finished, a large objective can come from a file, and the test suite runs on Linux.
+
+- A worker's edit could vanish from its sealed diff on Linux, so `brgr land` reported success having applied nothing. brgr
+  copied the Git index before diffing and the copy got a fresh time, which told Git it could trust a file's size and
+  time; an edit that kept the file's size, in the same second as the checkout, then looked unchanged. The copy now
+  keeps the index's time (issue #289).
+- `brgr accept` could print `brgr cleanup pending: No such file or directory (os error 2)` for a pane worker (issue #265).
+  The pane's session loop and the deciding command run the same cleanup with no lock between them. A file the other
+  process already handled is now the step's success, proven by the archive holding the sealed bytes; a report missing or
+  unreadable for any other reason is reported once, naming the path. A decision's own reclaim could also run before the
+  report was archived and keep the worktree for good; it now leaves that to the cleanup that archives. Every remaining
+  `cleanup pending` error names the file that failed.
+- `brgr run --objective-file PATH` accepts an objective up to 256 KiB without putting it in one process argument, which
+  Linux caps at 128 KiB. The workflow SDK uses a private temporary file for tasks over 64 KiB.
+- On Linux, the check that no ancestor process claims a different pane reads `/proc/PID/environ`. It used `ps -E`, which
+  procps rejects, so the check did nothing there.
+- Creating a task worktree retries when `git worktree add` finds another worktree still being created.
+- The Herdr commands for worktree creation, pane cleanup and OMP agent lookup honor `HERDR_BIN_PATH` like the others.
+- Tests only: the suite no longer reaches a real Herdr from inside a Herdr pane, where it could send a real agent a
+  `FROM BRGR` notice for a task that does not exist (issue #270). Tests and benches now run brgr through one isolated
+  constructor, and a source scan keeps it that way.
+- Tests only: tests wait for events they control instead of clock windows (issue #224), new multi-process tests race
+  cancel, recovery, decisions and restarts on one control home (readiness gate 2-4), the slowest tests stopped waiting out
+  real intervals, and Linux-only races and `ETXTBSY` in tests were fixed.
+- CI: a pull request runs on Linux, in about two minutes. The macOS job runs on the push to `main`. A release waits for that
+  commit's `main` run to pass instead of repeating the tests, and still does an uncached release build and a smoke run of
+  the packaged binary.
 
 ## 2.15.16 — 2026-11-03
 

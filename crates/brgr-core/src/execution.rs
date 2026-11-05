@@ -206,6 +206,11 @@ pub(crate) fn is_retryable_spawn_failure(
     )
 }
 
+/// How brgr's own pane adapter exits when the agent stopped by itself and, even
+/// after a reminder, wrote no report. Unlike every other delegated failure this
+/// is a known end, so it is `failed`, which a workflow may retry.
+pub const AGENT_GAVE_NO_REPORT_EXIT: i32 = 3;
+
 /// The last non-empty line a Herdr-backed adapter wrote to stderr, bounded. The
 /// adapter is brgr's own `__pane-run` or `__omp-run`, whose last line is its
 /// error, which says why the run failed far better than the outcome alone.
@@ -254,6 +259,45 @@ pub(crate) fn finish_execution(
     Ok(result)
 }
 
+/// A Herdr-backed run with no result. Only an agent that stopped by itself is a
+/// known end; anything else may have left a worker running.
+fn delegated_failure(
+    store: &Store,
+    spec: &TaskSpec,
+    attempt_id: AttemptId,
+    output: Option<&brgr_runner::ExecutionOutput>,
+) -> ResultEnvelope {
+    let reason = delegated_lost_reason(output);
+    if output.is_some_and(|output| {
+        output.exit_code == Some(AGENT_GAVE_NO_REPORT_EXIT)
+            && !output.cancelled
+            && !output.timed_out
+    }) {
+        return terminal_with_requested_logs(
+            store,
+            spec,
+            attempt_id,
+            TerminalOutcome::Failed,
+            reason,
+            output,
+        );
+    }
+    let mut result = terminal_with_requested_logs(
+        store,
+        spec,
+        attempt_id,
+        TerminalOutcome::Lost,
+        reason,
+        output,
+    );
+    result.slept_seconds = output.and_then(|output| output.slept_seconds);
+    result.unresolved_effects.push(
+        "The separately launched worker may still be running or may have caused external effects"
+            .to_owned(),
+    );
+    result
+}
+
 fn finish_execution_result(
     store: &Store,
     spec: &TaskSpec,
@@ -266,20 +310,12 @@ fn finish_execution_result(
     if manifest.launch.mode == ExecutionMode::DelegatedExternal
         && !matches!(&execution, Ok(output) if !output.cancelled && output.succeeded(manifest) && !output.result.is_empty())
     {
-        let reason = delegated_lost_reason(execution.as_ref().ok());
-        let mut result = terminal_with_requested_logs(
+        return Ok(delegated_failure(
             store,
             spec,
             attempt_id,
-            TerminalOutcome::Lost,
-            reason,
             execution.as_ref().ok(),
-        );
-        result.unresolved_effects.push(
-            "The separately launched worker may still be running or may have caused external effects"
-                .to_owned(),
-        );
-        return Ok(result);
+        ));
     }
     match execution {
         Ok(output) if output.cancelled => {
@@ -333,6 +369,7 @@ fn finish_execution_result(
                 artifacts,
                 None,
             );
+            result.slept_seconds = output.slept_seconds;
             result.unresolved_effects.extend(unresolved_effects);
             if let Some(observation) = route_observation(manifest, observed_model) {
                 result.route_observation = Some(observation);
@@ -479,6 +516,7 @@ pub(crate) fn terminal_with_requested_logs(
     }
     let mut result = result_for(spec, attempt_id, outcome, artifacts, Some(error));
     result.unresolved_effects = unresolved_effects;
+    result.slept_seconds = output.and_then(|value| value.slept_seconds);
     result
 }
 
@@ -540,10 +578,28 @@ pub(crate) fn unsettled_worker_reason(
     task_id: TaskId,
     attempt_id: AttemptId,
 ) -> Result<Option<String>, StoreError> {
-    let children = store.unsettled_children(attempt_id)?;
-    if children > 0 {
+    let children = store.unsettled_child_tasks(attempt_id)?;
+    if !children.is_empty() {
+        let details = children
+            .iter()
+            .map(|child| {
+                let id = child.to_string();
+                match store.latest_result(*child) {
+                    Ok(result) if result.outcome == TerminalOutcome::Candidate => Ok(format!(
+                        "{id} (candidate: `brgr accept {id}` or `brgr reject {id}`)"
+                    )),
+                    Ok(_) => Ok(format!("{id} (acknowledge with `brgr result {id} --ack`)")),
+                    Err(StoreError::NoResultYet(_)) => Ok(format!(
+                        "{id} (cancel with `brgr cancel {id}` or wait for its result)"
+                    )),
+                    Err(error) => Err(error),
+                }
+            })
+            .collect::<Result<Vec<_>, StoreError>>()?;
         return Ok(Some(format!(
-            "{children} child task(s) remain undecided or unacknowledged"
+            "{} child task(s) remain undecided or unacknowledged: {}",
+            children.len(),
+            details.join("; ")
         )));
     }
     let questions = store.unsettled_questions(task_id, attempt_id)?;
@@ -572,6 +628,7 @@ pub(crate) fn result_for(
         legacy_embedded_route_observation: None,
         route_observation: Some(RouteObservation::unavailable()),
         unresolved_effects: vec![],
+        slept_seconds: None,
     }
 }
 
@@ -599,6 +656,7 @@ mod failure_reason_tests {
             cancelled: false,
             output_truncated: false,
             elapsed: std::time::Duration::ZERO,
+            slept_seconds: None,
         }
     }
 

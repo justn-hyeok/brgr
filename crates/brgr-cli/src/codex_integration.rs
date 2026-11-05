@@ -17,7 +17,7 @@ use tempfile::NamedTempFile;
 
 const SKILL_TEXT: &str = r#"---
 name: brgr
-description: Delegate bounded coding work through brgr. Workers open as Herdr panes beside you, run with full permissions, and report back as sealed results you accept or reject. Use for Claude Code, Codex, Gemini CLI, GitHub Copilot CLI, Pi, OpenCode, Cursor, Devin, Cline, GJC and OMP workers.
+description: Delegate bounded coding work through brgr. Workers open as Herdr panes beside you, run with full permissions, and report back as sealed results you accept or reject. Use for Claude Code, Codex, Gemini CLI, GitHub Copilot CLI, Pi, OpenCode, Cursor, Devin, Cline and OMP workers.
 ---
 
 # brgr
@@ -26,11 +26,11 @@ brgr hands bounded work to registered coding agents and seals what they return f
 
 ## Rules
 
-1. Every worker opens as a Herdr pane split beside your pane, running the harness's own TUI: the first to the right of a wide pane or below a narrow one, later ones stacked under it in equal sizes while you keep your half, and in a new tab once that column is full or after `brgr config set worker-placement tab`. Do not choose headless yourself; pass `--mode auto` when you cannot tell whether a Herdr pane is available.
+1. Every worker opens as a Herdr pane split beside your pane, running the harness's own TUI: the first to the right of a wide pane or below a narrow one, later ones stacked under it in equal sizes while you keep your half, and in a new tab once that column is full or after `brgr config set worker-placement tab`. Do not choose headless yourself; pass `--mode auto` when you cannot tell whether a Herdr pane is available. For an OpenCode session, auto uses headless when brgr cannot verify the caller pane; an explicit `--mode pane` requires a verified pane.
 2. When the work should be done by Claude, use `--harness local.claude-code`. Do not run Claude through another harness.
 3. Workers always run with full permissions (yolo). Nothing lowers it; `--permission` is ignored.
 4. Close what you open. Decide every result (`accept`, `reject`, or `result TASK --ack`) so brgr closes the worker's pane and removes its worktree once nothing in it would be lost. Use `--keep-pane` or `--keep-worktree` only when the user asks to keep one.
-5. From Codex, start every brgr command with `--as SESSION`, the session in your calling context, and never add `--source-pane`. brgr finds your pane from what the Codex panes show; if it cannot, the run fails instead of opening beside someone else. Codex 0.162 and later show a command's line only after it ends, so before the first handoff of a session run one short brgr command with the same `--as` (for example `brgr --as SESSION status --brief`). From Cursor, `CURSOR_CONVERSATION_ID` is the session; `--as` is optional.
+5. From Codex, start every brgr command with `--as SESSION`, the session in your calling context, and never add `--source-pane`. brgr finds your pane from what the Codex panes show; if it cannot, `--mode auto` runs headless and explicit pane mode is refused before admission. Codex 0.162 and later show a command's line only after it ends, so before the first handoff of a session run one short brgr command with the same `--as` (for example `brgr --as SESSION status --brief`). From Cursor, `CURSOR_CONVERSATION_ID` is the session; `--as` is optional. OpenCode sessions use `--mode auto` when their Herdr pane cannot be verified; an explicit pane request is refused and should use `--mode headless` instead.
 6. Leave a worker's screens to brgr. It accepts the workspace trust prompt, continue notices, Claude Code's bypass warning and new-MCP-server prompt, and skips update offers.
 
 ## The loop
@@ -60,19 +60,21 @@ brgr hands bounded work to registered coding agents and seals what they return f
 
 Owner and worker talk with `brgr message send TASK --to owner|worker --kind note|question|reply --body "<text>"`; a reply adds `--reply-to MESSAGE_ID`. Read with `brgr message list TASK --for owner|worker` or `brgr message wait TASK --for owner|worker`, and acknowledge with `brgr message ack TASK MESSAGE_ID --for owner|worker`. Messages wait while the recipient is busy. A native screen is not a message: answer it with `brgr input TASK --key <key>`. A worker can hand back its answer without editing files with `brgr report TASK --body "<text>"`.
 
-Siblings talk directly only when the user asks for a **debate**: `brgr debate start TASK_A TASK_B`. Participants receive the group id and use `brgr debate send GROUP --to TASK --kind question --body "<text>"`, `brgr debate list`, `brgr debate wait` and `brgr debate ack MESSAGE_ID`; a reply adds `--kind reply --reply-to MESSAGE_ID`. The owner uses `brgr debate status GROUP` and `brgr debate stop GROUP`.
+Siblings talk directly only when the user asks for a **debate**: `brgr debate start TASK_A TASK_B`. Participants receive the group id and use `brgr debate send GROUP --to TASK --kind question --body "<text>"`, `brgr debate list`, `brgr debate wait` and `brgr debate ack MESSAGE_ID`; a reply adds `--kind reply --reply-to MESSAGE_ID`. If a blocking `message wait`, `wait` or `watch` returns `debate_message_pending`, run `brgr debate list`, acknowledge the peer message, then wait again if needed. `brgr debate wait` returns `debate_joined` with the group when a debate starts while it waits, and its `timeout` receipt names the group. The owner uses `brgr debate status GROUP` and `brgr debate stop GROUP`.
 
 ## More
 
 - Parallel attempts: start the same objective on several harnesses, compare with `brgr diff TASK --stat`, accept the best and reject the rest so every pane closes.
-- Child tasks: `--enable-delegation` lets a worker start its own workers, and `--max-children <n>` caps them.
+- Child tasks: only a worker launched with `--enable-delegation` can start its own workers; pane mode does not enable it. `--max-children <n>` caps concurrent children. Owner `status` lists descendants with parent, harness, and model; ancestor owners may read child status/results but cannot accept or reject them. `cancel TASK` stops the task and descendants (`--tree` remains accepted).
 - Workspace: a clean Git repository gets a task worktree. `--snapshot-path <file>` carries chosen uncommitted files; `--evidence-file <file>` and `--capture-logs` add artifacts.
+- Isolation: to keep test tasks out of the real store, pass `--home DIR` on every brgr command. An exported `BRGR_HOME` does not reach a Codex session, whose shared daemon keeps its own environment.
 - Status: `brgr status --brief`, `brgr status TASK --tree`, `brgr cancel TASK --tree`. A different session stops a worker with `brgr cancel TASK --force` without deciding the result.
-- Config: `brgr config init`, `brgr config show`, `brgr config set model <name> --harness <id>`, `brgr config set worker-placement tab`, `brgr config check`. User instructions live in `$BRGR_HOME/BRGR.md`.
+- Config: `brgr config init`, `brgr config show`, `brgr config set model <name> --harness <id>`, `brgr config alias set NAME --harness ID`, `brgr config set worker-placement tab`, `brgr config check`. Alias set also accepts `--model MODEL` and `--effort EFFORT`; use `brgr run <objective> --use <name>` to select a saved route. User instructions live in `$BRGR_HOME/BRGR.md`.
 - Housekeeping: `brgr errors` lists recorded failures. A worktree a decision kept (it holds work found nowhere else) stays until `brgr prune --apply`; `brgr prune` first reports what would go and why the rest stays.
-- Head: `brgr head claim TASK --abandoned --goal TEXT` takes an abandoned head. A live head uses `brgr head request TASK --to SESSION`.
+- Head: to pass your command to a new session, `brgr head handoff TASK --kind claude|codex|cursor --goal TEXT`; the new head is told every step. `brgr head claim TASK --abandoned --goal TEXT` takes a head that is gone. The other `head` subcommands are the steps these run.
+- Which to use: one worker for a bounded task; parallel attempts to compare answers; a workflow script for a fixed sequence of steps (`brgr workflow init`); `--enable-delegation` when a worker must split its own work; debate only when the user asks; handoff when this session should stop being the head.
 - Registration: `brgr harness draft <executable>`, `brgr harness add <executable> --workspace <scratch> --prompt "<probe>"`, `brgr harness status <id>`, `brgr doctor`. Each harness keeps its own login and configuration.
-- Owners: Codex sessions, Claude Code sessions (`claude:<CLAUDE_CODE_SESSION_ID>`), and Cursor sessions (`cursor:<CURSOR_CONVERSATION_ID>` in a Cursor Herdr pane) receive notices. Other Herdr owner kinds are told that `FROM BRGR` will not arrive; use `brgr watch A B C` or `brgr watch --all`.
+- Owners: Codex sessions, Claude Code sessions (`claude:<CLAUDE_CODE_SESSION_ID>`), and Cursor sessions (`cursor:<CURSOR_CONVERSATION_ID>` in a Cursor Herdr pane) receive notices. OpenCode sessions are identified as `opencode:<OPENCODE_SESSION_ID>` but do not receive `FROM BRGR`; use `brgr watch A B C` or `brgr watch --all`.
 "#;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -483,19 +485,66 @@ fn write_json_atomic(path: &Path, value: &Value) -> Result<()> {
 fn write_bytes_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     let parent = path.parent().context("path has no parent")?;
     fs::create_dir_all(parent)?;
-    let mut temporary = NamedTempFile::new_in(parent)?;
+    let target = match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => fs::canonicalize(path)
+            .with_context(|| format!("refusing dangling symlink {}", path.display()))?,
+        _ => path.to_path_buf(),
+    };
+    let target_parent = target.parent().context("path has no parent")?;
+    fs::create_dir_all(target_parent)?;
+    let mut temporary = NamedTempFile::new_in(target_parent)?;
     temporary.write_all(bytes)?;
-    temporary
-        .as_file_mut()
-        .set_permissions(fs::Permissions::from_mode(0o600))?;
+    if target == path {
+        temporary
+            .as_file_mut()
+            .set_permissions(fs::Permissions::from_mode(0o600))?;
+    } else {
+        let mode = fs::metadata(&target)?.permissions().mode() & 0o777;
+        temporary
+            .as_file_mut()
+            .set_permissions(fs::Permissions::from_mode(mode))?;
+    }
     temporary.as_file_mut().sync_all()?;
-    temporary.persist(path)?;
+    temporary.persist(&target)?;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn writing_hooks_keeps_a_symlink_and_updates_its_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("dotfiles-hooks.json");
+        let link = dir.path().join("hooks.json");
+        fs::write(&target, "{}\n").unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        write_json_atomic(&link, &json!({"hooks": {}})).unwrap();
+
+        assert!(
+            fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(
+            fs::read_to_string(&target).unwrap(),
+            "{\n  \"hooks\": {}\n}\n"
+        );
+    }
+
+    #[test]
+    fn writing_hooks_refuses_a_dangling_symlink_with_its_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let link = dir.path().join("hooks.json");
+        std::os::unix::fs::symlink(dir.path().join("missing.json"), &link).unwrap();
+
+        let error = write_json_atomic(&link, &json!({"hooks": {}})).unwrap_err();
+
+        assert!(format!("{error:#}").contains(&link.display().to_string()));
+    }
 
     /// Splits one skill command into argv, filling its placeholders with
     /// sample values so the command line can be parsed.

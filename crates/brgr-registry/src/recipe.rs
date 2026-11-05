@@ -141,8 +141,8 @@ pub(crate) const GENERIC: Recipe = Recipe {
 
 pub(crate) const RECIPES: &[Recipe] = &[
     Recipe {
-        names: &["gjc"],
-        id: "local.gjc",
+        names: &["brgr-fixture", "fixture"],
+        id: "local.fixture",
         required_flags: &["--mode=<value>", "--no-session", "--no-mcp", "-p, --print"],
         catalog: Some((&["--list-models=${model.id}"], Catalog::ProviderTable)),
         argv: &[
@@ -161,7 +161,7 @@ pub(crate) const RECIPES: &[Recipe] = &[
         edits: None,
         read_only: None,
         interactive: Some(Interactive {
-            kind: "gjc",
+            kind: "fixture",
             argv: &[],
             effort_print_only: false,
             model_print_only_with: None,
@@ -716,7 +716,10 @@ pub(crate) fn generate_manifest(
     }
     let id = format!("local.{}", requested_name.to_ascii_lowercase());
     validate_harness_id(&id)?;
-    if matches!(id.as_str(), "local.gjc" | "local.omp" | "local.omp-herdr") {
+    if matches!(
+        id.as_str(),
+        "local.fixture" | "local.omp" | "local.omp-herdr"
+    ) {
         return Err(RegistryError::UnsupportedHarness);
     }
     Ok(draft(&GENERIC, id, executable, help))

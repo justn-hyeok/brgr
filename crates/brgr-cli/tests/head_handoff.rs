@@ -37,14 +37,14 @@ fn json_output(output: &std::process::Output) -> Value {
     serde_json::from_slice(&output.stdout).unwrap()
 }
 
-fn gjc_fixture() -> std::path::PathBuf {
+fn brgr_fixture() -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../testdata/fixtures/gjc")
+        .join("../../testdata/fixtures/brgr-fixture")
         .canonicalize()
         .unwrap()
 }
 
-fn gjc_home() -> (TempDir, std::path::PathBuf, std::path::PathBuf) {
+fn fixture_home() -> (TempDir, std::path::PathBuf, std::path::PathBuf) {
     let temp = TempDir::new().unwrap();
     let home = temp.path().join("brgr");
     let workspace = temp.path().join("work");
@@ -56,7 +56,7 @@ fn gjc_home() -> (TempDir, std::path::PathBuf, std::path::PathBuf) {
         &[
             "harness",
             "add",
-            gjc_fixture().to_str().unwrap(),
+            brgr_fixture().to_str().unwrap(),
             "--workspace",
             scratch.to_str().unwrap(),
             "--prompt",
@@ -214,7 +214,7 @@ fn take_offer(home: &Path, fake: &Path, dir: &Path, task_id: Option<&str>, key: 
 
 #[test]
 fn handoff_opens_a_pane_prompts_it_and_leaves_the_binding_with_the_outgoing_head() {
-    let (temp, home, workspace) = gjc_home();
+    let (temp, home, workspace) = fixture_home();
     let task_id = start_task(&home, &workspace);
     let dir = temp.path().join("fake");
     fs::create_dir_all(&dir).unwrap();
@@ -239,7 +239,7 @@ fn handoff_opens_a_pane_prompts_it_and_leaves_the_binding_with_the_outgoing_head
 
 #[test]
 fn take_commits_for_the_incoming_session_and_tells_the_outgoing_pane() {
-    let (temp, home, workspace) = gjc_home();
+    let (temp, home, workspace) = fixture_home();
     let task_id = start_task(&home, &workspace);
     let dir = temp.path().join("fake");
     fs::create_dir_all(&dir).unwrap();
@@ -279,7 +279,7 @@ fn take_commits_for_the_incoming_session_and_tells_the_outgoing_pane() {
 
 #[test]
 fn take_refuses_the_outgoing_session_an_unknown_offer_and_a_moved_head() {
-    let (temp, home, workspace) = gjc_home();
+    let (temp, home, workspace) = fixture_home();
     let task_id = start_task(&home, &workspace);
     let dir = temp.path().join("fake");
     fs::create_dir_all(&dir).unwrap();
@@ -326,7 +326,7 @@ fn take_refuses_the_outgoing_session_an_unknown_offer_and_a_moved_head() {
 
 #[test]
 fn exit_old_closes_the_outgoing_pane_only_after_resume_and_a_clean_retire() {
-    let (temp, home, workspace) = gjc_home();
+    let (temp, home, workspace) = fixture_home();
     let task_id = start_task(&home, &workspace);
     let dir = temp.path().join("fake");
     fs::create_dir_all(&dir).unwrap();
@@ -371,7 +371,7 @@ fn exit_old_closes_the_outgoing_pane_only_after_resume_and_a_clean_retire() {
 
 #[test]
 fn a_busy_outgoing_head_is_not_closed_and_the_failure_is_reported_apart_from_the_handoff() {
-    let (temp, home, workspace) = gjc_home();
+    let (temp, home, workspace) = fixture_home();
     let task_id = start_task(&home, &workspace);
     let dir = temp.path().join("fake");
     fs::create_dir_all(&dir).unwrap();
@@ -418,7 +418,7 @@ fn a_busy_outgoing_head_is_not_closed_and_the_failure_is_reported_apart_from_the
 
 #[test]
 fn a_handoff_without_exit_old_never_closes_a_pane() {
-    let (temp, home, workspace) = gjc_home();
+    let (temp, home, workspace) = fixture_home();
     let task_id = start_task(&home, &workspace);
     let dir = temp.path().join("fake");
     fs::create_dir_all(&dir).unwrap();
@@ -457,7 +457,7 @@ fn the_incoming_prompt_states_the_owner_and_home_on_every_command() {
     // hold another worker's `BRGR_OWNER_ID`, parent identity, and not this
     // control home. The pane env cannot be relied on, so each command unsets
     // those identities and carries the owner and home.
-    let (temp, home, workspace) = gjc_home();
+    let (temp, home, workspace) = fixture_home();
     let task_id = start_task(&home, &workspace);
     let dir = temp.path().join("fake");
     fs::create_dir_all(&dir).unwrap();
@@ -483,7 +483,7 @@ fn the_incoming_prompt_states_the_owner_and_home_on_every_command() {
 
 #[test]
 fn incoming_head_take_status_result_retire_work_without_brgr_session_id() {
-    let (temp, home, workspace) = gjc_home();
+    let (temp, home, workspace) = fixture_home();
     let task_id = start_task(&home, &workspace);
     let dir = temp.path().join("fake");
     fs::create_dir_all(&dir).unwrap();
@@ -536,7 +536,7 @@ fn take_records_the_pane_the_handoff_opened_as_the_new_head_s_notification_pane(
     // A Codex head runs commands in its daemon's environment, which names
     // another pane, and its screen may not show its own call yet. The pane that
     // received the offer is the one brgr opened for it.
-    let (temp, home, workspace) = gjc_home();
+    let (temp, home, workspace) = fixture_home();
     let task_id = start_task(&home, &workspace);
     let dir = temp.path().join("fake");
     fs::create_dir_all(&dir).unwrap();
@@ -561,7 +561,7 @@ fn a_new_head_with_nothing_left_to_do_can_still_retire_the_handoff() {
     // The old head decided the only result before the new one took command, as
     // happens when the worker finishes while the incoming agent is starting.
     // There is then no owner-side write for the incoming head to make.
-    let (temp, home, workspace) = gjc_home();
+    let (temp, home, workspace) = fixture_home();
     let task_id = start_task(&home, &workspace);
     let dir = temp.path().join("fake");
     fs::create_dir_all(&dir).unwrap();
@@ -596,7 +596,7 @@ fn a_new_head_with_nothing_left_to_do_can_still_retire_the_handoff() {
 
 #[test]
 fn handoff_without_a_task_and_no_open_work_opens_a_pane_with_an_empty_manifest() {
-    let (temp, home, _workspace) = gjc_home();
+    let (temp, home, _workspace) = fixture_home();
     let dir = temp.path().join("fake");
     fs::create_dir_all(&dir).unwrap();
     let fake = fake_herdr(&dir);
@@ -617,7 +617,7 @@ fn handoff_without_a_task_and_no_open_work_opens_a_pane_with_an_empty_manifest()
 
 #[test]
 fn handoff_without_a_task_includes_every_open_task_in_the_manifest() {
-    let (temp, home, workspace) = gjc_home();
+    let (temp, home, workspace) = fixture_home();
     let first = start_task(&home, &workspace);
     let second = start_task(&home, &workspace);
     let dir = temp.path().join("fake");
@@ -639,7 +639,7 @@ fn handoff_without_a_task_includes_every_open_task_in_the_manifest() {
 
 #[test]
 fn handoff_with_an_explicit_task_still_names_that_task_in_the_take_prompt() {
-    let (temp, home, workspace) = gjc_home();
+    let (temp, home, workspace) = fixture_home();
     let task_id = start_task(&home, &workspace);
     let dir = temp.path().join("fake");
     fs::create_dir_all(&dir).unwrap();
@@ -699,7 +699,7 @@ fn handoff_help_names_the_task_id_format() {
 fn a_codex_handoff_without_a_visible_pane_says_to_run_a_short_command_first() {
     // Codex 0.162 and later show a command's line only after it ends, so the
     // first call of a session cannot see its own pane yet.
-    let (_temp, home, _workspace) = gjc_home();
+    let (_temp, home, _workspace) = fixture_home();
     let session = "01a0fb33-447c-7ba0-9f37-ba04f33ce809";
     let output = run(
         &home,
@@ -716,7 +716,7 @@ fn a_codex_handoff_without_a_visible_pane_says_to_run_a_short_command_first() {
 
 #[test]
 fn a_claude_handoff_without_a_pane_does_not_get_the_codex_advice() {
-    let (_temp, home, _workspace) = gjc_home();
+    let (_temp, home, _workspace) = fixture_home();
     let output = run(
         &home,
         &["head", "handoff", "--kind", "claude", "--goal", "g"],

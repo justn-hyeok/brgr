@@ -86,11 +86,32 @@ pub(crate) fn bounded_git_diff_with_executable(
     )?;
     let real_index = String::from_utf8(real_index).map_err(|error| error.to_string())?;
     let real_index = Path::new(real_index.trim_end_matches('\n'));
+    let repository = repository_root(
+        executable,
+        workspace,
+        deadline.saturating_sub(started.elapsed()),
+    )?;
     // A repository without a commit or a staged file has no index yet.
     if real_index.is_file() {
         fs::copy(real_index, &index).map_err(|error| error.to_string())?;
+        // Git trusts a file's size and time only if the file is older than the
+        // index. A copy's fresh time would hide an edit that keeps the size.
+        let modified = fs::metadata(real_index)
+            .and_then(|metadata| metadata.modified())
+            .map_err(|error| error.to_string())?;
+        fs::File::options()
+            .write(true)
+            .open(&index)
+            .and_then(|file| file.set_modified(modified))
+            .map_err(|error| error.to_string())?;
     }
-    let listing = git(deadline.saturating_sub(started.elapsed())).run(
+    let listing = Git {
+        executable,
+        workspace: &repository,
+        index: Some(&index),
+        remaining: deadline.saturating_sub(started.elapsed()),
+    }
+    .run(
         &["ls-files", "--others", "--exclude-standard", "-z"],
         None,
         MAX_LISTING_BYTES,
@@ -98,7 +119,13 @@ pub(crate) fn bounded_git_diff_with_executable(
     )?;
     let untracked = untracked_to_add(&listing, excluded);
     if !untracked.is_empty() {
-        git(deadline.saturating_sub(started.elapsed())).run(
+        Git {
+            executable,
+            workspace: &repository,
+            index: Some(&index),
+            remaining: deadline.saturating_sub(started.elapsed()),
+        }
+        .run(
             &[
                 "--literal-pathspecs",
                 "add",
@@ -140,6 +167,27 @@ pub(crate) fn bounded_git_diff_with_executable(
         max_bytes,
         "requested Git diff",
     )
+}
+
+fn repository_root(
+    executable: &Path,
+    workspace: &Path,
+    remaining: Duration,
+) -> Result<std::path::PathBuf, String> {
+    let output = Git {
+        executable,
+        workspace,
+        index: None,
+        remaining,
+    }
+    .run(
+        &["rev-parse", "--show-toplevel"],
+        None,
+        4_096,
+        "Git repository root lookup",
+    )?;
+    let output = String::from_utf8(output).map_err(|error| error.to_string())?;
+    Ok(Path::new(output.trim_end_matches('\n')).to_path_buf())
 }
 
 /// The NUL-separated untracked paths, less the requested evidence files: a
@@ -318,6 +366,53 @@ mod tests {
         String::from_utf8(output.stdout).unwrap()
     }
 
+    /// A worker's edit that keeps a file's size, in the same instant as its
+    /// checkout, is told apart from a clean file only by content. Git compares
+    /// content when the file is no older than the index, so a copy of the
+    /// index has to keep the index's time. A fresh time makes the entry look
+    /// settled, and the edit vanishes from the sealed patch (seen on Linux and
+    /// macOS). The times are set by hand so this does not depend on the clock.
+    #[test]
+    fn a_same_size_edit_in_the_same_instant_as_the_index_stays_in_the_patch() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path();
+        git(workspace, &["init", "-q"]);
+        // A ctime the test cannot set would otherwise give the edit away.
+        git(workspace, &["config", "core.trustctime", "false"]);
+        git(workspace, &["config", "core.checkStat", "minimal"]);
+        // An hour ago: a copy of the index made now is clearly newer than the
+        // file, which is what makes Git trust the file's size and time.
+        let instant = std::time::SystemTime::now() - Duration::from_hours(1);
+        let set_time = |path: &Path| {
+            fs::File::options()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_modified(instant)
+                .unwrap();
+        };
+        fs::write(workspace.join("a"), "base\n").unwrap();
+        set_time(&workspace.join("a"));
+        git(workspace, &["add", "a"]);
+        git(workspace, &["commit", "-q", "-m", "base"]);
+        let tree = git(workspace, &["rev-parse", "HEAD^{tree}"]);
+        fs::write(workspace.join("a"), "task\n").unwrap();
+        set_time(&workspace.join("a"));
+        set_time(&workspace.join(".git/index"));
+
+        let patch = bounded_git_diff(
+            workspace,
+            tree.trim(),
+            &[],
+            1024 * 1024,
+            Duration::from_mins(1),
+        )
+        .unwrap();
+
+        let patch = String::from_utf8(patch).unwrap();
+        assert!(patch.contains("+task"), "the edit is missing: {patch:?}");
+    }
+
     fn repository() -> tempfile::TempDir {
         let root = tempfile::tempdir().unwrap();
         git(root.path(), &["init", "-q"]);
@@ -369,6 +464,29 @@ mod tests {
 
         assert!(patch.contains("b/sub/new.txt"), "patch: {patch}");
         assert!(!patch.contains("deleted file"), "patch: {patch}");
+    }
+
+    #[test]
+    fn a_subdirectory_workspace_captures_new_files_across_the_worktree() {
+        let root = repository();
+        let root = root.path();
+        fs::create_dir_all(root.join("sub")).unwrap();
+        fs::write(root.join("sub/tracked.txt"), "base\n").unwrap();
+        git(root, &["add", "sub/tracked.txt"]);
+        git(root, &["commit", "-qm", "sub"]);
+        fs::write(root.join("README"), "changed outside\n").unwrap();
+        fs::write(root.join("outside_new.txt"), "outside\n").unwrap();
+        fs::write(root.join("sub/inside_new.txt"), "inside\n").unwrap();
+        // A task's own directory is under its workspace, as is what it excludes.
+        fs::create_dir_all(root.join("sub/.brgr/tasks/task-r1")).unwrap();
+        fs::write(root.join("sub/.brgr/tasks/task-r1/report.md"), "report\n").unwrap();
+
+        let patch = diff(&root.join("sub"), &[".brgr/tasks/task-r1".to_owned()]);
+
+        assert!(patch.contains("+changed outside"), "patch: {patch}");
+        assert!(patch.contains("b/outside_new.txt"), "patch: {patch}");
+        assert!(patch.contains("b/sub/inside_new.txt"), "patch: {patch}");
+        assert!(!patch.contains(".brgr/tasks"), "patch: {patch}");
     }
 
     #[test]

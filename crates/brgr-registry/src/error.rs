@@ -29,6 +29,8 @@ pub enum RegistryError {
     HarnessAliasCollision(String),
     #[error("the installed harness is not supported by a verified recipe")]
     UnsupportedHarness,
+    #[error("support for GJC was removed")]
+    RemovedGjcSupport,
     #[error("help does not document a supported bounded fresh-run flag contract")]
     RequiredFlagsMissing,
     #[error("harness id contains unsafe path characters: {0}")]

@@ -459,7 +459,7 @@ fn classify(error: &str) -> String {
     // Older runs also ended with the adapter's progress line, which quoted the
     // task's objective; it is never part of an error class.
     let head = error.split(" | ").next().unwrap_or(error);
-    let head = without_free_text(head);
+    let head = mask_paths(without_free_text(head));
     let mut out = Vec::new();
     for token in head.split_whitespace() {
         out.push(normalize_token(token));
@@ -470,10 +470,10 @@ fn classify(error: &str) -> String {
 
 fn normalize_token(token: &str) -> String {
     let core = token.trim_matches(|c: char| ",.;:'\"()[]{}<>".contains(c));
-    let replacement = if is_uuid(core) {
-        Some("<id>")
-    } else if core.starts_with('/') || core.starts_with("~/") {
+    let replacement = if core.starts_with('/') || core.starts_with("~/") {
         Some("<path>")
+    } else if let Some(masked) = mask_uuids(core) {
+        return token.replace(core, &masked);
     } else if is_pane_id(core) {
         Some("<pane>")
     } else if core.len() >= 12 && core.chars().all(|c| c.is_ascii_hexdigit()) {
@@ -519,7 +519,7 @@ fn is_pane_id(text: &str) -> bool {
 /// `=`, `,`, `;`, quotes and brackets, so `key=ghp_...` or `(bob@example.com)`
 /// is caught inside a longer token.
 pub(crate) fn redact(text: &str, limit: usize) -> String {
-    let text = without_free_text(text);
+    let text = mask_paths(without_free_text(text));
     let home = std::env::var("HOME").unwrap_or_default();
     let mut words = Vec::new();
     for word in text.split_whitespace() {
@@ -550,10 +550,93 @@ fn mask_pieces(word: &str) -> String {
     out
 }
 
+/// Replace absolute and home-relative filesystem paths before splitting on
+/// whitespace, so paths containing spaces remain a single redaction.
+fn mask_paths(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut at = 0;
+    let mut cursor = 0;
+    while cursor < bytes.len() {
+        let rest = &bytes[cursor..];
+        let starts_path = (rest.starts_with(b"~/")
+            || (rest[0] == b'/' && rest.get(1).is_some_and(|next| !next.is_ascii_whitespace())))
+            && (cursor == 0
+                || bytes[cursor - 1].is_ascii_whitespace()
+                || "=(:,;['\"".as_bytes().contains(&bytes[cursor - 1]));
+        if !starts_path {
+            cursor += 1;
+            continue;
+        }
+        let start = cursor;
+        while cursor < bytes.len() && !bytes[cursor].is_ascii_whitespace() {
+            cursor += 1;
+        }
+        // A known home prefix can contain spaces (notably macOS's
+        // "Application Support"); consume the rest of that filesystem path.
+        let prefix = &text[start..cursor];
+        if prefix.starts_with("~/") || prefix.starts_with("/Users/") || prefix.starts_with("/home/")
+        {
+            while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
+                let next = cursor + 1;
+                let next_word = text[next..].split_whitespace().next().unwrap_or_default();
+                if next < bytes.len()
+                    && !next_word.is_empty()
+                    && (next_word.starts_with("Support/") || next_word.starts_with("Application"))
+                {
+                    cursor = next;
+                    while cursor < bytes.len() && !bytes[cursor].is_ascii_whitespace() {
+                        cursor += 1;
+                    }
+                } else {
+                    break;
+                }
+            }
+        }
+        let punct_start = cursor;
+        while cursor > start && ",.;:)]}".as_bytes().contains(&bytes[cursor - 1]) {
+            cursor -= 1;
+        }
+        out.push_str(&text[at..start]);
+        out.push_str("<path>");
+        out.push_str(&text[cursor..punct_start]);
+        at = punct_start;
+    }
+    out.push_str(&text[at..]);
+    out
+}
+
+fn mask_uuids(text: &str) -> Option<String> {
+    let mut out = String::new();
+    let mut at = 0;
+    let mut found = false;
+    for (start, _) in text.char_indices() {
+        if start < at {
+            continue;
+        }
+        let end = start + 36;
+        if text.get(start..end).is_some_and(is_uuid) {
+            out.push_str(&text[at..start]);
+            out.push_str("<id>");
+            at = end;
+            found = true;
+        }
+    }
+    if found {
+        out.push_str(&text[at..]);
+        Some(out)
+    } else {
+        None
+    }
+}
+
 fn mask_piece(piece: &str) -> String {
     let core = piece.trim_matches(|c: char| ".:".contains(c));
     if core.is_empty() {
         return piece.to_owned();
+    }
+    if let Some(masked) = mask_uuids(core) {
+        return piece.replace(core, &masked);
     }
     let replacement = if is_secret(core) {
         "<secret>".to_owned()
@@ -731,6 +814,44 @@ mod tests {
     }
 
     #[test]
+    fn text_after_a_path_still_says_what_failed() {
+        assert_eq!(
+            redact("~/x/run failed with status 2", 400),
+            "<path> failed with status 2"
+        );
+        assert_eq!(
+            redact("about ~5 tasks / 2 runs", 400),
+            "about ~5 tasks / 2 runs"
+        );
+    }
+
+    #[test]
+    fn report_paths_are_masked_whole_and_share_one_fingerprint() {
+        let paths = [
+            "~/Library/Application Support/brgr/worktrees/brgr/ae8578d1/.brgr/tasks/ae8578d1-3c05-4d96-900d-410e65ffaec6-r1/report.md",
+            "/private/tmp/claude-501/-Users-justn-dev-rp-tales/report.md",
+            "/Users/justn/Library/Application Support/brgr/worktrees/private-repo/task/report.md",
+        ];
+        let errors: Vec<_> = paths
+            .iter()
+            .map(|path| format!("the agent finished without writing its report to {path}"))
+            .collect();
+        let classes: Vec<_> = errors.iter().map(|error| classify(error)).collect();
+        let samples: Vec<_> = errors.iter().map(|error| redact(error, 400)).collect();
+        for text in classes.iter().chain(&samples) {
+            assert_eq!(
+                text,
+                "the agent finished without writing its report to <path>"
+            );
+        }
+        assert!(
+            classes
+                .windows(2)
+                .all(|pair| fingerprint(&pair[0]) == fingerprint(&pair[1]))
+        );
+    }
+
+    #[test]
     fn redaction_masks_homes_ids_addresses_and_tokens() {
         let text = "failed in /Users/alice/dev/brgr task 38d33b4e-7368-4f7a-a050-822378f2b12a for someone@example.com with ghp_abcdefghijklmnopqrstuvwxyz0123456789 done";
         let out = redact(text, 400);
@@ -741,7 +862,7 @@ mod tests {
         assert!(out.contains("<id>") && out.contains("<email>") && out.contains("<secret>"));
         // Another user's home is masked even when it is not this machine's.
         let other = redact("failed in /Users/someone/dev/x", 100);
-        assert_eq!(other, "failed in /Users/<user>/dev/x");
+        assert_eq!(other, "failed in <path>");
     }
 
     #[test]
@@ -888,11 +1009,13 @@ mod tests {
             "#!/bin/sh\necho \"$@\" >> \"${0%.body}.calls\"\ncase \"$2\" in\n list) echo '[]';;\n create) /bin/cat >> \"${0%.body}.stdin\"; echo https://github.com/o/r/issues/7;;\nesac\n",
         );
         GH_PROGRAM.with(|program| *program.borrow_mut() = Some(gh.clone()));
-        let mut config = Config::load(&paths.config).unwrap();
-        config.issues.auto_file = true;
-        config.issues.repo = Some("o/r".to_owned());
-        config.issues.min_count = 2;
-        config.save(&paths.config).unwrap();
+        Config::update(&paths.config, &paths.home, |config| {
+            config.issues.auto_file = true;
+            config.issues.repo = Some("o/r".to_owned());
+            config.issues.min_count = 2;
+            Ok(true)
+        })
+        .unwrap();
         let failure = Failure {
             outcome: "lost",
             harness: "local.opencode",
@@ -933,11 +1056,13 @@ mod tests {
             "#!/bin/sh\ncase \"$2\" in\n list) echo '[]';;\n create) if [ -e \"${0%.body}.made\" ]; then echo boom >&2; exit 1; fi; : > \"${0%.body}.made\"; /bin/cat >/dev/null; echo https://github.com/o/r/issues/1;;\nesac\n",
         );
         GH_PROGRAM.with(|program| *program.borrow_mut() = Some(gh));
-        let mut config = Config::load(&paths.config).unwrap();
-        config.issues.auto_file = true;
-        config.issues.repo = Some("o/r".to_owned());
-        config.issues.min_count = 1;
-        config.save(&paths.config).unwrap();
+        Config::update(&paths.config, &paths.home, |config| {
+            config.issues.auto_file = true;
+            config.issues.repo = Some("o/r".to_owned());
+            config.issues.min_count = 1;
+            Ok(true)
+        })
+        .unwrap();
         for error in ["first distinct failure", "second distinct failure"] {
             record(
                 &paths,

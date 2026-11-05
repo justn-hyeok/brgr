@@ -8,7 +8,7 @@
 //! the only safety authority. `git worktree remove` refuses a worktree with
 //! modified or untracked files, and is forced only when brgr has shown every
 //! such change is disposable: an untracked tool-state or cache directory
-//! (`.gjc/`, `.commandcode/`, `.agent-progress/`, `.build/` and the like), or a
+//! (`.fixture/`, `.commandcode/`, `.agent-progress/`, `.build/` and the like), or a
 //! worktree whose patch is byte-for-byte the diff the store sealed with the
 //! result. A task branch goes when every commit on it
 //! survives elsewhere: in `HEAD`, or on another branch or remote-tracking
@@ -554,10 +554,16 @@ fn objection(
     // directory under the right name that is not that path — a copy, a clone,
     // one someone made — was not put here by brgr. This also settles a prefix
     // shared by two tasks, which the name alone cannot.
-    let Some(task) = matches
-        .into_iter()
-        .find(|task| resolve(Path::new(&task.workspace)) == resolved)
-    else {
+    let candidate_slug = file_name(worktree);
+    let Some((candidate_prefix, candidate_revision)) = parse_slug(&candidate_slug) else {
+        return Some("directory name is not a brgr task slug; refusing to touch it".to_owned());
+    };
+    let Some(task) = matches.into_iter().find(|task| {
+        let workspace = resolve(Path::new(&task.workspace));
+        task.task_id.to_string().starts_with(candidate_prefix)
+            && task.revision == candidate_revision
+            && (workspace == resolved || workspace.starts_with(&resolved))
+    }) else {
         return Some("no task revision was admitted in this directory".to_owned());
     };
     found.owner = Some(task.owner_id.as_str().to_owned());
@@ -701,7 +707,7 @@ const DISPOSABLE: [&str; 13] = [
     ".mypy_cache",
     ".venv",
     ".gradle",
-    ".gjc",
+    ".fixture",
     ".commandcode",
     ".agent-progress",
     ".build",
@@ -710,7 +716,7 @@ const DISPOSABLE: [&str; 13] = [
 /// The worker tool-state directories. Unlike the package managers' and
 /// compilers' directories above, these are disposable even when git lists them
 /// as untracked, because a worker harness writes them and nothing else does.
-const TOOL_STATE: [&str; 4] = [".gjc", ".commandcode", ".agent-progress", ".build"];
+const TOOL_STATE: [&str; 4] = [".fixture", ".commandcode", ".agent-progress", ".build"];
 
 /// An untracked directory a worker tool owns, or a file git listed inside one.
 /// `--untracked-files=all` reports files, not the enclosing untracked
@@ -1401,14 +1407,12 @@ pub(crate) fn reclaim_task(paths: &Paths, task: TaskId, revision: u32) -> Option
     if launch.keep_worktree || (launch.keep_pane && launch.pane_mode) {
         return None;
     }
-    let worktree = resolve(Path::new(&launch.spec.workspace));
+    let workspace = resolve(Path::new(&launch.spec.workspace));
     // Only a checkout brgr made under its own root; a non-Git task ran in
     // place, in the user's own directory.
     let root = canonical(&paths.worktrees)?;
+    let worktree = task_worktree(&workspace, &root, task, revision)?;
     let parent = worktree.parent()?;
-    if parent.parent() != Some(root.as_path()) || !worktree.is_dir() {
-        return None;
-    }
     if left_to_the_pane_cleanup(paths, task, revision) {
         return None;
     }
@@ -1515,6 +1519,28 @@ pub(crate) fn reclaim_task(paths: &Paths, task: TaskId, revision: u32) -> Option
         }
         (None, _, _) => None,
     }
+}
+
+fn task_worktree(workspace: &Path, root: &Path, task: TaskId, revision: u32) -> Option<PathBuf> {
+    if !workspace.is_dir() {
+        return None;
+    }
+    workspace
+        .ancestors()
+        .find(|path| {
+            let Some((prefix, slug_revision)) = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .and_then(parse_slug)
+            else {
+                return false;
+            };
+            path.parent().and_then(Path::parent) == Some(root)
+                && slug_revision == revision
+                && task.to_string().starts_with(prefix)
+        })
+        .map(Path::to_path_buf)
+        .filter(|worktree| worktree.is_dir())
 }
 
 /// How long a decision waits for a worker that is exiting after sealing its
@@ -1701,16 +1727,16 @@ mod tests {
 
     #[test]
     fn only_an_untracked_harness_directory_is_a_cache() {
-        assert!(harness_cache("?? .gjc/"));
+        assert!(harness_cache("?? .fixture/"));
         assert!(harness_cache("?? .commandcode/"));
         assert!(harness_cache("?? .agent-progress/"));
         assert!(harness_cache("?? .build/"));
-        assert!(harness_cache("?? .gjc/session.json"));
+        assert!(harness_cache("?? .fixture/session.json"));
         assert!(!harness_cache("?? .claude/"));
         assert!(!harness_cache("?? .cursor/"));
-        assert!(!harness_cache(" M .gjc/config.json"));
+        assert!(!harness_cache(" M .fixture/config.json"));
         assert!(!harness_cache("?? src/main.rs"));
-        assert!(!harness_cache("?? .gjcx/"));
+        assert!(!harness_cache("?? .fixturex/"));
         assert!(!harness_cache("?? .build"));
         assert!(!harness_cache("?? .build-notes.txt"));
         assert!(!harness_cache("?? .buildx/"));
@@ -1722,7 +1748,7 @@ mod tests {
         assert!(regenerable("node_modules/"));
         assert!(regenerable("packages/web/.next/"));
         assert!(regenerable("target/"));
-        assert!(regenerable(".gjc/"));
+        assert!(regenerable(".fixture/"));
         assert!(regenerable(".commandcode/"));
         assert!(regenerable(".agent-progress/"));
         assert!(regenerable(".build/"));
@@ -1750,7 +1776,7 @@ mod tests {
             ".agent-progress/",
             ".build/",
             ".commandcode/",
-            ".gjc/",
+            ".fixture/",
             "ios/.build/",
         ] {
             assert!(regenerable(path), "{path}");
@@ -1779,7 +1805,7 @@ mod tests {
         for status in [
             "?? vendor/.build/x",
             "?? .agent-progress/state.json",
-            "?? a/b/.gjc/c",
+            "?? a/b/.fixture/c",
         ] {
             assert!(harness_cache(status), "{status}");
         }

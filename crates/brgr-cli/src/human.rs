@@ -109,8 +109,10 @@ fn short_id(task_id: &str) -> String {
 /// One `brgr status` table row, already read from the store.
 pub(crate) struct StatusRow {
     pub task_id: String,
+    pub parent_task_id: Option<String>,
     pub state: String,
     pub harness: String,
+    pub model: Option<String>,
     /// First attempt start in Unix seconds; `None` until an attempt exists.
     pub created_at: Option<u64>,
     pub objective: String,
@@ -128,6 +130,7 @@ pub(crate) struct BriefDetail {
 /// The `brgr status TASK` block, already read from the store.
 pub(crate) struct TaskDetail {
     pub task_id: String,
+    pub parent_task_id: Option<String>,
     pub state: String,
     pub harness: String,
     pub model: Option<String>,
@@ -184,15 +187,29 @@ pub(crate) fn status_table(rows: &[StatusRow], now: u64) -> String {
     if rows.is_empty() {
         return "no tasks\n".to_owned();
     }
-    let headers = ["ID", "STATE", "HARNESS", "ELAPSED", "OBJECTIVE"];
-    let mut widths = column_widths(&[0; 5], &headers);
-    let cells: Vec<[String; 5]> = rows
+    let headers = [
+        "ID",
+        "PARENT",
+        "STATE",
+        "HARNESS",
+        "MODEL",
+        "ELAPSED",
+        "OBJECTIVE",
+    ];
+    let mut widths = column_widths(&[0; 7], &headers);
+    let cells: Vec<[String; 7]> = rows
         .iter()
         .map(|row| {
             [
                 short_id(&row.task_id),
+                row.parent_task_id
+                    .as_deref()
+                    .map_or_else(|| "-".to_owned(), short_id),
                 cell(&row.state, CELL_MAX),
                 cell(&row.harness, CELL_MAX),
+                row.model
+                    .as_deref()
+                    .map_or_else(|| "-".to_owned(), |value| cell(value, CELL_MAX)),
                 elapsed_text(row.created_at, now),
                 cell(&row.objective, CELL_MAX),
             ]
@@ -235,10 +252,16 @@ pub(crate) fn brief_table(rows: &[StatusRow], now: u64) -> String {
     for row in rows {
         let _ = writeln!(
             output,
-            "{}  {}  {}  {}  {}",
+            "{}  parent={}  {}  {}  model={}  {}  {}",
             row.task_id,
+            row.parent_task_id
+                .as_deref()
+                .map_or_else(|| "-".to_owned(), |value| cell(value, CELL_MAX)),
             cell(&row.state, CELL_MAX),
             cell(&row.harness, CELL_MAX),
+            row.model
+                .as_deref()
+                .map_or_else(|| "-".to_owned(), |value| cell(value, CELL_MAX)),
             elapsed_text(row.created_at, now),
             objective_head(&row.objective),
         );
@@ -268,6 +291,7 @@ pub(crate) fn task_detail(detail: &TaskDetail, now: u64) -> String {
         let _ = writeln!(output, "{key}: {value}");
     };
     line("task", &detail.task_id);
+    line("parent", detail.parent_task_id.as_deref().unwrap_or("-"));
     line("state", &safe_text(&detail.state));
     line("harness", &safe_text(&detail.harness));
     line(
@@ -369,8 +393,10 @@ mod tests {
     ) -> StatusRow {
         StatusRow {
             task_id: task_id.to_owned(),
+            parent_task_id: None,
             state: state.to_owned(),
             harness: harness.to_owned(),
+            model: None,
             created_at,
             objective: objective.to_owned(),
         }
@@ -394,7 +420,7 @@ mod tests {
         let rows = vec![row(
             "2b2c279a-b8e1-43a8-846c-cb8344a301d7",
             "terminal",
-            "local.gjc",
+            "local.fixture",
             Some(940),
             "Review this change",
         )];
@@ -403,7 +429,7 @@ mod tests {
         assert_eq!(lines.len(), 1, "{text}");
         assert!(lines[0].starts_with("2b2c279a-b8e1-43a8-846c-cb8344a301d7"));
         assert!(lines[0].contains("terminal"));
-        assert!(lines[0].contains("local.gjc"));
+        assert!(lines[0].contains("local.fixture"));
         assert!(lines[0].contains("1m"));
         assert!(lines[0].contains("Review this change"));
         assert!(!text.contains('\u{1b}'));
@@ -439,7 +465,7 @@ mod tests {
             row(
                 "2b2c279a-b8e1-43a8-846c-cb8344a301d7",
                 "terminal",
-                "local.gjc",
+                "local.fixture",
                 Some(940),
                 "Review this change",
             ),
@@ -461,7 +487,7 @@ mod tests {
         assert!(lines[0].contains("OBJECTIVE"), "{text}");
         assert_eq!(&lines[1][..8], "2b2c279a");
         assert!(lines[1].contains("terminal"));
-        assert!(lines[1].contains("local.gjc"));
+        assert!(lines[1].contains("local.fixture"));
         assert!(lines[1].contains("1m"));
         assert!(lines[1].contains("Review this change"));
         assert_eq!(&lines[2][..8], "aaaaaaaa");
@@ -550,8 +576,9 @@ mod tests {
     fn task_detail_lists_the_summary_then_points_at_json() {
         let detail = TaskDetail {
             task_id: "2b2c279a-b8e1-43a8-846c-cb8344a301d7".to_owned(),
+            parent_task_id: None,
             state: "terminal".to_owned(),
-            harness: "local.gjc".to_owned(),
+            harness: "local.fixture".to_owned(),
             model: Some("swe-1.6".to_owned()),
             workspace: "/tmp/work tree".to_owned(),
             created_at: Some(940),
@@ -561,26 +588,28 @@ mod tests {
         let text = task_detail(&detail, 1_000);
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines[0], "task: 2b2c279a-b8e1-43a8-846c-cb8344a301d7");
-        assert_eq!(lines[1], "state: terminal");
-        assert_eq!(lines[2], "harness: local.gjc");
-        assert_eq!(lines[3], "model: swe-1.6");
-        assert_eq!(lines[4], "workspace: /tmp/work tree");
-        assert_eq!(lines[5], "elapsed: 1m");
-        assert_eq!(lines[6], "result: candidate");
-        assert_eq!(lines[7], "questions: 2");
+        assert_eq!(lines[1], "parent: -");
+        assert_eq!(lines[2], "state: terminal");
+        assert_eq!(lines[3], "harness: local.fixture");
+        assert_eq!(lines[4], "model: swe-1.6");
+        assert_eq!(lines[5], "workspace: /tmp/work tree");
+        assert_eq!(lines[6], "elapsed: 1m");
+        assert_eq!(lines[7], "result: candidate");
+        assert_eq!(lines[8], "questions: 2");
         assert_eq!(
-            lines[8],
+            lines[9],
             "full detail: brgr status 2b2c279a-b8e1-43a8-846c-cb8344a301d7 --json"
         );
-        assert_eq!(lines.len(), 9, "{text}");
+        assert_eq!(lines.len(), 10, "{text}");
     }
 
     #[test]
     fn task_detail_omits_missing_model_result_and_questions() {
         let detail = TaskDetail {
             task_id: "2b2c279a-b8e1-43a8-846c-cb8344a301d7".to_owned(),
+            parent_task_id: None,
             state: "running".to_owned(),
-            harness: "local.gjc".to_owned(),
+            harness: "local.fixture".to_owned(),
             model: None,
             workspace: "/tmp/work".to_owned(),
             created_at: None,
@@ -603,8 +632,9 @@ mod tests {
     fn task_detail_sanitizes_untrusted_fields() {
         let detail = TaskDetail {
             task_id: "2b2c279a-b8e1-43a8-846c-cb8344a301d7".to_owned(),
+            parent_task_id: None,
             state: "running".to_owned(),
-            harness: "local.gjc\u{1b}[31m".to_owned(),
+            harness: "local.fixture\u{1b}[31m".to_owned(),
             model: None,
             workspace: "/tmp/work\n/etc".to_owned(),
             created_at: None,
@@ -613,7 +643,7 @@ mod tests {
         };
         let text = task_detail(&detail, 1_000);
         assert!(!text.contains('\u{1b}'), "{text:?}");
-        assert!(text.contains("harness: local.gjc [31m"));
+        assert!(text.contains("harness: local.fixture [31m"));
         assert!(text.contains("workspace: /tmp/work /etc"));
     }
 
@@ -622,14 +652,14 @@ mod tests {
         let receipt = RunReceipt {
             state: "starting".to_owned(),
             outcome: None,
-            harness: "local.gjc".to_owned(),
+            harness: "local.fixture".to_owned(),
             workspace: "/tmp/work".to_owned(),
             task_id: "2b2c279a-b8e1-43a8-846c-cb8344a301d7".to_owned(),
         };
         let text = run_receipt(&receipt);
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines[0], "state: starting");
-        assert_eq!(lines[1], "harness: local.gjc");
+        assert_eq!(lines[1], "harness: local.fixture");
         assert_eq!(lines[2], "workspace: /tmp/work");
         assert_eq!(
             lines.last(),
@@ -642,7 +672,7 @@ mod tests {
         let receipt = RunReceipt {
             state: "terminal".to_owned(),
             outcome: Some("candidate".to_owned()),
-            harness: "local.gjc".to_owned(),
+            harness: "local.fixture".to_owned(),
             workspace: "/tmp/work".to_owned(),
             task_id: "2b2c279a-b8e1-43a8-846c-cb8344a301d7".to_owned(),
         };

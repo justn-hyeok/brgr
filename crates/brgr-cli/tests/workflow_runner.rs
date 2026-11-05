@@ -58,9 +58,9 @@ fn json_output(output: &std::process::Output) -> Value {
     serde_json::from_slice(&output.stdout).unwrap()
 }
 
-fn gjc_fixture() -> PathBuf {
+fn brgr_fixture() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../testdata/fixtures/gjc")
+        .join("../../testdata/fixtures/brgr-fixture")
         .canonicalize()
         .unwrap()
 }
@@ -72,7 +72,7 @@ fn add_fixture(home: &Path, scratch: &Path) {
         &[
             "harness",
             "add",
-            gjc_fixture().to_str().unwrap(),
+            brgr_fixture().to_str().unwrap(),
             "--workspace",
             scratch.to_str().unwrap(),
             "--prompt",
@@ -202,7 +202,11 @@ fn process_alive(pid: u32) -> bool {
 }
 
 fn read_pid(path: &Path) -> u32 {
-    fs::read_to_string(path).unwrap().trim().parse().unwrap()
+    serde_json::from_slice::<Value>(&fs::read(path).unwrap()).unwrap()["pid"]
+        .as_u64()
+        .unwrap()
+        .try_into()
+        .unwrap()
 }
 
 #[test]

@@ -123,6 +123,43 @@ fn install_chains_to_the_existing_status_line_and_uninstall_restores_it_exactly(
 }
 
 #[test]
+fn install_refuses_environment_assignment_without_editing_settings() {
+    let setup = setup();
+    let original = ORIGINAL.replace("bash CHAIN", "FOO=bar statusline");
+    fs::write(settings(&setup), &original).unwrap();
+
+    let output = brgr(&setup, &["install", "--context"]);
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("sets an environment variable"));
+    assert_eq!(fs::read_to_string(settings(&setup)).unwrap(), original);
+    assert!(!setup.home.join("claude-statusline.json").exists());
+}
+
+#[test]
+fn installs_in_the_same_second_keep_both_backups() {
+    let setup = setup();
+    fs::write(
+        settings(&setup),
+        ORIGINAL.replace("bash CHAIN", "bash first.sh"),
+    )
+    .unwrap();
+    let first: Value = json(&brgr(&setup, &["install", "--context"]));
+    fs::write(
+        settings(&setup),
+        ORIGINAL.replace("bash CHAIN", "bash second.sh"),
+    )
+    .unwrap();
+    let second: Value = json(&brgr(&setup, &["install", "--context"]));
+
+    let first_backup = PathBuf::from(first["status_line"]["backup"].as_str().unwrap());
+    let second_backup = PathBuf::from(second["status_line"]["backup"].as_str().unwrap());
+    assert_ne!(first_backup, second_backup);
+    assert!(first_backup.exists());
+    assert!(second_backup.exists());
+}
+
+#[test]
 fn without_an_existing_status_line_install_adds_one_and_uninstall_removes_it() {
     let setup = setup();
     let original = "{\n  \"model\": \"opus\",\n  \"hooks\": {}\n}\n";

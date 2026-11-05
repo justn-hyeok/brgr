@@ -75,6 +75,47 @@ fn write_direct_script(path: &Path, body: &str) {
     fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
 }
 
+/// Runs a just-written trampoline once. On Linux another thread's `fork` can
+/// hold the file open for writing until its child execs, so the first run can
+/// fail with `ETXTBSY` for a moment. It is retried only for that, with a hang
+/// guard a correct run does not reach.
+pub fn warm_executable(path: &Path) {
+    let started = std::time::Instant::now();
+    loop {
+        match Command::new(path).arg("--warm").status() {
+            Ok(status) => {
+                assert!(status.success(), "trampoline --warm failed: {status}");
+                return;
+            }
+            Err(error)
+                if error.kind() == std::io::ErrorKind::ExecutableFileBusy
+                    && started.elapsed() < std::time::Duration::from_mins(1) =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(error) => panic!("run trampoline --warm: {error}"),
+        }
+    }
+}
+
+/// Runs a command on a file this process just wrote, waiting out the moment a
+/// `fork` in another test thread can still hold it open for writing on Linux.
+/// The guard only stops a hang: a correct run does not reach it.
+pub fn output_when_not_busy(command: &mut Command) -> std::process::Output {
+    let started = std::time::Instant::now();
+    loop {
+        match command.output() {
+            Err(error)
+                if error.kind() == io::ErrorKind::ExecutableFileBusy
+                    && started.elapsed() < HANG_GUARD =>
+            {
+                thread::sleep(Duration::from_millis(10));
+            }
+            other => return other.unwrap(),
+        }
+    }
+}
+
 fn warmed_trampoline() -> &'static Path {
     WARMED_TRAMPOLINE.get_or_init(create_warmed_trampoline)
 }
@@ -88,11 +129,7 @@ fn create_warmed_trampoline() -> PathBuf {
     }
     fs::write(&trampoline, TRAMPOLINE_SOURCE).unwrap();
     fs::set_permissions(&trampoline, fs::Permissions::from_mode(0o755)).unwrap();
-    let status = Command::new(&trampoline)
-        .arg("--warm")
-        .status()
-        .expect("run trampoline --warm");
-    assert!(status.success(), "trampoline --warm failed: {status}");
+    warm_executable(&trampoline);
     // Drop write bits so a later `fs::write` through a hard link cannot
     // clobber every trampoline in this process.
     fs::set_permissions(&trampoline, fs::Permissions::from_mode(0o555)).unwrap();
@@ -209,14 +246,20 @@ pub const INHERITED_WORKER_ENV: &[&str] = &[
 pub fn brgr_command() -> Command {
     let mut command = Command::new(brgr_binary());
     command.env("BRGR_TEST_TRUST_HERDR_PANE", "1");
+    isolate_test_command(&mut command);
+    command
+}
+
+/// Removes inherited worker/Herdr identity and supplies the isolated test PATH
+/// for any intermediary process that may execute brgr.
+pub fn isolate_test_command(command: &mut Command) {
     for name in INHERITED_WORKER_ENV {
         command.env_remove(name);
     }
-    clear_inherited_herdr_env(&mut command);
+    clear_inherited_herdr_env(command);
     // Harness children inherit PATH (but the runner removes HERDR_BIN_PATH),
     // so put a failing Herdr stub first while preserving every existing tool.
     command.env("PATH", test_path());
-    command
 }
 
 /// PATH used by intermediary test processes that may launch the brgr binary.
@@ -316,15 +359,15 @@ pub fn json_output(output: &std::process::Output) -> Value {
     serde_json::from_slice(&output.stdout).unwrap()
 }
 
-/// The gjc fixture harness every contract test registers.
-pub fn gjc_fixture() -> PathBuf {
+/// The deterministic fixture harness every contract test registers.
+pub fn brgr_fixture() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../testdata/fixtures/gjc")
+        .join("../../testdata/fixtures/brgr-fixture")
         .canonicalize()
         .unwrap()
 }
 
-/// Certifies the gjc fixture against `scratch` so `local.gjc` can be run.
+/// Certifies the deterministic fixture against `scratch` so `local.fixture` can be run.
 pub fn add_fixture(home: &Path, fixture: &Path, scratch: &Path) {
     fs::create_dir_all(scratch).unwrap();
     let receipt = json_output(&run(

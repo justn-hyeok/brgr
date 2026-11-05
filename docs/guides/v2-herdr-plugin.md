@@ -1,5 +1,7 @@
 # brgr v2 Herdr plugin contract
 
+GJC support has since been removed; the run records below are historical.
+
 The public v2 package is `herdr-plugin.toml` plus the Rust `brgr` binary built
 from this repository. Herdr is the workspace and pane host. The v1 managed-run
 path remains available through the same binary: fresh bounded execution,
@@ -55,9 +57,9 @@ store schema migration. Existing `brgr run|status|result|cancel|harness` command
 remain the standalone escape hatch without Herdr.
 
 The plugin requires Herdr 0.9 or newer on macOS. The optional legacy
-`local.omp-herdr` adapter still has best-effort pane cleanup and cannot prove
-external worker cancellation. It is separate from the v2 status and Codex
-panes. Windows, Linux, notarized macOS distribution, and automatic recovery of
+`local.omp-herdr` adapter remains separate from the v2 status and Codex panes;
+cancellation closes its recorded pane only while the agent, terminal, and
+session identities still match. Windows, Linux, notarized macOS distribution, and automatic recovery of
 unknown executable drift are not certified by this plugin package.
 
 ## Verification gates

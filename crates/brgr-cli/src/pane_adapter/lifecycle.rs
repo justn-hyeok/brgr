@@ -65,8 +65,10 @@ pub(super) fn update_receipt(path: &Path, update: impl FnOnce(&mut PaneReceipt))
 pub(crate) fn seal_native_report(paths: &Paths, task: TaskId, revision: u32) -> Result<()> {
     let path = paths.pane_receipt(task, revision);
     let receipt: PaneReceipt = serde_json::from_slice(&fs::read(&path)?)?;
-    let attempt: AttemptId = env::var("BRGR_PARENT_ATTEMPT_ID")?.parse()?;
-    if env::var("BRGR_PARENT_TASK_ID")? != task.to_string()
+    let attempt: AttemptId = crate::worker_identity::attempt()
+        .context("no worker attempt is known here")?
+        .parse()?;
+    if crate::worker_identity::task().as_deref() != Some(task.to_string().as_str())
         || receipt.task != Some(task)
         || receipt.attempt != Some(attempt)
         || receipt.revision != revision
@@ -130,6 +132,12 @@ pub(crate) fn stop_external(
     if receipt.task != Some(attempt.task.task_id) || receipt.attempt != Some(attempt.attempt_id) {
         return Ok(false);
     }
+    // Before anything closes the pane: once the agent is gone its tools have no
+    // recorded parent to be found under.
+    crate::tui_host::stop_descendants(&paths.runs.join(format!(
+        "{}-r{}.native-state.json",
+        attempt.task.task_id, attempt.task.revision
+    )));
     let launch: LaunchEnvelope = serde_json::from_slice(&fs::read(
         paths.launch(attempt.task.task_id, attempt.task.revision),
     )?)?;
@@ -170,6 +178,7 @@ pub(crate) fn stop_external(
         legacy_embedded_route_observation: None,
         route_observation: Some(brgr_protocol::RouteObservation::unavailable()),
         unresolved_effects: Vec::new(),
+        slept_seconds: None,
     };
     if let Some(model) =
         crate::session_model::pane_session_model(paths, &attempt.task, attempt.attempt_id)
@@ -631,6 +640,13 @@ pub(crate) fn close_leftover_pane(paths: &Paths, task: TaskId, revision: u32, ke
         }
         Ok(true) => {}
     }
+    // Whichever process reaches a stopped worker first closes its pane, and a
+    // host gone with the pane no longer says what ran under it.
+    crate::tui_host::stop_descendants(
+        &paths
+            .runs
+            .join(format!("{task}-r{revision}.native-state.json")),
+    );
     let _ = update_receipt(&path, |value| "closing".clone_into(&mut value.cleanup));
     if herdr.call(&["pane", "close", &receipt.pane]).is_ok() {
         let _ = mark_closed(&path);

@@ -8,7 +8,7 @@ download for malware.
 Before running a downloaded archive:
 
 1. Download the `.tar.gz`, `brgr.spdx.json`, and `checksums.txt` from the same GitHub release.
-2. Verify it with `shasum -a 256 -c checksums.txt` from that directory.
+2. Verify it with `shasum -a 256 -c --ignore-missing checksums.txt` from that directory. `checksums.txt` lists every platform's archive, so without `--ignore-missing` the ones you did not download fail.
 3. Extract the archive and move `brgr` to a directory on your `PATH`.
 4. Try `brgr --version`. If macOS blocks it, review the warning and use the
    per-item **Open Anyway** control in System Settings > Privacy & Security only

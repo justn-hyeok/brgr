@@ -8,7 +8,8 @@ use std::{env, fs, path::PathBuf};
 use anyhow::{Context as _, Result, anyhow, bail};
 use brgr_protocol::{OwnerId, TaskId};
 use brgr_store::{
-    HandoffManifest, RetireOutcome, Store, StoreError, Takeover, TakeoverId, TakeoverState,
+    AbandonedClaim, HandoffManifest, RetireOutcome, Store, StoreError, Takeover, TakeoverId,
+    TakeoverState,
 };
 use clap::Subcommand;
 use serde::{Deserialize, Serialize};
@@ -348,7 +349,8 @@ fn status(store: &Store, task: TaskId, json_output: bool) -> Result<()> {
                     TakeoverState::Committed
                     | TakeoverState::Resumed
                     | TakeoverState::Retired
-                    | TakeoverState::RetireFailed => Some(takeover.committed_epoch()),
+                    | TakeoverState::RetireFailed
+                    | TakeoverState::Superseded => Some(takeover.committed_epoch()),
                 },
                 "updated_at": takeover.updated_at,
             })).collect::<Vec<_>>(),
@@ -414,7 +416,7 @@ fn claim_core(
         key,
         why,
     } = *claim;
-    let (from_session, _) = store.owner_binding(owner_id)?.with_context(|| {
+    let (from_session, expected_epoch) = store.owner_binding(owner_id)?.with_context(|| {
         format!("owner {owner_id} is unbound; run `brgr bind TASK --session {session}`")
     })?;
     if from_session == session {
@@ -447,26 +449,24 @@ fn claim_core(
     eprintln!(
         "brgr: taking the head of {owner_id} from {from_session} ({why}); owner-session check skipped"
     );
-    let requested = store.request_takeover(owner_id, &from_session, session, key)?;
+    let requested = store.claim_abandoned_takeover(
+        owner_id,
+        &AbandonedClaim {
+            from_session: &from_session,
+            to_session: session,
+            idempotency_key: key,
+            goal,
+            notes: notes.unwrap_or_default(),
+            expected_epoch,
+        },
+    )?;
     if requested.state == TakeoverState::Aborted {
         bail!(
             "takeover {} was aborted; claim again with a new --key",
             requested.takeover_id
         );
     }
-    if requested.state == TakeoverState::Requested {
-        let references = store.handoff_references(owner_id)?;
-        let manifest = HandoffManifest {
-            goal: goal.to_owned(),
-            decision_notes: notes.unwrap_or_default().to_owned(),
-            origin_session: from_session.clone(),
-            tasks: references.tasks,
-            pending_result_ids: references.pending_result_ids,
-            pending_message_ids: references.pending_message_ids,
-        };
-        store.prepare_takeover(requested.takeover_id, &manifest)?;
-    }
-    let committed = store.commit_takeover(requested.takeover_id)?;
+    let committed = requested;
     let stored = store.handoff_manifest(committed.takeover_id)?;
     print_value(
         &json!({
@@ -476,6 +476,10 @@ fn claim_core(
             "manifest": stored.map(|item| item.manifest),
         }),
         json_output,
+    );
+    eprintln!(
+        "when the work is done, run `brgr head retire {}`",
+        committed.takeover_id
     );
     Ok(committed)
 }

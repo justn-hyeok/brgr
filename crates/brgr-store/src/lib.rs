@@ -42,13 +42,13 @@ pub use owner::OwnerProof;
 use owner::assert_owner_binding;
 pub use result::{OpenReason, Settlement};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
-use schema::initialize_connection;
+use schema::{configure_connection, initialize_connection};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use takeover::note_owner_action;
 pub use takeover::{
-    HandoffManifest, HandoffReferences, ManifestTask, RetireOutcome, StoredHandoffManifest,
-    Takeover, TakeoverEvent, TakeoverId, TakeoverState,
+    AbandonedClaim, HandoffManifest, HandoffReferences, ManifestTask, RetireOutcome,
+    StoredHandoffManifest, Takeover, TakeoverEvent, TakeoverId, TakeoverState,
 };
 pub use tree::SubtreeNode;
 pub use workflow::{
@@ -132,6 +132,32 @@ impl Store {
         initialize_connection(&connection)?;
         private_file(&database_path)?;
         let artifacts = ArtifactStore::open(root)?;
+        Ok(Self {
+            connection,
+            artifacts,
+        })
+    }
+
+    /// Opens an existing store without creating its directory, database, schema, or artifact directories.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the database is missing, cannot be opened, or is
+    /// not an initialized store.
+    pub fn open_existing(root: impl AsRef<Path>) -> Result<Self, StoreError> {
+        let root = root.as_ref();
+        let database_path = root.join("brgr.sqlite3");
+        let connection = Connection::open_with_flags(
+            &database_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
+        )?;
+        connection.busy_timeout(BUSY_TIMEOUT)?;
+        configure_connection(&connection)?;
+        let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        if version == 0 {
+            return Err(StoreError::UninitializedStore);
+        }
+        let artifacts = ArtifactStore::open_existing(root);
         Ok(Self {
             connection,
             artifacts,

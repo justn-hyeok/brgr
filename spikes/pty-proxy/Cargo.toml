@@ -1,0 +1,21 @@
+[package]
+name = "pty-proxy-spike"
+version = "0.1.0"
+edition = "2024"
+
+[workspace]
+
+[dependencies]
+alacritty_terminal = "0.25"
+portable-pty = "0.9"
+libc = "0.2"
+vt100 = "0.16"
+
+[[bin]]
+name = "read-screen"
+path = "src/read_screen.rs"
+
+[[bin]]
+name = "throughput"
+path = "src/throughput.rs"
+

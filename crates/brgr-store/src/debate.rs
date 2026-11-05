@@ -38,6 +38,70 @@ pub struct PeerDraft {
 }
 
 impl Store {
+    /// Checks whether an attempt belongs to an active debate.
+    /// # Errors
+    /// Returns an error if the membership lookup fails.
+    pub fn debate_membership(&self, task: TaskId, attempt: AttemptId) -> Result<bool, StoreError> {
+        Ok(self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM debate_members m JOIN debate_groups g ON g.group_id=m.group_id WHERE m.task_id=?1 AND m.attempt_id=?2 AND g.active=1)",
+            params![task.to_string(), attempt.to_string()],
+            |row| row.get(0),
+        )?)
+    }
+    /// Returns unread count and the oldest unread message creation time (Unix seconds).
+    /// # Errors
+    /// Returns an error if the summary lookup fails.
+    pub fn peer_unread_summary(
+        &self,
+        group: &str,
+        task: TaskId,
+    ) -> Result<(u64, Option<i64>), StoreError> {
+        let (count, oldest): (i64, Option<i64>) = self.connection.query_row(
+            "SELECT COUNT(*), MIN(created_at) FROM peer_messages WHERE group_id=?1 AND to_task=?2 AND acknowledged=0",
+            params![group, task.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        Ok((
+            u64::try_from(count).map_err(|_| StoreError::NumericOverflow)?,
+            oldest,
+        ))
+    }
+
+    /// Returns the exact attempt a task joined to a debate with.
+    /// # Errors
+    /// Returns an error if the member is absent or the lookup fails.
+    pub fn debate_member_attempt(
+        &self,
+        group: &str,
+        task: TaskId,
+    ) -> Result<AttemptId, StoreError> {
+        let value: String = self
+            .connection
+            .query_row(
+                "SELECT attempt_id FROM debate_members WHERE group_id=?1 AND task_id=?2",
+                params![group, task.to_string()],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or_else(|| StoreError::TaskMessageNotFound(task.to_string()))?;
+        value.parse().map_err(|_| StoreError::InvalidTaskMessage)
+    }
+
+    /// Returns one active debate containing this exact member attempt.
+    /// # Errors
+    /// Returns an error if the lookup fails.
+    pub fn active_debate_for_task(
+        &self,
+        task: TaskId,
+        attempt: AttemptId,
+    ) -> Result<Option<String>, StoreError> {
+        Ok(self.connection.query_row(
+            "SELECT g.group_id FROM debate_groups g JOIN debate_members m ON m.group_id=g.group_id WHERE m.task_id=?1 AND m.attempt_id=?2 AND g.active=1 ORDER BY g.rowid DESC LIMIT 1",
+            params![task.to_string(), attempt.to_string()],
+            |row| row.get(0),
+        ).optional()?)
+    }
+
     /// Create a named debate for sibling attempts with the same owner.
     /// # Errors
     /// Rejects missing tasks, stale attempts, or conflicting group identities.
@@ -365,7 +429,7 @@ impl Store {
                 ..value
             });
         }
-        transaction.execute("INSERT INTO peer_messages (message_id,group_id,from_task,to_task,from_attempt,to_attempt,kind,body,in_reply_to) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",params![draft.id,draft.group,draft.from.to_string(),draft.to.to_string(),from_attempt.to_string(),to_attempt.to_string(),draft.kind.as_str(),draft.body,draft.reply_to])?;
+        transaction.execute("INSERT INTO peer_messages (message_id,group_id,from_task,to_task,from_attempt,to_attempt,kind,body,in_reply_to,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,unixepoch())",params![draft.id,draft.group,draft.from.to_string(),draft.to.to_string(),from_attempt.to_string(),to_attempt.to_string(),draft.kind.as_str(),draft.body,draft.reply_to])?;
         transaction.commit()?;
         Ok(value)
     }

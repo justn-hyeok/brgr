@@ -25,6 +25,7 @@ fn a_lost_delegated_run_names_the_adapter_error() {
         cancelled: false,
         output_truncated: false,
         elapsed: Duration::from_secs(1),
+        slept_seconds: None,
     };
     assert_eq!(
         delegated_lost_reason(Some(&output)),
@@ -103,7 +104,7 @@ fn delegated_fixture_manifest() -> HarnessManifest {
         id: "internal.fixture-delegated".to_owned(),
         adapter: PROCESS_ADAPTER_V1.to_owned(),
         executable: PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../testdata/fixtures/gjc")
+            .join("../../testdata/fixtures/brgr-fixture")
             .canonicalize()
             .unwrap(),
         probe: ProbeSpec {
@@ -255,6 +256,45 @@ fn delegated_pane_finish(
 }
 
 #[test]
+fn only_an_agent_that_gave_no_report_fails_where_other_pane_ends_stay_lost() {
+    let output = ExecutionOutput {
+        exit_code: Some(crate::AGENT_GAVE_NO_REPORT_EXIT),
+        stdout: vec![],
+        stderr: b"Error: the agent finished without writing its report\n".to_vec(),
+        result: vec![],
+        observed_model: None,
+        timed_out: false,
+        cancelled: false,
+        output_truncated: false,
+        elapsed: Duration::from_millis(1),
+        slept_seconds: None,
+    };
+    let result = delegated_pane_finish(output.clone(), None);
+    assert_eq!(result.outcome, TerminalOutcome::Failed);
+    assert!(result.unresolved_effects.is_empty());
+    assert!(result.error.unwrap().contains("without writing its report"));
+
+    for other in [
+        ExecutionOutput {
+            exit_code: Some(1),
+            ..output.clone()
+        },
+        ExecutionOutput {
+            timed_out: true,
+            ..output.clone()
+        },
+        ExecutionOutput {
+            cancelled: true,
+            ..output
+        },
+    ] {
+        let result = delegated_pane_finish(other, None);
+        assert_eq!(result.outcome, TerminalOutcome::Lost);
+        assert!(!result.unresolved_effects.is_empty());
+    }
+}
+
+#[test]
 fn a_run_records_the_model_its_own_session_log_names() {
     let output = ExecutionOutput {
         exit_code: Some(0),
@@ -266,11 +306,13 @@ fn a_run_records_the_model_its_own_session_log_names() {
         cancelled: false,
         output_truncated: false,
         elapsed: Duration::from_millis(1),
+        slept_seconds: Some(61),
     };
     let result = delegated_pane_finish(
         output.clone(),
         Some(&|_spec, _attempt| Some("claude-fixture-2".to_owned())),
     );
+    assert_eq!(result.slept_seconds, Some(61));
     let observation = result.route_observation.unwrap();
     assert_eq!(observation.model.as_deref(), Some("claude-fixture-2"));
     assert_eq!(
@@ -365,6 +407,7 @@ fn delegated_external_failure_is_lost_with_unresolved_effects() {
         cancelled: false,
         output_truncated: false,
         elapsed: Duration::from_millis(1),
+        slept_seconds: None,
     };
     let result = finish_execution(
         &store,
@@ -425,6 +468,7 @@ fn result_for(attempt: &Attempt, outcome: TerminalOutcome) -> ResultEnvelope {
         legacy_embedded_route_observation: None,
         route_observation: None,
         unresolved_effects: vec![],
+        slept_seconds: None,
     }
 }
 
@@ -514,6 +558,7 @@ fn restart_replay_of_same_result_is_idempotent_without_new_rows() {
             legacy_embedded_route_observation: None,
             route_observation: None,
             unresolved_effects: vec![],
+            slept_seconds: None,
         };
         assert_eq!(
             store
@@ -988,6 +1033,7 @@ fn successful_output(result: &[u8]) -> ExecutionOutput {
         cancelled: false,
         output_truncated: false,
         elapsed: Duration::from_millis(1),
+        slept_seconds: None,
     }
 }
 

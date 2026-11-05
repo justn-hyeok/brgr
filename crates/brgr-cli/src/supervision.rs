@@ -22,6 +22,38 @@ use brgr_runner::HarnessManifest;
 use brgr_store::{RunnerIdentity, Store, StoreError, UnfinishedAttempt};
 use serde::Deserialize;
 
+pub(crate) const WAIT_RECONCILE_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Rate-limits recovery and cleanup while a command is polling a result.
+pub(crate) struct WaitReconcileSchedule {
+    last_reconcile: tokio::time::Instant,
+}
+
+impl WaitReconcileSchedule {
+    pub(crate) fn now() -> Self {
+        Self::new(tokio::time::Instant::now())
+    }
+
+    fn new(now: tokio::time::Instant) -> Self {
+        Self {
+            // Reconcile immediately, then no more than once per interval.
+            last_reconcile: now - WAIT_RECONCILE_INTERVAL,
+        }
+    }
+
+    pub(crate) fn should_reconcile(&mut self) -> bool {
+        self.should_reconcile_at(tokio::time::Instant::now())
+    }
+
+    fn should_reconcile_at(&mut self, now: tokio::time::Instant) -> bool {
+        if now.duration_since(self.last_reconcile) < WAIT_RECONCILE_INTERVAL {
+            return false;
+        }
+        self.last_reconcile = now;
+        true
+    }
+}
+
 pub(crate) async fn supervise(paths: &Paths, launch_path: &Path, json_output: bool) -> Result<()> {
     supervise_inner(paths, launch_path, json_output, None).await
 }
@@ -408,6 +440,7 @@ pub(crate) fn record_unstarted_terminal(
         } else {
             vec![]
         },
+        slept_seconds: None,
     };
     store.commit_terminal_result_final(&task.owner_id, &result)?;
     crate::error_memo::record_result(paths, &task.route.harness_id, &result);
@@ -530,5 +563,25 @@ mod claim_grace_tests {
             SUPERVISOR_CLAIM_GRACE
         );
         assert_eq!(claim_grace(b"not json"), SUPERVISOR_CLAIM_GRACE);
+    }
+}
+
+#[cfg(test)]
+mod waiting_reconcile_tests {
+    use super::*;
+
+    #[test]
+    fn wait_reconciliation_runs_at_most_once_per_five_seconds() {
+        let start = tokio::time::Instant::now();
+        let mut schedule = WaitReconcileSchedule::new(start);
+        let mut expensive_reconciliations = 0;
+
+        for poll in 0..50 {
+            if schedule.should_reconcile_at(start + Duration::from_millis(poll * 200)) {
+                expensive_reconciliations += 1;
+            }
+        }
+
+        assert_eq!(expensive_reconciliations, 2);
     }
 }

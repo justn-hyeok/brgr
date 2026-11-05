@@ -9,7 +9,7 @@ and development.
 Install the current public v2 plugin from GitHub:
 
 ```bash
-herdr plugin install justn-hyeok/brgr --ref v2.10.6
+herdr plugin install justn-hyeok/brgr --ref v2.15.20
 ```
 
 The plugin builds `brgr` from the pinned Cargo lockfile, so a Rust toolchain is
@@ -62,13 +62,22 @@ headless. The separate `local.omp-herdr` route retains its legacy
 | Route or operation | v1 status |
 |---|---|
 | OMP process, Cursor CLI, Command Code, Devin CLI, Codex CLI, GitHub Copilot CLI, Gemini CLI, Pi | Certified bounded fresh-run contract; exact model/effort only where the activated recipe supports it |
-| GJC | Experimental: the recipe is kept and registered harnesses keep working, but it is not part of the certified set and is not rechecked on each release |
 | Approved unfamiliar one-shot CLI | Supported after manifest contract test and authorized scratch activation |
-| `local.omp-herdr` presentation | Optional best effort; external worker stop is not certified and uncertain failure is `lost` |
+| `local.omp-herdr` presentation | Optional best effort; cancellation closes the recorded OMP pane only while its agent, terminal, and session identities still match; uncertain execution failure is `lost` |
 | Resume, in-flight steering, provider-side undo | Deferred; unsupported requests must fail rather than silently fall back |
 
-`local.devin` runs `devin` in documented prompt-file print mode with smart
-permissions and the non-interactive workspace-trust override. When the installed
+### Harness tiers
+
+| Tier | Harnesses | What it means |
+|---|---|---|
+| 1 | Claude Code, Codex CLI, Cursor CLI, Devin CLI | Each release runs a real round through it first, and a failure stops the release |
+| 2 | Command Code, OMP, OpenCode, Cline | The recipe and screen rules are kept up, and it runs for real when its recipe changes. Bugs get fixed but do not stop a release |
+| 3 | GitHub Copilot CLI, Gemini CLI, Pi | The recipe and contract tests only, with fixes on report |
+
+Devin CLI is a worker only: it cannot be an owner.
+
+`local.devin` runs `devin` in documented prompt-file print mode with
+`--permission-mode dangerous` and the non-interactive workspace-trust override. When the installed
 CLI documents `--model <MODEL>`, `brgr run OBJECTIVE --model MODEL` passes that
 name through as `--model=VALUE` in print mode and in the pane; the CLI checks
 the name itself. There is no parser for `devin models`: that listing is grouped
@@ -119,19 +128,18 @@ recorded, several sessions, or another task's — the source stays
 pane harnesses are unchanged.
 
 For lowest available Luna effort on the installed CLIs tested on 2026-09-14:
-OMP uses `openai-codex/gpt-5.6-luna` with `--effort low`, GJC uses the same
-model with `--effort minimal`, Cursor CLI uses the exact model variant
+OMP uses `openai-codex/gpt-5.6-luna` with `--effort low`, Cursor CLI uses the exact model variant
 `gpt-5.6-luna-none` without an effort flag, and Command Code uses
 `gpt-5.6-luna` with `--effort low`. Recheck each executable's native catalog
-after upgrading it. These are route requests; only OMP and GJC expose a
-native model observation, and none expose a verified effort observation.
+after upgrading it. These are route requests; only OMP exposes a native model
+observation, and none expose a verified effort observation.
 
 ## Standalone Codex and CLI
 
 ### Pane mode
 
 Generated recipes declare native TUI launches for Claude Code, Codex, Gemini
-CLI, GitHub Copilot CLI, Pi, Cursor, Devin, Cline, OMP, OpenCode, GJC, and
+CLI, GitHub Copilot CLI, Pi, Cursor, Devin, Cline, OMP, OpenCode, and
 Command Code. Codex runs every installed hook for a worker as well; brgr's
 own hook recognises a task worktree by the session's working directory and
 does nothing there, while the user's other hooks still run. Codex has no
@@ -147,18 +155,22 @@ of the task objective and is local display text only. Change it with
 `brgr config set pane-name-template TEMPLATE`, restore the default with
 `brgr config clear-pane-name-template`, or set an empty template to stop naming
 panes.
-Owned-workspace trust, "press Enter to continue" notices, update offers (skipped) and an applied self-update are answered automatically; any other screen is reported and fails the run after three minutes. Other native
+Owned-workspace trust, "press Enter to continue" notices, update offers (skipped), Claude Code's Bypass Permissions warning and new-MCP-server prompt (accepted), its fullscreen renderer offer (declined), Codex's hook review (trusted), an applied self-update and oh-my-zsh's update offer in a new pane's shell (declined) are answered automatically; any other screen is reported and fails the run after three minutes. Other native
 input uses `brgr input TASK --key KEY` or `--text TEXT`; conversation messages
 stay queued while the TUI is busy or displaying a native dialog.
 
 Headless is only ever an explicit per-call choice through `--headless`,
-`--mode headless`, or `--mode auto`; auto chooses it only when no Herdr pane is
-available and reports that choice. Read-only scope, an unsupported effort,
+`--mode headless`, or `--mode auto`; auto chooses it when no Herdr pane can be
+verified and reports that choice. OpenCode sessions whose pane cannot be
+verified therefore run headless with auto; an explicit `--mode pane` is refused
+before admission with guidance to use `--mode headless`. Read-only scope, an unsupported effort,
 and legacy `prefer_print_mode` settings never select it. Use
 `--owner-session SESSION --source-pane PANE` for a positively verified source
 when the caller is a shared daemon. `--as SESSION` (the short form) is the
 session in the calling context; Codex owners are identified by what the panes
-show, not by a shared daemon's environment. Codex 0.162 and later show a
+show, not by a shared daemon's environment. OpenCode uses `OPENCODE_SESSION_ID`
+for its owner identity, but its tool process cannot prove the Herdr pane through
+the process ancestry check. Codex 0.162 and later show a
 command's line only after it ends, so a run looks for the pane once the call
 has finished, while `head handoff` needs it at once: first run one short command such as
 `brgr --as SESSION status --brief` and the line is there. When `--as` names a session and
@@ -177,15 +189,41 @@ created. Set `brgr config set worker-placement tab` for new tabs or `adjacent`
 for a split beside the exact caller. Settings live at `$BRGR_HOME/config.toml`
 and do not move existing panes. Legacy auto-worker settings remain readable.
 
+Named routes live under `[aliases]` in `config.toml`; each entry stores a
+registered harness and optional exact model and effort. Manage them with
+`brgr config alias set NAME --harness ID` (optionally add `--model MODEL` and
+`--effort EFFORT`), `brgr config alias list`, and
+`brgr config alias remove NAME`. Select one with
+`brgr run OBJECTIVE --use NAME`. The run stores the expanded route, so later
+alias edits do not change existing tasks. Names may contain Korean text but
+cannot contain whitespace or control characters or start with `-`.
+
+In a terminal, `brgr config edit` opens a menu for adding, editing and removing
+aliases, choosing or clearing each harness's default model, and viewing harness
+health and tiers. Models come from the harness catalog when readable; otherwise
+enter an exact model name. Each completed change is saved immediately to the
+same config file as `brgr config set model MODEL --harness ID`. Esc or Back cancels the pending change;
+Ctrl+C exits. The editor skips the fixture and removed GJC harnesses. It requires
+a terminal and refuses `--json`; agents and scripts should use
+commands such as `brgr config alias list` and
+`brgr config set model MODEL --harness ID` instead.
+
 A worker receives `$BRGR_BIN`, its exact task/attempt identity, and a scoped
-owner session. It may call `brgr run OBJECTIVE` again to create a child; brgr records the
-parent edge and delivers the child result to that worker's inbox. The parent
-must read and accept/reject a candidate (or acknowledge another outcome)
-before its own successful result can become a candidate. `brgr wait TASK`
+owner session. A worker launched with `--enable-delegation` may call `brgr run OBJECTIVE` to
+create a child, and that child may do the same; pane mode does not enable
+delegation by itself.
+brgr records the parent edge and delivers the child result to that worker's
+inbox. The parent must read and accept/reject a candidate (or acknowledge
+another outcome) before its own successful result can become a candidate.
+Parent cancellation includes live descendants; `--tree` remains accepted.
+Owners see descendants in `status` and `status --brief`, with parent, harness,
+and requested model, and may read descendant status/results without gaining
+accept/reject rights. `brgr wait TASK`
 waits for a child result without approving it. `brgr watch A B C` or `brgr watch --all` prints one JSON line per event until every watched task has a result. Watch never decides, approves, or replies. The `message` subcommands (`send`, `list`, `wait`, `ack`)
 let each side ask and answer questions on the active attempt; unanswered
-questions block a successful candidate. Standalone runs opt in with
-`--enable-delegation`; plugin workers enable it automatically. See
+questions block a successful candidate. Standalone owner runs are unchanged;
+plugin workers enable delegation automatically. A worker without the flag is
+refused before child admission. See
 [recursive worker contract](recursive-workers.md) for the verified scope
 and remaining gates, including the
 [live OMP → GJC → GJC receipt](../evidence/live-recursive-bridge-2026-09-23.md) and
@@ -214,7 +252,7 @@ the owner-session check, and prints a note on stderr that it did. It only reads:
 it cannot be combined with `result --ack`, and `accept`, `reject`, `land`, `apply`
 and `bind` still need the owner's session. `brgr status TASK --json` prints one object on stdout; every note brgr adds goes to
 stderr. Its fields are `task` (the stored task: `task.workspace` is the worktree,
-`task.evidence.base_commit` the commit it started from), `state`, `workspace`
+`task.evidence.base_commit` the commit it started from), `state`, `created_at`, `parent_task_id` (for a child), `workspace`
 and `base_commit` (copies of those two), `workspace_present` (the worktree still
 exists), `session`, `calling_options`, `source_pane` and `source_session`. `brgr apply TASK --workspace PATH` checks a sealed
 diff; `--execute` applies it only after an explicit accepted result. The diff
@@ -238,7 +276,8 @@ and counts as the owner's acknowledgement of it. A lost run whose worker may sti
 be running is refused, with the worker's process named: a second run would share
 the task's pid record and hide the first worker from `prune`. `brgr status TASK --tree` shows time and question/approval waits;
 `brgr cancel TASK --tree` records cancellation for the subtree before stopping
-its active processes. `brgr cancel TASK --force` does the same when this session
+its active processes; `--tree` remains an accepted flag.
+`brgr cancel TASK --force` does the same when this session
 is not the bound owner: reaching the control home is the access check. It does
 not accept or reject a sealed result; an already-terminal task only closes a
 leftover pane brgr recorded as its own. See [the completion loop plan](completion-loop-plan.md)
@@ -258,6 +297,14 @@ result exists, whether a decision exists). `brgr status --brief --json` is a
 compact array with keys `task_id`, `state`, `harness`, `elapsed_seconds`,
 `objective_head`.
 
+`--deadline-seconds` counts awake time for a pane or headless run, on macOS and on
+Linux, so machine sleep extends the wall-clock duration before the run times out.
+When wall-clock time exceeds awake time by more than 60 seconds, the sealed result
+records the gap as `slept_seconds`. Two places still use wall-clock time: the time
+remaining in `status --tree`, and the recovery of a pane run whose supervisor died,
+which has no awake clock to read and stops the worker once the wall clock passes
+its deadline.
+
 Install the local binary and Codex integration, then start a new Codex session:
 
 ```bash
@@ -266,22 +313,23 @@ brgr integrate codex install
 brgr integrate claude install   # same skill for Claude Code
 ```
 
-Ask Codex, for example, “GJC를 작은 scratch 작업으로 검증해 등록하고,
-이 변경을 검토하면서 실패 사례도 확인해줘.” Registration may invoke the
-selected harness's model, so authorize its scratch prompt explicitly.
+Ask Codex, for example, “이 변경을 검토하면서 실패 사례도 확인해줘.”
 Codex owns the task criteria and the accept/reject decision; brgr owns the
 bounded execution, sealed bytes, and durable inbox. The CLI remains an escape
 hatch for inspection and explicit operations:
 
 ```bash
-brgr run "Review this change" --harness local.gjc --criterion "findings cite changed lines"
 brgr status --brief
 brgr result TASK
 brgr accept TASK --reason "criteria verified"
 ```
 
-A task objective is at most 256 KiB (UTF-8 bytes). A new `brgr run OBJECTIVE`
-and the workflow SDK `agent()` refuse a longer one before creating a task. Omit `--criterion`
+A task objective is at most 256 KiB (UTF-8 bytes). Pass it as `brgr run OBJECTIVE`
+or as `brgr run --objective-file PATH`; the file must be a regular UTF-8 file.
+Linux limits one argument to 128 KiB, so use `--objective-file` for larger
+objectives to avoid the operating system's `E2BIG` argument limit. The workflow
+SDK `agent()` uses a private temporary file for tasks over 64 KiB. Both forms
+refuse a longer objective before creating a task. Omit `--criterion`
 only for a short objective: longer than 512 bytes, the default criterion is
 the fixed text `Objective achieved` and does not quote the prompt. Each
 `--criterion` is at most 4096 bytes, at most 32 criteria, 65536 bytes in total.
@@ -300,7 +348,10 @@ decide its result until `brgr bind TASK --session SESSION` explicitly claims it.
 When the owning session changes, hand the head over with the `head` commands
 (below) rather than `bind`: `bind` is for an unbound owner, and it is refused
 while the owner has an open handoff. If the current head cannot run brgr, the
-incoming session uses `brgr head claim TASK --abandoned --goal TEXT`. For a CLI fixture, set both
+incoming session uses `brgr head claim TASK --abandoned --goal TEXT`. It may
+supersede a committed or resumed takeover whose incoming head has disappeared;
+requested and prepared takeovers still block a claim. Retire the new takeover
+with `brgr head retire TAKEOVER` when its work is done. For a CLI fixture, set both
 `BRGR_OWNER_ID=codex:example` and `BRGR_SESSION_ID=example-session` on run and
 follow-up commands.
 
@@ -319,7 +370,7 @@ runs request, prepare, and commit as the incoming session.
 | read | `brgr head show TAKEOVER` | anyone with the store (read only) |
 | commit | `brgr head commit TAKEOVER` | only the incoming session |
 | close | `brgr head retire TAKEOVER` | only the incoming session, after it has resumed |
-| claim | `brgr head claim TASK --abandoned --goal TEXT` | a different session, when the current head cannot run brgr |
+| claim | `brgr head claim TASK --abandoned --goal TEXT` | a different session, when the current head cannot run brgr; it may supersede a committed or resumed takeover, but not a requested or prepared one |
 
 ### Opening the incoming head from the current head
 
@@ -437,7 +488,7 @@ machine was asleep, and its retry waits longer.
 `brgr doctor` probes every registered harness as well as the Codex integration
 and store. On a terminal it starts with `ok`, or one `needs_attention` line per
 problem naming the item and, when doctor already has one, the next command
-(for a changed harness, `brgr harness recertify local.gjc`). `brgr doctor --json`
+(for a changed harness, `brgr harness recertify local.claude-code`). `brgr doctor --json`
 and a pipe keep the JSON, with a top-level `problems` array. A nonzero exit
 still means something needs attention, and the error names those items. Re-certify
 an unhealthy harness with an authorized scratch run before starting new work.
@@ -666,8 +717,11 @@ accept, reject, apply, or land.
 
 Write the SDK and a short example with `brgr workflow init`. Start the driver
 with `brgr workflow run SCRIPT`. Inspect a run with `brgr workflow status RUN`.
-If the driver dies, `brgr workflow resume RUN` starts the same script from the
-top; journaled steps replay instead of creating a second task. Stop a run with
+Status reports `driver_alive` as `true` or `false`; `null` means brgr cannot
+identify the driver from a current process record. When a non-finished run's
+driver is dead, status names `brgr workflow resume RUN`. Resume starts the same
+script from the top; journaled steps replay instead of creating a second task.
+Status only reads the run and never resumes it. Stop a run with
 `brgr workflow cancel RUN`. While a worker has asked a question, the SDK calls
 `brgr workflow set-state RUN blocked` once, then `brgr workflow set-state RUN running`
 after the owner replies.
@@ -739,7 +793,9 @@ deadline never fails the run; the script decides what to do with `timed_out`.
 default 0. Nothing is retried unless the script sets it. A retry happens only
 when the sealed outcome is exactly `failed`. `lost`, `cancelled`, a deadline
 `timed_out`, and any unrecognized outcome are returned as they are and never
-retried: a run of uncertain state may have side effects. Each retry is a new
+retried: a run of uncertain state may have side effects. A pane agent that stops
+by itself and writes no report even after one reminder is `failed`, so it is
+retried; one whose pane or process disappeared is `lost`, so it is not. Each retry is a new
 journaled step whose key is the base key plus a reserved suffix (`KEY~retry1`,
 then `KEY~retry2`, `KEY~retry3`). User keys cannot contain `~`. A resumed
 script replays each journaled attempt and does not launch a key that already
@@ -753,6 +809,10 @@ still records a run without a driver when a caller needs only the journal.
 
 ## Development
 
+## Messages and debate
+
+Participants use `brgr debate send GROUP --to TASK --kind question --body "<text>"`, `brgr debate list`, `brgr debate wait`, and `brgr debate ack MESSAGE_ID`; replies add `--kind reply --reply-to MESSAGE_ID`. If a worker's blocking `message wait`, `wait` or `watch` returns `debate_message_pending`, run `brgr debate list`, read and acknowledge the peer message, then wait again if needed. Outside a debate these commands behave as before. `brgr debate wait` returns `debate_joined` with the group when a debate starts while it waits, and its `timeout` receipt names the group, because a busy pane cannot show the notice. The owner can use `brgr debate status GROUP` to inspect unread counts, age, worker state, and `brgr debate stop GROUP` to end the conversation.
+
 ```bash
 cargo build --workspace
 cargo test --workspace
@@ -760,7 +820,7 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo run -p brgr-cli -- --help
 ```
 
-The local store defaults to `~/Library/Application Support/brgr`. Harness
+The local store defaults to `~/Library/Application Support/brgr` on macOS and `$XDG_DATA_HOME/brgr` or `~/.local/share/brgr` on Linux. Harness
 output, help text, manifests, and reports are treated as untrusted data.
 Before upgrading, retain a recoverable copy of the private registry and store.
 An older `v1.0.5` binary cannot load a newly activated manifest containing

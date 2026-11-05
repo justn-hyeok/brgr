@@ -131,6 +131,18 @@ pub(super) fn classify(screen: &str, workspace: &Path) -> Screen {
             keys,
         };
     }
+    // Claude Code's first-run offer has its cursor on "Yes, try it".
+    if let Some(selected) = selected
+        && lower.contains("try the new fullscreen renderer?")
+        && let Some(skip) = options.iter().position(|option| is_skip(&option.text))
+    {
+        let mut keys = keys_between(selected, skip);
+        keys.push("enter");
+        return Screen::Resolve {
+            rule: "renderer-offer-skip",
+            keys,
+        };
+    }
     if selected.is_none() {
         return if has_continue_notice(screen) {
             Screen::Resolve {
@@ -169,8 +181,9 @@ fn keys_between(from: usize, to: usize) -> Vec<&'static str> {
     std::iter::repeat_n(key, to.abs_diff(from)).collect()
 }
 
-/// Claude Code's own gates in front of a run, answered by accepting: the
-/// Bypass Permissions warning and a newly found MCP server.
+/// A harness's own gates in front of a run, answered by accepting: Claude Code's
+/// Bypass Permissions warning and newly found MCP server, and Codex's review of
+/// new hooks, which `brgr integrate codex install` is what adds.
 fn accepting_option(lower: &str, options: &[MenuOption]) -> Option<(&'static str, usize)> {
     let position = |prefix: &str| {
         options
@@ -179,6 +192,9 @@ fn accepting_option(lower: &str, options: &[MenuOption]) -> Option<(&'static str
     };
     if lower.contains("bypass permissions mode") {
         return position("yes, i accept").map(|at| ("bypass-warning", at));
+    }
+    if lower.contains("hooks need review") {
+        return position("trust all").map(|at| ("codex-hooks-trust", at));
     }
     if lower.contains("mcp server") {
         // The single-server choice first; "use this and all future" only if it
@@ -369,6 +385,50 @@ pub(super) fn resolve(
         std::thread::sleep(REDRAW);
     }
     Ok(outcome)
+}
+
+/// How long a new pane's shell may take to draw anything.
+const SHELL_DRAW: Duration = Duration::from_secs(5);
+const SHELL_DRAW_POLL: Duration = Duration::from_millis(100);
+
+fn is_shell_update_offer(screen: &str) -> bool {
+    let lower = screen.to_lowercase();
+    lower.contains("[oh-my-zsh]") && lower.contains("would you like to update?")
+}
+
+/// Waits for a new pane's shell to stop drawing before anything is typed into it.
+/// A shell startup question takes the next key as its answer: oh-my-zsh's update
+/// offer ate the first letter of the command, seen live as `zsh: command not
+/// found: odex`, on every pane until the offer was answered.
+pub(super) fn settle_shell(herdr: &Herdr, pane: &str, run: &PaneRunArgs, paths: &Paths) {
+    let started = Instant::now();
+    let mut answered = false;
+    let mut last = String::new();
+    let mut unchanged = 0;
+    while started.elapsed() < SHELL_DRAW {
+        let Some(screen) = herdr.screen(pane) else {
+            return;
+        };
+        if !answered && is_shell_update_offer(&screen) {
+            answered = true;
+            let keys = ["n"];
+            match herdr.call(&["pane", "send-keys", pane, keys[0]]) {
+                Ok(_) => record(&log_path(paths, run), pane, "shell-update-offer", &keys),
+                Err(failure) => {
+                    eprintln!("brgr pane mode · could not skip a shell update offer: {failure}");
+                }
+            }
+        } else if screen == last && !screen.trim().is_empty() {
+            unchanged += 1;
+            if unchanged >= 2 {
+                return;
+            }
+        } else {
+            unchanged = 0;
+        }
+        last = screen;
+        std::thread::sleep(SHELL_DRAW_POLL);
+    }
 }
 
 /// The per-attempt record of every key brgr pressed on its own.
@@ -703,6 +763,47 @@ mod tests {
             Screen::Resolve {
                 rule: "update-offer-skip",
                 keys: vec!["enter"],
+            }
+        );
+    }
+
+    /// Captured from Claude Code 2.1.318 on its first run in a Herdr pane; the
+    /// cursor starts on "Yes, try it".
+    const CLAUDE_RENDERER_OFFER: &str =
+        include_str!("../../../../testdata/fixtures/screens/claude-2.1.318-renderer-offer.txt");
+
+    #[test]
+    fn claudes_renderer_offer_is_declined_by_moving_to_not_now() {
+        assert_eq!(
+            classify(CLAUDE_RENDERER_OFFER, Path::new("/somewhere")),
+            Screen::Resolve {
+                rule: "renderer-offer-skip",
+                keys: vec!["down", "enter"],
+            }
+        );
+    }
+
+    #[test]
+    fn a_question_about_a_fullscreen_renderer_without_that_offer_is_not_answered() {
+        let screen = "Should the fullscreen renderer be the default?\n❯ 1. Yes\n  2. Not now\n";
+        assert!(matches!(
+            classify(screen, Path::new("/somewhere")),
+            Screen::Unknown(_)
+        ));
+    }
+
+    /// Captured from Codex CLI 0.166.0 on its first run after
+    /// `brgr integrate codex install`. Text sent to this screen is lost.
+    const CODEX_HOOKS_REVIEW: &str =
+        include_str!("../../../../testdata/fixtures/screens/codex-0.166-hooks-review.txt");
+
+    #[test]
+    fn codexs_hook_review_is_answered_by_trusting_all() {
+        assert_eq!(
+            classify(CODEX_HOOKS_REVIEW, Path::new("/somewhere")),
+            Screen::Resolve {
+                rule: "codex-hooks-trust",
+                keys: vec!["down", "enter"],
             }
         );
     }
@@ -1061,6 +1162,28 @@ esac
             keep_pane: false,
         };
         (paths, run)
+    }
+
+    #[test]
+    fn a_shell_update_offer_is_declined_before_anything_is_typed() {
+        let (temp, herdr) = fake_herdr("[oh-my-zsh] Would you like to update? [Y/n] ");
+        let (paths, run) = run_args(&temp);
+        settle_shell(&herdr, "w1:p2", &run, &paths);
+        let keys = std::fs::read_to_string(temp.path().join("keys")).unwrap();
+        assert_eq!(keys.trim(), "pane send-keys w1:p2 n");
+        let log = std::fs::read_to_string(log_path(&paths, &run)).unwrap();
+        assert!(
+            log.trim_end().ends_with("w1:p2 shell-update-offer n"),
+            "{log}"
+        );
+    }
+
+    #[test]
+    fn a_plain_shell_prompt_presses_nothing() {
+        let (temp, herdr) = fake_herdr("repo on main\n❯ update the docs? [Y/n]");
+        let (paths, run) = run_args(&temp);
+        settle_shell(&herdr, "w1:p2", &run, &paths);
+        assert!(!temp.path().join("keys").exists());
     }
 
     #[test]

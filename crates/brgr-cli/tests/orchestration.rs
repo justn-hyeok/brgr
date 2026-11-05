@@ -39,7 +39,8 @@ fn default_call_does_not_silently_run_headless_without_a_tui_source() {
     let scratch = temp.path().join("scratch");
     fs::create_dir_all(&workspace).unwrap();
     fs::create_dir_all(&scratch).unwrap();
-    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata/fixtures/gjc");
+    let fixture =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata/fixtures/brgr-fixture");
     assert!(
         command(&home)
             .args(["harness", "add"])
@@ -105,7 +106,8 @@ fn auto_mode_without_a_herdr_pane_runs_headless_and_reports_why() {
     let scratch = temp.path().join("scratch");
     fs::create_dir_all(&workspace).unwrap();
     fs::create_dir_all(&scratch).unwrap();
-    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata/fixtures/gjc");
+    let fixture =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata/fixtures/brgr-fixture");
     let added = command(&home)
         .args(["harness", "add"])
         .arg(fixture)
@@ -164,12 +166,12 @@ fn config_init_preserves_user_instructions_and_calls_apply_their_snapshot() {
     fs::create_dir_all(&scratch).unwrap();
     let bin = temp.path().join("bin");
     fs::create_dir_all(&bin).unwrap();
-    let fixture = bin.join("gjc");
+    let fixture = bin.join("fixture");
     write_fast_script(
         &fixture,
         r#"#!/bin/sh
 case "$1" in
---version) echo 'gjc fixture';exit 0;;
+--version) echo 'fixture fixture';exit 0;;
 --help) printf '%s\n' '-p, --print' '--mode=<value>' '--no-session' '--no-mcp' '--model' '--thinking';exit 0;;
 esac
 for argument in "$@";do case "$argument" in @*) prompt_file=${argument#@};;esac;done

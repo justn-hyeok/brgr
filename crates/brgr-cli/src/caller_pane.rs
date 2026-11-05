@@ -436,18 +436,39 @@ fn process_table() -> Option<HashMap<u32, (u32, String)>> {
 /// `ps -E` prints the arguments before the environment, so the last match is
 /// the environment's.
 fn pane_in_environment(pid: u32) -> Option<String> {
-    let output = Command::new("/bin/ps")
-        .args(["-E", "-ww", "-o", "command=", "-p", &pid.to_string()])
-        .output()
-        .ok()?;
-    let text = String::from_utf8_lossy(&output.stdout);
-    let (_, rest) = text.rsplit_once(" HERDR_PANE_ID=")?;
-    rest.split_whitespace().next().map(str::to_owned)
+    #[cfg(target_os = "linux")]
+    {
+        const MAX_ENVIRONMENT_SIZE: u64 = 1024 * 1024;
+        let file = fs::File::open(format!("/proc/{pid}/environ")).ok()?;
+        let mut bytes = Vec::new();
+        file.take(MAX_ENVIRONMENT_SIZE + 1)
+            .read_to_end(&mut bytes)
+            .ok()?;
+        if bytes.len() as u64 > MAX_ENVIRONMENT_SIZE {
+            return None;
+        }
+        bytes.split(|byte| *byte == 0).find_map(|entry| {
+            let value = entry.strip_prefix(b"HERDR_PANE_ID=")?;
+            std::str::from_utf8(value).ok().map(str::to_owned)
+        })
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let output = Command::new("/bin/ps")
+            .args(["-E", "-ww", "-o", "command=", "-p", &pid.to_string()])
+            .output()
+            .ok()?;
+        let text = String::from_utf8_lossy(&output.stdout);
+        let (_, rest) = text.rsplit_once(" HERDR_PANE_ID=")?;
+        rest.split_whitespace().next().map(str::to_owned)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_os = "linux")]
+    use std::process::Stdio;
 
     const SESSION: &str = "01a0fb33-447c-7ba0-9f37-ba04f33ce809";
 
@@ -645,5 +666,51 @@ mod tests {
     fn the_process_table_includes_this_process() {
         let table = process_table().unwrap();
         assert!(table.contains_key(&std::process::id()));
+    }
+
+    /// A child that stays until killed, with an environment the test can read.
+    /// `spawn` can return in the middle of the exec: the kernel wakes the parent
+    /// before it fills in the new image's environment, and `/proc` reads as empty
+    /// until then. `MARK` shows it has been filled in. An ancestor of a running
+    /// brgr has long finished its exec, so `pane_in_environment` never sees this.
+    #[cfg(target_os = "linux")]
+    fn waiting_child(pane: Option<&str>) -> std::process::Child {
+        let mut command = Command::new("/bin/sleep");
+        command.arg("600").env_clear().env("MARK", "1");
+        if let Some(pane) = pane {
+            command.env("HERDR_PANE_ID", pane);
+        }
+        let child = command
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let environ = format!("/proc/{}/environ", child.id());
+        let started = std::time::Instant::now();
+        while !fs::read(&environ).is_ok_and(|bytes| !bytes.is_empty()) {
+            assert!(
+                started.elapsed() < std::time::Duration::from_mins(1),
+                "the child's environment never appeared"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        child
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn pane_environment_is_read_from_another_process() {
+        let mut with_pane = waiting_child(Some("w-test:p42"));
+        let with_value = pane_in_environment(with_pane.id());
+        with_pane.kill().unwrap();
+        with_pane.wait().unwrap();
+        assert_eq!(with_value.as_deref(), Some("w-test:p42"));
+
+        let mut without_pane = waiting_child(None);
+        let without_value = pane_in_environment(without_pane.id());
+        without_pane.kill().unwrap();
+        without_pane.wait().unwrap();
+        assert_eq!(without_value, None);
     }
 }

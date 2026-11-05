@@ -568,6 +568,7 @@ pub(crate) fn primary_checkout(checkout: &Path) -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
+#[cfg(test)]
 pub(crate) fn prepare_workspace(
     worktrees_root: &Path,
     source: &Path,
@@ -576,17 +577,38 @@ pub(crate) fn prepare_workspace(
     adapter: &str,
     allow_clean_head_snapshot: bool,
 ) -> Result<PathBuf> {
+    prepare_workspace_with_reuse(
+        worktrees_root,
+        source,
+        task_id,
+        revision,
+        adapter,
+        allow_clean_head_snapshot,
+        false,
+    )
+    .map(|(workspace, _created)| workspace)
+}
+
+pub(crate) fn prepare_workspace_with_reuse(
+    worktrees_root: &Path,
+    source: &Path,
+    task_id: TaskId,
+    revision: u32,
+    adapter: &str,
+    allow_clean_head_snapshot: bool,
+    reuse_clean_unadmitted_worktree: bool,
+) -> Result<(PathBuf, bool)> {
     let source = source.canonicalize()?;
     let root_output = Command::new("git")
         .args(["-C", &lossy(&source), "rev-parse", "--show-toplevel"])
         .output();
     let root_output = match root_output {
         Ok(output) => output,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(source),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok((source, false)),
         Err(error) => return Err(error.into()),
     };
     if !root_output.status.success() {
-        return Ok(source);
+        return Ok((source, false));
     }
     let root = PathBuf::from(String::from_utf8(root_output.stdout)?.trim());
     let dirty = git_stdout(&root, &["status", "--porcelain"])?;
@@ -615,6 +637,19 @@ pub(crate) fn prepare_workspace(
         Err(_) => target.clone(),
     };
     let branch = format!("brgr/task-{task_slug}");
+    if (target.exists() || planned.exists())
+        && reuse_clean_unadmitted_worktree
+        && reusable_unadmitted_worktree(
+            &root,
+            &worktree_list,
+            &planned,
+            &target,
+            &branch,
+            base_revision.trim(),
+        )
+    {
+        return Ok((task_workspace_path(&source, &root, &target), false));
+    }
     refuse_existing_path_or_branch(&root, &worktree_list, &planned, &target, &branch)?;
 
     let status = if adapter == OMP_ROLE_ADAPTER_V1
@@ -638,13 +673,77 @@ pub(crate) fn prepare_workspace(
     if env::var_os("BRGR_TEST_EXIT_AFTER_WORKTREE").is_some() {
         std::process::exit(78);
     }
-    let relative = source.strip_prefix(&root).unwrap_or(Path::new(""));
+    Ok((task_workspace_path(&source, &root, &target), true))
+}
+
+fn task_workspace_path(source: &Path, root: &Path, target: &Path) -> PathBuf {
+    let relative = source.strip_prefix(root).unwrap_or(Path::new(""));
     // `join("")` appends a separator, and OpenCode compares the workspace as an
     // exact string, so a root-level source must stay the bare worktree path.
     if relative.as_os_str().is_empty() {
-        return Ok(target);
+        return target.to_path_buf();
     }
-    Ok(target.join(relative))
+    target.join(relative)
+}
+
+fn reusable_unadmitted_worktree(
+    root: &Path,
+    worktree_list: &str,
+    planned: &Path,
+    target: &Path,
+    branch: &str,
+    base_revision: &str,
+) -> bool {
+    let Ok(metadata) = fs::symlink_metadata(target) else {
+        return false;
+    };
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return false;
+    }
+    let branch_ref = format!("refs/heads/{branch}");
+    let registered = worktree_list.split("\n\n").any(|entry| {
+        let mut path_matches = false;
+        let mut branch_matches = false;
+        for line in entry.lines() {
+            if let Some(path) = line.strip_prefix("worktree ") {
+                path_matches = Path::new(path) == planned || Path::new(path) == target;
+            } else if let Some(value) = line.strip_prefix("branch ") {
+                branch_matches = value == branch_ref;
+            }
+        }
+        path_matches && branch_matches
+    });
+    if !registered {
+        return false;
+    }
+    let Ok(head) = git_stdout(target, &["rev-parse", "HEAD"]) else {
+        return false;
+    };
+    let Ok(branch_head) = git_stdout(root, &["rev-parse", branch]) else {
+        return false;
+    };
+    let Ok(commits_beyond_base) = git_stdout(
+        root,
+        &["rev-list", "--count", &format!("{base_revision}..{branch}")],
+    ) else {
+        return false;
+    };
+    if head.trim() != base_revision
+        || branch_head.trim() != base_revision
+        || commits_beyond_base.trim() != "0"
+    {
+        return false;
+    }
+    git_stdout(
+        target,
+        &[
+            "status",
+            "--porcelain",
+            "--untracked-files=all",
+            "--ignored",
+        ],
+    )
+    .is_ok_and(|status| status.trim().is_empty())
 }
 
 pub(crate) fn workspace_is_present(workspace: &str) -> bool {
@@ -804,6 +903,11 @@ fn git_ref_exists(root: &Path, git_ref: &str) -> Result<bool> {
 
 fn is_git_lock_error(stderr: &str) -> bool {
     let text = stderr.to_ascii_lowercase();
+    // `git worktree add` reads its siblings, and one being created at the same
+    // moment can have an admin directory whose files are not written yet.
+    if text.contains("failed to read .git/worktrees/") {
+        return true;
+    }
     text.contains("lock")
         && (text.contains("unable to create")
             || text.contains("unable to write")
@@ -1004,6 +1108,19 @@ mod tests {
         assert!(branches(&repo).contains("brgr/task-aaaaaaaa"));
         assert!(branches(&repo).contains("user/keep-me"));
         assert!(!worktrees.join("repo").join("aaaaaaaa").exists());
+    }
+
+    /// Seen on Linux: two `git worktree add` at once, and the second read the
+    /// first's admin directory before it was complete.
+    #[test]
+    fn a_sibling_worktree_still_being_created_is_retried() {
+        assert!(is_git_lock_error(
+            "Preparing worktree (new branch 'brgr/task-11111111')\n\
+             fatal: failed to read .git/worktrees/22222222/commondir: Success\n"
+        ));
+        assert!(!is_git_lock_error(
+            "fatal: invalid reference: brgr/task-11111111\n"
+        ));
     }
 
     #[test]

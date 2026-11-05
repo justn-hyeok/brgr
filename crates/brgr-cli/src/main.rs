@@ -1,11 +1,14 @@
 mod admission;
 #[cfg(test)]
 mod adversary;
+mod aliases;
 mod bridge_host;
 mod caller_pane;
 mod cli;
 mod codex_integration;
 mod config;
+mod config_edit;
+mod config_edit_view;
 mod context_signal;
 mod debate;
 mod error_memo;
@@ -36,6 +39,7 @@ mod task_commands;
 mod tree_status;
 mod tui_host;
 mod watch;
+mod worker_identity;
 mod workflow;
 mod workspace;
 mod worktree_prune;
@@ -250,7 +254,8 @@ async fn main() -> Result<()> {
         return plugin_bridge::client(Path::new(&dir), budget_seconds.saturating_add(120)).await;
     }
     bridge_host::validate_bridge_host_preflight(&cli)?;
-    let paths = Paths::new(cli.home.clone())?;
+    let paths = Paths::new(worker_identity::resolve_home(cli.home.clone()))?;
+    worker_identity::initialize(&paths);
     let internal = matches!(
         &cli.command,
         Command::Plugin { .. }
@@ -331,6 +336,9 @@ async fn execute(paths: &Paths, command: Command, json_output: bool) -> Result<(
         Command::Integrate { command } => integrate(paths, command, json_output),
         Command::Doctor => doctor(paths, json_output).await,
         Command::Errors { command } => error_memo::run(paths, command.as_ref()),
+        Command::Config {
+            command: ConfigCommand::Edit,
+        } => config_edit_view::run(paths, json_output).await,
         Command::Config { command } => config_command(paths, &command, json_output).await,
         Command::Prune {
             apply,
@@ -350,7 +358,7 @@ async fn execute(paths: &Paths, command: Command, json_output: bool) -> Result<(
         command @ (Command::Notify { .. } | Command::NotifyWorkflow { .. }) => {
             deliver_notice(paths, command).await
         }
-        Command::PaneRun(args) => pane_adapter::run_pane_adapter(paths, &args),
+        Command::PaneRun(args) => pane_adapter::pane_run_command(paths, &args),
         Command::TuiHost { config } => tui_host::run(&config),
         Command::Session { task } => pane_adapter::serve_session(paths, task),
         Command::SealReport { task, revision } => {
@@ -403,65 +411,181 @@ async fn deliver_notice(paths: &Paths, command: Command) -> Result<()> {
     }
 }
 
-async fn config_command(paths: &Paths, command: &ConfigCommand, json_output: bool) -> Result<()> {
-    let mut config = Config::load(&paths.config)?;
+async fn config_alias_command(
+    paths: &Paths,
+    command: &cli::AliasCommand,
+    json_output: bool,
+) -> Result<()> {
+    use cli::AliasCommand;
     match command {
+        AliasCommand::List => {
+            let config = Config::load(&paths.config)?;
+            if json_output {
+                print_value(&serde_json::to_value(aliases::list(&config))?, true);
+            } else if aliases::list(&config).is_empty() {
+                println!("No aliases configured.");
+            } else {
+                for (name, alias) in aliases::list(&config) {
+                    println!(
+                        "{name}: harness={}{}{}",
+                        alias.harness,
+                        alias
+                            .model
+                            .as_ref()
+                            .map(|value| format!(" model={value}"))
+                            .unwrap_or_default(),
+                        alias
+                            .effort
+                            .as_ref()
+                            .map(|value| format!(" effort={value}"))
+                            .unwrap_or_default()
+                    );
+                }
+            }
+        }
+        AliasCommand::Remove { name } => {
+            update_config(paths, |config| {
+                aliases::remove(config, name)?;
+                Ok(())
+            })?;
+        }
+        AliasCommand::Set {
+            name,
+            harness,
+            model,
+            effort,
+        } => {
+            let registry =
+                brgr_registry::Registry::open_with_control_home(&paths.registry, &paths.home)?;
+            let registered = registry.registered_harness_ids()?;
+            if !registered.iter().any(|id| id == harness) {
+                bail!(
+                    "harness {harness} is not registered; registered: {}",
+                    registered.join(", ")
+                );
+            }
+            if let Some(model) = model {
+                match registry.preflight_registered_model(harness, model).await {
+                    Ok(()) => {}
+                    Err(
+                        error @ (brgr_registry::RegistryError::ModelCatalogMissing(_)
+                        | brgr_registry::RegistryError::ModelCatalogExecutableMissing(_)
+                        | brgr_registry::RegistryError::InvalidModelCatalog
+                        | brgr_registry::RegistryError::ModelCatalogProbeFailed { .. }),
+                    ) => eprintln!(
+                        "brgr: could not read model catalog for {harness}: {error}; accepting model {model}"
+                    ),
+                    Err(error) => return Err(error.into()),
+                }
+            }
+            update_config(paths, |config| {
+                aliases::set(
+                    config,
+                    name,
+                    aliases::Alias {
+                        harness: harness.clone(),
+                        model: model.clone(),
+                        effort: effort.clone(),
+                    },
+                )?;
+                Ok(())
+            })?;
+        }
+    }
+    Ok(())
+}
+
+fn update_config(paths: &Paths, change: impl FnOnce(&mut Config) -> Result<()>) -> Result<Config> {
+    Config::update(&paths.config, &paths.home, |config| {
+        change(config)?;
+        Ok(true)
+    })
+}
+
+fn validate_issue_reporting(repo: &str, min_count: u64) -> Result<()> {
+    if repo.split('/').count() != 2 || repo.contains(char::is_whitespace) {
+        bail!("repository must be OWNER/NAME");
+    }
+    if min_count == 0 {
+        bail!("--min-count must be at least 1");
+    }
+    Ok(())
+}
+
+fn validate_handoff_condition(kind: &str, quota_percent: u8) -> Result<()> {
+    if kind.is_empty() || kind.contains(char::is_whitespace) {
+        bail!("--kind must be a Herdr agent kind such as codex");
+    }
+    if !(1..=99).contains(&quota_percent) {
+        bail!("a threshold is a percentage from 1 to 99");
+    }
+    Ok(())
+}
+
+async fn config_command(paths: &Paths, command: &ConfigCommand, json_output: bool) -> Result<()> {
+    if let ConfigCommand::Alias { command } = command {
+        return config_alias_command(paths, command, json_output).await;
+    }
+    let config = match command {
         ConfigCommand::Init => return config::initialize(paths, json_output),
         ConfigCommand::Set {
             key,
             value,
             harness,
-        } => {
+        } => update_config(paths, |config| {
             config.set(key, value, harness.as_deref())?;
-            config.save(&paths.config)?;
+            Ok(())
+        })?,
+        ConfigCommand::Check => {
+            let config = Config::load(&paths.config)?;
+            return config::check(paths, &config, json_output).await;
         }
-        ConfigCommand::Check => return config::check(paths, &config, json_output).await,
-        ConfigCommand::Show => {}
+        ConfigCommand::Show => Config::load(&paths.config)?,
+        ConfigCommand::Alias { .. } | ConfigCommand::Edit => unreachable!("handled above"),
         ConfigCommand::SetCodexExecutable { executable } => {
             config::validate_codex_executable(executable)?;
-            config.herdr.codex_executable = Some(executable.clone());
-            config.save(&paths.config)?;
+            update_config(paths, |config| {
+                config.herdr.codex_executable = Some(executable.clone());
+                Ok(())
+            })?
         }
-        ConfigCommand::ClearCodexExecutable => {
+        ConfigCommand::ClearCodexExecutable => update_config(paths, |config| {
             config.herdr.codex_executable = None;
-            config.save(&paths.config)?;
-        }
-        ConfigCommand::SetWorkerPlacement { placement } => {
+            Ok(())
+        })?,
+        ConfigCommand::SetWorkerPlacement { placement } => update_config(paths, |config| {
             config.herdr.worker_placement = *placement;
-            config.save(&paths.config)?;
-        }
-        ConfigCommand::ClearPaneNameTemplate => {
+            Ok(())
+        })?,
+        ConfigCommand::ClearPaneNameTemplate => update_config(paths, |config| {
             config.reset_pane_name_template();
-            config.save(&paths.config)?;
-        }
-        ConfigCommand::SetAutoWorkerPane { enabled } => {
+            Ok(())
+        })?,
+        ConfigCommand::SetAutoWorkerPane { enabled } => update_config(paths, |config| {
             config.herdr.auto_worker_pane = *enabled;
-            config.save(&paths.config)?;
-        }
-        ConfigCommand::SetPaneMode { enabled } => {
+            Ok(())
+        })?,
+        ConfigCommand::SetPaneMode { enabled } => update_config(paths, |config| {
             config.herdr.prefer_print_mode = !*enabled;
-            config.save(&paths.config)?;
-        }
-        ConfigCommand::SetAutoRecertify { enabled } => {
+            Ok(())
+        })?,
+        ConfigCommand::SetAutoRecertify { enabled } => update_config(paths, |config| {
             config.recertify.auto = *enabled;
-            config.save(&paths.config)?;
-        }
+            Ok(())
+        })?,
         ConfigCommand::SetIssueReporting { repo, min_count } => {
-            if repo.split('/').count() != 2 || repo.contains(char::is_whitespace) {
-                bail!("repository must be OWNER/NAME");
-            }
-            if *min_count == 0 {
-                bail!("--min-count must be at least 1");
-            }
-            config.issues.auto_file = true;
-            config.issues.repo = Some(repo.clone());
-            config.issues.min_count = *min_count;
-            config.save(&paths.config)?;
+            validate_issue_reporting(repo, *min_count)?;
+            update_config(paths, |config| {
+                config.issues.auto_file = true;
+                config.issues.repo = Some(repo.clone());
+                config.issues.min_count = *min_count;
+                Ok(())
+            })?
         }
-        ConfigCommand::ClearIssueReporting => {
+        ConfigCommand::ClearIssueReporting => update_config(paths, |config| {
             config.issues.auto_file = false;
-            config.save(&paths.config)?;
-        }
+            Ok(())
+        })?,
         ConfigCommand::SetHandoffCondition {
             kind,
             exit_old,
@@ -469,27 +593,24 @@ async fn config_command(paths: &Paths, command: &ConfigCommand, json_output: boo
             agent_args,
             auto,
         } => {
-            if kind.is_empty() || kind.contains(char::is_whitespace) {
-                bail!("--kind must be a Herdr agent kind such as codex");
-            }
-            if !(1..=99).contains(quota_percent) {
-                bail!("a threshold is a percentage from 1 to 99");
-            }
-            config.handoff = config::HandoffConfig {
-                kind: Some(kind.clone()),
-                exit_old: *exit_old,
-                context_percent: None,
-                quota_percent: Some(*quota_percent),
-                agent_args: agent_args.clone(),
-                auto: *auto,
-            };
-            config.save(&paths.config)?;
+            validate_handoff_condition(kind, *quota_percent)?;
+            update_config(paths, |config| {
+                config.handoff = config::HandoffConfig {
+                    kind: Some(kind.clone()),
+                    exit_old: *exit_old,
+                    context_percent: None,
+                    quota_percent: Some(*quota_percent),
+                    agent_args: agent_args.clone(),
+                    auto: *auto,
+                };
+                Ok(())
+            })?
         }
-        ConfigCommand::ClearHandoffCondition => {
+        ConfigCommand::ClearHandoffCondition => update_config(paths, |config| {
             config.handoff = config::HandoffConfig::default();
-            config.save(&paths.config)?;
-        }
-    }
+            Ok(())
+        })?,
+    };
     if json_output {
         print_value(&serde_json::to_value(&config)?, true);
     } else {
@@ -508,7 +629,7 @@ fn owner_from_environment() -> Result<OwnerId> {
         owner_kind,
     )
     .or_else(|| session.map(|id| format!("{}:{id}", owner_kind())))
-    .unwrap_or_else(|| "codex:manual".to_owned());
+    .unwrap_or_else(|| format!("{}:manual", owner_kind()));
     Ok(OwnerId::new(owner)?)
 }
 
@@ -536,6 +657,9 @@ fn owner_id_from(
 fn delegation_parent_from_environment() -> Result<Option<(TaskId, AttemptId)>> {
     let explicit = invocation::current().session.clone();
     let env_session = env::var("BRGR_SESSION_ID").ok();
+    if let Some(worker) = worker_identity::from_directory() {
+        return Ok(Some(worker));
+    }
     let parent_task = env::var("BRGR_PARENT_TASK_ID").ok();
     let parent_attempt = env::var("BRGR_PARENT_ATTEMPT_ID").ok();
     if foreign_parent_identity(explicit.as_deref(), env_session.as_deref()) {
@@ -594,6 +718,9 @@ fn inherited_delegation_parent(
 /// shells keep the `codex` owner prefix.
 fn owner_kind() -> &'static str {
     let set = |name: &str| env::var(name).is_ok_and(|value| !value.trim().is_empty());
+    if !set("CODEX_THREAD_ID") && set("OPENCODE_SESSION_ID") {
+        return "opencode";
+    }
     if !set("CODEX_THREAD_ID") && !set("BRGR_SESSION_ID") && set("CLAUDE_CODE_SESSION_ID") {
         "claude"
     } else if caller_pane::inherited_agent_kind().as_deref() == Some("cursor")
@@ -664,10 +791,13 @@ fn current_session() -> Result<Option<String>> {
     let explicit = env::var("BRGR_SESSION_ID")
         .ok()
         .filter(|value| !value.trim().is_empty());
-    if codex
-        .as_ref()
-        .zip(explicit.as_ref())
-        .is_some_and(|(a, b)| a != b)
+    // In a Codex worker the thread is its own, and BRGR_SESSION_ID is whatever
+    // its shared daemon inherited.
+    if worker_identity::from_directory().is_none()
+        && codex
+            .as_ref()
+            .zip(explicit.as_ref())
+            .is_some_and(|(a, b)| a != b)
     {
         bail!("CODEX_THREAD_ID and BRGR_SESSION_ID disagree");
     }
@@ -677,7 +807,10 @@ fn current_session() -> Result<Option<String>> {
     let cursor = env::var("CURSOR_CONVERSATION_ID")
         .ok()
         .filter(|value| !value.trim().is_empty());
-    Ok(codex.or(explicit).or(claude).or(cursor))
+    let opencode = env::var("OPENCODE_SESSION_ID")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+    Ok(codex.or(explicit).or(claude).or(cursor).or(opencode))
 }
 
 /// `--observe`: a read by someone who does not own the task. The store is in the
@@ -827,7 +960,7 @@ mod tests {
         assert!(validate_bridge_host_command(&escaped.command, root.path(), root.path()).is_err());
 
         let harness_status =
-            Cli::try_parse_from(["brgr", "harness", "status", "local.gjc"]).unwrap();
+            Cli::try_parse_from(["brgr", "harness", "status", "local.fixture"]).unwrap();
         validate_bridge_host_command(&harness_status.command, root.path(), root.path()).unwrap();
 
         let harness_add = Cli::try_parse_from([
@@ -881,9 +1014,9 @@ mod tests {
 
     #[test]
     fn legacy_launch_without_pinned_manifest_cannot_replay() {
-        let error = pinned_manifest_for_launch(None, None, "local.gjc").unwrap_err();
+        let error = pinned_manifest_for_launch(None, None, "local.fixture").unwrap_err();
         assert!(error.to_string().contains("unsafe replay is disabled"));
-        let error = pinned_manifest_for_launch(None, Some("digest"), "local.gjc").unwrap_err();
+        let error = pinned_manifest_for_launch(None, Some("digest"), "local.fixture").unwrap_err();
         assert!(error.to_string().contains("unsafe replay is disabled"));
     }
 
@@ -1187,7 +1320,7 @@ mod tests {
         let Command::Run(args) = parsed.command else {
             panic!("not a run");
         };
-        assert_eq!(args.objective, "--workspace /etc");
+        assert_eq!(args.objective.as_deref(), Some("--workspace /etc"));
         assert_eq!(args.step.as_deref(), Some("--help~retry1"));
         assert_eq!(args.step_deadline, Some(2));
         assert_eq!(args.step_retries, Some(1));

@@ -128,7 +128,7 @@ Head 자동 종료는 남아 있다.
 
 ## Phase 2. Head Migration
 
-릴리스 방향: v2.15.0 · 상태: 2.1~2.6 출시. 실사용 확인은 Claude Head와 Codex Head 각 1회(둘 다 `--exit-old` 포함)다([Claude 기록](../evidence/verification-debt-2026-11-01.md), [Codex 기록](../releases/v2.15.15.md)). Codex 세션의 첫 brgr 명령이 `head handoff`인 경우, Cursor Head, 실제 신호로 하는 조건부 인계는 확인하지 못했다
+릴리스 방향: v2.15.0 · 상태: 2.1~2.6 출시. 실사용 확인은 Claude Head와 Codex Head 각 1회(둘 다 `--exit-old` 포함)다([Claude 기록](../evidence/verification-debt-2026-11-01.md), [Codex 기록](../releases/v2.15.15.md)). Linux와 macOS의 인계 왕복과 `--auto`(사용량 수치는 시험에서 넣은 값)는 [Linux 기록](../evidence/debate-handoff-delegation-2026-11-05.md)과 [macOS 기록](../evidence/debate-handoff-delegation-macos-2026-11-05.md)에 있다. Codex 세션의 첫 brgr 명령이 `head handoff`인 경우, Cursor Head, 실제 신호로 하는 조건부 인계는 확인하지 못했다
 
 지휘권을 다른 세션으로 옮기고 기존 worker와 미처리 결과를 승계한다. 인계 성공은
 새 Head가 실제 작업을 이어서 수행했을 때 입증한다. 특정 하네스 전용이 아니다.
@@ -315,7 +315,10 @@ owner(Head)는 사용자가 직접 띄운 세션이라 래퍼로 풀 수 없다.
 0. 스파이크([#228](https://github.com/justn-hyeok/brgr/issues/228)): PTY 프록시가
    Claude Code, Codex, Cursor TUI를 충실하게 감쌀 수 있는가. 설계를 바꾸는 유일한
    결정이라 먼저 한다. 결과가 나쁘면 제어되는 호스트만 TUI를 지원하고 순수
-   터미널은 headless만 지원한다.
+   터미널은 headless만 지원한다. macOS와 Linux x86_64 결과는 go다
+   ([macOS](../evidence/pty-proxy-spike-2026-11-04.md),
+   [Linux](../evidence/pty-proxy-spike-linux-2026-11-04.md)). 순수 터미널
+   에뮬레이터는 아직 시험하지 않았다.
 1. worker 세션과 배치 포트를 정의하고 호출 지점을 옮긴다. 첫 구현은 Herdr에 위임하는
    동작 불변 리팩터링이다. Phase 3.5(#200)와 #197이 이 안의 조각이다.
 2. 데이터 모델 일반화: surface를 호스트 중립으로, recipe의 `herdr_kind`를 호스트별
@@ -335,15 +338,17 @@ owner(Head)는 사용자가 직접 띄운 세션이라 래퍼로 풀 수 없다.
 5. 서명 없이도 믿을 수 있는 배포([#230](https://github.com/justn-hyeok/brgr/issues/230)).
 
 Apple 서명과 공증은 기준에 넣지 않는다. 홍보 문구의 모든 주장은 2와 3의 증거에
-연결한다. Herdr와 Orca를 깎아내리지 않는다. Unified Continuity(Phase 4)를 v3
-기준에 포함할지는 owner가 정한다.
+연결한다. Herdr와 Orca를 깎아내리지 않는다. Unified Continuity(Phase 4)는 v3
+기준에 넣지 않는다(owner 결정 2026-11-05).
+
+구현 이슈: 포트 #311, 데이터 모델 #312, tmux·cmux 어댑터 #313, 순수 터미널 #314.
 
 모르는 것: tmux와 cmux에 `idle`에 해당하는 신호가 있는지, Herdr의 어떤 동작이
 암묵적으로 신뢰성에 기여하는지, Herdr가 task 계약까지 가져올지.
 
 ## Phase 4. Unified Continuity
 
-릴리스 방향: 호스트 중립 다음. v3 기준에 포함할지는 owner가 정한다 · 상태: Phase 3.5 뒤
+릴리스 방향: 호스트 중립 다음, v3 기준에는 넣지 않음(owner 결정 2026-11-05) · 상태: Phase 3.5 뒤
 
 실행 중인 동적 workflow의 Head를 교체해도 작업이 계속되게 한다.
 

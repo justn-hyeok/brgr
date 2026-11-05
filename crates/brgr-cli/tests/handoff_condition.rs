@@ -37,14 +37,14 @@ fn json_output(output: &std::process::Output) -> Value {
     serde_json::from_slice(&output.stdout).unwrap()
 }
 
-fn gjc_fixture() -> std::path::PathBuf {
+fn brgr_fixture() -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../testdata/fixtures/gjc")
+        .join("../../testdata/fixtures/brgr-fixture")
         .canonicalize()
         .unwrap()
 }
 
-fn gjc_home() -> (TempDir, std::path::PathBuf, std::path::PathBuf) {
+fn fixture_home() -> (TempDir, std::path::PathBuf, std::path::PathBuf) {
     let temp = TempDir::new().unwrap();
     let home = temp.path().join("brgr");
     let workspace = temp.path().join("work");
@@ -56,7 +56,7 @@ fn gjc_home() -> (TempDir, std::path::PathBuf, std::path::PathBuf) {
         &[
             "harness",
             "add",
-            gjc_fixture().to_str().unwrap(),
+            brgr_fixture().to_str().unwrap(),
             "--workspace",
             scratch.to_str().unwrap(),
             "--prompt",
@@ -145,7 +145,7 @@ fn stderr_of(home: &Path, task_id: &str, envs: &[(&str, &str)]) -> String {
 
 #[test]
 fn a_head_over_its_limit_is_told_once_with_the_exact_handoff_command() {
-    let (_temp, home, workspace) = gjc_home();
+    let (_temp, home, workspace) = fixture_home();
     let task_id = start_task(&home, &workspace);
     arm(&home);
     write_signal(&home, "session-head", 72.0, now());
@@ -166,7 +166,7 @@ fn a_head_over_its_limit_is_told_once_with_the_exact_handoff_command() {
 
 #[test]
 fn nothing_is_said_without_a_configured_condition_a_fresh_signal_or_the_bound_session() {
-    let (_temp, home, workspace) = gjc_home();
+    let (_temp, home, workspace) = fixture_home();
     let task_id = start_task(&home, &workspace);
     write_signal(&home, "session-head", 99.0, now());
     // No condition configured.
@@ -186,7 +186,7 @@ fn nothing_is_said_without_a_configured_condition_a_fresh_signal_or_the_bound_se
 
 #[test]
 fn an_open_handoff_silences_the_note() {
-    let (_temp, home, workspace) = gjc_home();
+    let (_temp, home, workspace) = fixture_home();
     let task_id = start_task(&home, &workspace);
     arm(&home);
     write_signal(&home, "session-head", 80.0, now());
@@ -213,7 +213,7 @@ fn an_open_handoff_silences_the_note() {
 
 #[test]
 fn a_handoff_condition_needs_a_target_and_a_percentage() {
-    let (_temp, home, _workspace) = gjc_home();
+    let (_temp, home, _workspace) = fixture_home();
     for args in [
         vec!["config", "set-handoff-condition", "--kind", "claude"],
         vec![
@@ -279,7 +279,7 @@ fn arm_with_quota(home: &Path) {
 
 #[test]
 fn a_target_whose_plan_is_already_over_is_named_and_not_handed_to() {
-    let (_temp, home, workspace) = gjc_home();
+    let (_temp, home, workspace) = fixture_home();
     let task_id = start_task(&home, &workspace);
     arm_with_quota(&home);
     write_signal(&home, "session-head", 90.0, now());
@@ -293,7 +293,7 @@ fn a_target_whose_plan_is_already_over_is_named_and_not_handed_to() {
 
 #[test]
 fn a_stale_or_other_harness_report_does_not_block_the_handoff() {
-    let (_temp, home, workspace) = gjc_home();
+    let (_temp, home, workspace) = fixture_home();
     let task_id = start_task(&home, &workspace);
     arm_with_quota(&home);
     write_signal(&home, "session-head", 90.0, now());
@@ -340,7 +340,7 @@ fn arm_auto(home: &Path, auto: bool) {
 
 #[test]
 fn an_auto_handoff_runs_from_the_head_s_own_command_once() {
-    let (temp, home, workspace) = gjc_home();
+    let (temp, home, workspace) = fixture_home();
     let task_id = start_task(&home, &workspace);
     let dir = temp.path().join("fake");
     fs::create_dir_all(&dir).unwrap();
@@ -381,7 +381,7 @@ fn an_auto_handoff_runs_from_the_head_s_own_command_once() {
 
 #[test]
 fn without_auto_no_pane_is_opened() {
-    let (temp, home, workspace) = gjc_home();
+    let (temp, home, workspace) = fixture_home();
     let task_id = start_task(&home, &workspace);
     let dir = temp.path().join("fake");
     fs::create_dir_all(&dir).unwrap();
@@ -397,7 +397,7 @@ fn without_auto_no_pane_is_opened() {
 
 #[test]
 fn an_auto_handoff_that_cannot_start_says_why_and_still_gives_the_command() {
-    let (_temp, home, workspace) = gjc_home();
+    let (_temp, home, workspace) = fixture_home();
     let task_id = start_task(&home, &workspace);
     arm_auto(&home, true);
     write_signal(&home, "session-head", 80.0, now());
@@ -414,7 +414,7 @@ fn an_auto_handoff_that_cannot_start_says_why_and_still_gives_the_command() {
 
 #[test]
 fn a_full_context_window_alone_is_never_told() {
-    let (_temp, home, workspace) = gjc_home();
+    let (_temp, home, workspace) = fixture_home();
     let task_id = start_task(&home, &workspace);
     arm(&home);
     // The signal says 99% of the context window and 10% of the plan.
@@ -424,7 +424,7 @@ fn a_full_context_window_alone_is_never_told() {
 
 #[test]
 fn the_context_threshold_is_gone_but_an_old_config_still_loads() {
-    let (_temp, home, _workspace) = gjc_home();
+    let (_temp, home, _workspace) = fixture_home();
     assert!(
         !run(
             &home,

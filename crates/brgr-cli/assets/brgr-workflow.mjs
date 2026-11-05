@@ -1,5 +1,8 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { execFile } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync, chmodSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
@@ -225,19 +228,35 @@ async function requireActive(runId) {
   }
 }
 
-async function launchStep(args, runId, mode) {
+async function launchStep(args, runId, mode, task) {
+  let objectiveDirectory;
+  if (Buffer.byteLength(task) > 64 * 1024) {
+    objectiveDirectory = mkdtempSync(join(tmpdir(), "brgr-objective-"));
+    chmodSync(objectiveDirectory, 0o700);
+    const objectivePath = join(objectiveDirectory, "objective.txt");
+    writeFileSync(objectivePath, task, { mode: 0o600, flag: "wx" });
+    args = [...args, "--objective-file", objectivePath];
+  } else {
+    args = [...args, "--", task];
+  }
   let delay = BACKOFF_START_MS;
-  for (;;) {
-    try {
-      return await execBrgr([...sourcePanePrefix(mode), "run", ...args]);
-    } catch (error) {
-      if (error && error.code === TEMPFAIL) {
-        await requireActive(runId);
-        await sleep(delay);
-        delay = Math.min(delay * 2, BACKOFF_CAP_MS);
-        continue;
+  try {
+    for (;;) {
+      try {
+        return await execBrgr([...sourcePanePrefix(mode), "run", ...args]);
+      } catch (error) {
+        if (error && error.code === TEMPFAIL) {
+          await requireActive(runId);
+          await sleep(delay);
+          delay = Math.min(delay * 2, BACKOFF_CAP_MS);
+          continue;
+        }
+        throw wrapChildError(error);
       }
-      throw wrapChildError(error);
+    }
+  } finally {
+    if (objectiveDirectory) {
+      rmSync(objectiveDirectory, { recursive: true, force: true });
     }
   }
 }
@@ -438,13 +457,12 @@ function runArgs(options, runId, key, retries) {
   if (retries > 0) {
     args.push(option("step-retries", retries));
   }
-  args.push("--", options.task);
   return args;
 }
 
 async function runAttempt(options, runId, key, retries) {
   const launched = parseJson(
-    (await launchStep(runArgs(options, runId, key, retries), runId, options.mode)).stdout,
+    (await launchStep(runArgs(options, runId, key, retries), runId, options.mode, options.task)).stdout,
     "run",
   );
   if (!launched.task_id) {
