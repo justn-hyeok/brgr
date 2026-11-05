@@ -17,6 +17,8 @@ use std::{
     process::Command,
 };
 
+use brgr_protocol::{AttemptId, ResultEnvelope, ResultId, SCHEMA_V1, TaskSpec, TerminalOutcome};
+use brgr_store::Store;
 use serde_json::Value;
 use tempfile::TempDir;
 
@@ -237,6 +239,171 @@ fn a_refused_revise_keeps_the_failure_unacknowledged_and_worktree_kept() {
         !stderr.contains("run(s) failed or were lost and are not acknowledged"),
         "the failure banner remained after revise was admitted: {stderr}"
     );
+}
+
+#[test]
+fn a_killed_foreground_revise_acknowledges_its_previous_failure() {
+    let fixture = Fixture::new();
+    let task = fixture.run_failing_task("failure before a killed foreground revision");
+    let mut revise = fixture.command();
+    revise.args([
+        "revise",
+        &task,
+        "SLOW killed foreground revision",
+        "--foreground",
+    ]);
+    let mut child = revise.spawn().unwrap();
+    let store_path = fixture.home.join("store");
+    assert!(
+        common::wait_until(|| {
+            Store::open(&store_path)
+                .and_then(|store| store.task(task.parse().unwrap()))
+                .is_ok_and(|spec| spec.revision == 2)
+        }),
+        "foreground revise never durably admitted revision 2"
+    );
+    // The admission, not a later `result --ack`, must have acknowledged the
+    // failed revision before the worker could outlive the revise.
+    assert!(
+        common::wait_until(|| {
+            Store::open(&store_path)
+                .and_then(|store| {
+                    store.inbox(&store.task(task.parse().unwrap()).unwrap().owner_id, true)
+                })
+                .is_ok_and(|items| {
+                    items
+                        .iter()
+                        .any(|item| item.result.revision == 1 && item.acknowledged)
+                })
+        }),
+        "admission did not acknowledge the previous failure"
+    );
+
+    // The runner writes the worker's pid when it spawns and removes the file
+    // when the worker exits, so wait for it before killing the supervisor:
+    // killing first could leave a spawned worker orphaned with no record.
+    let pid_file = fixture.home.join("runs").join(format!("{task}.pid"));
+    let mut worker_pid = String::new();
+    assert!(
+        common::wait_until(|| {
+            if let Ok(pid) = fs::read_to_string(&pid_file)
+                && !pid.trim().is_empty()
+            {
+                worker_pid = pid;
+                return true;
+            }
+            false
+        }),
+        "worker pid file never appeared"
+    );
+    let killed = Command::new("/bin/kill")
+        .args(["-9", &child.id().to_string()])
+        .status()
+        .unwrap();
+    assert!(killed.success(), "could not SIGKILL foreground revise");
+    let status = child.wait().unwrap();
+    assert!(!status.success(), "SIGKILL unexpectedly succeeded");
+    let _ = Command::new("/bin/kill")
+        .args(["-9", worker_pid.trim()])
+        .status();
+
+    assert!(
+        common::wait_until(|| {
+            let _ = fixture.command().args(["status", &task]).output().unwrap();
+            Store::open(&store_path)
+                .and_then(|store| {
+                    store.inbox(&store.task(task.parse().unwrap()).unwrap().owner_id, true)
+                })
+                .is_ok_and(|items| items.iter().any(|item| item.result.revision == 2))
+        }),
+        "status did not recover the killed revision"
+    );
+    // Nothing acknowledges revision 2's lost result by hand: the next
+    // revision's admission must do it, or the failure banner stays.
+    let revised = fixture.json(&["revise", &task, "BRGR_FIXTURE_OK", "--foreground"]);
+    assert_eq!(revised["revision"], 3, "{revised}");
+    fixture.accept(&task);
+
+    let after = fixture.command().args(["status", &task]).output().unwrap();
+    let stderr = String::from_utf8_lossy(&after.stderr);
+    assert!(
+        !stderr.contains("run(s) failed or were lost and are not acknowledged"),
+        "a prior revision's failure remained unacknowledged: {stderr}"
+    );
+}
+
+#[test]
+fn result_ack_clears_older_failures_and_unblocks_prune() {
+    let fixture = Fixture::new();
+    let task = fixture.run_failing_task("historical failure");
+    let task_id = task.parse().unwrap();
+    let mut store = Store::open(fixture.home.join("store")).unwrap();
+    let mut next: TaskSpec = store.task(task_id).unwrap();
+    next.revision = 2;
+    next.create_request_id = format!("historical-revise-{task}");
+    next.objective = "candidate awaiting a decision".to_owned();
+    store
+        .record_task(&next, "historical-revision-digest")
+        .unwrap();
+    let attempt_id = AttemptId::new();
+    store.create_attempt(task_id, 2, attempt_id).unwrap();
+    let artifact = store
+        .seal_artifact_reader(
+            std::io::Cursor::new(b"candidate"),
+            &next.artifact_contract.media_type,
+            next.artifact_contract.max_bytes,
+        )
+        .unwrap();
+    let candidate = ResultEnvelope {
+        schema: SCHEMA_V1.to_owned(),
+        task_id,
+        revision: 2,
+        attempt_id,
+        result_id: ResultId::new(),
+        outcome: TerminalOutcome::Candidate,
+        artifacts: vec![artifact],
+        error: None,
+        legacy_embedded_route_observation: None,
+        route_observation: None,
+        unresolved_effects: vec![],
+        slept_seconds: None,
+    };
+    store
+        .commit_terminal_result(&next.owner_id, &candidate)
+        .unwrap();
+    drop(store);
+
+    fixture.acknowledge(&task);
+
+    let store = Store::open(fixture.home.join("store")).unwrap();
+    let inbox = store.inbox(&next.owner_id, true).unwrap();
+    let old_failure = inbox
+        .iter()
+        .find(|item| item.result.revision == 1)
+        .expect("revision 1 failure missing from inbox");
+    assert!(
+        old_failure.acknowledged,
+        "historical failure was not acknowledged"
+    );
+    let candidate_item = inbox
+        .iter()
+        .find(|item| item.result.result_id == candidate.result_id)
+        .expect("candidate missing from inbox");
+    assert!(
+        candidate_item.acknowledged,
+        "acknowledged candidate remained pending"
+    );
+    assert!(
+        store
+            .decision_for_result(candidate.result_id)
+            .unwrap()
+            .is_none()
+    );
+    drop(store);
+
+    let applied = fixture.prune(&["--apply"]);
+    assert_eq!(applied["removed"], 1, "{applied}");
+    assert!(!fixture.worktree(&task).exists());
 }
 
 /// Acknowledging a lost result does not stop its worker. A harness process

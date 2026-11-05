@@ -448,6 +448,13 @@ pub(crate) fn result(
         .collect::<Result<Vec<_>>>()?;
     if ack {
         store.acknowledge_bound(&spec.owner_id, result.result_id, &session_id, binding_epoch)?;
+        store.acknowledge_older_failures_bound(
+            &spec.owner_id,
+            task,
+            spec.revision,
+            &session_id,
+            binding_epoch,
+        )?;
         if let Err(error) = pane_cleanup::mark_pending(&paths.runs, task, &result) {
             eprintln!("brgr pane cleanup queue could not be updated: {error}");
         } else if let Err(error) = pane_cleanup::close_if_eligible(&store, &paths.runs, task) {

@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Continue notices are answered only when the visible line contains the notice itself, not prose that quotes or discusses it.
+- `revise` acknowledges the replaced failure as soon as its new revision is admitted, and `result --ack` can clear older failed or lost revisions left by v2.15.20.
 - Notification dispatchers now stop when their original store database is removed or replaced without recreating it.
 - `brgr wait` and `brgr watch` poll sealed results every 200 ms and run recovery and cleanup at most once every five seconds.
 - Pending worktree cleanup no longer waits on a newer revision's worker; accept/reject keep the bounded supervisor-exit wait.

@@ -237,6 +237,73 @@ impl Store {
         Ok(())
     }
 
+    /// Acknowledges older failed or lost results for one task without changing
+    /// a candidate that is still awaiting an owner decision.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a stale session or a database/serialization failure.
+    pub fn acknowledge_older_failures_bound(
+        &self,
+        owner_id: &OwnerId,
+        task_id: TaskId,
+        before_revision: u32,
+        session_id: &str,
+        binding_epoch: u64,
+    ) -> Result<(), StoreError> {
+        let transaction = self.write_transaction()?;
+        assert_owner_binding(
+            &transaction,
+            owner_id,
+            Some(session_id),
+            Some(binding_epoch),
+        )?;
+        note_owner_action(&transaction, owner_id, session_id, binding_epoch)?;
+        let failed = {
+            let mut statement = transaction.prepare(
+                "SELECT r.result_id, r.envelope_json
+                 FROM results r
+                 JOIN inbox_items i ON i.result_id = r.result_id
+                 WHERE i.owner_id = ?1 AND i.acknowledged = 0
+                   AND r.task_id = ?2 AND r.revision < ?3
+                 ORDER BY r.rowid",
+            )?;
+            let rows = statement.query_map(
+                params![owner_id.as_str(), task_id.to_string(), before_revision],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )?;
+            rows.map(|row| {
+                let (result_id, envelope) = row?;
+                let result = serde_json::from_str::<ResultEnvelope>(&envelope)?;
+                Ok::<_, StoreError>(
+                    matches!(
+                        result.outcome,
+                        TerminalOutcome::Failed | TerminalOutcome::Lost
+                    )
+                    .then_some(result_id),
+                )
+            })
+            .collect::<Result<Vec<_>, StoreError>>()?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+        };
+        for result_id in failed {
+            transaction.execute(
+                "UPDATE inbox_items SET acknowledged = 1
+                 WHERE owner_id = ?1 AND result_id = ?2",
+                params![owner_id.as_str(), result_id],
+            )?;
+            transaction.execute(
+                "UPDATE completion_notifications SET resolved = 1,
+                   claim_token = NULL, claim_until = 0 WHERE result_id = ?1",
+                [result_id],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
     /// Records the sole accept/reject decision for a result.
     ///
     /// Semantic replay is idempotent even when a caller generated a new
