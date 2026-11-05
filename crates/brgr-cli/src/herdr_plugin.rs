@@ -370,7 +370,7 @@ fn plugin_path_value(
     env::join_paths(binary_paths).context("could not add brgr to Codex PATH")
 }
 
-fn codex_env_config(name: &str, value: &str) -> Result<String> {
+pub(crate) fn codex_env_config(name: &str, value: &str) -> Result<String> {
     Ok(format!(
         "shell_environment_policy.set.{name}={}",
         serde_json::to_string(value)?
