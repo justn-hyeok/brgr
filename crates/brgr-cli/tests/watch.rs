@@ -132,6 +132,11 @@ fn pause_worker_and_supervisor_exit_when_the_test_home_is_removed() {
     let deadline = Instant::now() + Duration::from_secs(3);
     while Instant::now() < deadline {
         if !process_exists(&worker_pid) && !process_exists(&supervisor_pid) {
+            assert!(
+                !home.exists(),
+                "supervisor exit path recreated the removed home {}",
+                home.display()
+            );
             return;
         }
         std::thread::sleep(Duration::from_millis(20));

@@ -2578,3 +2578,58 @@ fn acknowledge_older_failures_bound_leaves_an_older_candidate_untouched() {
         "the older failed result was not acknowledged"
     );
 }
+
+#[test]
+fn sealing_after_the_store_root_is_removed_fails_without_recreating_it() {
+    let root = TempDir::new().unwrap();
+    let store_root = root.path().join("store");
+    let store = Store::open(&store_root).unwrap();
+
+    fs::remove_dir_all(&store_root).unwrap();
+
+    assert!(
+        store
+            .seal_artifact_reader(std::io::Cursor::new(b"report"), "text/plain", 100)
+            .is_err()
+    );
+    assert!(
+        !store_root.exists(),
+        "sealing recreated the removed store root"
+    );
+}
+
+#[test]
+fn sealing_recreates_only_staging_and_shard_with_private_permissions() {
+    let root = TempDir::new().unwrap();
+    let store_root = root.path().join("store");
+    let store = Store::open(&store_root).unwrap();
+
+    let first = store
+        .seal_artifact_reader(std::io::Cursor::new(b"first"), "text/plain", 100)
+        .unwrap();
+    assert_eq!(store.read_artifact(&first, 100).unwrap(), b"first");
+
+    fs::remove_dir_all(store_root.join("artifacts/sha256/.tmp")).unwrap();
+
+    let reference = store
+        .seal_artifact_reader(std::io::Cursor::new(b"report"), "text/plain", 100)
+        .unwrap();
+    assert_eq!(store.read_artifact(&reference, 100).unwrap(), b"report");
+
+    #[cfg(unix)]
+    {
+        let shard = store_root.join(&reference.store_relative_path);
+        let shard_directory = shard.parent().unwrap();
+        for directory in [
+            store_root.join("artifacts/sha256/.tmp"),
+            shard_directory.to_path_buf(),
+        ] {
+            assert_eq!(
+                fs::metadata(&directory).unwrap().permissions().mode() & 0o777,
+                0o700,
+                "{} is not private",
+                directory.display()
+            );
+        }
+    }
+}

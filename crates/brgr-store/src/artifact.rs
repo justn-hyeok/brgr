@@ -1,7 +1,7 @@
 use std::{
     fs::{self, File, OpenOptions},
     io::{self, Read, Write},
-    os::unix::fs::MetadataExt,
+    os::unix::fs::{MetadataExt, PermissionsExt},
     path::{Path, PathBuf},
 };
 
@@ -73,7 +73,7 @@ impl ArtifactStore {
         }
 
         let staging = self.root.join(".tmp");
-        private_directory(&staging)?;
+        private_subdirectory(&staging)?;
         let mut temporary = NamedTempFile::new_in(&staging)?;
         private_file(temporary.path())?;
 
@@ -103,7 +103,7 @@ impl ArtifactStore {
         let digest = format_sha256(hash.as_ref());
         let hex_digest = digest.trim_start_matches("sha256:");
         let digest_directory = self.root.join(&hex_digest[..2]);
-        private_directory(&digest_directory)?;
+        private_subdirectory(&digest_directory)?;
         let destination = digest_directory.join(&hex_digest[2..]);
 
         match temporary.persist_noclobber(&destination) {
@@ -220,6 +220,19 @@ fn same_regular_file(before: &fs::Metadata, opened: &fs::Metadata) -> bool {
 
 fn sync_directory(path: &Path) -> Result<(), StoreError> {
     OpenOptions::new().read(true).open(path)?.sync_all()?;
+    Ok(())
+}
+
+/// Creates one directory level under the artifact root without recreating
+/// missing ancestors, so sealing fails instead of rebuilding a deleted store.
+fn private_subdirectory(path: &Path) -> Result<(), StoreError> {
+    match fs::create_dir(path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(StoreError::Io(error)),
+    }
+    #[cfg(unix)]
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
     Ok(())
 }
 
