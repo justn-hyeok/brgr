@@ -14,7 +14,7 @@ use anyhow::{Context as _, Result, bail};
 use brgr_protocol::TaskId;
 use serde_json::Value;
 
-use super::{Herdr, Notices, POLL, native, start_agent};
+use super::{Herdr, Notices, POLL, native, screens, start_agent};
 use crate::{Paths, cli::PaneRunArgs};
 
 /// How long the incoming agent may take to be ready for its first prompt.
@@ -72,6 +72,7 @@ pub(crate) fn open_incoming(paths: &Paths, spec: &IncomingSpec<'_>) -> Result<In
         task: spec.task,
         outstanding: Vec::new(),
     };
+    screens::settle_shell(&herdr, &pane, &run, paths);
     let ready = start_agent(&herdr, &name, &pane, &run, &mut notices).and_then(|()| {
         let waited = Instant::now();
         while !native::native_ready(&herdr, &pane, spec.kind, false) {

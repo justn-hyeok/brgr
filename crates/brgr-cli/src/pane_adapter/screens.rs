@@ -387,6 +387,50 @@ pub(super) fn resolve(
     Ok(outcome)
 }
 
+/// How long a new pane's shell may take to draw anything.
+const SHELL_DRAW: Duration = Duration::from_secs(5);
+const SHELL_DRAW_POLL: Duration = Duration::from_millis(100);
+
+fn is_shell_update_offer(screen: &str) -> bool {
+    let lower = screen.to_lowercase();
+    lower.contains("[oh-my-zsh]") && lower.contains("would you like to update?")
+}
+
+/// Waits for a new pane's shell to stop drawing before anything is typed into it.
+/// A shell startup question takes the next key as its answer: oh-my-zsh's update
+/// offer ate the first letter of the command, seen live as `zsh: command not
+/// found: odex`, on every pane until the offer was answered.
+pub(super) fn settle_shell(herdr: &Herdr, pane: &str, run: &PaneRunArgs, paths: &Paths) {
+    let started = Instant::now();
+    let mut answered = false;
+    let mut last = String::new();
+    let mut unchanged = 0;
+    while started.elapsed() < SHELL_DRAW {
+        let Some(screen) = herdr.screen(pane) else {
+            return;
+        };
+        if !answered && is_shell_update_offer(&screen) {
+            answered = true;
+            let keys = ["n"];
+            match herdr.call(&["pane", "send-keys", pane, keys[0]]) {
+                Ok(_) => record(&log_path(paths, run), pane, "shell-update-offer", &keys),
+                Err(failure) => {
+                    eprintln!("brgr pane mode · could not skip a shell update offer: {failure}");
+                }
+            }
+        } else if screen == last && !screen.trim().is_empty() {
+            unchanged += 1;
+            if unchanged >= 2 {
+                return;
+            }
+        } else {
+            unchanged = 0;
+        }
+        last = screen;
+        std::thread::sleep(SHELL_DRAW_POLL);
+    }
+}
+
 /// The per-attempt record of every key brgr pressed on its own.
 pub(super) fn log_path(paths: &Paths, run: &PaneRunArgs) -> PathBuf {
     paths
@@ -1118,6 +1162,28 @@ esac
             keep_pane: false,
         };
         (paths, run)
+    }
+
+    #[test]
+    fn a_shell_update_offer_is_declined_before_anything_is_typed() {
+        let (temp, herdr) = fake_herdr("[oh-my-zsh] Would you like to update? [Y/n] ");
+        let (paths, run) = run_args(&temp);
+        settle_shell(&herdr, "w1:p2", &run, &paths);
+        let keys = std::fs::read_to_string(temp.path().join("keys")).unwrap();
+        assert_eq!(keys.trim(), "pane send-keys w1:p2 n");
+        let log = std::fs::read_to_string(log_path(&paths, &run)).unwrap();
+        assert!(
+            log.trim_end().ends_with("w1:p2 shell-update-offer n"),
+            "{log}"
+        );
+    }
+
+    #[test]
+    fn a_plain_shell_prompt_presses_nothing() {
+        let (temp, herdr) = fake_herdr("repo on main\n❯ update the docs? [Y/n]");
+        let (paths, run) = run_args(&temp);
+        settle_shell(&herdr, "w1:p2", &run, &paths);
+        assert!(!temp.path().join("keys").exists());
     }
 
     #[test]

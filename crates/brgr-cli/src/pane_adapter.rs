@@ -559,6 +559,7 @@ fn start_worker(
     run: &PaneRunArgs,
     notices: &mut Notices<'_>,
 ) -> Result<()> {
+    screens::settle_shell(herdr, pane, run, notices.paths);
     if run.native_executable.is_some() {
         start_native(herdr, pane, run, notices)?;
     } else {
