@@ -463,7 +463,7 @@ if (launched.status !== 0) {{
   console.error(launched.stderr);
   process.exit(launched.status ?? 1);
 }}
-await new Promise((resolve) => setTimeout(resolve, 60000));
+await new Promise((resolve) => setTimeout(resolve, 600000));
 "#,
         workspace = json!(workspace)
     );
@@ -511,6 +511,7 @@ await new Promise((resolve) => setTimeout(resolve, 60000));
         &owner_env(),
     ));
     assert_eq!(cancelled["state"], "cancelled");
+    assert_eq!(cancelled["driver_stopped"], true, "{cancelled}");
     wait_run_state(&fixture.home, &run_id, "cancelled", Duration::from_mins(1));
     assert!(
         wait_until(Duration::from_mins(1), || !process_alive(pid)),
