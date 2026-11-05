@@ -2,7 +2,7 @@
 
 mod common;
 
-use common::{brgr_command, wait_until, write_fast_script};
+use common::{brgr_command, process_exists, wait_until, write_fast_script};
 
 use std::{
     fs,
@@ -86,7 +86,7 @@ if [ -n "$prompt_file" ] && /usr/bin/grep -q 'HOLD' "$prompt_file"; then
   /bin/sleep 30
 elif [ -n "$prompt_file" ] && /usr/bin/grep -q 'PAUSE' "$prompt_file"; then
   n=0
-  while [ ! -e "$BRGR_HOME/release-pause" ] && [ "$n" -lt 6000 ]; do
+  while [ -d "$BRGR_HOME" ] && [ ! -e "$BRGR_HOME/release-pause" ] && [ "$n" -lt 6000 ]; do
     /bin/sleep 0.1
     n=$((n + 1))
   done
@@ -104,6 +104,45 @@ fn watch_home() -> (TempDir, PathBuf, PathBuf) {
     write_fast_script(&executable, WATCH_FIXTURE);
     add_fixture(&home, &executable, &temp.path().join("scratch"));
     (temp, home, workspace)
+}
+
+#[test]
+fn pause_worker_and_supervisor_exit_when_the_test_home_is_removed() {
+    let (temp, home, workspace) = watch_home();
+    let task = start_task(&home, &workspace, "PAUSE", false);
+    let run_dir = home.join("runs");
+    let worker_pid_path = run_dir.join(format!("{task}.pid"));
+    assert!(
+        wait_until(|| fs::metadata(&worker_pid_path).is_ok_and(|metadata| metadata.len() > 0)),
+        "PAUSE worker did not start"
+    );
+    let worker_pid = fs::read_to_string(worker_pid_path)
+        .unwrap()
+        .trim()
+        .to_owned();
+    let supervisor: Value =
+        serde_json::from_slice(&fs::read(run_dir.join(format!("{task}.supervisor.json"))).unwrap())
+            .unwrap();
+    let supervisor_pid = supervisor["identity"]["handle"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    fs::remove_dir_all(temp.path()).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < deadline {
+        if !process_exists(&worker_pid) && !process_exists(&supervisor_pid) {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let _ = Command::new("/bin/kill")
+        .args(["-KILL", "--", &format!("-{worker_pid}")])
+        .status();
+    let _ = Command::new("/bin/kill")
+        .args(["-KILL", "--", &supervisor_pid])
+        .status();
+    panic!("PAUSE worker or supervisor stayed alive after its test home was removed");
 }
 
 fn start_task(home: &Path, workspace: &Path, objective: &str, foreground: bool) -> String {

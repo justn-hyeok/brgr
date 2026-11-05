@@ -3393,7 +3393,7 @@ printf '%s\n' '{{"type":"agent_end","stopReason":"completed"}}'
     ));
     let root_task = root["task_id"].as_str().unwrap();
     assert!(
-        wait_until(|| child_json_path.is_file() && ping_pid_path.is_file()),
+        wait_until(|| file_is_nonempty(&child_json_path) && file_is_nonempty(&ping_pid_path)),
         "the nested task did not start the process: {}",
         fs::read_to_string(&child_json_path).unwrap_or_default()
     );
@@ -3419,6 +3419,10 @@ printf '%s\n' '{{"type":"agent_end","stopReason":"completed"}}'
         .is_ok_and(
             |state| state == brgr_protocol::AttemptState::Terminal
         )));
+}
+
+fn file_is_nonempty(path: &Path) -> bool {
+    fs::metadata(path).is_ok_and(|metadata| metadata.is_file() && metadata.len() > 0)
 }
 
 #[test]
@@ -7092,7 +7096,12 @@ fn a_cancel_of_a_lost_revision_does_not_cancel_the_next_one() {
     let task = launch["task_id"].as_str().unwrap();
     let store = brgr_store::Store::open(home.join("store")).unwrap();
     active_attempt(&store, task);
-    let worker_pid = fs::read_to_string(home.join("runs").join(format!("{task}.pid")))
+    let worker_pid_path = home.join("runs").join(format!("{task}.pid"));
+    assert!(
+        wait_until(|| file_is_nonempty(&worker_pid_path)),
+        "worker pid file was not populated"
+    );
+    let worker_pid = fs::read_to_string(worker_pid_path)
         .unwrap()
         .trim()
         .to_owned();
