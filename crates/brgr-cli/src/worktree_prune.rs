@@ -1399,6 +1399,15 @@ fn lossy(path: &Path) -> String {
 /// Returns what happened, for a note on stderr; `None` when there was nothing
 /// to do. Never fails the decision that triggered it.
 pub(crate) fn reclaim_task(paths: &Paths, task: TaskId, revision: u32) -> Option<String> {
+    reclaim_task_with_worker_wait(paths, task, revision, false)
+}
+
+fn reclaim_task_with_worker_wait(
+    paths: &Paths,
+    task: TaskId,
+    revision: u32,
+    wait_for_worker_exit: bool,
+) -> Option<String> {
     let store = Store::open(&paths.store).ok()?;
     let launch: crate::LaunchEnvelope =
         serde_json::from_slice(&fs::read(paths.launch(task, revision)).ok()?).ok()?;
@@ -1421,14 +1430,13 @@ pub(crate) fn reclaim_task(paths: &Paths, task: TaskId, revision: u32) -> Option
     if unsettled(&store, task, revision, None).is_some() {
         return None;
     }
-    // A decision can land while a headless supervisor is still exiting after
-    // sealing the result; nothing would retry once it has gone, so wait a moment.
-    let exited_by = std::time::Instant::now() + WORKER_EXIT_WAIT;
-    while crate::supervision::worker_may_be_running(paths, task) {
-        if std::time::Instant::now() >= exited_by {
-            return None;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(200));
+    if newer_revision_is_pending(paths, &store, task, revision) {
+        // Git-backed revisions have distinct worktrees, but keep the older
+        // checkout until its newer revision is done. A later reconcile retries.
+        return None;
+    }
+    if !worker_exit_is_safe(paths, task, wait_for_worker_exit) {
+        return None;
     }
     // The decision and the pane's session loop both reclaim once the pane
     // closes. One attempt at a time: the other process is already on it.
@@ -1547,6 +1555,31 @@ fn task_worktree(workspace: &Path, root: &Path, task: TaskId, revision: u32) -> 
 /// result.
 const WORKER_EXIT_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// Cleanup paths check once; only the decision path waits for the supervisor
+/// that may still be exiting after it sealed the result.
+fn worker_exit_is_safe(paths: &Paths, task: TaskId, wait: bool) -> bool {
+    if !wait {
+        return !crate::supervision::worker_may_be_running(paths, task);
+    }
+    let exited_by = std::time::Instant::now() + WORKER_EXIT_WAIT;
+    while crate::supervision::worker_may_be_running(paths, task) {
+        if std::time::Instant::now() >= exited_by {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    true
+}
+
+fn newer_revision_is_pending(paths: &Paths, store: &Store, task: TaskId, revision: u32) -> bool {
+    let Ok(latest) = store.latest_revision(task) else {
+        return true;
+    };
+    latest > revision
+        && (unsettled(store, task, latest, None).is_some()
+            || crate::supervision::worker_may_be_running(paths, task))
+}
+
 /// The marker that records the owner's `--include-ignored` on a decision. A
 /// pane-mode worktree is reclaimed later, when its pane closes, by a process
 /// that never saw the flag, so the choice is written down, with the id of the
@@ -1595,6 +1628,14 @@ pub(crate) fn forget_ignored(paths: &Paths, task: TaskId, revision: u32) {
 /// Runs [`reclaim_task`] and notes the outcome on stderr.
 pub(crate) fn reclaim_and_report(paths: &Paths, task: TaskId, revision: u32) {
     if let Some(note) = reclaim_task(paths, task, revision) {
+        eprintln!("brgr · {note}");
+    }
+}
+
+/// Reclaims from an owner's accept, reject or acknowledgement, allowing the headless
+/// supervisor its existing bounded exit window.
+pub(crate) fn reclaim_after_decision_and_report(paths: &Paths, task: TaskId, revision: u32) {
+    if let Some(note) = reclaim_task_with_worker_wait(paths, task, revision, true) {
         eprintln!("brgr · {note}");
     }
 }
