@@ -30,7 +30,7 @@ use std::{
     fmt::Write as _,
     fs,
     io::Write as _,
-    os::unix::fs::PermissionsExt,
+    os::unix::fs::{MetadataExt, PermissionsExt},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     thread,
@@ -4355,47 +4355,201 @@ fn idle_claude_owner_is_told_when_a_worker_asks() {
     json_output(&run(&home, &["cancel", task], &owner));
 }
 
-/// A notification dispatcher stops once its control home is gone.
-///
-/// It polls for up to a day, and an open database connection keeps reading a
-/// deleted database, so every test that deleted its home left one running.
-#[test]
-fn a_dispatcher_exits_when_its_control_home_is_removed() {
-    let (temp, home, workspace) = fixture_home();
+fn set_dispatcher_notifications(home: &Path, enabled: bool) {
+    let enabled = if enabled { "true" } else { "false" };
+    assert!(
+        run(
+            home,
+            &[
+                "config",
+                "set",
+                "notifications",
+                enabled,
+                "--harness",
+                "local.fixture"
+            ],
+            &[],
+        )
+        .status
+        .success()
+    );
+}
+
+fn dispatcher_with_pending_notice() -> (
+    TempDir,
+    PathBuf,
+    String,
+    PathBuf,
+    PathBuf,
+    PathBuf,
+    std::process::Child,
+) {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("brgr");
+    let workspace = temp.path().join("work");
+    let executable = temp.path().join("fixture");
+    let herdr = temp.path().join("herdr");
+    let herdr_calls = temp.path().join("herdr-calls");
+    let herdr_gate = temp.path().join("herdr-gate");
+    let herdr_release = temp.path().join("herdr-release");
+    fs::create_dir_all(&workspace).unwrap();
+    write_fast_script(
+        &herdr,
+        "#!/bin/sh\nif [ \"$1\" = --session ]; then shift 2; fi\ncase \"$1 $2\" in\n 'agent get') printf called >> \"$BRGR_TEST_HERDR_CALLS\"; if [ ! -e \"$BRGR_TEST_HERDR_GATE\" ]; then : > \"$BRGR_TEST_HERDR_GATE\"; while [ ! -e \"$BRGR_TEST_HERDR_RELEASE\" ]; do /bin/sleep 0.01; done; fi; printf '%s\\n' '{\"result\":{\"agent\":{\"agent\":\"codex\",\"pane_id\":\"w1:p1\",\"agent_status\":\"working\",\"agent_session\":{\"value\":\"dispatcher-session\"}}}}';;\n *) exit 2;;\nesac\n",
+    );
+    write_fast_script(
+        &executable,
+        "#!/bin/sh\ncase \"$1\" in\n --version) echo 'fixture v-dispatcher-notice'; exit 0;;\n --help) printf '%s\\n' '-p, --print' '--mode=<value>' '--no-session' '--no-mcp' '--model' '--thinking'; exit 0;;\nesac\nfor item in \"$@\"; do case \"$item\" in @*) prompt=${item#@};; esac; done\nif /usr/bin/grep -q BRGR_FIXTURE_OK \"$prompt\"; then\n printf '%s\\n' '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"BRGR_FIXTURE_OK\"}]}}'\n printf '%s\\n' '{\"type\":\"agent_end\",\"stopReason\":\"completed\"}'\nelse\n exit 7\nfi\n",
+    );
+    add_fixture(&home, &executable, &temp.path().join("scratch"));
     let owner = [("BRGR_OWNER_ID", "codex:dispatcher-exit")];
+    set_dispatcher_notifications(&home, false);
     let launched = json_output(&run(
         &home,
-        &["run", "SLOW", "--workspace", workspace.to_str().unwrap()],
+        &[
+            "run",
+            "FAIL",
+            "--workspace",
+            workspace.to_str().unwrap(),
+            "--foreground",
+        ],
         &owner,
     ));
-    let task = launched["task_id"].as_str().unwrap();
-    let mut dispatcher = brgr_command()
+    assert_eq!(launched["outcome"], "failed", "{launched}");
+    let task = launched["task_id"].as_str().unwrap().to_owned();
+    let attempt = brgr_store::Store::open(home.join("store"))
+        .unwrap()
+        .latest_result(task.parse().unwrap())
+        .unwrap()
+        .attempt_id;
+    assert_eq!(
+        brgr_store::Store::open(home.join("store"))
+            .unwrap()
+            .pending_notifications_for_task(task.parse().unwrap())
+            .unwrap()
+            .len(),
+        1,
+        "the fixture must leave an undelivered notice"
+    );
+    let owner_id = brgr_protocol::OwnerId::new("codex:dispatcher-exit").unwrap();
+    let store = brgr_store::Store::open(home.join("store")).unwrap();
+    let epoch = store.rebind_owner(&owner_id, "dispatcher-session").unwrap();
+    store
+        .register_owner_surface(
+            &owner_id,
+            "dispatcher-session",
+            epoch,
+            "w1:p1",
+            None,
+            herdr.to_str().unwrap(),
+        )
+        .unwrap();
+    drop(store);
+    let message_id = uuid::Uuid::new_v4().to_string();
+    rusqlite::Connection::open(home.join("store/brgr.sqlite3"))
+        .unwrap()
+        .execute(
+            "INSERT INTO task_messages (message_id, task_id, attempt_id, direction, kind, body)
+             VALUES (?1, ?2, ?3, 'worker_to_owner', 'question', 'dispatcher race gate')",
+            rusqlite::params![message_id, task, attempt.to_string()],
+        )
+        .unwrap();
+    set_dispatcher_notifications(&home, true);
+    let dispatcher = brgr_command()
         .arg("--home")
         .arg(&home)
-        .args(["__notify", task])
+        .args(["__notify", &task])
         .env_remove("HERDR_ENV")
+        .env("BRGR_TEST_HERDR_CALLS", &herdr_calls)
+        .env("BRGR_TEST_HERDR_GATE", &herdr_gate)
+        .env("BRGR_TEST_HERDR_RELEASE", &herdr_release)
         .spawn()
         .unwrap();
-    // Still polling: the run is not finished.
-    thread::sleep(Duration::from_millis(800));
-    assert!(
-        dispatcher.try_wait().unwrap().is_none(),
-        "exited before the home was removed"
-    );
+    (
+        temp,
+        home,
+        task,
+        herdr_calls,
+        herdr_gate,
+        herdr_release,
+        dispatcher,
+    )
+}
 
-    // Not cancelled first: a final result also ends the dispatcher, and this
-    // must show that a vanished home alone is enough.
-    fs::remove_dir_all(&home).unwrap();
-    let exited = wait_until(|| dispatcher.try_wait().unwrap().is_some());
-    if !exited {
-        let _ = dispatcher.kill();
+fn wait_for_dispatcher_exit(
+    dispatcher: &mut std::process::Child,
+) -> Option<std::process::ExitStatus> {
+    let started = Instant::now();
+    while started.elapsed() < Duration::from_secs(5) {
+        if let Some(status) = dispatcher.try_wait().unwrap() {
+            return Some(status);
+        }
+        thread::sleep(Duration::from_millis(50));
     }
-    // The run's supervisor names the removed home in its argv; stop it too.
-    let _ = Command::new("/usr/bin/pkill")
-        .args(["-f", home.to_str().unwrap()])
-        .status();
-    drop(temp);
-    assert!(exited, "the dispatcher kept polling a removed control home");
+    None
+}
+
+fn wait_for_herdr_gate(path: &Path, dispatcher: &mut std::process::Child) {
+    let started = Instant::now();
+    while started.elapsed() < Duration::from_secs(5) {
+        if path.exists() {
+            return;
+        }
+        assert!(
+            dispatcher.try_wait().unwrap().is_none(),
+            "dispatcher exited before reaching the gated Herdr call"
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
+    panic!("dispatcher did not reach the gated Herdr call within five seconds");
+}
+
+/// A dispatcher does not recreate its control home after deletion during a pass.
+#[test]
+fn a_dispatcher_exits_without_recreating_its_deleted_control_home() {
+    let (_temp, home, _task, _herdr_calls, herdr_gate, herdr_release, mut dispatcher) =
+        dispatcher_with_pending_notice();
+    wait_for_herdr_gate(&herdr_gate, &mut dispatcher);
+    fs::remove_dir_all(&home).unwrap();
+    fs::write(herdr_release, "continue").unwrap();
+    let status = wait_for_dispatcher_exit(&mut dispatcher);
+    if status.is_none() {
+        dispatcher.kill().unwrap();
+        dispatcher.wait().unwrap();
+    }
+    let status = status.expect("the dispatcher kept polling a removed control home");
+    assert!(
+        status.success(),
+        "dispatcher failed after home deletion: {status}"
+    );
+    assert!(!home.exists(), "the dispatcher recreated its deleted home");
+}
+
+#[test]
+fn a_dispatcher_exits_when_its_database_is_recreated() {
+    let (_temp, home, _task, _herdr_calls, herdr_gate, herdr_release, mut dispatcher) =
+        dispatcher_with_pending_notice();
+    wait_for_herdr_gate(&herdr_gate, &mut dispatcher);
+    let database = home.join("store/brgr.sqlite3");
+    let old_identity = fs::metadata(&database).unwrap();
+    fs::remove_file(&database).unwrap();
+    drop(brgr_store::Store::open(home.join("store")).unwrap());
+    let new_identity = fs::metadata(&database).unwrap();
+    assert!(
+        old_identity.dev() != new_identity.dev() || old_identity.ino() != new_identity.ino(),
+        "replacement database reused its device and inode"
+    );
+    fs::write(herdr_release, "continue").unwrap();
+    let status = wait_for_dispatcher_exit(&mut dispatcher);
+    if status.is_none() {
+        dispatcher.kill().unwrap();
+        dispatcher.wait().unwrap();
+    }
+    let status = status.expect("the dispatcher stayed alive after database replacement");
+    assert!(
+        status.success(),
+        "dispatcher failed after database replacement: {status}"
+    );
 }
 
 #[test]

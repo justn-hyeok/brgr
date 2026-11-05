@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Notification dispatchers now stop when their original store database is removed or replaced without recreating it.
+
 ## 2.15.20 — 2026-11-05
 
 Fixes from the gate 2-5 review: revisions, heads, installers and stopping a process.

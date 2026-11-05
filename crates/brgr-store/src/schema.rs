@@ -318,8 +318,7 @@ pub(crate) fn schema_stamp(schema: &str) -> i64 {
 /// `journal_mode` is persistent, and re-declaring it takes a lock that
 /// `busy_timeout` does not cover, so it is only written when it differs.
 pub(crate) fn initialize_connection(connection: &Connection) -> Result<(), StoreError> {
-    connection.pragma_update(None, "foreign_keys", "ON")?;
-    connection.pragma_update(None, "synchronous", "FULL")?;
+    configure_connection(connection)?;
     let journal_mode: String = connection.query_row("PRAGMA journal_mode", [], |row| row.get(0))?;
     if !journal_mode.eq_ignore_ascii_case("wal") {
         connection.pragma_update(None, "journal_mode", "WAL")?;
@@ -347,6 +346,12 @@ pub(crate) fn initialize_connection(connection: &Connection) -> Result<(), Store
         connection.pragma_update(None, "user_version", stamp)?;
     }
     ensure_peer_message_timestamp(connection)?;
+    Ok(())
+}
+
+pub(crate) fn configure_connection(connection: &Connection) -> Result<(), StoreError> {
+    connection.pragma_update(None, "foreign_keys", "ON")?;
+    connection.pragma_update(None, "synchronous", "FULL")?;
     Ok(())
 }
 

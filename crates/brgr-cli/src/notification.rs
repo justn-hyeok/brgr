@@ -1,7 +1,7 @@
 use std::{
     env,
     fs::{self, OpenOptions, TryLockError},
-    os::unix::fs::OpenOptionsExt as _,
+    os::unix::fs::{MetadataExt as _, OpenOptionsExt as _},
     os::unix::process::CommandExt as _,
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -26,6 +26,27 @@ const POLL_INTERVAL: Duration = Duration::from_millis(500);
 const MAX_BACKOFF: Duration = Duration::from_secs(3);
 const MAX_LIFETIME: Duration = Duration::from_hours(24);
 const HERDR_TIMEOUT: Duration = Duration::from_secs(5);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct DatabaseIdentity {
+    device: u64,
+    inode: u64,
+}
+
+fn database_identity(path: &Path) -> Result<Option<DatabaseIdentity>> {
+    let metadata = match fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    if !metadata.is_file() {
+        return Ok(None);
+    }
+    Ok(Some(DatabaseIdentity {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+    }))
+}
 
 /// Records the pane of a head that has just taken command, and starts delivery
 /// of the notices a takeover requeued for it.
@@ -496,14 +517,20 @@ fn spawn_dispatcher(
 }
 
 pub async fn deliver_pending(paths: &Paths, task: TaskId) -> Result<()> {
-    if !notifications_enabled(paths, task)? {
+    let database = paths.store.join("brgr.sqlite3");
+    let Some(identity) = database_identity(&database)? else {
         return Ok(());
-    }
+    };
     let Some(_lock) = try_notify_lock(&paths.runs.join(format!("{task}.notify.lock")))? else {
         return Ok(());
     };
     let started = Instant::now();
-    let store = open_store(paths, started).await?;
+    let Some(store) = open_dispatch_store(paths, &database, identity, started).await? else {
+        return Ok(());
+    };
+    if !notifications_enabled_with_store(paths, task, &store)? {
+        return Ok(());
+    }
     // A finished task with nothing left to send exits before anything else:
     // proving the owner's pane reads every Codex pane, which takes seconds.
     if settled(&store, task)? {
@@ -512,13 +539,9 @@ pub async fn deliver_pending(paths: &Paths, task: TaskId) -> Result<()> {
     let mut registered = register_for_task(paths, &store, task).await;
     let mut next_try = Instant::now() + Duration::from_secs(2);
     let mut gap = Duration::from_secs(2);
-    let database = paths.store.join("brgr.sqlite3");
     let mut backoff = POLL_INTERVAL;
     while started.elapsed() < MAX_LIFETIME {
-        // An open connection keeps reading a deleted database, so a dispatcher
-        // whose control home was removed polled a dead store for a day. Test
-        // suites delete their homes; each run left one such process behind.
-        if !database.exists() {
+        if database_identity(&database)? != Some(identity) {
             return Ok(());
         }
         // The owner's pane may only be provable once the call that started this
@@ -558,7 +581,7 @@ pub async fn deliver_pending(paths: &Paths, task: TaskId) -> Result<()> {
             let Some(target) = claimed else {
                 continue;
             };
-            match try_deliver(paths, &target).await {
+            match try_deliver(paths, &store, &target).await {
                 Ok(()) => {
                     commit_delivery(|| store.mark_notification_delivered(&target, &token)).await?;
                 }
@@ -626,19 +649,24 @@ fn try_notify_lock(path: &Path) -> Result<Option<std::fs::File>> {
 /// Returns an error if the store cannot be opened or a durable write fails.
 pub async fn deliver_pending_workflow(paths: &Paths, run: &str) -> Result<()> {
     let run_id = WorkflowRunId::new(run)?;
+    let database = paths.store.join("brgr.sqlite3");
+    let Some(identity) = database_identity(&database)? else {
+        return Ok(());
+    };
     let Some(_lock) = try_notify_lock(&paths.runs.join(format!("{run_id}.workflow.notify.lock")))?
     else {
         return Ok(());
     };
     let started = Instant::now();
-    let store = open_store(paths, started).await?;
+    let Some(store) = open_dispatch_store(paths, &database, identity, started).await? else {
+        return Ok(());
+    };
     let mut registered = register_for_workflow(paths, &store, &run_id).await;
     let mut next_try = Instant::now() + Duration::from_secs(2);
     let mut gap = Duration::from_secs(2);
-    let database = paths.store.join("brgr.sqlite3");
     let mut backoff = POLL_INTERVAL;
     while started.elapsed() < MAX_LIFETIME {
-        if !database.exists() {
+        if database_identity(&database)? != Some(identity) {
             return Ok(());
         }
         if !registered && Instant::now() >= next_try {
@@ -712,7 +740,7 @@ async fn deliver_one_workflow(
     let Some(target) = claimed else {
         return Ok(true);
     };
-    match try_deliver_workflow(paths, &target).await {
+    match try_deliver_workflow(paths, store, &target).await {
         Ok(()) => {
             commit_delivery(|| store.mark_workflow_notification_delivered(&target, &token)).await?;
             Ok(true)
@@ -732,8 +760,12 @@ async fn deliver_one_workflow(
     }
 }
 
-async fn try_deliver_workflow(paths: &Paths, target: &WorkflowNotificationTarget) -> Result<()> {
-    let counts = Store::open(&paths.store)?.workflow_step_counts(&target.run_id)?;
+async fn try_deliver_workflow(
+    paths: &Paths,
+    store: &Store,
+    target: &WorkflowNotificationTarget,
+) -> Result<()> {
+    let counts = store.workflow_step_counts(&target.run_id)?;
     let body = format!(
         "FROM BRGR\n{}",
         json!({
@@ -751,11 +783,11 @@ async fn try_deliver_workflow(paths: &Paths, target: &WorkflowNotificationTarget
             )
         })
     );
-    prompt_owner(paths, &owner_pane_for_workflow(paths, target), &body).await
+    prompt_owner(paths, store, &owner_pane_for_workflow(store, target), &body).await
 }
 
 fn owner_pane_for_workflow<'a>(
-    paths: &'a Paths,
+    store: &Store,
     target: &'a WorkflowNotificationTarget,
 ) -> OwnerPane<'a> {
     OwnerPane {
@@ -764,8 +796,7 @@ fn owner_pane_for_workflow<'a>(
         pane_id: &target.pane_id,
         session_id: &target.session_id,
         owner_kind: owner_agent(target.owner_id.as_str()).unwrap_or("codex"),
-        any_kind: Store::open(&paths.store)
-            .is_ok_and(|store| is_taken_head(&store, &target.owner_id, &target.session_id)),
+        any_kind: is_taken_head(store, &target.owner_id, &target.session_id),
     }
 }
 
@@ -791,6 +822,10 @@ async fn register_for_workflow(paths: &Paths, store: &Store, run_id: &WorkflowRu
 
 fn notifications_enabled(paths: &Paths, task: TaskId) -> Result<bool> {
     let store = Store::open(&paths.store)?;
+    notifications_enabled_with_store(paths, task, &store)
+}
+
+fn notifications_enabled_with_store(paths: &Paths, task: TaskId, store: &Store) -> Result<bool> {
     if store.workflow_step_for_task(task)?.is_some() {
         return Ok(false);
     }
@@ -801,15 +836,25 @@ fn notifications_enabled(paths: &Paths, task: TaskId) -> Result<bool> {
         != Some(false))
 }
 
-async fn open_store(paths: &Paths, started: Instant) -> Result<Store> {
+async fn open_dispatch_store(
+    paths: &Paths,
+    database: &Path,
+    identity: DatabaseIdentity,
+    started: Instant,
+) -> Result<Option<Store>> {
     loop {
-        match Store::open(&paths.store) {
-            Ok(store) => return Ok(store),
+        if database_identity(database)? != Some(identity) {
+            return Ok(None);
+        }
+        match Store::open_existing(&paths.store) {
+            Ok(store) if database_identity(database)? == Some(identity) => return Ok(Some(store)),
+            Ok(_) => return Ok(None),
             Err(error)
                 if error.is_retryable_database_contention() && started.elapsed() < MAX_LIFETIME =>
             {
                 sleep(POLL_INTERVAL).await;
             }
+            Err(_) if database_identity(database)? != Some(identity) => return Ok(None),
             Err(error) => return Err(error.into()),
         }
     }
@@ -961,20 +1006,17 @@ fn owner_agent(owner_id: &str) -> Option<&'static str> {
     }
 }
 
-async fn try_deliver(paths: &Paths, target: &NotificationTarget) -> Result<()> {
+async fn try_deliver(paths: &Paths, store: &Store, target: &NotificationTarget) -> Result<()> {
     let task = target.task_id;
     // A run that did not produce a candidate is a failure the owner must act
     // on, not a result to verify, so it is announced as one with its reason.
-    let failure = Store::open(&paths.store)
-        .ok()
-        .and_then(|store| store.latest_result(task).ok())
-        .filter(|result| {
-            result.result_id == target.result_id
-                && matches!(
-                    result.outcome,
-                    TerminalOutcome::Failed | TerminalOutcome::Lost
-                )
-        });
+    let failure = store.latest_result(task).ok().filter(|result| {
+        result.result_id == target.result_id
+            && matches!(
+                result.outcome,
+                TerminalOutcome::Failed | TerminalOutcome::Lost
+            )
+    });
     let body = if let Some(result) = failure {
         format!(
             "FROM BRGR\n{}",
@@ -1000,14 +1042,14 @@ async fn try_deliver(paths: &Paths, target: &NotificationTarget) -> Result<()> {
     };
     prompt_owner(
         paths,
+        store,
         &OwnerPane {
             herdr_bin: &target.herdr_bin,
             herdr_session: target.herdr_session.as_deref(),
             pane_id: &target.pane_id,
             session_id: &target.session_id,
             owner_kind: owner_agent(target.owner_id.as_str()).unwrap_or("codex"),
-            any_kind: Store::open(&paths.store)
-                .is_ok_and(|store| is_taken_head(&store, &target.owner_id, &target.session_id)),
+            any_kind: is_taken_head(store, &target.owner_id, &target.session_id),
         },
         &body,
     )
@@ -1025,13 +1067,13 @@ async fn deliver_questions(paths: &Paths, store: &Store, task: TaskId) {
         return;
     };
     for target in pending {
-        if deliver_question(paths, &target).await.is_ok() {
+        if deliver_question(paths, store, &target).await.is_ok() {
             let _ = store.record_question_notice(&target.message_id, &target.session_id);
         }
     }
 }
 
-async fn deliver_question(paths: &Paths, target: &QuestionTarget) -> Result<()> {
+async fn deliver_question(paths: &Paths, store: &Store, target: &QuestionTarget) -> Result<()> {
     let task = target.task_id;
     let message = &target.message_id;
     let body = format!(
@@ -1048,26 +1090,30 @@ async fn deliver_question(paths: &Paths, target: &QuestionTarget) -> Result<()> 
     );
     prompt_owner(
         paths,
+        store,
         &OwnerPane {
             herdr_bin: &target.herdr_bin,
             herdr_session: target.herdr_session.as_deref(),
             pane_id: &target.pane_id,
             session_id: &target.session_id,
             owner_kind: owner_agent(&target.owner_id).unwrap_or("codex"),
-            any_kind: OwnerId::new(target.owner_id.clone()).is_ok_and(|owner| {
-                Store::open(&paths.store)
-                    .is_ok_and(|store| is_taken_head(&store, &owner, &target.session_id))
-            }),
+            any_kind: OwnerId::new(target.owner_id.clone())
+                .is_ok_and(|owner| is_taken_head(store, &owner, &target.session_id)),
         },
         &body,
     )
     .await
 }
 
-async fn prompt_owner(paths: &Paths, pane: &OwnerPane<'_>, body: &str) -> Result<()> {
+async fn prompt_owner(
+    paths: &Paths,
+    store: &Store,
+    pane: &OwnerPane<'_>,
+    body: &str,
+) -> Result<()> {
     if let Some(id) = pane.session_id.strip_prefix("worker:") {
         let attempt = id.parse::<brgr_protocol::AttemptId>()?;
-        let parent = Store::open(&paths.store)?
+        let parent = store
             .unfinished_attempts()?
             .into_iter()
             .find(|item| item.attempt_id == attempt)

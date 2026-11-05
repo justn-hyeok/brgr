@@ -25,6 +25,12 @@ impl ArtifactStore {
         Ok(Self { root })
     }
 
+    pub(crate) fn open_existing(store_root: &Path) -> Self {
+        Self {
+            root: store_root.join("artifacts").join("sha256"),
+        }
+    }
+
     pub(crate) fn seal_path(
         &self,
         source: &Path,
