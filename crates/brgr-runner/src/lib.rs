@@ -572,16 +572,31 @@ async fn stop_process_group(child: &mut tokio::process::Child) -> Result<ExitSta
     let grace_started = Instant::now();
     while grace_started.elapsed() < Duration::from_millis(500) {
         if let Some(status) = child.try_wait()? {
+            sleep(Duration::from_millis(500).saturating_sub(grace_started.elapsed())).await;
+            kill_process_group(pid, "KILL");
             return Ok(status);
         }
         sleep(Duration::from_millis(25)).await;
     }
+    kill_process_group(pid, "KILL");
+    Ok(child.wait().await?)
+}
+
+fn kill_process_group(pid: u32, signal: &str) {
+    if !std::process::Command::new("/bin/kill")
+        .arg("-0")
+        .arg("--")
+        .arg(format!("-{pid}"))
+        .output()
+        .is_ok_and(|output| output.status.success())
+    {
+        return;
+    }
     let _ = std::process::Command::new("/bin/kill")
-        .arg("-KILL")
+        .arg(format!("-{signal}"))
         .arg("--")
         .arg(format!("-{pid}"))
         .status();
-    Ok(child.wait().await?)
 }
 
 #[cfg(test)]
@@ -1516,6 +1531,35 @@ mod tests {
         assert!(started.elapsed() < Duration::from_mins(1));
     }
 
+    #[tokio::test]
+    async fn cancellation_kills_a_term_ignoring_child_after_leader_exits() {
+        let child_pid_path =
+            std::env::temp_dir().join(format!("brgr-child-{}.pid", std::process::id()));
+        let mut command = Command::new("/bin/sh");
+        command.arg("-c")
+            .arg("(/bin/sh -c 'trap \"\" TERM; echo $$ > \"$1\"; exec /bin/sleep 600' sh \"$1\") & trap 'exit 0' TERM; wait")
+            .arg("sh")
+            .arg(&child_pid_path)
+            .kill_on_drop(true);
+        command.as_std_mut().process_group(0);
+        let mut leader = command.spawn().unwrap();
+        assert!(leader.id().is_some());
+        let started = Instant::now();
+        while !child_pid_path.exists() && started.elapsed() < Duration::from_secs(5) {
+            sleep(Duration::from_millis(10)).await;
+        }
+        let child_pid = std::fs::read_to_string(&child_pid_path)
+            .unwrap()
+            .trim()
+            .to_owned();
+        let _ = stop_process_group(&mut leader).await.unwrap();
+        assert!(
+            !process_is_alive(&child_pid),
+            "TERM-ignoring child survived run"
+        );
+        let _ = std::fs::remove_file(child_pid_path);
+    }
+
     #[test]
     fn rejects_relative_executables() {
         let mut manifest = echo_manifest(4_096);
@@ -1808,6 +1852,32 @@ mod tests {
         assert!(matches!(
             extract_jsonl_assistant_final(missing_turn.as_bytes()),
             Err(RunnerError::MissingTerminalEvent)
+        ));
+    }
+
+    #[test]
+    fn empty_last_assistant_message_does_not_seal_an_interim_message() {
+        let events = concat!(
+            "{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Let me look at the files first.\"}]}}\n",
+            "{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[]}}\n",
+            "{\"type\":\"agent_end\",\"stopReason\":\"completed\"}\n",
+        );
+        assert!(matches!(
+            extract_jsonl_assistant_final(events.as_bytes()),
+            Err(RunnerError::MissingAssistantText)
+        ));
+    }
+
+    #[test]
+    fn error_stopped_jsonl_does_not_seal_an_interim_message_and_keeps_error() {
+        let events = concat!(
+            "{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Let me look at the files first.\"}]}}\n",
+            "{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[],\"errorMessage\":\"Connect error resource_exhausted\"}}\n",
+            "{\"type\":\"agent_end\",\"stopReason\":\"error\"}\n",
+        );
+        assert!(matches!(
+            extract_jsonl_assistant_final(events.as_bytes()),
+            Err(RunnerError::AssistantError(message)) if message == "Connect error resource_exhausted"
         ));
     }
 

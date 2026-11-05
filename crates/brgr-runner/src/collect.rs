@@ -104,8 +104,9 @@ pub(crate) fn collect_result_with_model(
 }
 
 pub(crate) fn extract_jsonl_assistant_final(stdout: &[u8]) -> Result<Vec<u8>, RunnerError> {
-    let mut final_text = None;
+    let mut final_assistant = None;
     let mut completed = false;
+    let mut agent_failed = false;
     let mut assistant_turn_ended = false;
     let mut unqualified_agent_end = false;
     for line in stdout
@@ -120,25 +121,30 @@ pub(crate) fn extract_jsonl_assistant_final(stdout: &[u8]) -> Result<Vec<u8>, Ru
                     .and_then(serde_json::Value::as_str)
                     == Some("assistant") =>
             {
-                let parts = event
-                    .pointer("/message/content")
+                let message = event.get("message").expect("role came from message");
+                let text = message
+                    .pointer("/content")
                     .and_then(serde_json::Value::as_array)
-                    .ok_or(RunnerError::MissingAssistantText)?;
-                let text = parts
-                    .iter()
+                    .into_iter()
+                    .flatten()
                     .filter(|part| {
                         part.get("type").and_then(serde_json::Value::as_str) == Some("text")
                     })
                     .filter_map(|part| part.get("text").and_then(serde_json::Value::as_str))
                     .collect::<Vec<_>>()
                     .join("\n");
-                if !text.trim().is_empty() {
-                    final_text = Some(text.into_bytes());
-                }
+                final_assistant = Some((
+                    text,
+                    message
+                        .get("errorMessage")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned),
+                ));
             }
             Some("agent_end") => {
                 match event.get("stopReason").and_then(serde_json::Value::as_str) {
                     Some("completed") => completed = true,
+                    Some("error") => agent_failed = true,
                     None => unqualified_agent_end = true,
                     _ => {}
                 }
@@ -154,10 +160,23 @@ pub(crate) fn extract_jsonl_assistant_final(stdout: &[u8]) -> Result<Vec<u8>, Ru
             _ => {}
         }
     }
-    if !(completed || (unqualified_agent_end && assistant_turn_ended)) {
+    if !(completed || agent_failed || (unqualified_agent_end && assistant_turn_ended)) {
         return Err(RunnerError::MissingTerminalEvent);
     }
-    final_text.ok_or(RunnerError::MissingAssistantText)
+    let (text, error) = final_assistant.ok_or(RunnerError::MissingAssistantText)?;
+    if agent_failed {
+        if let Some(error) = error.filter(|value| !value.is_empty()) {
+            return Err(RunnerError::AssistantError(error));
+        }
+        return Err(RunnerError::MissingAssistantText);
+    }
+    if !text.trim().is_empty() {
+        return Ok(text.into_bytes());
+    }
+    if let Some(error) = error.filter(|value| !value.is_empty()) {
+        return Err(RunnerError::AssistantError(error));
+    }
+    Err(RunnerError::MissingAssistantText)
 }
 
 pub(crate) fn observe_jsonl_model(
