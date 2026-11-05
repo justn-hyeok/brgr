@@ -2095,6 +2095,7 @@ const RETRY_DECISIONS: &[(&str, bool)] = &[
     // steps refuse to run twice. None of them is a write a running attempt
     // depends on, so none of them waits for a lock.
     ("request_takeover", false),
+    ("claim_abandoned_takeover", false),
     ("prepare_takeover", false),
     ("commit_takeover", false),
     ("resume_idle_takeover", false),

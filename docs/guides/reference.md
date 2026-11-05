@@ -344,7 +344,10 @@ decide its result until `brgr bind TASK --session SESSION` explicitly claims it.
 When the owning session changes, hand the head over with the `head` commands
 (below) rather than `bind`: `bind` is for an unbound owner, and it is refused
 while the owner has an open handoff. If the current head cannot run brgr, the
-incoming session uses `brgr head claim TASK --abandoned --goal TEXT`. For a CLI fixture, set both
+incoming session uses `brgr head claim TASK --abandoned --goal TEXT`. It may
+supersede a committed or resumed takeover whose incoming head has disappeared;
+requested and prepared takeovers still block a claim. Retire the new takeover
+with `brgr head retire TAKEOVER` when its work is done. For a CLI fixture, set both
 `BRGR_OWNER_ID=codex:example` and `BRGR_SESSION_ID=example-session` on run and
 follow-up commands.
 
@@ -363,7 +366,7 @@ runs request, prepare, and commit as the incoming session.
 | read | `brgr head show TAKEOVER` | anyone with the store (read only) |
 | commit | `brgr head commit TAKEOVER` | only the incoming session |
 | close | `brgr head retire TAKEOVER` | only the incoming session, after it has resumed |
-| claim | `brgr head claim TASK --abandoned --goal TEXT` | a different session, when the current head cannot run brgr |
+| claim | `brgr head claim TASK --abandoned --goal TEXT` | a different session, when the current head cannot run brgr; it may supersede a committed or resumed takeover, but not a requested or prepared one |
 
 ### Opening the incoming head from the current head
 

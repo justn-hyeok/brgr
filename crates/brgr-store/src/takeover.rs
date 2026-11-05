@@ -76,11 +76,11 @@ impl FromStr for TakeoverId {
 /// requested -> prepared -> committed -> resumed -> retired
 ///     |            |           |           \-> retire_failed
 ///     v            v
-///  aborted      aborted            (no abort after commit: roll forward)
+///  aborted      aborted         superseded <- committed/resumed
 /// ```
 ///
-/// `retired` and `retire_failed` are only reachable through `resumed`, so a
-/// record cannot claim a closed handoff that the incoming head never picked up.
+/// `retired` and `retire_failed` are only reachable through `resumed`. A moved
+/// takeover can be closed as `superseded` by a later abandoned claim.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TakeoverState {
@@ -99,6 +99,8 @@ pub enum TakeoverState {
     RetireFailed,
     /// Stopped before the binding moved.
     Aborted,
+    /// A later abandoned claim moved the binding onward.
+    Superseded,
 }
 
 impl TakeoverState {
@@ -112,6 +114,7 @@ impl TakeoverState {
             Self::Retired => "retired",
             Self::RetireFailed => "retire_failed",
             Self::Aborted => "aborted",
+            Self::Superseded => "superseded",
         }
     }
 
@@ -124,6 +127,7 @@ impl TakeoverState {
             "retired" => Ok(Self::Retired),
             "retire_failed" => Ok(Self::RetireFailed),
             "aborted" => Ok(Self::Aborted),
+            "superseded" => Ok(Self::Superseded),
             other => Err(StoreError::InvalidTakeoverState(other.to_owned())),
         }
     }
@@ -131,7 +135,10 @@ impl TakeoverState {
     /// Whether no further step can be taken from this state.
     #[must_use]
     pub fn is_terminal(self) -> bool {
-        matches!(self, Self::Retired | Self::RetireFailed | Self::Aborted)
+        matches!(
+            self,
+            Self::Retired | Self::RetireFailed | Self::Aborted | Self::Superseded
+        )
     }
 
     /// The one place the handoff graph is written down.
@@ -145,8 +152,11 @@ impl TakeoverState {
             (self, to),
             (Self::Requested, Self::Prepared | Self::Aborted)
                 | (Self::Prepared, Self::Committed | Self::Aborted)
-                | (Self::Committed, Self::Resumed)
-                | (Self::Resumed, Self::Retired | Self::RetireFailed)
+                | (Self::Committed, Self::Resumed | Self::Superseded)
+                | (
+                    Self::Resumed,
+                    Self::Retired | Self::RetireFailed | Self::Superseded
+                )
         )
     }
 }
@@ -225,6 +235,16 @@ pub struct HandoffReferences {
     pub pending_message_ids: Vec<String>,
 }
 
+/// Inputs captured before an abandoned claim starts its write transaction.
+pub struct AbandonedClaim<'a> {
+    pub from_session: &'a str,
+    pub to_session: &'a str,
+    pub idempotency_key: &'a str,
+    pub goal: &'a str,
+    pub notes: &'a str,
+    pub expected_epoch: u64,
+}
+
 /// A stored manifest, as read back from the store.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StoredHandoffManifest {
@@ -280,6 +300,118 @@ pub struct TakeoverEvent {
     /// Why the transition happened: a reason, or a retirement outcome.
     pub detail: Option<String>,
     pub at: i64,
+}
+
+fn replay_claim(
+    transaction: Transaction<'_>,
+    recorded_id: &str,
+    to_session: &str,
+    idempotency_key: &str,
+    session_id: &str,
+    epoch: u64,
+) -> Result<Takeover, StoreError> {
+    let recorded = load_takeover(&transaction, recorded_id)?;
+    if recorded.to_session != to_session {
+        return Err(StoreError::TakeoverIdempotencyConflict(
+            idempotency_key.to_owned(),
+        ));
+    }
+    if recorded.state != TakeoverState::Committed {
+        return Err(takeover_state_conflict(
+            recorded.takeover_id,
+            recorded.state,
+            TakeoverState::Committed,
+        ));
+    }
+    if session_id != to_session || epoch != recorded.committed_epoch() {
+        return Err(StoreError::TakeoverBindingConflict(recorded.takeover_id));
+    }
+    transaction.commit()?;
+    Ok(recorded)
+}
+
+fn supersede_in_transaction(
+    transaction: &Transaction<'_>,
+    takeover_id: TakeoverId,
+    to_session: &str,
+) -> Result<(), StoreError> {
+    let reason = format!("superseded by abandoned claim to {to_session}");
+    set_state(
+        transaction,
+        takeover_id,
+        TakeoverState::Superseded,
+        Some(&reason),
+    )?;
+    append_event(
+        transaction,
+        takeover_id,
+        TakeoverState::Superseded,
+        Some(&reason),
+    )
+}
+
+fn insert_claim_in_transaction(
+    transaction: &Transaction<'_>,
+    owner_id: &OwnerId,
+    claim: &AbandonedClaim<'_>,
+    takeover_id: TakeoverId,
+) -> Result<(), StoreError> {
+    let AbandonedClaim {
+        from_session,
+        to_session,
+        idempotency_key,
+        expected_epoch,
+        goal,
+        notes,
+    } = *claim;
+    let references = handoff_references_in_transaction(transaction, owner_id)?;
+    let manifest = HandoffManifest {
+        goal: goal.to_owned(),
+        decision_notes: notes.to_owned(),
+        origin_session: from_session.to_owned(),
+        tasks: references.tasks,
+        pending_result_ids: references.pending_result_ids,
+        pending_message_ids: references.pending_message_ids,
+    };
+    validate_manifest(transaction, owner_id, from_session, &manifest)?;
+    let digest = Store::handoff_manifest_digest(&manifest)?;
+    let manifest_json = serde_json::to_string(&manifest)?;
+    transaction.execute(
+        "INSERT INTO head_takeovers
+         (takeover_id, owner_id, from_session, from_epoch, to_session, state,
+          idempotency_key, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, 'prepared', ?6,
+             CAST(strftime('%s','now') AS INTEGER), CAST(strftime('%s','now') AS INTEGER))",
+        params![
+            takeover_id.to_string(),
+            owner_id.as_str(),
+            from_session,
+            i64::try_from(expected_epoch).map_err(|_| StoreError::NumericOverflow)?,
+            to_session,
+            idempotency_key
+        ],
+    )?;
+    append_event(transaction, takeover_id, TakeoverState::Requested, None)?;
+    set_state(transaction, takeover_id, TakeoverState::Prepared, None)?;
+    append_event(
+        transaction,
+        takeover_id,
+        TakeoverState::Prepared,
+        Some("abandoned claim"),
+    )?;
+    transaction.execute(
+        "INSERT INTO handoff_manifests
+         (manifest_id, owner_id, takeover_id, manifest_json, digest, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, CAST(strftime('%s','now') AS INTEGER))",
+        params![
+            Uuid::new_v4().to_string(),
+            owner_id.as_str(),
+            takeover_id.to_string(),
+            manifest_json,
+            digest
+        ],
+    )?;
+    Ok(())
 }
 
 impl Store {
@@ -349,7 +481,7 @@ impl Store {
             .query_row(
                 "SELECT takeover_id FROM head_takeovers
                  WHERE owner_id = ?1
-                   AND state NOT IN ('retired', 'retire_failed', 'aborted') LIMIT 1",
+                   AND state NOT IN ('retired', 'retire_failed', 'aborted', 'superseded') LIMIT 1",
                 [owner_id.as_str()],
                 |row| row.get(0),
             )
@@ -376,6 +508,88 @@ impl Store {
             ],
         )?;
         append_event(&transaction, takeover_id, TakeoverState::Requested, None)?;
+        let takeover = load_takeover(&transaction, &takeover_id.to_string())?;
+        transaction.commit()?;
+        Ok(takeover)
+    }
+
+    /// Supersedes an abandoned committed or resumed head and atomically binds
+    /// the owner to a new incoming session. Uncommitted takeovers remain open
+    /// and block this operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the binding changed since the caller read it, an
+    /// uncommitted takeover is open, or the handoff manifest is invalid.
+    pub fn claim_abandoned_takeover(
+        &self,
+        owner_id: &OwnerId,
+        claim: &AbandonedClaim<'_>,
+    ) -> Result<Takeover, StoreError> {
+        let AbandonedClaim {
+            from_session,
+            to_session,
+            idempotency_key,
+            goal,
+            notes,
+            expected_epoch,
+        } = *claim;
+        validate_request(from_session, to_session, idempotency_key)?;
+        if goal.trim().is_empty() || goal.len() > MAX_GOAL_BYTES || notes.len() > MAX_NOTES_BYTES {
+            return Err(StoreError::InvalidHandoffManifest(
+                "the goal or notes are empty or oversized",
+            ));
+        }
+        let transaction = self.write_transaction()?;
+        let recorded: Option<String> = transaction
+            .query_row(
+                "SELECT takeover_id FROM head_takeovers WHERE owner_id = ?1 AND idempotency_key = ?2",
+                params![owner_id.as_str(), idempotency_key],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let (session_id, epoch) = read_binding(&transaction, owner_id)?;
+        if let Some(recorded_id) = recorded {
+            return replay_claim(
+                transaction,
+                &recorded_id,
+                to_session,
+                idempotency_key,
+                &session_id,
+                epoch,
+            );
+        }
+        if epoch != expected_epoch {
+            return Err(StoreError::OwnerBindingConflict);
+        }
+        if session_id != from_session {
+            return Err(StoreError::OwnerBindingConflict);
+        }
+        let open: Option<String> = transaction
+            .query_row(
+                "SELECT takeover_id FROM head_takeovers WHERE owner_id = ?1
+             AND state NOT IN ('retired', 'retire_failed', 'aborted', 'superseded')
+             ORDER BY rowid DESC LIMIT 1",
+                [owner_id.as_str()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(old_id) = open {
+            let old_id = parse_takeover_id(&old_id)?;
+            let old = load_takeover(&transaction, &old_id.to_string())?;
+            if !matches!(old.state, TakeoverState::Committed | TakeoverState::Resumed)
+                || old.to_session != session_id
+                || old.committed_epoch() != epoch
+            {
+                return Err(StoreError::TakeoverInProgress(old_id));
+            }
+            supersede_in_transaction(&transaction, old_id, to_session)?;
+        }
+        let takeover_id = TakeoverId::new();
+        insert_claim_in_transaction(&transaction, owner_id, claim, takeover_id)?;
+        rebind_in_transaction(&transaction, owner_id, to_session)?;
+        set_state(&transaction, takeover_id, TakeoverState::Committed, None)?;
+        append_event(&transaction, takeover_id, TakeoverState::Committed, None)?;
         let takeover = load_takeover(&transaction, &takeover_id.to_string())?;
         transaction.commit()?;
         Ok(takeover)
@@ -1120,6 +1334,29 @@ fn handoff_revision_is_open(settlement: crate::Settlement) -> bool {
     )
 }
 
+fn handoff_references_in_transaction(
+    transaction: &Transaction<'_>,
+    owner_id: &OwnerId,
+) -> Result<HandoffReferences, StoreError> {
+    let revisions = open_revision_attempts(transaction, owner_id)?;
+    let mut tasks = Vec::new();
+    for (task_id, revision, attempt_id) in revisions {
+        let raw = crate::result::revision_settlement_on(transaction, task_id, revision)?;
+        if handoff_revision_is_open(raw) {
+            tasks.push(ManifestTask {
+                task_id,
+                revision,
+                attempt_id,
+            });
+        }
+    }
+    Ok(HandoffReferences {
+        tasks,
+        pending_result_ids: pending_result_ids(transaction, owner_id)?,
+        pending_message_ids: pending_message_ids(transaction, owner_id)?,
+    })
+}
+
 /// A pending result is one the owner has still to settle: undecided and
 /// unacknowledged in this owner's inbox. Anything settled is the owner's own
 /// history and does not travel.
@@ -1631,6 +1868,7 @@ mod tests {
             TakeoverState::Retired,
             TakeoverState::RetireFailed,
             TakeoverState::Aborted,
+            TakeoverState::Superseded,
         ] {
             for to in [
                 TakeoverState::Requested,
@@ -1640,6 +1878,7 @@ mod tests {
                 TakeoverState::Retired,
                 TakeoverState::RetireFailed,
                 TakeoverState::Aborted,
+                TakeoverState::Superseded,
             ] {
                 assert_eq!(
                     from.allows(to),
@@ -1651,11 +1890,15 @@ mod tests {
                         ) | (
                             TakeoverState::Prepared,
                             TakeoverState::Committed | TakeoverState::Aborted
-                        ) | (TakeoverState::Committed, TakeoverState::Resumed)
-                            | (
-                                TakeoverState::Resumed,
-                                TakeoverState::Retired | TakeoverState::RetireFailed
-                            )
+                        ) | (
+                            TakeoverState::Committed,
+                            TakeoverState::Resumed | TakeoverState::Superseded
+                        ) | (
+                            TakeoverState::Resumed,
+                            TakeoverState::Retired
+                                | TakeoverState::RetireFailed
+                                | TakeoverState::Superseded
+                        )
                     ),
                     "{from:?} -> {to:?}"
                 );
@@ -1668,6 +1911,7 @@ mod tests {
         assert!(TakeoverState::Retired.is_terminal());
         assert!(TakeoverState::RetireFailed.is_terminal());
         assert!(TakeoverState::Aborted.is_terminal());
+        assert!(TakeoverState::Superseded.is_terminal());
         assert!(!TakeoverState::Resumed.is_terminal());
         assert_eq!(
             TakeoverState::parse("retire_failed").unwrap(),
@@ -1685,6 +1929,7 @@ mod tests {
             TakeoverState::Retired,
             TakeoverState::RetireFailed,
             TakeoverState::Aborted,
+            TakeoverState::Superseded,
         ] {
             assert_eq!(TakeoverState::parse(state.as_str()).unwrap(), state);
         }
