@@ -859,17 +859,55 @@ mod tests {
         assert!(error.to_string().contains("response identity differs"));
     }
 
+    /// Proves the group member whose pid a script wrote is dead once the
+    /// bridge has stopped the request. The member's leader never waits for
+    /// it or kills it, so only a group-wide signal can end it; a leader-only
+    /// signal leaves it behind and this fails. A missing pid file is a
+    /// failure, not a skipped check, and a survivor's whole group is put
+    /// down (its pgid is the leader's pid) before the panic so a broken run
+    /// leaves nothing behind.
+    async fn assert_group_member_died(leader_file: &Path, member_file: &Path) {
+        let member: u32 = fs::read_to_string(member_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let waited = std::time::Instant::now();
+        while process_is_live(member) && waited.elapsed() < Duration::from_secs(15) {
+            tokio::time::sleep(POLL_INTERVAL).await;
+        }
+        if process_is_live(member) {
+            let leader: u32 = fs::read_to_string(leader_file)
+                .unwrap()
+                .trim()
+                .parse()
+                .unwrap();
+            let _ = std::process::Command::new("/bin/kill")
+                .args(["-KILL", "--", &format!("-{leader}")])
+                .output();
+            panic!("group member {member} survived the bridge's process-group kill");
+        }
+    }
+
     #[tokio::test]
     async fn timed_out_child_and_group_are_killed() {
         let root = TempDir::new().unwrap();
+        let leader_file = root.path().join("leader.pid");
         let pid_file = root.path().join("child.pid");
         let script = write_script(
             root.path(),
             "hang.sh",
-            "#!/bin/sh\necho $$ > \"$1\"\nexec /bin/sleep 30\n",
+            // A child in the same group records its pid, then the leader
+            // sleeps: both outlive a signal that reaches only the leader.
+            "#!/bin/sh\necho $$ > \"$2\"\n/bin/sh -c 'echo $$ > \"$1\"; exec /bin/sleep 30' sh \"$1\" </dev/null >/dev/null 2>&1 &\nwhile [ ! -s \"$1\" ]; do /bin/sleep 0.05; done\n/bin/sleep 30\n",
         );
         let response = run_request(
-            sample_request("8-8-8", root.path(), &[pid_file.to_str().unwrap()], 1),
+            sample_request(
+                "8-8-8",
+                root.path(),
+                &[pid_file.to_str().unwrap(), leader_file.to_str().unwrap()],
+                10,
+            ),
             &script,
             root.path(),
             root.path(),
@@ -877,14 +915,7 @@ mod tests {
         .await;
         assert_eq!(response.code, 1);
         assert!(response.stderr.contains("timed out"));
-        // The 1s timeout can fire before the script records its pid under
-        // load. When the pid was captured, prove the group is dead;
-        // otherwise the timed-out response code is the kill evidence.
-        if let Ok(contents) = fs::read_to_string(&pid_file)
-            && let Ok(pid) = contents.trim().parse::<u32>()
-        {
-            assert!(!process_is_live(pid));
-        }
+        assert_group_member_died(&leader_file, &pid_file).await;
     }
 
     #[tokio::test]
@@ -1002,14 +1033,23 @@ mod tests {
     #[tokio::test]
     async fn oversized_output_kills_the_process_group() {
         let root = TempDir::new().unwrap();
+        let leader_file = root.path().join("wide-leader.pid");
         let pid_file = root.path().join("wide.pid");
         let script = write_script(
             root.path(),
             "overflow.sh",
-            "#!/bin/sh\necho $$ > \"$1\"\nexec dd if=/dev/zero bs=1048576 count=32\n",
+            // A child in the same group records its pid before the flood
+            // starts; only a group-wide signal can reach it once the leader
+            // is gone.
+            "#!/bin/sh\necho $$ > \"$2\"\n/bin/sh -c 'echo $$ > \"$1\"; exec /bin/sleep 60' sh \"$1\" </dev/null >/dev/null 2>&1 &\nwhile [ ! -s \"$1\" ]; do /bin/sleep 0.05; done\ndd if=/dev/zero bs=1048576 count=32 2>/dev/null\n",
         );
         let response = run_request(
-            sample_request("12-12-12", root.path(), &[pid_file.to_str().unwrap()], 20),
+            sample_request(
+                "12-12-12",
+                root.path(),
+                &[pid_file.to_str().unwrap(), leader_file.to_str().unwrap()],
+                20,
+            ),
             &script,
             root.path(),
             root.path(),
@@ -1017,12 +1057,7 @@ mod tests {
         .await;
         assert_eq!(response.code, 1);
         assert!(response.stderr.contains("output exceeded 8 MiB"));
-        let pid: u32 = fs::read_to_string(&pid_file)
-            .unwrap()
-            .trim()
-            .parse()
-            .unwrap();
-        assert!(!process_is_live(pid));
+        assert_group_member_died(&leader_file, &pid_file).await;
     }
 
     #[tokio::test]
