@@ -6804,6 +6804,53 @@ fn detached_supervisor_exit_before_claim_becomes_one_durable_lost_inbox_item() {
 
 #[cfg(debug_assertions)]
 #[test]
+fn a_cancel_of_a_lost_revision_does_not_cancel_the_next_one() {
+    let (_temp, home, workspace) = fixture_home();
+    let owner = [("BRGR_OWNER_ID", "codex:cancel-lost-revision")];
+    let launch = json_output(&run(
+        &home,
+        &["run", "SLOW", "--workspace", workspace.to_str().unwrap()],
+        &owner,
+    ));
+    let task = launch["task_id"].as_str().unwrap();
+    let store = brgr_store::Store::open(home.join("store")).unwrap();
+    active_attempt(&store, task);
+    json_output(&run(&home, &["cancel", task], &owner));
+    let worker_pid = fs::read_to_string(home.join("runs").join(format!("{task}.pid")))
+        .unwrap()
+        .trim()
+        .to_owned();
+    let receipt: Value = serde_json::from_slice(
+        &fs::read(home.join("runs").join(format!("{task}.supervisor.json"))).unwrap(),
+    )
+    .unwrap();
+    let supervisor_pid = receipt
+        .pointer("/identity/handle")
+        .unwrap()
+        .as_str()
+        .unwrap();
+    Command::new("/bin/kill")
+        .args(["-9", supervisor_pid])
+        .status()
+        .unwrap();
+    Command::new("/bin/kill")
+        .args(["-9", &worker_pid])
+        .status()
+        .unwrap();
+    let terminal = settle(&home, task, &owner).expect("cancelled dead supervisor did not settle");
+    assert_eq!(terminal["result"]["outcome"], "lost");
+
+    let revised = json_output(&run(
+        &home,
+        &["revise", task, "BRGR_FIXTURE_OK", "--foreground"],
+        &owner,
+    ));
+    assert_eq!(revised["revision"], 2);
+    assert_eq!(revised["outcome"], "candidate");
+}
+
+#[cfg(debug_assertions)]
+#[test]
 fn wait_reconciles_a_crashed_detached_supervisor_to_lost() {
     let (_temp, home, workspace) = fixture_home();
     let owner = [("BRGR_OWNER_ID", "codex:wait-crash")];

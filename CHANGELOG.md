@@ -3,6 +3,7 @@
 ## Unreleased
 
 - `BRGR_HOME` now wins inside a task worktree. Only a command with neither it nor `--home` takes its home from the worktree's path.
+- A cancel marker left by a cancelled or lost revision no longer cancels the next revision.
 
 ## 2.15.19 — 2026-11-05
 
