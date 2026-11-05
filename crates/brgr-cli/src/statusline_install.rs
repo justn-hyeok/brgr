@@ -289,7 +289,40 @@ fn chainable(command: &str) -> Result<()> {
              simplify it to a single command, or leave it and use `brgr config` thresholds without `--context`"
         );
     }
+    let mut words = command.split_whitespace();
+    if words.next().is_some_and(|word| {
+        word.split_once('=').is_some_and(|(name, _)| {
+            !name.is_empty()
+                && name
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        })
+    }) {
+        bail!(
+            "the existing statusLine command sets an environment variable, which brgr will not wrap; \
+             simplify it to a single command, or leave it and use `brgr config` thresholds without `--context`"
+        );
+    }
     Ok(())
+}
+
+fn unique_backup_path(brgr_home: &Path, seconds: u64) -> PathBuf {
+    let base = brgr_home
+        .join("backups")
+        .join(format!("claude-settings-{seconds}.json"));
+    if !base.exists() {
+        return base;
+    }
+    let mut suffix = 1_u64;
+    loop {
+        let path = brgr_home
+            .join("backups")
+            .join(format!("claude-settings-{seconds}-{suffix}.json"));
+        if !path.exists() {
+            return path;
+        }
+        suffix += 1;
+    }
 }
 
 fn shell_quote(value: &str) -> String {
@@ -417,10 +450,7 @@ pub(crate) fn install(brgr_home: &Path, harness: Harness, executable: &Path) -> 
     if status_line_command(&check) != Some(command.as_str()) {
         bail!("the edit did not produce the intended statusLine");
     }
-    let backup = brgr_home.join("backups").join(format!(
-        "claude-settings-{}.json",
-        crate::context_signal::now()
-    ));
+    let backup = unique_backup_path(brgr_home, crate::context_signal::now());
     write_atomic(&backup, text.as_bytes(), 0o600)?;
     let mode = fs::metadata(&target).map_or(0o600, |meta| meta.permissions().mode() & 0o777);
     write_atomic(&target, edited.as_bytes(), mode)?;
@@ -567,5 +597,22 @@ mod tests {
         }
         assert!(chainable("bash /Users/me/.claude/statusline-command.sh").is_ok());
         assert!(chainable("node \"/path with space/s.js\" --flag").is_ok());
+    }
+
+    #[test]
+    fn an_environment_assignment_command_is_not_wrapped() {
+        assert!(chainable("FOO=bar statusline").is_err());
+    }
+
+    #[test]
+    fn backups_get_distinct_paths_when_created_in_the_same_second() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = unique_backup_path(dir.path(), 123);
+        fs::create_dir_all(first.parent().unwrap()).unwrap();
+        fs::write(&first, "first").unwrap();
+        let second = unique_backup_path(dir.path(), 123);
+
+        assert_ne!(first, second);
+        assert_eq!(fs::read_to_string(first).unwrap(), "first");
     }
 }
