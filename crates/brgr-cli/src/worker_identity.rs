@@ -4,9 +4,14 @@
 //! A Codex worker does not: its tool commands run in Codex's shared daemon, which
 //! keeps the environment of whoever started it, so the variables are absent or
 //! name another worker. Its working directory is still its own, so a task
-//! directory inside a brgr worktree wins over the environment.
+//! directory inside a brgr worktree wins over the environment. The same daemon
+//! loses a custom `BRGR_HOME`, so the worktree's own path also names the home.
 
-use std::{env, fs, path::Path, sync::OnceLock};
+use std::{
+    env, fs,
+    path::{Path, PathBuf},
+    sync::OnceLock,
+};
 
 use brgr_protocol::{AttemptId, TaskId};
 use brgr_store::Store;
@@ -72,6 +77,37 @@ pub(crate) fn attempt() -> Option<String> {
         .or_else(|| env::var("BRGR_PARENT_ATTEMPT_ID").ok())
 }
 
+/// The home to use when `chosen` came from nowhere or from the environment. A
+/// `--home` that differs from the environment was typed for this command, so it
+/// stands.
+pub(crate) fn resolve_home(chosen: Option<PathBuf>) -> Option<PathBuf> {
+    if chosen.is_some()
+        && chosen.as_deref().map(Path::as_os_str) != env::var_os("BRGR_HOME").as_deref()
+    {
+        return chosen;
+    }
+    env::current_dir()
+        .ok()
+        .and_then(|directory| directory.canonicalize().ok())
+        .and_then(|directory| home_in_directory(&directory))
+        .or(chosen)
+}
+
+/// The home whose worktree holds `directory`: a directory with `.brgr/tasks` at
+/// `HOME/worktrees/REPO/TASK`, in a home that has a store. Anywhere else there is
+/// none, so a head's own checkout is never moved to another home.
+fn home_in_directory(directory: &Path) -> Option<PathBuf> {
+    directory
+        .ancestors()
+        .find(|ancestor| ancestor.join(".brgr/tasks").is_dir())
+        .and_then(|worktree| {
+            let worktrees = worktree.parent()?.parent()?;
+            let home = worktrees.parent()?;
+            (worktrees.file_name()? == "worktrees" && home.join("store").is_dir())
+                .then(|| home.to_owned())
+        })
+}
+
 /// The task whose `.brgr/tasks/TASK-rN` is in `directory` or a parent of it, up
 /// to `worktrees`. Outside `worktrees` there is none, so a head in its own
 /// checkout is never taken for a worker. The newest revision wins.
@@ -103,6 +139,26 @@ mod tests {
 
     const OLD: &str = "2b2c279a-b8e1-43a8-846c-cb8344a301d7";
     const NEW: &str = "3b2c279a-b8e1-43a8-846c-cb8344a301d7";
+
+    #[test]
+    fn a_worktree_names_its_home() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().canonicalize().unwrap().join("home");
+        let worktree = home.join("worktrees/repo/abc");
+        fs::create_dir_all(home.join("store")).unwrap();
+        fs::create_dir_all(worktree.join(".brgr/tasks")).unwrap();
+        fs::create_dir_all(worktree.join("src")).unwrap();
+        assert_eq!(home_in_directory(&worktree.join("src")), Some(home));
+    }
+
+    #[test]
+    fn a_checkout_with_a_task_directory_names_no_home() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path().canonicalize().unwrap();
+        fs::create_dir_all(root.join("store")).unwrap();
+        fs::create_dir_all(root.join("dev/repo/.brgr/tasks")).unwrap();
+        assert_eq!(home_in_directory(&root.join("dev/repo")), None);
+    }
 
     #[test]
     fn the_newest_task_directory_in_a_worktree_names_the_worker() {

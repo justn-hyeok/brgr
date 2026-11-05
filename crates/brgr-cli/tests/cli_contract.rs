@@ -2646,6 +2646,38 @@ fn include_ignored_reaches_the_reclaim_a_pane_cleanup_runs() {
     );
 }
 
+/// A Codex worker's commands run in a shared daemon that lost `BRGR_HOME`. Its
+/// worktree's path still names the home, and a typed `--home` still wins.
+#[test]
+fn a_command_from_a_worker_directory_uses_the_workers_home() {
+    let root = tempfile::tempdir().unwrap();
+    let root = root.path().canonicalize().unwrap();
+    let home = root.join("custom");
+    let elsewhere = root.join("elsewhere");
+    let worktree = home.join("worktrees/repo/abc");
+    let task = worktree.join(".brgr/tasks/2b2c279a-b8e1-43a8-846c-cb8344a301d7-r1");
+    fs::create_dir_all(&task).unwrap();
+    fs::create_dir_all(home.join("store")).unwrap();
+    let brgr = || {
+        let mut command = common::brgr_command();
+        command
+            .current_dir(&worktree)
+            .env_remove("BRGR_HOME")
+            .env("HOME", root.join("user"));
+        command
+    };
+    let default_home = brgr().args(["config", "init"]).output().unwrap();
+    assert!(default_home.status.success(), "{default_home:?}");
+    assert!(home.join("config.toml").is_file());
+
+    let typed = brgr()
+        .args(["--home", elsewhere.to_str().unwrap(), "config", "init"])
+        .output()
+        .unwrap();
+    assert!(typed.status.success(), "{typed:?}");
+    assert!(elsewhere.join("config.toml").is_file());
+}
+
 /// A worker that changed files and then never wrote its report has failed, but
 /// its work stays reviewable: the worktree diff is sealed with the result.
 #[test]
