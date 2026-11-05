@@ -1009,11 +1009,13 @@ mod tests {
             "#!/bin/sh\necho \"$@\" >> \"${0%.body}.calls\"\ncase \"$2\" in\n list) echo '[]';;\n create) /bin/cat >> \"${0%.body}.stdin\"; echo https://github.com/o/r/issues/7;;\nesac\n",
         );
         GH_PROGRAM.with(|program| *program.borrow_mut() = Some(gh.clone()));
-        let mut config = Config::load(&paths.config).unwrap();
-        config.issues.auto_file = true;
-        config.issues.repo = Some("o/r".to_owned());
-        config.issues.min_count = 2;
-        config.save(&paths.config).unwrap();
+        Config::update(&paths.config, &paths.home, |config| {
+            config.issues.auto_file = true;
+            config.issues.repo = Some("o/r".to_owned());
+            config.issues.min_count = 2;
+            Ok(true)
+        })
+        .unwrap();
         let failure = Failure {
             outcome: "lost",
             harness: "local.opencode",
@@ -1054,11 +1056,13 @@ mod tests {
             "#!/bin/sh\ncase \"$2\" in\n list) echo '[]';;\n create) if [ -e \"${0%.body}.made\" ]; then echo boom >&2; exit 1; fi; : > \"${0%.body}.made\"; /bin/cat >/dev/null; echo https://github.com/o/r/issues/1;;\nesac\n",
         );
         GH_PROGRAM.with(|program| *program.borrow_mut() = Some(gh));
-        let mut config = Config::load(&paths.config).unwrap();
-        config.issues.auto_file = true;
-        config.issues.repo = Some("o/r".to_owned());
-        config.issues.min_count = 1;
-        config.save(&paths.config).unwrap();
+        Config::update(&paths.config, &paths.home, |config| {
+            config.issues.auto_file = true;
+            config.issues.repo = Some("o/r".to_owned());
+            config.issues.min_count = 1;
+            Ok(true)
+        })
+        .unwrap();
         for error in ["first distinct failure", "second distinct failure"] {
             record(
                 &paths,
