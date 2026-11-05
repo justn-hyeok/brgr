@@ -256,7 +256,7 @@ pub(crate) async fn run_task(paths: &Paths, mut args: RunArgs, json_output: bool
     .await?;
     let mode = resolve_execution_mode(requested_mode, &activated, &spec)?;
     with_slow_notice(
-        "preparing the worktree and starting the worker",
+        start_notice(args.foreground),
         Box::pin(start_task(
             paths,
             spec,
@@ -360,6 +360,16 @@ async fn preflight_with_notice(
     Ok(())
 }
 
+/// What a slow `start_task` is waiting for. A foreground call holds the whole
+/// run, so once the worker is up the wait is the task itself, not the start.
+fn start_notice(foreground: bool) -> &'static str {
+    if foreground {
+        "running the task in the foreground"
+    } else {
+        "preparing the worktree and starting the worker"
+    }
+}
+
 /// Runs `stage`; if it is still going after [`SLOW_STAGE`], says once on stderr
 /// what brgr is waiting for, so a long start is not a silent one.
 async fn with_slow_notice<T>(waiting_for: &str, stage: impl std::future::Future<Output = T>) -> T {
@@ -410,6 +420,15 @@ mod slow_stage_tests {
         })
         .await;
         assert!(silent.borrow().is_empty());
+    }
+
+    #[test]
+    fn the_start_notice_names_the_foreground_wait() {
+        assert_eq!(start_notice(true), "running the task in the foreground");
+        assert_eq!(
+            start_notice(false),
+            "preparing the worktree and starting the worker"
+        );
     }
 }
 
