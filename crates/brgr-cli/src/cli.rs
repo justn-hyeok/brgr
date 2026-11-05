@@ -371,8 +371,8 @@ pub(crate) enum ConfigCommand {
         #[arg(action = clap::ArgAction::Set)]
         enabled: bool,
     },
-    /// Run harnesses as their own TUI in a Herdr pane (true, the default) or
-    /// headless in print mode (false).
+    /// Has no effect, kept so old scripts still run. Workers open in a Herdr
+    /// pane; pass `--headless` to a run to choose print mode.
     SetPaneMode {
         #[arg(action = clap::ArgAction::Set)]
         enabled: bool,
@@ -525,9 +525,8 @@ pub(crate) struct RunArgs {
     pub(crate) capabilities: CapabilityArgs,
     #[command(flatten)]
     pub(crate) evidence: EvidenceArgs,
-    /// Deadline in seconds. A headless run counts awake time, so machine sleep
-    /// extends it, and its result records a gap over 60 seconds as
-    /// `slept_seconds`. A pane run's deadline is wall-clock time.
+    /// Deadline in seconds. It counts awake time, so machine sleep extends it,
+    /// and the result records a gap over 60 seconds as `slept_seconds`.
     #[arg(long)]
     pub(crate) deadline_seconds: Option<u64>,
     #[arg(long)]
