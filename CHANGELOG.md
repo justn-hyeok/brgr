@@ -2,16 +2,20 @@
 
 ## Unreleased
 
+## 2.15.20 — 2026-11-05
+
+Fixes from the gate 2-5 review: revisions, heads, installers and stopping a process.
+
 - A refused `brgr revise` no longer acknowledges the failed or lost result it was meant to replace.
 - `workflow status` reports driver liveness and names the resume command for a dead driver without changing run state.
 - Config edits and set commands now lock, reread, and atomically update the current file so concurrent changes are retained.
 - Error memo issue text now masks filesystem paths whole, including paths with spaces, and groups path-varying failures under one fingerprint.
 - `brgr head claim --abandoned` can recover a committed or resumed takeover after its current head disappears, recording the old takeover as `superseded`; older sessions are fenced by the binding epoch.
 - Codex hooks installs write through symlinks, status line backups never overwrite, and environment-assignment status lines are refused before editing settings.
-- OpenCode `--mode auto` now falls back to headless when its Herdr caller pane cannot be verified; an explicit pane request is refused before admission.
+- **Behavior change:** OpenCode `--mode auto` now falls back to headless when its Herdr caller pane cannot be verified; an explicit pane request is refused before admission.
 - Runner cancellation now kills remaining process-group members after the TERM grace period, and JSONL results use only the last assistant message.
 - `brgr revise` recovers only clean, unadmitted revision worktrees and removes worktrees and launch files left by an in-process admission failure.
-- `BRGR_HOME` now wins inside a task worktree. Only a command with neither it nor `--home` takes its home from the worktree's path.
+- **Behavior change:** `BRGR_HOME` now wins inside a task worktree. Only a command with neither it nor `--home` takes its home from the worktree's path.
 - A cancel marker left by a cancelled or lost revision no longer cancels the next revision.
 - Captured diffs and worktree reclaim now include tasks started from a repository subdirectory.
 
