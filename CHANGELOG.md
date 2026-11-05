@@ -2,11 +2,18 @@
 
 ## Unreleased
 
+## 2.15.19 — 2026-11-05
+
+Workers on macOS: real rounds found four defects that tests had not. `brgr config edit` arrives, and a workflow's `retries` now works in a pane.
+
 - A new pane whose shell asks oh-my-zsh's update question no longer loses the first letter of the command, which failed every worker and handoff until someone answered it. brgr now waits for the shell and declines the offer.
 - `brgr cancel` no longer leaves a Devin worker's tools running. Whichever process closed the pane first could lose the host that says what ran under it.
 - A Codex worker no longer stops with `CODEX_THREAD_ID and BRGR_SESSION_ID disagree` or fails to seal its report when its shared daemon inherited another session's identity. Both could stop it from starting a child.
 - A Codex worker under a custom `--home` or `BRGR_HOME` now uses that home. Its commands run in Codex's shared daemon, which lost the setting, so they silently created tasks in the default home.
 - **Behavior change:** a pane agent that stops by itself and writes no report even after a reminder now ends `failed`, not `lost`, so a workflow's `retries` can run it again. A pane or process that disappeared stays `lost` (issue #225).
+- `brgr config edit` picks harnesses, models and aliases in the terminal (issue #308).
+- An agent whose first prompt a screen swallowed gets the prompt again instead of an order to report (issue #316).
+- The docs now say a pane deadline counts awake time, which it always did while the supervisor lived.
 
 ## 2.15.18 — 2026-11-05
 
