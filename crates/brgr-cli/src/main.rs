@@ -759,10 +759,13 @@ fn current_session() -> Result<Option<String>> {
     let explicit = env::var("BRGR_SESSION_ID")
         .ok()
         .filter(|value| !value.trim().is_empty());
-    if codex
-        .as_ref()
-        .zip(explicit.as_ref())
-        .is_some_and(|(a, b)| a != b)
+    // In a Codex worker the thread is its own, and BRGR_SESSION_ID is whatever
+    // its shared daemon inherited.
+    if worker_identity::from_directory().is_none()
+        && codex
+            .as_ref()
+            .zip(explicit.as_ref())
+            .is_some_and(|(a, b)| a != b)
     {
         bail!("CODEX_THREAD_ID and BRGR_SESSION_ID disagree");
     }

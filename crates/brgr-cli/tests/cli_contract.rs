@@ -8621,6 +8621,32 @@ fn assert_returns_for_debate(mut child: std::process::Child) {
     );
 }
 
+/// The session a Codex worker's daemon inherited says nothing about the worker,
+/// so it only conflicts with the thread outside a worker's directory.
+#[test]
+fn a_stale_daemon_session_does_not_stop_a_worker() {
+    let owner = "codex:debate-session";
+    let (_temp, home, tasks) = debate_home(owner);
+    let worktree = home.join("worktrees/repo/abc");
+    fs::create_dir_all(worktree.join(format!(".brgr/tasks/{}-r1", tasks[0]))).unwrap();
+    let stale_session_in = |directory: &Path| {
+        brgr_command()
+            .current_dir(directory)
+            .arg("--home")
+            .arg(&home)
+            .args(["status", &tasks[0]])
+            .env("CODEX_THREAD_ID", "thread")
+            .env("BRGR_SESSION_ID", "another")
+            .output()
+            .unwrap()
+    };
+    let stderr =
+        |output: std::process::Output| String::from_utf8_lossy(&output.stderr).into_owned();
+    let error = "CODEX_THREAD_ID and BRGR_SESSION_ID disagree";
+    assert!(!stderr(stale_session_in(&worktree)).contains(error));
+    assert!(stderr(stale_session_in(&home)).contains(error));
+}
+
 /// A Codex worker's commands run in a daemon with someone else's environment, so
 /// only its directory says who it is.
 #[test]
