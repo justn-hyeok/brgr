@@ -26,11 +26,11 @@ brgr hands bounded work to registered coding agents and seals what they return f
 
 ## Rules
 
-1. Every worker opens as a Herdr pane split beside your pane, running the harness's own TUI: the first to the right of a wide pane or below a narrow one, later ones stacked under it in equal sizes while you keep your half, and in a new tab once that column is full or after `brgr config set worker-placement tab`. Do not choose headless yourself; pass `--mode auto` when you cannot tell whether a Herdr pane is available.
+1. Every worker opens as a Herdr pane split beside your pane, running the harness's own TUI: the first to the right of a wide pane or below a narrow one, later ones stacked under it in equal sizes while you keep your half, and in a new tab once that column is full or after `brgr config set worker-placement tab`. Do not choose headless yourself; pass `--mode auto` when you cannot tell whether a Herdr pane is available. For an OpenCode session, auto uses headless when brgr cannot verify the caller pane; an explicit `--mode pane` requires a verified pane.
 2. When the work should be done by Claude, use `--harness local.claude-code`. Do not run Claude through another harness.
 3. Workers always run with full permissions (yolo). Nothing lowers it; `--permission` is ignored.
 4. Close what you open. Decide every result (`accept`, `reject`, or `result TASK --ack`) so brgr closes the worker's pane and removes its worktree once nothing in it would be lost. Use `--keep-pane` or `--keep-worktree` only when the user asks to keep one.
-5. From Codex, start every brgr command with `--as SESSION`, the session in your calling context, and never add `--source-pane`. brgr finds your pane from what the Codex panes show; if it cannot, the run fails instead of opening beside someone else. Codex 0.162 and later show a command's line only after it ends, so before the first handoff of a session run one short brgr command with the same `--as` (for example `brgr --as SESSION status --brief`). From Cursor, `CURSOR_CONVERSATION_ID` is the session; `--as` is optional.
+5. From Codex, start every brgr command with `--as SESSION`, the session in your calling context, and never add `--source-pane`. brgr finds your pane from what the Codex panes show; if it cannot, `--mode auto` runs headless and explicit pane mode is refused before admission. Codex 0.162 and later show a command's line only after it ends, so before the first handoff of a session run one short brgr command with the same `--as` (for example `brgr --as SESSION status --brief`). From Cursor, `CURSOR_CONVERSATION_ID` is the session; `--as` is optional. OpenCode sessions use `--mode auto` when their Herdr pane cannot be verified; an explicit pane request is refused and should use `--mode headless` instead.
 6. Leave a worker's screens to brgr. It accepts the workspace trust prompt, continue notices, Claude Code's bypass warning and new-MCP-server prompt, and skips update offers.
 
 ## The loop
@@ -74,7 +74,7 @@ Siblings talk directly only when the user asks for a **debate**: `brgr debate st
 - Head: to pass your command to a new session, `brgr head handoff TASK --kind claude|codex|cursor --goal TEXT`; the new head is told every step. `brgr head claim TASK --abandoned --goal TEXT` takes a head that is gone. The other `head` subcommands are the steps these run.
 - Which to use: one worker for a bounded task; parallel attempts to compare answers; a workflow script for a fixed sequence of steps (`brgr workflow init`); `--enable-delegation` when a worker must split its own work; debate only when the user asks; handoff when this session should stop being the head.
 - Registration: `brgr harness draft <executable>`, `brgr harness add <executable> --workspace <scratch> --prompt "<probe>"`, `brgr harness status <id>`, `brgr doctor`. Each harness keeps its own login and configuration.
-- Owners: Codex sessions, Claude Code sessions (`claude:<CLAUDE_CODE_SESSION_ID>`), and Cursor sessions (`cursor:<CURSOR_CONVERSATION_ID>` in a Cursor Herdr pane) receive notices. Other Herdr owner kinds are told that `FROM BRGR` will not arrive; use `brgr watch A B C` or `brgr watch --all`.
+- Owners: Codex sessions, Claude Code sessions (`claude:<CLAUDE_CODE_SESSION_ID>`), and Cursor sessions (`cursor:<CURSOR_CONVERSATION_ID>` in a Cursor Herdr pane) receive notices. OpenCode sessions are identified as `opencode:<OPENCODE_SESSION_ID>` but do not receive `FROM BRGR`; use `brgr watch A B C` or `brgr watch --all`.
 "#;
 
 #[derive(Debug, Serialize, Deserialize)]

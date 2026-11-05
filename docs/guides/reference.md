@@ -160,13 +160,17 @@ input uses `brgr input TASK --key KEY` or `--text TEXT`; conversation messages
 stay queued while the TUI is busy or displaying a native dialog.
 
 Headless is only ever an explicit per-call choice through `--headless`,
-`--mode headless`, or `--mode auto`; auto chooses it only when no Herdr pane is
-available and reports that choice. Read-only scope, an unsupported effort,
+`--mode headless`, or `--mode auto`; auto chooses it when no Herdr pane can be
+verified and reports that choice. OpenCode sessions whose pane cannot be
+verified therefore run headless with auto; an explicit `--mode pane` is refused
+before admission with guidance to use `--mode headless`. Read-only scope, an unsupported effort,
 and legacy `prefer_print_mode` settings never select it. Use
 `--owner-session SESSION --source-pane PANE` for a positively verified source
 when the caller is a shared daemon. `--as SESSION` (the short form) is the
 session in the calling context; Codex owners are identified by what the panes
-show, not by a shared daemon's environment. Codex 0.162 and later show a
+show, not by a shared daemon's environment. OpenCode uses `OPENCODE_SESSION_ID`
+for its owner identity, but its tool process cannot prove the Herdr pane through
+the process ancestry check. Codex 0.162 and later show a
 command's line only after it ends, so a run looks for the pane once the call
 has finished, while `head handoff` needs it at once: first run one short command such as
 `brgr --as SESSION status --brief` and the line is there. When `--as` names a session and
