@@ -380,6 +380,28 @@ fn an_auto_handoff_runs_from_the_head_s_own_command_once() {
 }
 
 #[test]
+fn an_over_limit_target_is_never_handed_to_automatically() {
+    let (temp, home, workspace) = fixture_home();
+    let task_id = start_task(&home, &workspace);
+    let dir = temp.path().join("fake");
+    fs::create_dir_all(&dir).unwrap();
+    let fake = fake_herdr(&dir);
+    arm_auto(&home, true);
+    write_signal(&home, "session-head", 80.0, now());
+    // The chosen target's own plan is already over the limit, so the note
+    // names it and no handoff may start, automatic or not.
+    write_report(&home, "claude-elsewhere", "claude", 91.0, now() - 60);
+    let herdr = herdr_env(&fake, &dir, "p-old");
+    let output = run_with(&home, &["result", &task_id], &head_env(), &herdr);
+    let said = String::from_utf8_lossy(&output.stderr);
+    assert!(said.contains("claude, the harness you chose"), "{said}");
+    assert!(said.contains("no handoff command is given"), "{said}");
+    assert!(!said.contains("started automatically"), "{said}");
+    assert!(!said.contains("handoff TASK"), "{said}");
+    assert_eq!(calls_for(&dir, "pane split"), 0, "{}", calls(&dir));
+}
+
+#[test]
 fn without_auto_no_pane_is_opened() {
     let (temp, home, workspace) = fixture_home();
     let task_id = start_task(&home, &workspace);
