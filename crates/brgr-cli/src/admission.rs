@@ -525,6 +525,9 @@ pub(crate) async fn revise_task(paths: &Paths, args: ReviseArgs, json_output: bo
     calling.deadline_seconds = Some(replacement.budget.deadline_seconds);
     config::validate_manifest_argv(&calling.argv, &activated)?;
     revisable.acknowledge_previous(&store);
+    // The legacy cancel marker has no revision. Once a new revision is
+    // admitted, a marker left by an older settled revision must not cancel it.
+    let _ = fs::remove_file(paths.cancel(args.task));
     start_task(
         paths,
         replacement,
