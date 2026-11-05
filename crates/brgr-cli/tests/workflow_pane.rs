@@ -409,11 +409,11 @@ fn command_line_contains(pid: u32, needle: &str) -> bool {
 }
 
 fn live_driver_pid(fixture: &Fixture, run_id: &str) -> Option<u32> {
-    let pid = fs::read_to_string(pid_file(fixture, run_id))
-        .ok()?
-        .trim()
-        .parse()
-        .ok()?;
+    let pid =
+        serde_json::from_slice::<Value>(&fs::read(pid_file(fixture, run_id)).ok()?).ok()?["pid"]
+            .as_u64()?
+            .try_into()
+            .ok()?;
     (pid_is_alive(pid) && command_line_contains(pid, "workflow __drive")).then_some(pid)
 }
 

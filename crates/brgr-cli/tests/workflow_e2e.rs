@@ -1328,10 +1328,10 @@ fn kill_driver(fixture: &Fixture, run_id: &str) {
         wait_until(Duration::from_mins(1), || pid_path.is_file()),
         "driver pid file missing"
     );
-    let pid: u32 = fs::read_to_string(&pid_path)
+    let pid: u32 = serde_json::from_slice::<Value>(&fs::read(&pid_path).unwrap()).unwrap()["pid"]
+        .as_u64()
         .unwrap()
-        .trim()
-        .parse()
+        .try_into()
         .unwrap();
     let killed = Command::new("/bin/kill")
         .args(["-KILL", "--", &format!("-{pid}")])
@@ -1435,7 +1435,7 @@ fn a_follow_up_task_is_created_only_from_an_observed_report() {
 }
 
 #[test]
-fn resume_after_the_driver_dies_still_creates_exactly_three_tasks() {
+fn workflow_status_identifies_a_dead_driver_and_resume_finishes_the_run() {
     require_node();
     let fixture = fixture_home();
     init_sdk(&fixture);
@@ -1449,6 +1449,7 @@ fn resume_after_the_driver_dies_still_creates_exactly_three_tasks() {
         &["workflow", "status", &run_id],
         &owner_env(),
     ));
+    assert_eq!(before["driver_alive"], true, "{before}");
     let before_keys = step_keys(&before);
     assert_eq!(before_keys.len(), 2, "{before}");
     assert!(
@@ -1457,6 +1458,42 @@ fn resume_after_the_driver_dies_still_creates_exactly_three_tasks() {
         "{before}"
     );
     kill_driver(&fixture, &run_id);
+    let after_kill = run(
+        &fixture.home,
+        &fixture.workspace,
+        &["workflow", "status", &run_id],
+        &owner_env(),
+    );
+    let after_kill_json = json_output(&after_kill);
+    assert_eq!(after_kill_json["state"], "running", "{after_kill_json}");
+    assert_eq!(after_kill_json["driver_alive"], false, "{after_kill_json}");
+    assert!(
+        String::from_utf8_lossy(&after_kill.stderr)
+            .contains(&format!("brgr workflow resume {run_id}")),
+        "status did not name the recovery command: {}",
+        String::from_utf8_lossy(&after_kill.stderr)
+    );
+    let driver_record = fixture
+        .home
+        .join("runs")
+        .join(format!("{run_id}.workflow.pid"));
+    fs::write(&driver_record, b"12345\n").unwrap();
+    let old_record = json_output(&run(
+        &fixture.home,
+        &fixture.workspace,
+        &["workflow", "status", &run_id],
+        &owner_env(),
+    ));
+    assert!(old_record["driver_alive"].is_null(), "{old_record}");
+    fs::remove_file(&driver_record).unwrap();
+    let unknown = json_output(&run(
+        &fixture.home,
+        &fixture.workspace,
+        &["workflow", "status", &run_id],
+        &owner_env(),
+    ));
+    assert_eq!(unknown["state"], "running", "{unknown}");
+    assert!(unknown["driver_alive"].is_null(), "{unknown}");
     fs::remove_file(fixture.home.join("pause-before-c")).unwrap();
     json_output(&run(
         &fixture.home,

@@ -20,6 +20,7 @@ use std::{
 use anyhow::{Context as _, Result, bail};
 use brgr_protocol::TaskId;
 use brgr_store::{Store, WorkflowRun, WorkflowRunId, WorkflowRunState};
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
@@ -44,6 +45,12 @@ const NO_VERIFIED_PANE: &str = "no verified Herdr pane: workflow steps must use 
 
 struct PidGuard {
     path: PathBuf,
+}
+
+#[derive(Deserialize, Serialize)]
+struct DriverRecord {
+    pid: u32,
+    birth: String,
 }
 
 impl Drop for PidGuard {
@@ -160,7 +167,12 @@ pub(super) fn cancel_run(paths: &Paths, run: &str, json_output: bool) -> Result<
 pub(super) fn drive(paths: &Paths, run: &str, script: &Path) -> Result<()> {
     let run_id = WorkflowRunId::new(run)?;
     let pid_path = pid_path(paths, &run_id);
-    write_private(&pid_path, format!("{}\n", std::process::id()).as_bytes())?;
+    let pid = std::process::id();
+    let birth = crate::supervision::ps_field(&pid.to_string(), "lstart")?;
+    write_private(
+        &pid_path,
+        &serde_json::to_vec(&DriverRecord { pid, birth })?,
+    )?;
     let _guard = PidGuard { path: pid_path };
     let succeeded = run_node(paths, &run_id, script).is_ok_and(|status| status.success());
     settle_driver_exit(paths, &run_id, succeeded)
@@ -322,14 +334,31 @@ fn env_allowed(name: &OsStr) -> bool {
     ALLOWED_ENV.contains(&name) || name.starts_with("HERDR_")
 }
 
+pub(super) fn driver_alive(paths: &Paths, run_id: &WorkflowRunId) -> Option<bool> {
+    let record: DriverRecord =
+        serde_json::from_slice(&fs::read(pid_path(paths, run_id)).ok()?).ok()?;
+    Some(
+        crate::supervision::ps_field(&record.pid.to_string(), "lstart")
+            .is_ok_and(|birth| birth == record.birth)
+            && pid_is_alive(record.pid)
+            && command_line_contains(record.pid, "workflow __drive"),
+    )
+}
+
 fn live_driver_pid(paths: &Paths, run_id: &WorkflowRunId) -> Option<u32> {
-    let text = fs::read_to_string(pid_path(paths, run_id)).ok()?;
-    let pid = text.trim().parse::<u32>().ok()?;
-    if pid_is_alive(pid) && command_line_contains(pid, "workflow __drive") {
-        Some(pid)
-    } else {
-        None
+    if driver_alive(paths, run_id) != Some(true) {
+        // A driver from before records held a bare pid. It may still be running
+        // through an upgrade, and resuming beside it would run the script twice.
+        let bare = fs::read_to_string(pid_path(paths, run_id)).ok()?;
+        return bare
+            .trim()
+            .parse::<u32>()
+            .ok()
+            .filter(|pid| pid_is_alive(*pid) && command_line_contains(*pid, "workflow __drive"));
     }
+    let record: DriverRecord =
+        serde_json::from_slice(&fs::read(pid_path(paths, run_id)).ok()?).ok()?;
+    Some(record.pid)
 }
 
 fn pid_is_alive(pid: u32) -> bool {
