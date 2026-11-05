@@ -345,50 +345,33 @@ fn an_abandoned_claim_supersedes_a_resumed_takeover() {
 }
 
 #[test]
-fn concurrent_abandoned_claims_bind_the_head_once() {
+fn a_claim_that_read_an_older_binding_loses_to_one_that_committed() {
+    // Two processes can also run one after the other, and then the later claim
+    // rightly supersedes the earlier. Only a claim that read the binding before
+    // another committed must lose, so this drives that order directly.
     let (_temp, home, workspace) = fixture_home();
-    let task_id = start_task(&home, &workspace);
-    let mut commands = Vec::new();
-    for session in ["session-c", "session-d"] {
-        let mut command = brgr_command();
-        command
-            .arg("--home")
-            .arg(&home)
-            .args([
-                "--json",
-                "head",
-                "claim",
-                &task_id,
-                "--abandoned",
-                "--goal",
-                "recover",
-            ])
-            .env("BRGR_OWNER_ID", "codex:head-takeover")
-            .env("BRGR_SESSION_ID", session);
-        commands.push(command);
-    }
-    let outputs = commands
-        .into_iter()
-        .map(|mut command| std::thread::spawn(move || command.output().unwrap()))
-        .collect::<Vec<_>>()
-        .into_iter()
-        .map(|thread| thread.join().unwrap())
-        .collect::<Vec<_>>();
-    assert_eq!(
-        outputs
-            .iter()
-            .filter(|output| output.status.success())
-            .count(),
-        1,
-        "{outputs:?}"
-    );
-    let binding = brgr_store::Store::open(home.join("store"))
-        .unwrap()
-        .owner_binding(&brgr_protocol::OwnerId::new("codex:head-takeover").unwrap())
-        .unwrap()
+    start_task(&home, &workspace);
+    let store = brgr_store::Store::open(home.join("store")).unwrap();
+    let owner = brgr_protocol::OwnerId::new("codex:head-takeover").unwrap();
+    let (from, epoch) = store.owner_binding(&owner).unwrap().unwrap();
+    let claim = |to_session, idempotency_key| brgr_store::AbandonedClaim {
+        from_session: &from,
+        to_session,
+        idempotency_key,
+        goal: "recover",
+        notes: "",
+        expected_epoch: epoch,
+    };
+    store
+        .claim_abandoned_takeover(&owner, &claim("session-c", "claim-c"))
         .unwrap();
-    assert!(matches!(binding.0.as_str(), "session-c" | "session-d"));
-    assert_eq!(binding.1, 2);
+    assert!(matches!(
+        store.claim_abandoned_takeover(&owner, &claim("session-d", "claim-d")),
+        Err(brgr_store::StoreError::OwnerBindingConflict)
+    ));
+    let binding = store.owner_binding(&owner).unwrap().unwrap();
+    assert_eq!(binding.0, "session-c");
+    assert_eq!(binding.1, epoch + 1);
 }
 
 fn incoming_env() -> [(&'static str, &'static str); 2] {
