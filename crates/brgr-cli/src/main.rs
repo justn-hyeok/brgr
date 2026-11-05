@@ -254,7 +254,23 @@ async fn main() -> Result<()> {
         return plugin_bridge::client(Path::new(&dir), budget_seconds.saturating_add(120)).await;
     }
     bridge_host::validate_bridge_host_preflight(&cli)?;
-    let paths = Paths::new(worker_identity::resolve_home(cli.home.clone()))?;
+    let home = worker_identity::resolve_home(cli.home.clone());
+    // Background internals started for a control home that is gone (issue #350)
+    // exit quietly instead of recreating it. Every other command still creates
+    // its home on first use through `Paths::new`.
+    if matches!(
+        &cli.command,
+        Command::Notify { .. }
+            | Command::NotifyWorkflow { .. }
+            | Command::Session { .. }
+            | Command::Supervise { .. }
+    ) && !match &home {
+        Some(path) => path.exists(),
+        None => default_home()?.exists(),
+    } {
+        return Ok(());
+    }
+    let paths = Paths::new(home)?;
     worker_identity::initialize(&paths);
     let internal = matches!(
         &cli.command,
