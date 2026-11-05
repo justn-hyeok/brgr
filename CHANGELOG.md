@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- A Codex worker under a custom `--home` or `BRGR_HOME` now uses that home. Its commands run in Codex's shared daemon, which lost the setting, so they silently created tasks in the default home.
 - **Behavior change:** a pane agent that stops by itself and writes no report even after a reminder now ends `failed`, not `lost`, so a workflow's `retries` can run it again. A pane or process that disappeared stays `lost` (issue #225).
 
 ## 2.15.18 — 2026-11-05

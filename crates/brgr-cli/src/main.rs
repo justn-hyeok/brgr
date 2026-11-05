@@ -254,7 +254,7 @@ async fn main() -> Result<()> {
         return plugin_bridge::client(Path::new(&dir), budget_seconds.saturating_add(120)).await;
     }
     bridge_host::validate_bridge_host_preflight(&cli)?;
-    let paths = Paths::new(cli.home.clone())?;
+    let paths = Paths::new(worker_identity::resolve_home(cli.home.clone()))?;
     worker_identity::initialize(&paths);
     let internal = matches!(
         &cli.command,
