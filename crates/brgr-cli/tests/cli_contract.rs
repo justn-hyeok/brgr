@@ -6593,6 +6593,48 @@ fn real_cli_run_binds_candidate_to_its_owner() {
     assert_eq!(replay["decision_id"], accepted["decision_id"]);
 }
 
+/// A foreground run waits for the whole task, so once the worker is up the slow
+/// notice must name the run, not "preparing the worktree". The fixture sleeps
+/// 30s on SLOW; a 12s deadline settles it past the 8s notice.
+#[test]
+fn a_slow_foreground_run_says_it_is_running_not_preparing() {
+    let (_temp, home, workspace) = fixture_home();
+    let ran = run(
+        &home,
+        &[
+            "run",
+            "SLOW",
+            "--workspace",
+            workspace.to_str().unwrap(),
+            "--deadline-seconds",
+            "12",
+            "--foreground",
+        ],
+        &[("BRGR_OWNER_ID", "codex:slow-notice")],
+    );
+    let stderr = String::from_utf8_lossy(&ran.stderr);
+    assert!(
+        stderr.contains("brgr: still running the task in the foreground..."),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("preparing the worktree"), "{stderr}");
+
+    let fast = run(
+        &home,
+        &[
+            "run",
+            "BRGR_FIXTURE_OK",
+            "--workspace",
+            workspace.to_str().unwrap(),
+            "--foreground",
+        ],
+        &[("BRGR_OWNER_ID", "codex:slow-notice")],
+    );
+    assert_eq!(json_output(&fast)["outcome"], "candidate");
+    let fast_stderr = String::from_utf8_lossy(&fast.stderr);
+    assert!(!fast_stderr.contains("brgr: still"), "{fast_stderr}");
+}
+
 #[test]
 fn control_home_inside_worker_workspace_is_rejected_before_task_admission() {
     let temp = TempDir::new().unwrap();
