@@ -143,6 +143,9 @@ pub(crate) enum Command {
         session: Option<String>,
     },
     /// Move an owner's head from one session to another.
+    #[command(
+        after_help = "Most owners run only `handoff`, whose new head is told every later step, or `claim` for a head that is gone. The others are the steps these run."
+    )]
     Head {
         #[command(subcommand)]
         command: crate::head::HeadCommand,

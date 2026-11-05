@@ -128,7 +128,7 @@ Head 자동 종료는 남아 있다.
 
 ## Phase 2. Head Migration
 
-릴리스 방향: v2.15.0 · 상태: 2.1~2.6 출시. 실사용 확인은 Claude Head와 Codex Head 각 1회(둘 다 `--exit-old` 포함)다([Claude 기록](../evidence/verification-debt-2026-11-01.md), [Codex 기록](../releases/v2.15.15.md)). Codex 세션의 첫 brgr 명령이 `head handoff`인 경우, Cursor Head, 실제 신호로 하는 조건부 인계는 확인하지 못했다
+릴리스 방향: v2.15.0 · 상태: 2.1~2.6 출시. 실사용 확인은 Claude Head와 Codex Head 각 1회(둘 다 `--exit-old` 포함)다([Claude 기록](../evidence/verification-debt-2026-11-01.md), [Codex 기록](../releases/v2.15.15.md)). Linux와 macOS의 인계 왕복과 `--auto`(사용량 수치는 시험에서 넣은 값)는 [Linux 기록](../evidence/debate-handoff-delegation-2026-11-05.md)과 [macOS 기록](../evidence/debate-handoff-delegation-macos-2026-11-05.md)에 있다. Codex 세션의 첫 brgr 명령이 `head handoff`인 경우, Cursor Head, 실제 신호로 하는 조건부 인계는 확인하지 못했다
 
 지휘권을 다른 세션으로 옮기고 기존 worker와 미처리 결과를 승계한다. 인계 성공은
 새 Head가 실제 작업을 이어서 수행했을 때 입증한다. 특정 하네스 전용이 아니다.
