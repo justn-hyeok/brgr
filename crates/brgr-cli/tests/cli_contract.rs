@@ -4978,7 +4978,7 @@ esac
 fn the_codex_hook_stays_out_of_a_worker_in_a_task_worktree() {
     let temp = TempDir::new().unwrap();
     let home = temp.path().join("brgr");
-    let hook = |cwd: &Path| {
+    let hook = |cwd: &Path, session_id: &str| {
         let mut child = brgr_command()
             .arg("--home")
             .arg(&home)
@@ -4988,7 +4988,7 @@ fn the_codex_hook_stays_out_of_a_worker_in_a_task_worktree() {
             .stderr(std::process::Stdio::piped())
             .spawn()
             .unwrap();
-        let input = json!({"session_id": "019b0000-0000-7000-8000-000000000001", "cwd": cwd});
+        let input = json!({"session_id": session_id, "cwd": cwd});
         child
             .stdin
             .take()
@@ -5005,10 +5005,20 @@ fn the_codex_hook_stays_out_of_a_worker_in_a_task_worktree() {
     };
     let owner = temp.path().join("project");
     fs::create_dir_all(&owner).unwrap();
-    assert!(hook(&owner).contains("brgr calling context"));
+    assert!(hook(&owner, "019b0000-0000-7000-8000-000000000001").contains("brgr calling context"));
     let worker = home.join("worktrees/project/0123abcd");
     fs::create_dir_all(&worker).unwrap();
-    assert_eq!(hook(&worker).trim(), "{}");
+    let worker_session = "019b0000-0000-7000-8000-000000000002";
+    assert_eq!(hook(&worker, worker_session).trim(), "{}");
+    // The hook ran inside a task worktree: the worker's session must not have
+    // been bound as an owner.
+    let store = brgr_store::Store::open(home.join("store")).unwrap();
+    let worker_owner = brgr_protocol::OwnerId::new(format!("codex:{worker_session}")).unwrap();
+    assert_eq!(
+        store.owner_binding(&worker_owner).unwrap(),
+        None,
+        "the Codex hook bound a worker's session as an owner"
+    );
 }
 
 fn invoke_hook_with_herdr(
@@ -6142,6 +6152,15 @@ fn land_accepts_and_applies_in_one_step_and_leaves_nothing_to_acknowledge() {
     // The decision acknowledged the result: no failure banner, no ack needed.
     let status = run(&home, &["status", &task], &owner);
     assert!(!String::from_utf8_lossy(&status.stderr).contains("not acknowledged"));
+    let owner_id = brgr_protocol::OwnerId::new("codex:three-way").unwrap();
+    let store = brgr_store::Store::open(home.join("store")).unwrap();
+    assert!(
+        store.inbox(&owner_id, false).unwrap().is_empty(),
+        "land left the candidate unacknowledged in the owner's inbox"
+    );
+    let acknowledged = store.inbox(&owner_id, true).unwrap();
+    assert_eq!(acknowledged.len(), 1);
+    assert!(acknowledged[0].acknowledged);
 }
 
 #[test]

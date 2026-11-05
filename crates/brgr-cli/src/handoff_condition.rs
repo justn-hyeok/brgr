@@ -412,7 +412,7 @@ mod tests {
 
     #[test]
     fn a_target_already_at_its_plan_limit_is_named_instead_of_handed_to() {
-        let (text, state) = decide(
+        let (verdict, state) = evaluate(
             &config(),
             &signal(Some(90.0), 1_000),
             State::default(),
@@ -420,12 +420,17 @@ mod tests {
             "claude",
             Some(91.0),
         );
-        let text = text.unwrap();
+        let text = verdict.note.unwrap();
         assert!(text.contains("codex, the harness you chose"), "{text}");
         assert!(text.contains("91% of its plan"), "{text}");
         assert!(!text.contains("brgr head handoff TASK"), "{text}");
+        assert!(
+            verdict.handoff.is_none(),
+            "an over-limit target still got a handoff: {:?}",
+            verdict.handoff
+        );
         // Said once per crossing, like the command would have been.
-        let (again, _) = decide(
+        let (again, _) = evaluate(
             &config(),
             &signal(Some(91.0), 1_060),
             state,
@@ -433,7 +438,8 @@ mod tests {
             "claude",
             Some(91.0),
         );
-        assert_eq!(again, None);
+        assert_eq!(again.note, None);
+        assert!(again.handoff.is_none());
     }
 
     #[test]
