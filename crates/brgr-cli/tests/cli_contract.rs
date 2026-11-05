@@ -8102,6 +8102,179 @@ fn worktree_created_before_admission_is_preserved_and_not_reused() {
     );
 }
 
+fn rejected_git_task(temp: &TempDir) -> (PathBuf, PathBuf, String) {
+    let home = temp.path().join("brgr");
+    let repository = temp.path().join("repo");
+    fs::create_dir_all(&repository).unwrap();
+    seed_git_repo(&repository);
+    add_fixture(&home, &brgr_fixture(), &temp.path().join("scratch"));
+    let owner = [("BRGR_OWNER_ID", "codex:revise-orphan")];
+    let task = json_output(&run(
+        &home,
+        &[
+            "run",
+            "BRGR_FIXTURE_OK",
+            "--workspace",
+            repository.to_str().unwrap(),
+            "--foreground",
+        ],
+        &owner,
+    ))["task_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    json_output(&run(
+        &home,
+        &[
+            "reject",
+            &task,
+            "--reason",
+            "revise after interrupted admission",
+        ],
+        &owner,
+    ));
+    (home, repository, task)
+}
+
+#[test]
+fn revise_reuses_a_clean_unadmitted_revision_after_process_death() {
+    let temp = TempDir::new().unwrap();
+    let (home, repository, task) = rejected_git_task(&temp);
+    let owner = [("BRGR_OWNER_ID", "codex:revise-orphan")];
+    let orphan = home
+        .join("worktrees/repo")
+        .join(format!("{}-r2", &task[..8]));
+    let crashed = run(
+        &home,
+        &[
+            "revise",
+            &task,
+            "BRGR_FIXTURE_OK",
+            "--foreground",
+            "--workspace",
+            repository.to_str().unwrap(),
+        ],
+        &[owner[0], ("BRGR_TEST_EXIT_AFTER_WORKTREE", "1")],
+    );
+    assert_eq!(crashed.status.code(), Some(78));
+    assert!(orphan.is_dir());
+
+    let revised = json_output(&run(
+        &home,
+        &[
+            "revise",
+            &task,
+            "BRGR_FIXTURE_OK",
+            "--foreground",
+            "--workspace",
+            repository.to_str().unwrap(),
+        ],
+        &owner,
+    ));
+    assert_eq!(revised["outcome"], "candidate", "{revised}");
+    assert_eq!(revised["revision"], 2);
+    let task_id = task.parse().unwrap();
+    let admitted = brgr_store::Store::open(home.join("store"))
+        .unwrap()
+        .task(task_id)
+        .unwrap();
+    assert_eq!(
+        Path::new(&admitted.workspace),
+        orphan.canonicalize().unwrap()
+    );
+}
+
+#[test]
+fn revise_cleans_created_files_when_admission_record_is_locked() {
+    let temp = TempDir::new().unwrap();
+    let (home, repository, task) = rejected_git_task(&temp);
+    let database = home.join("store/brgr.sqlite3");
+    let blocker = rusqlite::Connection::open(&database).unwrap();
+    blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let output = run(
+        &home,
+        &[
+            "revise",
+            &task,
+            "BRGR_FIXTURE_OK",
+            "--foreground",
+            "--workspace",
+            repository.to_str().unwrap(),
+        ],
+        &[("BRGR_OWNER_ID", "codex:revise-orphan")],
+    );
+    blocker.execute_batch("ROLLBACK").unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("locked"));
+    assert!(
+        !home.join(format!("launches/{task}-r2.json")).exists(),
+        "failed admission left its launch file behind"
+    );
+    let orphan = home
+        .join("worktrees/repo")
+        .join(format!("{}-r2", &task[..8]));
+    assert!(
+        !orphan.exists(),
+        "failed admission left its worktree behind"
+    );
+
+    let revised = json_output(&run(
+        &home,
+        &[
+            "revise",
+            &task,
+            "BRGR_FIXTURE_OK",
+            "--foreground",
+            "--workspace",
+            repository.to_str().unwrap(),
+        ],
+        &[("BRGR_OWNER_ID", "codex:revise-orphan")],
+    ));
+    assert_eq!(revised["outcome"], "candidate", "{revised}");
+    assert_eq!(revised["revision"], 2);
+}
+
+#[test]
+fn revise_refuses_an_unadmitted_revision_that_contains_work() {
+    let temp = TempDir::new().unwrap();
+    let (home, repository, task) = rejected_git_task(&temp);
+    let owner = [("BRGR_OWNER_ID", "codex:revise-orphan")];
+    let orphan = home
+        .join("worktrees/repo")
+        .join(format!("{}-r2", &task[..8]));
+    let crashed = run(
+        &home,
+        &[
+            "revise",
+            &task,
+            "BRGR_FIXTURE_OK",
+            "--foreground",
+            "--workspace",
+            repository.to_str().unwrap(),
+        ],
+        &[owner[0], ("BRGR_TEST_EXIT_AFTER_WORKTREE", "1")],
+    );
+    assert_eq!(crashed.status.code(), Some(78));
+    let marker = orphan.join("owner-work.txt");
+    fs::write(&marker, "keep this work\n").unwrap();
+
+    let refused = run(
+        &home,
+        &[
+            "revise",
+            &task,
+            "BRGR_FIXTURE_OK",
+            "--foreground",
+            "--workspace",
+            repository.to_str().unwrap(),
+        ],
+        &owner,
+    );
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains(&orphan.display().to_string()));
+    assert_eq!(fs::read_to_string(marker).unwrap(), "keep this work\n");
+}
+
 #[test]
 fn missing_task_worktree_fails_closed_without_recreate_or_new_identity() {
     let temp = TempDir::new().unwrap();

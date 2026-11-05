@@ -68,6 +68,7 @@ pub(crate) struct StartOptions<'a> {
     pub(crate) calling_options: config::CallingOptions,
     pub(crate) instructions_digest: Option<String>,
     pub(crate) workflow: Option<WorkflowStepAdmission>,
+    pub(crate) reuse_clean_unadmitted_worktree: bool,
 }
 
 /// One `brgr run --workflow --step` admission, computed before any worktree.
@@ -281,6 +282,7 @@ pub(crate) async fn run_task(paths: &Paths, mut args: RunArgs, json_output: bool
                 calling_options: calling,
                 instructions_digest,
                 workflow,
+                reuse_clean_unadmitted_worktree: false,
             },
         )),
     )
@@ -555,6 +557,7 @@ pub(crate) async fn revise_task(paths: &Paths, args: ReviseArgs, json_output: bo
             calling_options: calling,
             instructions_digest,
             workflow: None,
+            reuse_clean_unadmitted_worktree: true,
         },
     )
     .await
@@ -967,45 +970,70 @@ pub(crate) async fn start_task(
     )? {
         return Ok(());
     }
+    // Keep this repository-wide lock through orphan inspection, launch-file
+    // creation, the admission write, and any rollback so revises cannot race
+    // over the same revision path.
     let admission = workspace::acquire_admission_lock(&paths.worktrees, options.source_workspace)?;
     let task_id = spec.task_id;
     let harness_id = spec.route.harness_id.clone();
-    let workspace = prepare_task_workspace(paths, &mut spec, &activated.adapter, &options)?;
-    spec.workspace = workspace.to_string_lossy().into_owned();
-    spec.validate()?;
-    let launch = LaunchEnvelope {
-        spec,
-        harness_id,
-        protocol_generation: "brgr-v1".to_owned(),
-        keep_pane: matches!(options.pane, PaneDisposition::Keep),
-        keep_worktree: matches!(options.worktree, WorktreeDisposition::Keep),
-        delegation_enabled: options.enable_delegation || options.parent.is_some(),
-        manifest: Some(activated.clone()),
-        executable_digest: Some(activation.executable_digest.clone()),
-        pane_mode,
-        claimant: Claimant::Supervisor,
-        source_pane,
-        source_session: session.clone(),
-        calling_options: Some(options.calling_options.clone()),
-        instructions_digest: options.instructions_digest.clone(),
+    let revision = spec.revision;
+    let (workspace, workspace_created) =
+        prepare_task_workspace(paths, &mut spec, &activated.adapter, &options)?;
+    let launch_path = paths.launch(task_id, revision);
+    let mut launch_created = false;
+    let prepared = (|| -> Result<_> {
+        spec.workspace = workspace.to_string_lossy().into_owned();
+        spec.validate()?;
+        let launch = LaunchEnvelope {
+            spec,
+            harness_id,
+            protocol_generation: "brgr-v1".to_owned(),
+            keep_pane: matches!(options.pane, PaneDisposition::Keep),
+            keep_worktree: matches!(options.worktree, WorktreeDisposition::Keep),
+            delegation_enabled: options.enable_delegation || options.parent.is_some(),
+            manifest: Some(activated.clone()),
+            executable_digest: Some(activation.executable_digest.clone()),
+            pane_mode,
+            claimant: Claimant::Supervisor,
+            source_pane,
+            source_session: session.clone(),
+            calling_options: Some(options.calling_options.clone()),
+            instructions_digest: options.instructions_digest.clone(),
+        };
+        write_json_new(&launch_path, &launch)?;
+        launch_created = true;
+        let mut store = Store::open(&paths.store)?;
+        let request_digest_text = task_request_digest(&launch.spec)?;
+        let recorded = RecordedLaunch {
+            paths,
+            launch: &launch,
+            launch_path: &launch_path,
+            workspace: &workspace,
+        };
+        let commit = commit_recorded_task(
+            &recorded,
+            &mut store,
+            &request_digest_text,
+            &options,
+            proof.as_ref(),
+        )?;
+        Ok((launch, store, commit))
+    })();
+    let (launch, mut store, commit) = match prepared {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            discard_unrecorded_admission(
+                paths,
+                &workspace,
+                &launch_path,
+                task_id,
+                revision,
+                workspace_created,
+                launch_created,
+            );
+            return Err(error);
+        }
     };
-    let launch_path = paths.launch(task_id, launch.spec.revision);
-    write_json_new(&launch_path, &launch)?;
-    let mut store = Store::open(&paths.store)?;
-    let request_digest_text = task_request_digest(&launch.spec)?;
-    let recorded = RecordedLaunch {
-        paths,
-        launch: &launch,
-        launch_path: &launch_path,
-        workspace: &workspace,
-    };
-    let commit = commit_recorded_task(
-        &recorded,
-        &mut store,
-        &request_digest_text,
-        &options,
-        proof.as_ref(),
-    )?;
     drop(admission);
     match commit {
         AdmissionCommit::Created => {}
@@ -1208,7 +1236,10 @@ impl RecordedLaunch<'_> {
             self.paths,
             self.workspace,
             self.launch_path,
-            &self.launch.spec,
+            self.launch.spec.task_id,
+            self.launch.spec.revision,
+            true,
+            true,
         );
     }
 }
@@ -1217,15 +1248,22 @@ fn discard_unrecorded_admission(
     paths: &Paths,
     workspace: &Path,
     launch_path: &Path,
-    spec: &TaskSpec,
+    task_id: TaskId,
+    revision: u32,
+    discard_workspace: bool,
+    discard_launch: bool,
 ) {
-    let _ = fs::remove_file(launch_path);
+    if discard_launch {
+        let _ = fs::remove_file(launch_path);
+    }
     let _ = fs::remove_file(
         paths
             .runs
-            .join(format!("{}-r{}.snapshot.json", spec.task_id, spec.revision)),
+            .join(format!("{task_id}-r{revision}.snapshot.json")),
     );
-    workspace::discard_prepared_worktree(&paths.worktrees, workspace);
+    if discard_workspace {
+        workspace::discard_prepared_worktree(&paths.worktrees, workspace);
+    }
 }
 
 fn print_existing_task_receipt(
@@ -1439,7 +1477,7 @@ pub(crate) fn prepare_task_workspace(
     spec: &mut TaskSpec,
     adapter: &str,
     options: &StartOptions<'_>,
-) -> Result<PathBuf> {
+) -> Result<(PathBuf, bool)> {
     spec.evidence.base_commit = None;
     spec.evidence.base_tree = None;
     let selected = if options.snapshot_paths.is_empty() {
@@ -1450,13 +1488,14 @@ pub(crate) fn prepare_task_workspace(
             options.snapshot_paths,
         )?)
     };
-    let workspace = workspace::prepare_workspace(
+    let (workspace, created) = workspace::prepare_workspace_with_reuse(
         &paths.worktrees,
         options.source_workspace,
         spec.task_id,
         spec.revision,
         adapter,
         matches!(options.snapshot, WorkspaceSnapshot::AllowCleanHead) || selected.is_some(),
+        options.reuse_clean_unadmitted_worktree,
     )?;
     if spec.evidence.capture_diff {
         spec.evidence.base_commit = Some(workspace::git_head(&workspace)?);
@@ -1480,7 +1519,7 @@ pub(crate) fn prepare_task_workspace(
             &serde_json::to_value(snapshot.receipt(spec.task_id, spec.revision))?,
         )?;
     }
-    Ok(workspace)
+    Ok((workspace, created))
 }
 
 pub(crate) fn validate_source_home(

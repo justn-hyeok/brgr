@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- `brgr revise` recovers only clean, unadmitted revision worktrees and removes worktrees and launch files left by an in-process admission failure.
 - `BRGR_HOME` now wins inside a task worktree. Only a command with neither it nor `--home` takes its home from the worktree's path.
 - A cancel marker left by a cancelled or lost revision no longer cancels the next revision.
 - Captured diffs and worktree reclaim now include tasks started from a repository subdirectory.
