@@ -640,6 +640,13 @@ pub(crate) fn close_leftover_pane(paths: &Paths, task: TaskId, revision: u32, ke
         }
         Ok(true) => {}
     }
+    // Whichever process reaches a stopped worker first closes its pane, and a
+    // host gone with the pane no longer says what ran under it.
+    crate::tui_host::stop_descendants(
+        &paths
+            .runs
+            .join(format!("{task}-r{revision}.native-state.json")),
+    );
     let _ = update_receipt(&path, |value| "closing".clone_into(&mut value.cleanup));
     if herdr.call(&["pane", "close", &receipt.pane]).is_ok() {
         let _ = mark_closed(&path);

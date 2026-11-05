@@ -415,6 +415,57 @@ fn a_kept_worktree_is_not_reassessed_by_later_cleanups() {
     );
 }
 
+/// Devin's tools sit in their own sessions, so closing the pane leaves them
+/// running (seen live on macOS: `ping` outlived a cancelled worker).
+#[test]
+fn closing_a_workers_pane_stops_what_ran_under_its_host() {
+    let fixture = Fixture::new();
+    let mut host = std::process::Command::new("/bin/sh")
+        .args(["-c", "/bin/sleep 300 & wait"])
+        .spawn()
+        .unwrap();
+    let pid = host.id();
+    let tool = || {
+        let output = Command::new("/usr/bin/pgrep")
+            .args(["-P", &pid.to_string()])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&output.stdout).trim().to_owned()
+    };
+    let started = std::time::Instant::now();
+    while tool().is_empty() && started.elapsed() < Duration::from_secs(10) {
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert!(!tool().is_empty());
+    write_json_atomic(
+        &fixture
+            .paths
+            .runs
+            .join(format!("{}-r1.native-state.json", fixture.task)),
+        &crate::tui_host::NativeState {
+            pid,
+            birth: crate::supervision::ps_field(&pid.to_string(), "lstart").unwrap(),
+            phase: "running".to_owned(),
+            exit_code: None,
+            startup_error: None,
+        },
+    )
+    .unwrap();
+
+    close_leftover_pane(&fixture.paths, fixture.task, 1, false);
+
+    // The shell's `wait` returns once its tool is gone.
+    let started = std::time::Instant::now();
+    while host.try_wait().unwrap().is_none() && started.elapsed() < Duration::from_secs(10) {
+        thread::sleep(Duration::from_millis(20));
+    }
+    let ended = host.try_wait().unwrap().is_some();
+    let _ = host.kill();
+    let _ = host.wait();
+    assert!(ended, "the tool under the host is still running");
+    assert!(fixture.temp.path().join("closed").is_file());
+}
+
 #[test]
 fn recovered_session_keeps_its_original_deadline() {
     let fixture = Fixture::new();
