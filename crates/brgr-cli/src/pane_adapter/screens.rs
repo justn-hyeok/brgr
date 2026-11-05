@@ -212,15 +212,31 @@ fn has_continue_notice(screen: &str) -> bool {
             .trim()
             .trim_matches(['│', '┃', '║'])
             .trim()
+            .trim_start_matches(['•', '·', '*', '-', '›', '❯'])
+            .trim_start()
             .to_lowercase();
-        [
+        let notices = [
             "press enter to continue",
             "press return to continue",
             "press any key to continue",
-        ]
-        .iter()
-        .any(|notice| line.contains(notice))
+        ];
+        notices.iter().any(|notice| {
+            line.match_indices(notice).any(|(start, _)| {
+                let before = line[..start].trim_end();
+                let after = line[start + notice.len()..].trim();
+                (before.is_empty() || before.ends_with(['.', '!', '?']))
+                    && after.chars().all(is_closing_punctuation)
+            })
+        })
     })
+}
+
+fn is_closing_punctuation(character: char) -> bool {
+    character.is_ascii_punctuation()
+        || matches!(
+            character,
+            '…' | '⋯' | '”' | '’' | '»' | '。' | '！' | '？' | '、'
+        )
 }
 
 /// Codex's own folder prompt ("Trust this folder? ... 1. Trust and continue").
@@ -1052,6 +1068,27 @@ mod tests {
     fn agent_prose_about_an_update_is_not_the_applied_update_dialog() {
         let prose = "The build finished. Update complete, please restart the dev server.\n";
         assert_eq!(classify(prose, work()), Screen::Clear);
+    }
+
+    #[test]
+    fn sentence_followed_by_a_continue_notice_is_dismissed_with_enter() {
+        assert_eq!(
+            classify("│ • Startup complete. Press Enter to continue… │\n", work()),
+            Screen::Resolve {
+                rule: "continue-notice",
+                keys: vec!["enter"],
+            }
+        );
+    }
+
+    #[test]
+    fn prose_quoting_or_discussing_a_continue_notice_is_left_alone() {
+        for prose in [
+            "The tool prints \"press enter to continue\" when it stops.\n",
+            "I saw press enter to continue in the log.\n",
+        ] {
+            assert_eq!(classify(prose, work()), Screen::Clear, "{prose:?}");
+        }
     }
 
     #[test]
