@@ -1021,6 +1021,21 @@ mod tests {
     }
 
     #[test]
+    fn bridge_host_rejects_turning_on_issue_reporting() {
+        let root = TempDir::new().unwrap();
+        let reporting =
+            Cli::try_parse_from(["brgr", "config", "set-issue-reporting", "octo/brgr"]).unwrap();
+        let error =
+            validate_bridge_host_command(&reporting.command, root.path(), root.path()).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("unavailable through the Herdr host bridge"),
+            "{error}"
+        );
+    }
+
+    #[test]
     fn bridge_host_rejects_control_home_override() {
         let expected = Path::new("/private/tmp/brgr-home");
         assert!(require_bridge_home(Some(expected), expected).is_ok());
