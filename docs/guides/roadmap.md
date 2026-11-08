@@ -235,7 +235,7 @@ const { results, stopped_at } = await pipeline([
 
 ## Phase 3.5. 하네스 중립 전달 경로
 
-릴리스 방향: v2.x 패치 · 상태: 결정됨, 미착수 · 추적: [#200](https://github.com/sorrellabs/brgr/issues/200)
+릴리스 방향: v2.x 패치 · 상태: 결정됨, 미착수 · 추적: [#200](https://github.com/justn-hyeok/brgr/issues/200)
 
 Unified Continuity보다 먼저 한다. 2026-10-29에 정한 순서다.
 
@@ -274,7 +274,7 @@ pane 화면을 읽지 않는 Codex owner 식별은 기존 호출 동작을 바�
 
 ## 호스트 중립 (v3의 기준)
 
-릴리스 방향: 완성되면 v3(owner 결정 2026-10-31). 그 전까지는 2.x 패치 · 상태: 결정됨, 스파이크 전 · 추적: [#227](https://github.com/sorrellabs/brgr/issues/227)
+릴리스 방향: 완성되면 v3(owner 결정 2026-10-31). 그 전까지는 2.x 패치 · 상태: 결정됨, 스파이크 전 · 추적: [#227](https://github.com/justn-hyeok/brgr/issues/227)
 
 **문제.** brgr가 Herdr에 종속되어 있다. Herdr를 쓰는 것이 아니라 Herdr 없이는
 서지 못하는 구조가 문제다. 의존은 세 겹이다.
@@ -312,7 +312,7 @@ owner(Head)는 사용자가 직접 띄운 세션이라 래퍼로 풀 수 없다.
 
 순서.
 
-0. 스파이크([#228](https://github.com/sorrellabs/brgr/issues/228)): PTY 프록시가
+0. 스파이크([#228](https://github.com/justn-hyeok/brgr/issues/228)): PTY 프록시가
    Claude Code, Codex, Cursor TUI를 충실하게 감쌀 수 있는가. 설계를 바꾸는 유일한
    결정이라 먼저 한다. 결과가 나쁘면 제어되는 호스트만 TUI를 지원하고 순수
    터미널은 headless만 지원한다. macOS와 Linux x86_64 결과는 go다
@@ -332,10 +332,10 @@ owner(Head)는 사용자가 직접 띄운 세션이라 래퍼로 풀 수 없다.
 
 1. Herdr 없이 TUI worker가 돌고, 완료 알림이 전달되고, Head 인계가 되는 시연.
    tmux, cmux, 순수 터미널.
-2. 그 시연이 하네스 3종에서 실사용으로 검증됨([#225](https://github.com/sorrellabs/brgr/issues/225)).
-3. 에이전트 경험 기준선이 측정됨([#226](https://github.com/sorrellabs/brgr/issues/226)).
-4. Linux에서 빌드되고 테스트가 통과함([#229](https://github.com/sorrellabs/brgr/issues/229)).
-5. 서명 없이도 믿을 수 있는 배포([#230](https://github.com/sorrellabs/brgr/issues/230)).
+2. 그 시연이 하네스 3종에서 실사용으로 검증됨([#225](https://github.com/justn-hyeok/brgr/issues/225)).
+3. 에이전트 경험 기준선이 측정됨([#226](https://github.com/justn-hyeok/brgr/issues/226)).
+4. Linux에서 빌드되고 테스트가 통과함([#229](https://github.com/justn-hyeok/brgr/issues/229)).
+5. 서명 없이도 믿을 수 있는 배포([#230](https://github.com/justn-hyeok/brgr/issues/230)).
 
 Apple 서명과 공증은 기준에 넣지 않는다. 홍보 문구의 모든 주장은 2와 3의 증거에
 연결한다. Herdr와 Orca를 깎아내리지 않는다. Unified Continuity(Phase 4)는 v3
