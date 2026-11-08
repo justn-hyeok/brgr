@@ -1,6 +1,6 @@
 <p align="center"><img src="docs/assets/brgr-icon.svg" width="120" alt="brgr burger icon"></p>
 
-<p align="center"><a href="https://crates.io/crates/brgr-cli"><img src="https://img.shields.io/crates/v/brgr-cli.svg" alt="crates.io"></a> <a href="https://github.com/justn-hyeok/brgr/releases/latest"><img src="https://img.shields.io/github/v/release/justn-hyeok/brgr" alt="release"></a> <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT license"></a></p>
+<p align="center"><a href="https://crates.io/crates/brgr-cli"><img src="https://img.shields.io/crates/v/brgr-cli.svg" alt="crates.io"></a> <a href="https://github.com/sorrellabs/brgr/releases/latest"><img src="https://img.shields.io/github/v/release/sorrellabs/brgr" alt="release"></a> <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT license"></a></p>
 
 # brgr
 
@@ -97,7 +97,7 @@ that was already running does not know brgr yet.
 The Herdr plugin adds a task board and workspace actions on top:
 
 ```bash
-herdr plugin install justn-hyeok/brgr --ref v2.15.21
+herdr plugin install sorrellabs/brgr --ref v2.15.21
 ```
 
 ## Use it
