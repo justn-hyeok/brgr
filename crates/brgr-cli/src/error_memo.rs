@@ -1180,6 +1180,14 @@ mod tests {
             save(&paths, &ledger).unwrap();
             file_issues(&paths).unwrap();
             expected += usize::from(commented);
+            // Another test thread's `fork` can hold `error-report.lock` until
+            // its child execs, and `file_issues` then skips its turn by
+            // design, so a comment that is due is retried, not assumed.
+            let retry_until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while comments() < expected && std::time::Instant::now() < retry_until {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                file_issues(&paths).unwrap();
+            }
             assert_eq!(comments(), expected, "count {count}");
         }
     }
