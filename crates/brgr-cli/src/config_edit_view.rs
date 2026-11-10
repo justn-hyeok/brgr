@@ -291,6 +291,7 @@ mod tests {
 
         Config::update(&paths.config, &paths.home, |changed_elsewhere| {
             changed_elsewhere.issues.auto_file = false;
+            changed_elsewhere.issues.repo = Some("elsewhere/repo".into());
             Ok(true)
         })
         .unwrap();
@@ -313,6 +314,7 @@ mod tests {
 
         let saved = Config::load(&paths.config).unwrap();
         assert!(!saved.issues.auto_file);
+        assert_eq!(saved.issues.repo.as_deref(), Some("elsewhere/repo"));
         assert_eq!(
             saved.harnesses["local.codex"].model.as_deref(),
             Some("gpt-6")

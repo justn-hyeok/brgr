@@ -1207,11 +1207,20 @@ mod tests {
         const TRANSPORT: u64 = 8 * 1024 * 1024;
         let mut adversary = Adversary(0x5eed_1234_abcd_0001);
         let mut observed_models = 0_u32;
+        let mut final_answers = 0_u32;
 
         for case in 0..512 {
             // Every sixteenth case carries enough retainable content to press on
             // the retention bound; the rest explore shape rather than size.
-            let raw = if case % 16 == 0 {
+            // Case zero is pinned to a complete answer: without it no generated
+            // stream carries both an assistant text and its terminal event, so
+            // the final-answer branch below would never run — counted, as the
+            // models are, because a branch no case enters asserts nothing.
+            let raw = if case == 0 {
+                b"{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"final\"}]}}\n\
+                  {\"type\":\"agent_end\",\"stopReason\":\"completed\"}\n"
+                    .to_vec()
+            } else if case % 16 == 0 {
                 Adversary::flood(
                     usize::try_from(RESULT_LIMIT + JSONL_METADATA_SLACK_BYTES).unwrap() + 32_000,
                 )
@@ -1245,6 +1254,7 @@ mod tests {
             // A final answer may only come from a stream that carries the event
             // that ends one. Anything else must be an error, never a value.
             if let Ok(final_answer) = extract_jsonl_assistant_final(&semantic) {
+                final_answers += 1;
                 assert!(
                     semantic
                         .windows(b"message_end".len())
@@ -1281,6 +1291,10 @@ mod tests {
         assert!(
             observed_models > 5,
             "only {observed_models} of 512 cases reached model observation"
+        );
+        assert!(
+            final_answers > 0,
+            "no case of 512 produced a final answer for the branch to check"
         );
     }
 
@@ -1722,11 +1736,14 @@ mod tests {
         write_fast_script(
             &executable,
             &format!(
-                "#!/bin/sh\necho $$ > '{}'\ni=0\nwhile [ \"$i\" -lt 600 ]; do echo tick; i=$((i+1)); sleep 0.05; done\n",
+                "#!/bin/sh\necho $$ > '{}'\ni=0\nwhile [ \"$i\" -lt 2400 ]; do echo tick; i=$((i+1)); sleep 0.05; done\n",
                 dir.join("pid").display()
             ),
         );
-        let _ = ProcessRunner::probe(&executable, &[], INCIDENTAL_PROBE_DEADLINE).await;
+        // The deadline is only a hang guard for the helper itself: it must
+        // outlive the parent test's one-minute wait so that a surviving child
+        // can only have been ended by its parent's death, never by this.
+        let _ = ProcessRunner::probe(&executable, &[], Duration::from_mins(3)).await;
     }
 
     fn process_is_alive(pid: &str) -> bool {

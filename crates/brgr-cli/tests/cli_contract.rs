@@ -2734,7 +2734,15 @@ fn an_unverified_caller_is_never_split_beside_and_the_error_says_what_to_give() 
             .state("calls.log")
             .contains("pane split --pane w9:p1")
     );
-    let _ = output;
+    // The refusal names what to give instead: an exact Herdr source pane to
+    // run from, or `--mode headless` when there is none.
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("a pane run needs an exact Herdr source pane"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("--mode headless"), "{stderr}");
 }
 
 /// Herdr may call an agent ready while it shows a menu — Codex opened on an
@@ -4931,14 +4939,20 @@ esac
         ("BRGR_TEST_SESSION_FILE", reported.to_str().unwrap()),
         ("BRGR_TEST_RELEASE", release.to_str().unwrap()),
     ];
+    let started = Instant::now();
     let launch = json_output(&run(
         &home,
         &["run", "SLOW", "--workspace", workspace.to_str().unwrap()],
         &envs,
     ));
     // Herdr answers only once the release file exists, and it does not yet:
-    // a `run` that has returned did not wait for it. No clock is involved.
-    assert!(!release.exists(), "task admission waited for Herdr");
+    // a `run` that has returned did not wait for it. The fixture holds its
+    // answer for a full minute; twenty seconds is over ten times a passing
+    // run and still far inside that gate.
+    assert!(
+        started.elapsed() < Duration::from_secs(20),
+        "task admission waited for Herdr's registration"
+    );
     let task = launch["task_id"].as_str().unwrap();
     fs::write(&release, "go").unwrap();
     // Let the slow registration finish: it records the session once released.
@@ -8367,10 +8381,18 @@ fn integration_conflict_preserves_owner_edit(
     assert!(!partial.status.success());
     assert!(String::from_utf8_lossy(&partial.stderr).contains("repository root"));
     fs::write(repository.join("README"), "conflicting owner edit\n").unwrap();
+    // `--3way` is what would mark the conflict were the check run for real:
+    // the file keeping the owner edit proves the check wrote nothing.
     assert!(
         !run(
             home,
-            &["apply", task, "--workspace", repository.to_str().unwrap()],
+            &[
+                "apply",
+                task,
+                "--workspace",
+                repository.to_str().unwrap(),
+                "--3way"
+            ],
             owner,
         )
         .status
