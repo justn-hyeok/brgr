@@ -9,7 +9,7 @@ and development.
 Install the current public v2 plugin from GitHub:
 
 ```bash
-herdr plugin install justn-hyeok/brgr --ref v2.15.21
+herdr plugin install justn-hyeok/brgr --ref v2.15.22
 ```
 
 The plugin builds `brgr` from the pinned Cargo lockfile, so a Rust toolchain is
