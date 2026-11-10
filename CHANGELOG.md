@@ -1,8 +1,16 @@
 # Changelog
 
-## Unreleased
+## 2.15.22 — 2026-11-11
+
+A Codex worker under a custom home, homes deleted while brgr ran in them, and a failure `result --ack` could miss. The bundled SQLite moves past RUSTSEC-2026-0459.
 
 - A Codex pane worker's launch now passes the run's control home as `-c shell_environment_policy.set.BRGR_HOME="…"`, so its tool commands use a custom `--home`/`BRGR_HOME` even when Codex's shared daemon carries another one (issue #362).
+- Background internal commands exit quietly when their home no longer exists, and sealing an artifact fails instead of recreating a deleted home.
+- `result --ack` also acknowledges an earlier failed attempt of the same revision.
+- `doctor` reports an unavailable store in its report instead of exiting.
+- A foreground run past eight seconds says it is still running the task.
+- CI verifies packaged crates with `cargo package --workspace --locked`.
+- `rusqlite` 0.41.1 with `libsqlite3-sys` 0.39.1 (RUSTSEC-2026-0459).
 
 ## 2.15.21 — 2026-11-05
 
