@@ -1685,7 +1685,7 @@ mod tests {
     #[test]
     fn a_handoff_runs_requested_prepared_committed_and_through_a_derived_resume() {
         let root = TempDir::new().unwrap();
-        let (store, owner_id) = bound(&root);
+        let (mut store, owner_id) = bound(&root);
         let takeover = store
             .request_takeover(&owner_id, "session-a", "session-b", "handoff-1")
             .unwrap();
@@ -1729,6 +1729,37 @@ mod tests {
                 TakeoverState::Committed
             ],
             "one row per state transition, and none of them self-reported"
+        );
+
+        // `resumed` is never self-reported either: an owner-side write by the
+        // incoming session at the committed epoch is what derives it.
+        let mut follow_up = task();
+        follow_up.owner_id = owner_id.clone();
+        follow_up.create_request_id = "request-after-handoff".to_owned();
+        store
+            .record_task_bound(
+                &follow_up,
+                "digest-after-handoff",
+                &OwnerProof::new(owner_id.clone(), "session-b", 2).unwrap(),
+            )
+            .unwrap();
+        assert_eq!(
+            store.takeover(takeover.takeover_id).unwrap().unwrap().state,
+            TakeoverState::Resumed
+        );
+        assert_eq!(
+            store
+                .takeover_events(takeover.takeover_id)
+                .unwrap()
+                .iter()
+                .map(|event| event.kind)
+                .collect::<Vec<_>>(),
+            vec![
+                TakeoverState::Requested,
+                TakeoverState::Prepared,
+                TakeoverState::Committed,
+                TakeoverState::Resumed
+            ]
         );
     }
 

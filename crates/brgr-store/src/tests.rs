@@ -1908,7 +1908,21 @@ fn a_terminal_commit_hashes_artifacts_before_it_takes_the_write_lock() {
         verify_candidate_artifacts(&store.artifacts, &result, &verified.unwrap()).is_ok(),
         "verifying artifacts needed the write lock"
     );
+
+    // The commit itself must hash before it asks for the lock: while the lock
+    // is held it can only contend and fail, but its one verification must
+    // already have run by then.
+    VERIFICATIONS.with(|count| count.set(0));
+    let error = store
+        .commit_terminal_result(&task.owner_id, &result)
+        .unwrap_err();
     blocker.execute_batch("ROLLBACK").unwrap();
+    assert!(is_lock_contention(&error), "unexpected error: {error}");
+    assert_eq!(
+        VERIFICATIONS.with(std::cell::Cell::get),
+        1,
+        "the commit asked for the write lock before hashing its artifacts"
+    );
 
     assert_eq!(
         store

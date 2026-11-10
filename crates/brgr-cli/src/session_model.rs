@@ -499,8 +499,12 @@ mod tests {
             Some(rollout.canonicalize().unwrap())
         );
 
-        // A path outside the harness's own sessions directory is not one.
-        let foreign = write(&dir.path().join("elsewhere.jsonl"), "");
+        // A valid rollout name outside the sessions directory is still not
+        // one: the name check passes it, so only the containment check refuses.
+        let foreign = write(
+            &dir.path().join("elsewhere").join("rollout-t-222.jsonl"),
+            "",
+        );
         let other_task = TaskId::new();
         let other_tree = paths.worktrees.join("repo").join("bbbbbbbb");
         std::fs::create_dir_all(&other_tree).unwrap();

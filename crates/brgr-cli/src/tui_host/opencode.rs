@@ -334,7 +334,7 @@ mod tests {
     }
 
     #[test]
-    fn failed_api_never_opens_an_unselected_session() {
+    fn a_failed_server_spawn_never_opens_an_unselected_session() {
         let mut launch = launch();
         assert!(prepare(&mut launch, "openai/gpt-5.2#high").is_err());
         assert_eq!(launch.argv, ["--standalone", "--auto"]);
