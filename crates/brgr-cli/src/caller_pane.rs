@@ -433,8 +433,9 @@ fn process_table() -> Option<HashMap<u32, (u32, String)>> {
 }
 
 /// The `HERDR_PANE_ID` in a process's environment, when `ps` can read it.
-/// `ps -E` prints the arguments before the environment, so the last match is
-/// the environment's.
+/// `ps -E` prints the arguments before the environment, and for a system
+/// binary it prints no environment at all, so the environment part is found
+/// by subtracting a second, arguments-only `ps` call from the `-E` output.
 fn pane_in_environment(pid: u32) -> Option<String> {
     #[cfg(target_os = "linux")]
     {
@@ -454,14 +455,59 @@ fn pane_in_environment(pid: u32) -> Option<String> {
     }
     #[cfg(not(target_os = "linux"))]
     {
-        let output = Command::new("/bin/ps")
-            .args(["-E", "-ww", "-o", "command=", "-p", &pid.to_string()])
-            .output()
-            .ok()?;
-        let text = String::from_utf8_lossy(&output.stdout);
-        let (_, rest) = text.rsplit_once(" HERDR_PANE_ID=")?;
-        rest.split_whitespace().next().map(str::to_owned)
+        let ps = |with_environment: bool| {
+            let mut command = Command::new("/bin/ps");
+            if with_environment {
+                command.arg("-E");
+            }
+            let output = command
+                .args(["-ww", "-o", "command=", "-p", &pid.to_string()])
+                .output()
+                .ok()?;
+            Some(String::from_utf8_lossy(&output.stdout).into_owned())
+        };
+        pane_from_ps(&ps(false)?, &ps(true)?)
     }
+}
+
+/// The `HERDR_PANE_ID` in the environment part of a `ps -E` output, or `None`
+/// when `ps` did not show the environment. `arguments` is the `-o command=`
+/// output for the same pid without `-E`: `with_environment` must start with
+/// it, and what follows is the environment. Without that prefix the two calls
+/// saw different processes (or `ps` printed nothing) and nothing is trusted.
+/// Only the environment part is searched: an entry matches at its start or
+/// after a space, and a `HERDR_PANE_ID` inside the arguments is ignored.
+#[cfg_attr(target_os = "linux", allow(dead_code))]
+fn pane_from_ps(arguments: &str, with_environment: &str) -> Option<String> {
+    let arguments = arguments.strip_suffix('\n').unwrap_or(arguments);
+    let with_environment = with_environment
+        .strip_suffix('\n')
+        .unwrap_or(with_environment);
+    if arguments.is_empty() {
+        return None;
+    }
+    // `ps -E` separates the environment from the arguments with a space, so
+    // an output that only shares the arguments' leading characters (`cmd a`
+    // then `cmd ab ...`) came from a different process.
+    let environment = with_environment
+        .strip_prefix(arguments)?
+        .strip_prefix(' ')?;
+    if environment.is_empty() {
+        return None;
+    }
+    for (index, _) in environment.match_indices("HERDR_PANE_ID=") {
+        if index != 0 && !environment[..index].ends_with(char::is_whitespace) {
+            continue;
+        }
+        let value = environment[index + "HERDR_PANE_ID=".len()..]
+            .split(char::is_whitespace)
+            .next()
+            .unwrap_or("");
+        if !value.is_empty() {
+            return Some(value.to_owned());
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -712,5 +758,102 @@ pub(crate) mod tests {
         without_pane.kill().unwrap();
         without_pane.wait().unwrap();
         assert_eq!(without_value, None);
+    }
+
+    /// A system binary shows no environment in `ps -E`: the `-E` output is the
+    /// arguments line alone, so a `HERDR_PANE_ID` inside them is not read.
+    #[test]
+    fn ps_without_an_environment_part_is_unreadable() {
+        let arguments = "/bin/zsh -c : \" HERDR_PANE_ID=fake:p1 \"\n";
+        assert_eq!(pane_from_ps(arguments, arguments), None);
+    }
+
+    /// For a user binary `ps -E` prints the arguments, a space, then the
+    /// environment; the value comes from the environment part only.
+    #[test]
+    fn ps_environment_part_holds_the_real_pane() {
+        assert_eq!(
+            pane_from_ps(
+                "python3 x HERDR_PANE_ID=fake:p2\n",
+                "python3 x HERDR_PANE_ID=fake:p2 TERM=xterm HERDR_PANE_ID=real:p9 HOME=/u\n"
+            ),
+            Some("real:p9".to_owned())
+        );
+    }
+
+    /// A readable environment without `HERDR_PANE_ID` is `None`, even though
+    /// the arguments carry one.
+    #[test]
+    fn a_pane_in_the_arguments_alone_is_not_read() {
+        assert_eq!(
+            pane_from_ps(
+                "python3 x HERDR_PANE_ID=fake:p2\n",
+                "python3 x HERDR_PANE_ID=fake:p2 TERM=xterm HOME=/u\n"
+            ),
+            None
+        );
+    }
+
+    /// The process changed between the two `ps` calls, or `ps` printed
+    /// nothing: without the arguments line as a prefix nothing is trusted.
+    #[test]
+    fn ps_outputs_that_do_not_line_up_are_unreadable() {
+        assert_eq!(pane_from_ps("", ""), None);
+        assert_eq!(pane_from_ps("cmd a\n", ""), None);
+        assert_eq!(
+            pane_from_ps("cmd a\n", "cmd b HERDR_PANE_ID=real:p9\n"),
+            None
+        );
+        assert_eq!(pane_from_ps("cmd a\n", "cmd a"), None);
+    }
+
+    /// An output that shares only the arguments' leading characters belongs
+    /// to another process, whatever follows.
+    #[test]
+    fn an_environment_starts_after_a_space() {
+        assert_eq!(
+            pane_from_ps("cmd a\n", "cmd ab HERDR_PANE_ID=other:p1\n"),
+            None
+        );
+    }
+
+    /// `XHERDR_PANE_ID` does not end at a space boundary before the key.
+    #[test]
+    fn a_prefixed_key_is_not_a_match() {
+        assert_eq!(
+            pane_from_ps("cmd\n", "cmd XHERDR_PANE_ID=fake:p1 HOME=/u\n"),
+            None
+        );
+    }
+
+    /// An empty `HERDR_PANE_ID` value is `None`, and a later real entry wins.
+    #[test]
+    fn an_empty_value_is_not_a_pane() {
+        assert_eq!(pane_from_ps("cmd\n", "cmd HERDR_PANE_ID= HOME=/u\n"), None);
+        assert_eq!(
+            pane_from_ps("cmd\n", "cmd HERDR_PANE_ID= HERDR_PANE_ID=real:p9\n"),
+            Some("real:p9".to_owned())
+        );
+    }
+
+    /// Issue #279: a system binary's arguments quote a `HERDR_PANE_ID` that is
+    /// not in its environment. `ps -E` shows no environment for it, so the
+    /// answer is the environment's `real:p9`, never the argument's `fake:p1`.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn an_argument_quoted_pane_is_not_the_environment() {
+        use std::process::Stdio;
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", "sleep 30; : \" HERDR_PANE_ID=fake:p1 \""])
+            .env("HERDR_PANE_ID", "real:p9")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let value = pane_in_environment(child.id());
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert_ne!(value.as_deref(), Some("fake:p1"));
     }
 }
