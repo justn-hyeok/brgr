@@ -650,7 +650,12 @@ mod tests {
         }
         match std::fs::hard_link(warmed_trampoline(), path) {
             Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::CrossesDevices => {
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::CrossesDevices | std::io::ErrorKind::TooManyLinks
+                ) =>
+            {
                 std::fs::write(path, body).unwrap();
                 std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
             }

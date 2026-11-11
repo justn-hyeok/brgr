@@ -31,8 +31,9 @@ static CODEX_STUB_DIR: OnceLock<PathBuf> = OnceLock::new();
 /// warmed inode to `path` and writes `body` beside it as `path` with a
 /// `.body` suffix (mode `0644`, not executable). The trampoline runs
 /// `/bin/sh` on that file, so this is only for a body whose first line is
-/// `#!/bin/sh`. If the hard link fails with [`io::ErrorKind::CrossesDevices`],
-/// the body is written to `path` with mode `0755` instead. Tests that later
+/// `#!/bin/sh`. If the hard link fails with [`io::ErrorKind::CrossesDevices`]
+/// or [`io::ErrorKind::TooManyLinks`], the body is written to `path` with mode
+/// `0755` instead. Tests that later
 /// overwrite or digest the executable bytes must keep a unique inode (ordinary
 /// `fs::write` and `chmod`) so they do not share this trampoline.
 ///
@@ -56,7 +57,12 @@ pub fn write_fast_script(path: &Path, body: &str) {
     }
     match fs::hard_link(warmed_trampoline(), path) {
         Ok(()) => {}
-        Err(error) if error.kind() == io::ErrorKind::CrossesDevices => {
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::CrossesDevices | io::ErrorKind::TooManyLinks
+            ) =>
+        {
             write_direct_script(path, body);
         }
         Err(error) => panic!("hard-linking trampoline to {}: {error}", path.display()),

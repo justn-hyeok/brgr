@@ -33,8 +33,9 @@ static WARMED_TRAMPOLINE: OnceLock<PathBuf> = OnceLock::new();
 
 /// Writes a `#!/bin/sh` test executable without macOS's first-exec cost.
 ///
-/// If the hard link fails with [`io::ErrorKind::CrossesDevices`], the body is
-/// written to `path` with mode `0755` instead.
+/// If the hard link fails with [`io::ErrorKind::CrossesDevices`] or
+/// [`io::ErrorKind::TooManyLinks`], the body is written to `path` with mode
+/// `0755` instead.
 ///
 /// # Panics
 ///
@@ -56,7 +57,12 @@ pub(crate) fn write_fast_script(path: &Path, body: &str) {
     }
     match fs::hard_link(warmed_trampoline(), path) {
         Ok(()) => {}
-        Err(error) if error.kind() == io::ErrorKind::CrossesDevices => {
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::CrossesDevices | io::ErrorKind::TooManyLinks
+            ) =>
+        {
             write_direct_script(path, body);
         }
         Err(error) => panic!("hard-linking trampoline to {}: {error}", path.display()),
