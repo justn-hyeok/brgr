@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.15.23 — 2026-11-11
+
+A harness registered through a symlink survives a Homebrew upgrade, a macOS caller's pane is read only from its environment, and tests stop leaving a trampoline file per process.
+
+- The activation receipt keeps `registered_path`, the symlink a harness was added through. When the certified realpath is gone, `harness recertify` (and a run with auto-recertify on) certifies again through it; without one, the error names the missing path and the `brgr harness add` command (issue #388). A recertify of a present executable keeps it.
+- On macOS, `HERDR_PANE_ID` is read only from the environment part of `ps -E`, never from a process's arguments (issue #279).
+- Tests share one fast-script trampoline instead of leaving `trampoline-<pid>` per process, and fall back to a copy at the inode's link limit.
+
 ## 2.15.22 — 2026-11-11
 
 A Codex worker under a custom home, homes deleted while brgr ran in them, and a failure `result --ack` could miss. The bundled SQLite moves past RUSTSEC-2026-0459.
