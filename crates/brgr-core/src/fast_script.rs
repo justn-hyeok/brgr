@@ -29,14 +29,15 @@ static WARMED_TRAMPOLINE: OnceLock<PathBuf> = OnceLock::new();
 
 /// Writes a `#!/bin/sh` test executable without macOS's first-exec cost.
 ///
-/// If the hard link fails with [`io::ErrorKind::CrossesDevices`], the body is
-/// written to `path` with mode `0755` instead.
+/// If the hard link fails with [`io::ErrorKind::CrossesDevices`] or
+/// [`io::ErrorKind::TooManyLinks`], the body is written to `path` with mode
+/// `0755` instead.
 ///
 /// # Panics
 ///
 /// Panics if `body` does not start with `#!/bin/sh`, if `path` has no file
 /// name, or if creating, warming, or linking the trampoline fails for a
-/// reason other than a cross-device hard link.
+/// reason other than a cross-device or too-many-links hard link.
 pub(crate) fn write_fast_script(path: &Path, body: &str) {
     let first_line = body.lines().next();
     assert_eq!(
@@ -55,9 +56,30 @@ pub(crate) fn write_fast_script(path: &Path, body: &str) {
     if path.exists() {
         fs::remove_file(path).unwrap();
     }
-    match fs::hard_link(warmed_trampoline(), path) {
+    place_script(warmed_trampoline(), path, body, |from, to| {
+        fs::hard_link(from, to)
+    });
+}
+
+/// Links `trampoline` to `path`, or writes `body` to `path` with mode `0755`
+/// when the link fails because the filesystem does not allow it: a
+/// cross-device link (`EXDEV`) or an inode at its hard-link limit (`EMLINK`,
+/// reachable on Linux ext4 at ~65,000 links once leaked test temp dirs
+/// accumulate). Any other link error panics.
+fn place_script(
+    trampoline: &Path,
+    path: &Path,
+    body: &str,
+    link: impl FnOnce(&Path, &Path) -> io::Result<()>,
+) {
+    match link(trampoline, path) {
         Ok(()) => {}
-        Err(error) if error.kind() == io::ErrorKind::CrossesDevices => {
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::CrossesDevices | io::ErrorKind::TooManyLinks
+            ) =>
+        {
             fs::write(path, body).unwrap();
             fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
         }
@@ -191,5 +213,106 @@ mod tests {
         assert_eq!(meta.permissions().mode() & 0o777, 0o555);
         assert_ne!(meta.ino(), stale_inode);
         assert_eq!(entry_count(dir.path()), 1);
+    }
+
+    const OK_BODY: &str = "#!/bin/sh\necho ok\n";
+
+    /// Runs a script this test just wrote. On Linux another test thread's
+    /// `fork` can hold it open for writing until its child execs, so the
+    /// first exec can fail with `ETXTBSY`; that alone is retried, with a hang
+    /// guard a correct run does not reach.
+    fn run_script(path: &Path) -> String {
+        let started = std::time::Instant::now();
+        let output = loop {
+            match Command::new(path).output() {
+                Ok(output) => break output,
+                Err(error)
+                    if error.kind() == io::ErrorKind::ExecutableFileBusy
+                        && started.elapsed() < std::time::Duration::from_mins(1) =>
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(error) => panic!("run {}: {error}", path.display()),
+            }
+        };
+        assert!(
+            output.status.success(),
+            "{} failed: {}",
+            path.display(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap()
+    }
+
+    fn fallback_writes_executable_body(error: io::Error) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("script");
+        place_script(Path::new("no-such-trampoline"), &path, OK_BODY, |_, _| {
+            Err(error)
+        });
+        assert_eq!(fs::read(&path).unwrap(), OK_BODY.as_bytes());
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+        assert_eq!(run_script(&path).trim(), "ok");
+    }
+
+    #[test]
+    fn too_many_links_writes_executable_body() {
+        fallback_writes_executable_body(io::Error::from(io::ErrorKind::TooManyLinks));
+    }
+
+    #[test]
+    fn cross_device_link_writes_executable_body() {
+        fallback_writes_executable_body(io::Error::from(io::ErrorKind::CrossesDevices));
+    }
+
+    #[test]
+    #[should_panic(expected = "hard-linking trampoline to")]
+    fn other_link_error_panics() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("script");
+        place_script(Path::new("no-such-trampoline"), &path, OK_BODY, |_, _| {
+            Err(io::Error::from(io::ErrorKind::PermissionDenied))
+        });
+    }
+
+    /// Child of [`two_test_processes_share_one_trampoline`]: run only as a
+    /// `--exact --ignored` single test in a spawned copy of this binary, with
+    /// `TMPDIR` pointed at a fresh dir.
+    #[test]
+    #[ignore = "runs only as a spawned child of two_test_processes_share_one_trampoline"]
+    fn child_writes_and_runs_script() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("script");
+        write_fast_script(&path, OK_BODY);
+        assert_eq!(run_script(&path).trim(), "ok");
+    }
+
+    /// Two separate test processes sharing one `TMPDIR` must leave exactly
+    /// one trampoline file (`trampoline-<sha256>`), not one per process.
+    #[test]
+    fn two_test_processes_share_one_trampoline() {
+        let tmp = tempfile::tempdir().unwrap();
+        let exe = std::env::current_exe().unwrap();
+        for _ in 0..2 {
+            let output = Command::new(&exe)
+                .args([
+                    "--exact",
+                    "fast_script::tests::child_writes_and_runs_script",
+                    "--ignored",
+                    "--test-threads=1",
+                ])
+                .env("TMPDIR", tmp.path())
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "child failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        assert_eq!(entry_count(&tmp.path().join("brgr-fast-script")), 1);
     }
 }
