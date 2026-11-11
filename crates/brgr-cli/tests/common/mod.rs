@@ -25,7 +25,8 @@ static CODEX_STUB_DIR: OnceLock<PathBuf> = OnceLock::new();
 
 /// Writes a `#!/bin/sh` test executable without macOS's first-exec cost.
 ///
-/// One process-global trampoline under [`std::env::temp_dir`] is made
+/// One trampoline per source under [`std::env::temp_dir`], shared by every
+/// test process and named for the source's SHA-256, is made
 /// executable and run once. [`write_fast_script`] then hard-links that
 /// warmed inode to `path` and writes `body` beside it as `path` with a
 /// `.body` suffix (mode `0644`, not executable). The trampoline runs
@@ -118,22 +119,45 @@ pub fn output_when_not_busy(command: &mut Command) -> std::process::Output {
 }
 
 fn warmed_trampoline() -> &'static Path {
-    WARMED_TRAMPOLINE.get_or_init(create_warmed_trampoline)
+    WARMED_TRAMPOLINE.get_or_init(|| {
+        let dir = std::env::temp_dir().join("brgr-fast-script");
+        fs::create_dir_all(&dir).unwrap();
+        shared_trampoline_in(&dir)
+    })
 }
 
-fn create_warmed_trampoline() -> PathBuf {
-    let dir = std::env::temp_dir().join("brgr-fast-script");
-    fs::create_dir_all(&dir).unwrap();
-    let trampoline = dir.join(format!("trampoline-{}", std::process::id()));
-    if trampoline.exists() {
-        fs::remove_file(&trampoline).unwrap();
+/// The one trampoline every test process shares, named for the first 16 hex
+/// chars of the source's SHA-256 so an older source's file is never reused.
+/// An existing file is used only when it is a regular file with mode `0555`
+/// and exactly this source; anything else is replaced by writing a pid-named
+/// sibling, warming it, and renaming it over the shared name, so a racing
+/// process finds either a complete `0555` file or keeps the links it already
+/// made, never a half-written or writable trampoline.
+fn shared_trampoline_in(dir: &Path) -> PathBuf {
+    use sha2::{Digest, Sha256};
+    use std::fmt::Write as _;
+    let digest = Sha256::digest(TRAMPOLINE_SOURCE.as_bytes());
+    let mut hex = String::with_capacity(16);
+    for byte in &digest[..8] {
+        write!(hex, "{byte:02x}").expect("writing to a String cannot fail");
     }
-    fs::write(&trampoline, TRAMPOLINE_SOURCE).unwrap();
-    fs::set_permissions(&trampoline, fs::Permissions::from_mode(0o755)).unwrap();
-    warm_executable(&trampoline);
+    let trampoline = dir.join(format!("trampoline-{hex}"));
+    let valid = fs::metadata(&trampoline)
+        .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o777 == 0o555)
+        && fs::read(&trampoline).is_ok_and(|bytes| bytes == TRAMPOLINE_SOURCE.as_bytes());
+    if valid {
+        return trampoline;
+    }
+    let mut temporary = trampoline.file_name().unwrap().to_os_string();
+    temporary.push(format!(".{}", std::process::id()));
+    let temporary = trampoline.with_file_name(temporary);
+    fs::write(&temporary, TRAMPOLINE_SOURCE).unwrap();
+    fs::set_permissions(&temporary, fs::Permissions::from_mode(0o755)).unwrap();
+    warm_executable(&temporary);
     // Drop write bits so a later `fs::write` through a hard link cannot
     // clobber every trampoline in this process.
-    fs::set_permissions(&trampoline, fs::Permissions::from_mode(0o555)).unwrap();
+    fs::set_permissions(&temporary, fs::Permissions::from_mode(0o555)).unwrap();
+    fs::rename(&temporary, &trampoline).unwrap();
     trampoline
 }
 
