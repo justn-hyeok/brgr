@@ -5871,6 +5871,31 @@ fn activation_receipt(home: &Path) -> Value {
         .unwrap()
 }
 
+/// A re-certification while the certified path still exists (the CLI was
+/// updated in place) keeps the symlink the harness was registered through,
+/// so a later upgrade that deletes the versioned directory can still follow it.
+#[test]
+fn recertify_of_a_present_executable_keeps_the_registered_symlink() {
+    let (temp, home, _workspace, link, _versioned) = linked_fixture_home();
+    let scratch = temp.path().join("scratch");
+    let recertified = run(
+        &home,
+        &[
+            "harness",
+            "recertify",
+            "local.fixture",
+            "--workspace",
+            scratch.to_str().unwrap(),
+        ],
+        &[],
+    );
+    assert!(recertified.status.success(), "{recertified:?}");
+    assert_eq!(
+        activation_receipt(&home)["registered_path"].as_str(),
+        Some(link.to_str().unwrap())
+    );
+}
+
 #[test]
 fn recertify_follows_the_registered_symlink_when_the_certified_path_is_gone() {
     let (temp, home, _workspace, link, versioned) = linked_fixture_home();

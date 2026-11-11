@@ -228,16 +228,26 @@ pub(crate) async fn recertify_harness(
     // directory (Homebrew). The path the owner registered through, a symlink,
     // then names the new install; it is certified by a fresh scratch run
     // before it is trusted again.
-    let executable = if executable.is_file() {
-        executable
-    } else {
-        match registry.registered_path(harness)? {
-            Some(registered) if registered.is_file() => registered,
-            _ => bail!(
-                "{}",
-                certified_executable_missing(harness, &executable, presentation_only)
-            ),
+    // While the certified path still exists, the registered path is passed on
+    // only when it still resolves there, so `add_harness` records it again
+    // instead of dropping it.
+    let registered = registry
+        .registered_path(harness)?
+        .filter(|registered| registered.is_file());
+    let executable = match registered {
+        Some(registered)
+            if !executable.is_file()
+                || registered
+                    .canonicalize()
+                    .is_ok_and(|resolved| resolved == executable) =>
+        {
+            registered
         }
+        _ if executable.is_file() => executable,
+        _ => bail!(
+            "{}",
+            certified_executable_missing(harness, &executable, presentation_only)
+        ),
     };
     let args = if presentation_only {
         AddHarnessArgs {
