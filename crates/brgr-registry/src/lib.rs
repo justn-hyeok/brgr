@@ -117,6 +117,11 @@ pub struct ActivationReceipt {
     pub registration_mode: String,
     #[serde(default)]
     pub contract_suite: String,
+    /// The absolute path the owner registered this harness through, only
+    /// when it differed from its own canonical path (a symlink). Receipts
+    /// written before this field existed load as `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub registered_path: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -692,6 +697,50 @@ impl Registry {
         Ok((manifest.executable, presentation_only))
     }
 
+    /// The absolute path the owner registered this harness through, when it
+    /// differed from its own canonical path (a symlink, as a versioned
+    /// Homebrew install behind `/opt/homebrew/bin`). `None` for a receipt
+    /// written before this field existed or a direct canonical path. Does
+    /// not re-run the harness.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RegistryError`] when the activation receipt cannot be read.
+    pub fn registered_path(&self, harness_id: &str) -> Result<Option<PathBuf>, RegistryError> {
+        validate_harness_id(harness_id)?;
+        let receipt: ActivationReceipt =
+            serde_json::from_slice(&fs::read(self.activation_path(harness_id))?)?;
+        Ok(receipt.registered_path)
+    }
+
+    /// Records the path a successful registration was invoked through, when
+    /// it is absolute and resolves elsewhere (a symlink). A later
+    /// re-certification follows it when the certified realpath is gone. A
+    /// relative or already-canonical path records nothing: it cannot be
+    /// reproduced later.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RegistryError`] when the activation receipt cannot be read
+    /// or rewritten.
+    pub fn record_registered_path(
+        &self,
+        harness_id: &str,
+        path: &Path,
+    ) -> Result<(), RegistryError> {
+        validate_harness_id(harness_id)?;
+        let registered = (path.is_absolute()
+            && path.canonicalize().is_ok_and(|canonical| canonical != path))
+        .then(|| path.to_path_buf());
+        let receipt_path = self.activation_path(harness_id);
+        let mut receipt: ActivationReceipt = serde_json::from_slice(&fs::read(&receipt_path)?)?;
+        if receipt.registered_path == registered {
+            return Ok(());
+        }
+        receipt.registered_path = registered;
+        write_json_atomic(&receipt_path, &serde_json::to_vec_pretty(&receipt)?)
+    }
+
     /// Resolves an exact requested model through a bounded native catalog
     /// before task admission or a paid scratch run.
     ///
@@ -830,6 +879,7 @@ impl Registry {
                 "process-contract/v1"
             }
             .to_owned(),
+            registered_path: None,
         };
         write_json_atomic(&self.manifest_path(&manifest.id), &manifest_bytes)?;
         write_json_atomic(
@@ -1380,6 +1430,25 @@ mod tests {
     );
 
     static WARMED_TRAMPOLINE: OnceLock<PathBuf> = OnceLock::new();
+
+    #[test]
+    fn an_old_receipt_without_registered_path_loads_and_none_is_not_written() {
+        let old = r#"{
+            "schema": "brgr.activation/v1",
+            "harness_id": "local.fixture",
+            "executable_realpath": "/bin/echo",
+            "executable_digest": "d",
+            "version_digest": "v",
+            "help_digest": "h",
+            "manifest_digest": "m",
+            "tested_os": "macos",
+            "tested_arch": "aarch64"
+        }"#;
+        let receipt: ActivationReceipt = serde_json::from_str(old).unwrap();
+        assert_eq!(receipt.registered_path, None);
+        let written = serde_json::to_string(&receipt).unwrap();
+        assert!(!written.contains("registered_path"), "{written}");
+    }
 
     fn write_fast_script(path: &Path, body: &str) {
         let first_line = body.lines().next();

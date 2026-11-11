@@ -699,6 +699,48 @@ async fn recertify_if_allowed(
         | Health::EvidenceChanged { expected, observed } => {
             (probed.code(), expected.clone(), observed.clone())
         }
+        Health::Unspawnable => {
+            if !auto {
+                return Ok(probed);
+            }
+            // The certified path can be gone after an upgrade replaced its
+            // versioned directory (Homebrew). Re-certify only through the
+            // path the owner registered with, and only when it now resolves
+            // to a different existing file; any other unspawnable harness
+            // stops here as before.
+            let Some(registered) = registry.registered_path(harness)? else {
+                return Ok(probed);
+            };
+            let Ok(resolved) = registered.canonicalize() else {
+                return Ok(probed);
+            };
+            let Ok((recorded, _)) = registry.certified_executable(harness) else {
+                return Ok(probed);
+            };
+            if !resolved.is_file() || resolved == recorded {
+                return Ok(probed);
+            }
+            eprintln!(
+                "brgr: warning: {harness} was certified at {}, which no longer exists; \
+                 auto-recertify is on, so brgr is re-certifying it now through {} with one \
+                 scratch run. Turn it off with `brgr config set-auto-recertify false`.",
+                recorded.display(),
+                registered.display()
+            );
+            let scratch = tempfile::Builder::new()
+                .prefix("brgr-recertify-")
+                .tempdir()
+                .context("cannot create a scratch directory for re-certification")?;
+            crate::harness_commands::recertify_harness(
+                registry,
+                harness,
+                Some(scratch.path().to_path_buf()),
+                None,
+            )
+            .await
+            .with_context(|| format!("automatic re-certification of {harness} failed"))?;
+            return Ok(registry.health_probed(harness).await?);
+        }
         _ => return Ok(probed),
     };
     if !auto {

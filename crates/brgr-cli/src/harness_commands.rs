@@ -144,6 +144,7 @@ pub(crate) async fn add_harness(
             )
             .await?
     };
+    registry.record_registered_path(&receipt.harness_id, &args.executable)?;
     let probed = registry.health_probed(&receipt.harness_id).await?;
     require_healthy_harness(
         &receipt.harness_id,
@@ -159,6 +160,28 @@ pub(crate) async fn add_harness(
 /// answer certifies, so the shortest one keeps the paid run cheap.
 pub(crate) const RECERTIFY_PROMPT: &str = "say ok";
 
+/// The failure a re-certification reports when the certified executable is
+/// gone and no path the owner registered through resolves to a file. It
+/// names the missing recorded path and the command to run, instead of a bare
+/// `os error 2`.
+fn certified_executable_missing(
+    harness: &str,
+    recorded: &std::path::Path,
+    presentation_only: bool,
+) -> String {
+    let command = if presentation_only {
+        "brgr harness add <executable> --presentation-only".to_owned()
+    } else {
+        format!(
+            "brgr harness add <executable> --workspace <scratch> --prompt \"{RECERTIFY_PROMPT}\""
+        )
+    };
+    format!(
+        "harness {harness} was certified at {}, which no longer exists; register it again with `{command}`",
+        recorded.display()
+    )
+}
+
 /// Registers a harness again at the path it was certified with.
 pub(crate) async fn recertify_harness(
     registry: &Registry,
@@ -172,6 +195,14 @@ pub(crate) async fn recertify_harness(
         .authored_manifest(harness)
         .with_context(|| format!("harness {harness} is not registered; use `brgr harness add`"))?
     {
+        // An agent-authored manifest is never rewritten: when the executable
+        // it names is gone, only the owner can register the harness again.
+        if !manifest.executable.is_file() {
+            bail!(
+                "{}",
+                certified_executable_missing(harness, &manifest.executable, false)
+            );
+        }
         let workspace = match workspace {
             Some(path) => path,
             None => std::env::current_dir().context("cannot read the current directory")?,
@@ -193,6 +224,21 @@ pub(crate) async fn recertify_harness(
     let (executable, presentation_only) = registry
         .certified_executable(harness)
         .with_context(|| format!("harness {harness} is not registered; use `brgr harness add`"))?;
+    // The certified path can be gone after an upgrade replaced its versioned
+    // directory (Homebrew). The path the owner registered through, a symlink,
+    // then names the new install; it is certified by a fresh scratch run
+    // before it is trusted again.
+    let executable = if executable.is_file() {
+        executable
+    } else {
+        match registry.registered_path(harness)? {
+            Some(registered) if registered.is_file() => registered,
+            _ => bail!(
+                "{}",
+                certified_executable_missing(harness, &executable, presentation_only)
+            ),
+        }
+    };
     let args = if presentation_only {
         AddHarnessArgs {
             executable,

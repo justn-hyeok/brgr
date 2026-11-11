@@ -5828,6 +5828,204 @@ fn a_failed_automatic_recertification_still_stops_the_run() {
     );
 }
 
+/// Copies the fixture into `directory` as the versioned install a package
+/// manager would replace on upgrade.
+fn install_versioned_fixture(directory: &Path) -> PathBuf {
+    fs::create_dir_all(directory).unwrap();
+    let target = directory.join("fixture");
+    fs::copy(brgr_fixture(), &target).unwrap();
+    fs::set_permissions(&target, fs::Permissions::from_mode(0o700)).unwrap();
+    target
+}
+
+/// The fixture registered through a symlink in the test's own directory,
+/// like a versioned Homebrew install behind `/opt/homebrew/bin`. Returns the
+/// home, workspace, link, and versioned directory the link points into.
+fn linked_fixture_home() -> (TempDir, PathBuf, PathBuf, PathBuf, PathBuf) {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("brgr");
+    let workspace = temp.path().join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    let versioned = temp.path().join("v1");
+    let target = install_versioned_fixture(&versioned);
+    let link_dir = temp.path().join("bin");
+    fs::create_dir_all(&link_dir).unwrap();
+    let link = link_dir.join("fixture");
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+    add_fixture(&home, &link, &temp.path().join("scratch"));
+    (temp, home, workspace, link, versioned)
+}
+
+/// An upgrade: the versioned directory is deleted and the link is repointed
+/// at a new one. Returns the new target.
+fn upgrade_linked_fixture(temp: &Path, link: &Path, versioned: &Path) -> PathBuf {
+    fs::remove_dir_all(versioned).unwrap();
+    let target = install_versioned_fixture(&temp.join("v2"));
+    fs::remove_file(link).unwrap();
+    std::os::unix::fs::symlink(&target, link).unwrap();
+    target
+}
+
+fn activation_receipt(home: &Path) -> Value {
+    serde_json::from_slice(&fs::read(home.join("registry/activations/local.fixture.json")).unwrap())
+        .unwrap()
+}
+
+#[test]
+fn recertify_follows_the_registered_symlink_when_the_certified_path_is_gone() {
+    let (temp, home, _workspace, link, versioned) = linked_fixture_home();
+    let receipt = activation_receipt(&home);
+    assert_eq!(
+        receipt["executable_realpath"].as_str().unwrap(),
+        versioned
+            .join("fixture")
+            .canonicalize()
+            .unwrap()
+            .to_str()
+            .unwrap()
+    );
+    assert_eq!(
+        receipt["registered_path"].as_str().unwrap(),
+        link.to_str().unwrap()
+    );
+
+    let target = upgrade_linked_fixture(temp.path(), &link, &versioned);
+    let scratch = temp.path().join("scratch");
+    let recertified = run(
+        &home,
+        &[
+            "harness",
+            "recertify",
+            "local.fixture",
+            "--workspace",
+            scratch.to_str().unwrap(),
+        ],
+        &[],
+    );
+    assert!(recertified.status.success(), "{recertified:?}");
+    let receipt = activation_receipt(&home);
+    assert_eq!(
+        receipt["executable_realpath"].as_str().unwrap(),
+        target.canonicalize().unwrap().to_str().unwrap()
+    );
+    assert_eq!(
+        receipt["registered_path"].as_str().unwrap(),
+        link.to_str().unwrap()
+    );
+    assert_eq!(
+        json_output(&run(&home, &["harness", "status", "local.fixture"], &[]))["health"],
+        "healthy"
+    );
+}
+
+#[test]
+fn recertify_names_the_missing_executable_and_the_add_command_when_nothing_resolves() {
+    let (temp, home, _workspace, link, versioned) = linked_fixture_home();
+    let recorded = activation_receipt(&home)["executable_realpath"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    fs::remove_dir_all(&versioned).unwrap();
+    fs::remove_file(&link).unwrap();
+    let scratch = temp.path().join("scratch");
+    let failed = run(
+        &home,
+        &[
+            "harness",
+            "recertify",
+            "local.fixture",
+            "--workspace",
+            scratch.to_str().unwrap(),
+        ],
+        &[],
+    );
+    assert!(!failed.status.success());
+    let stderr = String::from_utf8_lossy(&failed.stderr);
+    assert!(
+        stderr.contains(&format!(
+            "harness local.fixture was certified at {recorded}, which no longer exists"
+        )),
+        "{stderr}"
+    );
+    assert!(stderr.contains("brgr harness add"), "{stderr}");
+    assert!(!stderr.contains("os error 2"), "{stderr}");
+
+    // A receipt written before registered_path existed fails the same way.
+    let (temp2, home2, _workspace2, _link2, versioned2) = linked_fixture_home();
+    let activation = home2.join("registry/activations/local.fixture.json");
+    let mut receipt = activation_receipt(&home2);
+    receipt.as_object_mut().unwrap().remove("registered_path");
+    fs::write(&activation, serde_json::to_vec_pretty(&receipt).unwrap()).unwrap();
+    let recorded2 = receipt["executable_realpath"].as_str().unwrap().to_owned();
+    fs::remove_dir_all(&versioned2).unwrap();
+    let scratch2 = temp2.path().join("scratch");
+    let failed2 = run(
+        &home2,
+        &[
+            "harness",
+            "recertify",
+            "local.fixture",
+            "--workspace",
+            scratch2.to_str().unwrap(),
+        ],
+        &[],
+    );
+    assert!(!failed2.status.success());
+    let stderr2 = String::from_utf8_lossy(&failed2.stderr);
+    assert!(
+        stderr2.contains(&format!(
+            "harness local.fixture was certified at {recorded2}, which no longer exists"
+        )),
+        "{stderr2}"
+    );
+    assert!(stderr2.contains("brgr harness add"), "{stderr2}");
+    assert!(!stderr2.contains("os error 2"), "{stderr2}");
+}
+
+#[test]
+fn auto_recertify_follows_the_registered_symlink_when_the_certified_path_is_gone() {
+    let (temp, home, workspace, link, versioned) = linked_fixture_home();
+    let envs = [("BRGR_OWNER_ID", "codex:recertify-test")];
+    let args = [
+        "run",
+        "BRGR_FIXTURE_OK",
+        "--workspace",
+        workspace.to_str().unwrap(),
+        "--foreground",
+    ];
+    upgrade_linked_fixture(temp.path(), &link, &versioned);
+
+    let stopped = run(&home, &args, &envs);
+    assert!(!stopped.status.success());
+    let stderr = String::from_utf8_lossy(&stopped.stderr);
+    assert!(stderr.contains("unspawnable"), "{stderr}");
+    assert!(
+        stderr.contains("brgr harness recertify local.fixture"),
+        "{stderr}"
+    );
+
+    json_output(&run(
+        &home,
+        &["config", "set-auto-recertify", "true"],
+        &envs,
+    ));
+    let created = run(&home, &args, &envs);
+    let stderr = String::from_utf8_lossy(&created.stderr);
+    assert!(
+        stderr.contains("warning: local.fixture was certified at"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains(&format!("through {}", link.display())),
+        "{stderr}"
+    );
+    assert_eq!(json_output(&created)["outcome"], "candidate");
+    assert_eq!(
+        json_output(&run(&home, &["harness", "status", "local.fixture"], &envs))["health"],
+        "healthy"
+    );
+}
+
 #[test]
 fn a_run_without_a_harness_uses_the_only_registered_one_and_refuses_to_pick() {
     let (temp, home, workspace) = fixture_home();
