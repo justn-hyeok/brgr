@@ -246,7 +246,7 @@ Head 교체가 성립하려면 기존 worker의 결과·질문·알림이 새 He
 owner 알림은 `prompt_owner`, 인계 중인 새 Head는 `tell_head`, worker에게 가는
 owner 메시지는 `deliver_worker_messages`가 각각 Herdr를 직접 부른다. headless
 worker는 push 경로가 없어 `brgr message`가 store에만 쌓인다. 이 위에 Head 교체를
-얹으면 Herdr 분리 때 같은 코드를 다시 뜯어야 하므로, 전달 경로를 먼저 하나로
+얹으면 같은 코드를 호출 지점마다 다시 고쳐야 하므로, 전달 경로를 먼저 하나로
 모은다.
 
 ```text
@@ -269,7 +269,8 @@ deliver(recipient, text)
   pending이 유지되고 `brgr status --tree`가 보여 준다.
 - 기본 실행 모드(Pane)는 바꾸지 않는다.
 
-이 단계는 Herdr 분리의 일부이지만 전부는 아니다. `--mode auto` 기본값 전환과
+호스트 중립은 중단했지만 이 단계는 headless worker와 Herdr 밖 owner의 전달
+때문에 남는다. `--mode auto` 기본값 전환과
 pane 화면을 읽지 않는 Codex owner 식별은 기존 호출 동작을 바꾸므로 이 로드맵
 밖에서 따로 결정한다.
 
@@ -369,7 +370,7 @@ agentdriver도 중단한다. Herdr는 brgr의 유일한 TUI 호스트로 남는�
 | 공통 Continuity 기반 | 5 | 3 | store/CLI는 v2.14.2. `claim`은 v2.15.0 |
 | Head Migration | 5 | 4 | 수동 인계, 자동 퇴장, 사용량 조건부 인계(알림과 `--auto`)까지 출시 |
 | Dynamic Workflows | 5 | 5 | Phase 3 완료. 패치로 쌓여 출시한다 |
-| 하네스 중립 전달 경로 | 4 | 2 | 패치. Unified Continuity의 선행 조건이며 Herdr 분리의 절반 |
+| 하네스 중립 전달 경로 | 4 | 2 | 패치. Unified Continuity의 선행 조건 |
 | 브릿저와 오케스트레이터 분리 | 5 | 4 | v3의 기준. 설계 전이라 공수는 추정이다 |
 | 호스트 중립 | - | - | 중단(owner 결정 2026-11-11) |
 | 하네스 호환성 | 4 | 2 | 매일의 경험이며 전부 패치다 |
