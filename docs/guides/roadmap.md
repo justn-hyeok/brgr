@@ -1,6 +1,6 @@
 # Execution Model Roadmap
 
-상태: Phase 1 store/CLI는 v2.14.2, 버려진 Head 인계는 v2.15.0, Dynamic Workflows는 v2.15.10 · 작성 2026-10-14 · 전달 경로 선행 결정 2026-10-29 · 제품 방향과 v3 결정 2026-10-31
+상태: Phase 1 store/CLI는 v2.14.2, 버려진 Head 인계는 v2.15.0, Dynamic Workflows는 v2.15.10 · 작성 2026-10-14 · 전달 경로 선행 결정 2026-10-29 · 제품 방향과 v3 결정 2026-10-31 · 호스트 중립 중단, v3 재정의 2026-11-11
 
 > 에이전트 세션이 아니라 brgr이 작업의 생명주기를 소유한다.
 
@@ -19,8 +19,9 @@ Head의 다음 brgr 명령 끝에서 같은 인계를 직접 실행한다. Claud
 Cursor가 신호를 낸다. 이것으로 2.6까지 갖췄다.
 
 지금까지의 단계는 모두 v2.x로 냈고, Dynamic Workflows도 v2.15.10 패치로 나갔다.
-**owner의 결정(2026-10-31): 아래 "호스트 중립"이 완성되면 v3로 내고 적극
-홍보한다.** 그 전까지는 모든 릴리스가 2.x 패치다. v3의 날짜는 정하지 않았고,
+**owner의 결정(2026-11-11): 호스트 중립은 중단하고, v3는 아래 "v3: 브릿저와
+오케스트레이터"로 다시 정의한다.** 그 전까지는 모든 릴리스가 2.x 패치다. v3의
+날짜는 정하지 않았고,
 마이너나 메이저는 owner가 말할 때만 올린다. 여러 작은 일이 같이 쌓였다고 올리지
 않는다. 문서만 바뀌면 릴리스를 만들지 않는다. 같은 날 추가 릴리스는 방금 낸
 버전이 깨졌을 때만 한다.
@@ -33,7 +34,7 @@ Cursor가 신호를 낸다. 이것으로 2.6까지 갖췄다.
   -> Head Migration
   -> Dynamic Workflows
   -> 하네스 중립 전달 경로
-  -> 호스트 중립 (v3의 기준)
+  -> v3: 브릿저와 오케스트레이터, 엄격한 SemVer
   -> Unified Continuity
 ```
 
@@ -272,83 +273,72 @@ deliver(recipient, text)
 pane 화면을 읽지 않는 Codex owner 식별은 기존 호출 동작을 바꾸므로 이 로드맵
 밖에서 따로 결정한다.
 
-## 호스트 중립 (v3의 기준)
+## v3: 브릿저와 오케스트레이터
 
-릴리스 방향: 완성되면 v3(owner 결정 2026-10-31). 그 전까지는 2.x 패치 · 상태: 결정됨, 스파이크 전 · 추적: [#227](https://github.com/justn-hyeok/brgr/issues/227)
+릴리스 방향: 3.0.0-rc.1로 변경 이유, 방향, 이후 로드맵을 먼저 공개한다(owner 결정 2026-11-11). 그 전까지는 2.x 패치 · 상태: 방향 결정, 설계 전
 
-**문제.** brgr가 Herdr에 종속되어 있다. Herdr를 쓰는 것이 아니라 Herdr 없이는
-서지 못하는 구조가 문제다. 의존은 세 겹이다.
+이름은 brgr로 유지한다. 3.0은 기능 하나가 아니라 구조와 버전 체계가 바뀌는
+기준점이다. 이후 큰 메이저 변경은 거의 없을 것으로 본다.
 
-1. 호출 지점: 추상화 없이 `herdr` 실행이 여러 파일에 흩어져 있다. 쓰는 동사는
-   12~13개로 좁다.
-2. 데이터 모델: owner surface 테이블의 `herdr_session`, `herdr_bin`(필수)과
-   하네스 recipe·manifest의 `herdr_kind`.
-3. 동작 의미: Herdr가 알려 주는 `idle`/`working`에 기대어 화면 응답과 메시지
-   전달을 판단한다.
+**구조.**
 
-**방향.** brgr는 어디에든 붙는 어댑팅 오케스트레이터다(Herdr, tmux, cmux, 순수
-터미널). Herdr는 지원 호스트 중 하나이고 최고의 화면이지만 정체성이 아니다.
-이 로드맵의 킬링 피처 후보는 **작업이 세션·pane·쿼터보다 오래 산다**는 것(Head
-이전과 저널된 워크플로)이며, 이 주장은 Herdr 없이도 시연되어야 한다.
+- **브릿저(코어)**: 맡기기 -> 봉인된 결과 -> 인박스 -> owner 결정. 자동 수락은 하지
+  않는다. 위의 최소 실행 계약이 곧 브릿저다.
+- **오케스트레이터(선택 설치)**: Dynamic Workflows, debate, 재귀 워커, Head 인계,
+  그리고 새 패턴(loop, 서로 공격하며 다듬는 패턴, advisor). 새 패턴은 기존
+  primitive(워커 실행, 세션 이어가기, 인박스)의 조합으로 만들 수 있는지부터 본다.
 
-호스트는 두 부류다. A는 창 만들기·화면 읽기·입력 보내기·닫기가 바깥에서 되는
-호스트(Herdr, cmux, tmux). B는 바깥에서 제어할 수 없는 순수 터미널이라 brgr가
-직접 감독해야 한다.
+**함께 하는 일.**
 
-```text
-(예정) worker 세션 포트
-brgr -- 제어 소켓 --> tui-host (brgr 소유 PTY 프록시가 harness TUI를 감쌈)
-                        ^ 표시되는 곳
-배치 어댑터: Herdr | cmux | tmux | 순수 터미널(attach)
-  호스트가 하는 일: tui-host를 돌리는 창 열기·닫기·배치
-```
+- 설치: brew 또는 curl([#230](https://github.com/justn-hyeok/brgr/issues/230)). Herdr
+  플러그인이 `[[build]]`로 cargo 빌드를 요구하는 지금 방식을 배포 방식과 연결한다.
+  yolo 켜기/끄기, 자동 신뢰 같은 기본값은 TUI에서 정하고 config에 저장한다.
+- Herdr 연동: pane 분할을 `layout.export`, `layout.apply`, `layout.set_split_ratio`,
+  `pane.move`로 더 정교하게 한다. agents 목록의 계층은 Herdr에 부모/자식 필드가
+  없으므로 `└` 같은 글리프 접두어와 parent-id 정렬 토큰으로 먼저 구현한다. 원격
+  (SSH, Teleport `tsh`)은 새로 만들지 않고 Herdr의 원격 기능을 쓴다. Herdr 기능
+  요청은 Discussions에 사람이 직접 쓴다. 에이전트는 쓰지 않는다.
+- Claude Code mod: 헤드리스 작업을 바로 보여 준다. 지금은 5초 폴링이고, mod API의
+  `process.run`은 끝날 때까지 기다리며 상태 표시는 문자열 하나다. 이 제약 안에서
+  방법을 찾는다.
+- 하네스: Tier 2(Command Code, OMP, OpenCode, Cline)까지 head로 쓸 수 있게 넓힌다.
+  Tier는 테스트 엄격도로 정의한다. Hermes는 지원하지 않는다.
+- brgr-bot: Discord/Slack에서 brgr을 불러 모델들에게 토론시키고 결과를 가져오는
+  비교·회의 엔진. 이후 head를 brgr 자체로 두는 "headless head"도 열어 둔다.
 
-상태·화면 읽기·입력 전달은 brgr가 자기 래퍼에서 하므로 어느 호스트에서나 같은
-신뢰성 규칙이 적용된다. Herdr의 에이전트 인식과 상태는 선택적 보강으로 남긴다.
-owner(Head)는 사용자가 직접 띄운 세션이라 래퍼로 풀 수 없다. 호스트가 입력을
-보낼 수 있으면 완료 알림을 넣고, 순수 터미널에서는 hook(다음 턴 주입)과 watch에
-기댄다. 따라서 "메시지가 양방향으로 닿는다"는 계약은 호스트 능력에 조건부이며,
-능력이 모자라면 조용히 넘어가지 않고 pending으로 보여 준다.
+**버전 규칙(3.0부터).**
 
-순서.
+- 엄격한 SemVer. 공개 표면은 CLI 명령·플래그·종료 코드, `--json` 스키마,
+  `FROM BRGR` 알림 형식, config.toml 키, 로컬 저장소 포맷, Herdr 플러그인 매니페스트,
+  Claude Code mod 도구 이름이다.
+- 동작 변경은 최소 minor, 덜 안전한 방향의 기본값 변경은 major다. 제거 전에
+  deprecate를 거친다.
+- 프리릴리스는 rc만 쓴다(`3.1.0-rc.N`). alpha, beta, nightly는 쓰지 않는다. 3.0에서
+  beta를 한 번 쓸지는 열려 있다.
+- 문서만 바뀌면 릴리스하지 않는다.
+- 크레이트, 플러그인 매니페스트, mod의 `plugin.json`, README의 `--ref`를 한 버전으로
+  맞춘다.
 
-0. 스파이크([#228](https://github.com/justn-hyeok/brgr/issues/228)): PTY 프록시가
-   Claude Code, Codex, Cursor TUI를 충실하게 감쌀 수 있는가. 설계를 바꾸는 유일한
-   결정이라 먼저 한다. 결과가 나쁘면 제어되는 호스트만 TUI를 지원하고 순수
-   터미널은 headless만 지원한다. macOS와 Linux x86_64 결과는 go다
-   ([macOS](../evidence/pty-proxy-spike-2026-11-04.md),
-   [Linux](../evidence/pty-proxy-spike-linux-2026-11-04.md)). 순수 터미널
-   에뮬레이터는 아직 시험하지 않았다.
-1. worker 세션과 배치 포트를 정의하고 호출 지점을 옮긴다. 첫 구현은 Herdr에 위임하는
-   동작 불변 리팩터링이다. Phase 3.5(#200)와 #197이 이 안의 조각이다.
-2. 데이터 모델 일반화: surface를 호스트 중립으로, recipe의 `herdr_kind`를 호스트별
-   힌트로. 영속 스키마를 건드리므로 마이그레이션과 하위 호환 시험이 필요하다.
-3. tmux, cmux 배치 어댑터.
-4. 순수 터미널용 attach.
+**아직 정하지 않은 것.** 브릿저와 오케스트레이터의 경계(owner 식별, 전달, 사용량
+관찰), 오케스트레이터 선택 설치 방식(feature flag, 별도 바이너리, 설치 명령), 2층으로
+충분한지 아니면 표면(surface)이나 실행 계약을 따로 두는 3층인지, Herdr Discussions에
+계층 표시 요청을 올릴지.
 
-스파이크 결과 전에는 1~4를 이슈로 쪼개지 않는다.
+## 호스트 중립 (중단)
 
-**v3의 "완성" 기준(제안).**
-
-1. Herdr 없이 TUI worker가 돌고, 완료 알림이 전달되고, Head 인계가 되는 시연.
-   tmux, cmux, 순수 터미널.
-2. 그 시연이 하네스 3종에서 실사용으로 검증됨([#225](https://github.com/justn-hyeok/brgr/issues/225)).
-3. 에이전트 경험 기준선이 측정됨([#226](https://github.com/justn-hyeok/brgr/issues/226)).
-4. Linux에서 빌드되고 테스트가 통과함([#229](https://github.com/justn-hyeok/brgr/issues/229)).
-5. 서명 없이도 믿을 수 있는 배포([#230](https://github.com/justn-hyeok/brgr/issues/230)).
-
-Apple 서명과 공증은 기준에 넣지 않는다. 홍보 문구의 모든 주장은 2와 3의 증거에
-연결한다. Herdr와 Orca를 깎아내리지 않는다. Unified Continuity(Phase 4)는 v3
-기준에 넣지 않는다(owner 결정 2026-11-05).
-
-구현 이슈: 포트 #311, 데이터 모델 #312, tmux·cmux 어댑터 #313, 순수 터미널 #314.
-
-모르는 것: tmux와 cmux에 `idle`에 해당하는 신호가 있는지, Herdr의 어떤 동작이
-암묵적으로 신뢰성에 기여하는지, Herdr가 task 계약까지 가져올지.
+owner 결정(2026-11-11): 현실적으로 불가능하다고 보고 중단한다. 함께 하려던
+agentdriver도 중단한다. Herdr는 brgr의 유일한 TUI 호스트로 남는다. PTY 프록시
+스파이크 결과([macOS](../evidence/pty-proxy-spike-2026-11-04.md),
+[Linux](../evidence/pty-proxy-spike-linux-2026-11-04.md))와 `spikes/pty-proxy`는
+기록으로 남긴다. 구현 이슈 #311~#314는 닫았다. 이 결정으로 빠진 옛 v3 기준 중
+실사용 검증([#225](https://github.com/justn-hyeok/brgr/issues/225)), 에이전트 경험
+측정([#226](https://github.com/justn-hyeok/brgr/issues/226)), Linux 지원
+([#229](https://github.com/justn-hyeok/brgr/issues/229)), 서명 없는 배포
+([#230](https://github.com/justn-hyeok/brgr/issues/230))는 각자 이슈로 남는다.
 
 ## Phase 4. Unified Continuity
 
-릴리스 방향: 호스트 중립 다음, v3 기준에는 넣지 않음(owner 결정 2026-11-05) · 상태: Phase 3.5 뒤
+릴리스 방향: v3 기준에는 넣지 않음(owner 결정 2026-11-05) · 상태: Phase 3.5 뒤
 
 실행 중인 동적 workflow의 Head를 교체해도 작업이 계속되게 한다.
 
@@ -372,8 +362,7 @@ Apple 서명과 공증은 기준에 넣지 않는다. 홍보 문구의 모든 �
 ## 투자 우선순위
 
 점수는 현재 구조를 바탕으로 한 상대적 제품 판단이다. 검증된 공수나 일정을 뜻하지 않는다.
-구현 순서는 Phase 0의 지속 개선 -> 2.5/2.6 -> 3 -> 3.5 -> 호스트 중립 -> 4다.
-호스트 중립 안에서는 스파이크가 먼저다.
+구현 순서는 Phase 0의 지속 개선 -> 2.5/2.6 -> 3 -> 3.5 -> v3 -> 4다.
 
 | 투자 대상 | 효과 / 5 | 공수 / 5 | 판단 |
 | --- | --- | --- | --- |
@@ -381,7 +370,8 @@ Apple 서명과 공증은 기준에 넣지 않는다. 홍보 문구의 모든 �
 | Head Migration | 5 | 4 | 수동 인계, 자동 퇴장, 사용량 조건부 인계(알림과 `--auto`)까지 출시 |
 | Dynamic Workflows | 5 | 5 | Phase 3 완료. 패치로 쌓여 출시한다 |
 | 하네스 중립 전달 경로 | 4 | 2 | 패치. Unified Continuity의 선행 조건이며 Herdr 분리의 절반 |
-| 호스트 중립 | 5 | 4 | v3의 기준. 스파이크 전이라 공수는 추정이다 |
+| 브릿저와 오케스트레이터 분리 | 5 | 4 | v3의 기준. 설계 전이라 공수는 추정이다 |
+| 호스트 중립 | - | - | 중단(owner 결정 2026-11-11) |
 | 하네스 호환성 | 4 | 2 | 매일의 경험이며 전부 패치다 |
 | 계층 탭·위성 UI | 2 | 3 | 현재 로드맵에서 제외한다 |
 
@@ -390,15 +380,16 @@ Apple 서명과 공증은 기준에 넣지 않는다. 홍보 문구의 모든 �
 | 릴리스 | 내는 때 |
 | --- | --- |
 | v2.x 패치 | 기본이며 v3 전까지 모든 릴리스. 현행 경험, 호환, 버그, 작은 명령, 소유자 알림 구멍, 대형 기능을 슬라이스로 쌓는 일 |
-| v3 | "호스트 중립"이 완성되면 owner가 낸다. 날짜는 정하지 않았고 적극 홍보한다. v4는 계획하지 않는다 |
+| v3 | 브릿저와 오케스트레이터를 나누고 엄격한 SemVer로 바꾸는 기준점. 3.0.0-rc.1로 방향을 먼저 공개한다. 날짜는 owner가 정한다 |
+| v3 이후 | SemVer를 따른다. 동작 변경은 minor 이상, 덜 안전한 기본값은 major, 프리릴리스는 rc만 |
 
-마이너와 메이저는 owner가 말할 때만 올린다. 그 전에 쌓인 작은 수정은 패치로
-먼저 낸다.
+v3 전까지 마이너와 메이저는 owner가 말할 때만 올린다. 그 전에 쌓인 작은 수정은
+패치로 먼저 낸다.
 
 제품의 중심은 실제 CLI 에이전트가 작업을 위임하고, 결과를 주고받고, 지휘권까지
-이전하는 경험이며, 그 작업이 세션·pane·쿼터보다 오래 사는 것이다. Herdr는 가장
-깊게 통합된 호스트로 남지만 core·store와 generic process 실행에 Herdr 의존성을
-강제하지 않고, 다른 호스트에도 붙을 수 있게 한다. Herdr는 작업 정체성이나 완료
+이전하는 경험이며, 그 작업이 세션·pane·쿼터보다 오래 사는 것이다. Herdr는 TUI
+worker의 호스트로 남지만 core·store와 generic process 실행에 Herdr 의존성을
+강제하지 않는다. Herdr는 작업 정체성이나 완료
 여부를 대신 판단하지 않는다.
 
 자체 IDE, 자체 채팅 UI, 범용 모델 게이트웨이, 계층 탭·위성 UI는 이번 로드맵의
