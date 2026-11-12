@@ -9,7 +9,7 @@ and development.
 Install the current public v2 plugin from GitHub:
 
 ```bash
-herdr plugin install justn-hyeok/brgr --ref v2.15.23
+herdr plugin install sorrellabs/brgr --ref v2.15.23
 ```
 
 The plugin builds `brgr` from the pinned Cargo lockfile, so a Rust toolchain is
@@ -700,12 +700,12 @@ draw it.
 Install it from a terminal:
 
 ```bash
-claude plugin marketplace add justn-hyeok/brgr
+claude plugin marketplace add sorrellabs/brgr
 claude plugin install brgr@brgr
 ```
 
 Inside a running terminal session the same install is
-`/plugin install brgr --marketplace justn-hyeok/brgr`.
+`/plugin install brgr --marketplace sorrellabs/brgr`.
 
 ## Dynamic Workflows
 

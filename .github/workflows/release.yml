@@ -205,7 +205,7 @@ jobs:
           # Dependencies first. A crate already at this version is skipped,
           # so a rerun finishes a partial publish.
           for crate in brgr-protocol brgr-runner brgr-store brgr-core brgr-registry brgr-cli; do
-            if curl -fsS -A "brgr-release (github.com/justn-hyeok/brgr)" \
+            if curl -fsS -A "brgr-release (github.com/sorrellabs/brgr)" \
               "https://crates.io/api/v1/crates/$crate/$version" >/dev/null 2>&1; then
               echo "$crate $version is already on crates.io"
               continue

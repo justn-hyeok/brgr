@@ -14,8 +14,8 @@ version = "2.15.23"
 edition = "2024"
 license = "MIT"
 rust-version = "1.95"
-repository = "https://github.com/justn-hyeok/brgr"
-homepage = "https://github.com/justn-hyeok/brgr"
+repository = "https://github.com/sorrellabs/brgr"
+homepage = "https://github.com/sorrellabs/brgr"
 
 [workspace.dependencies]
 # Internal crates. crates.io needs a version beside each path.
