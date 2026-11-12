@@ -97,7 +97,7 @@ that was already running does not know brgr yet.
 The Herdr plugin adds a task board and workspace actions on top:
 
 ```bash
-herdr plugin install sorrellabs/brgr --ref v2.15.23
+herdr plugin install sorrellabs/brgr --ref v2.15.24
 ```
 
 ## Use it
