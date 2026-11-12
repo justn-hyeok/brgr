@@ -2,8 +2,9 @@
 
 ## 2.15.24 — 2026-11-13
 
-The repository moved to `sorrellabs/brgr`, the crates.io page's links work, and `harness add` prints the receipt it stored.
+The repository moved to `sorrellabs/brgr`, workers no longer stall on a folder-trust dialog in a short stacked pane, the crates.io page's links work, and `harness add` prints the receipt it stored.
 
+- A worker opens in a new tab instead of a stacked pane under 20 rows, where Claude Code's folder-trust dialog lost its workspace path off the top and brgr could not answer it (#400).
 - The repository is now `github.com/sorrellabs/brgr`; the old `justn-hyeok/brgr` address redirects. The crates' `repository` and `homepage` point at the new address.
 - README links are absolute, so they resolve on crates.io instead of returning 404.
 - `brgr harness add` prints the activation receipt as stored, including `registered_path`.
