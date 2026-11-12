@@ -23,8 +23,11 @@ use super::lifecycle::PaneReceipt;
 
 /// A caller pane narrower than this many columns gets its workers below it.
 pub(super) const NARROW_CALLER: u64 = 100;
-/// Below this many rows a stacked worker cannot show its TUI.
-const MIN_ROWS: u64 = 10;
+/// Below this many rows a stacked worker cannot show a startup dialog whole.
+/// Claude Code's folder-trust dialog needs about 17 rows; shorter, its
+/// `Accessing workspace:` line and path scroll off, brgr cannot prove the
+/// dialog is for the task's workspace, and the worker waits on it.
+const MIN_ROWS: u64 = 20;
 /// Ratio differences smaller than this are rounding, not imbalance.
 const TOLERANCE: f64 = 0.02;
 
@@ -264,7 +267,20 @@ mod tests {
 
     #[test]
     fn later_workers_stack_under_the_last_worker_not_the_caller() {
-        let layout = three_stacked([0.5, 0.5]);
+        // Tall enough that a fourth stacked worker keeps MIN_ROWS.
+        let layout = layout(
+            &[
+                pane("c", 0, 0, 104, 132),
+                pane("a", 104, 0, 104, 66),
+                pane("b", 104, 66, 104, 34),
+                pane("d", 104, 100, 104, 32),
+            ],
+            &[
+                split("right", 0.5, 0, 0, 208, 132),
+                split("down", 0.5, 104, 0, 104, 132),
+                split("down", 0.5, 104, 66, 104, 66),
+            ],
+        );
         assert_eq!(
             place(&layout, "c", &names(&["a", "b", "d"])),
             Placement::Split {
@@ -306,13 +322,13 @@ mod tests {
     fn workers_below_a_narrow_caller_stack_under_it() {
         let layout = layout(
             &[
-                pane("c", 0, 0, 90, 33),
-                pane("a", 0, 33, 90, 22),
-                pane("b", 0, 55, 90, 11),
+                pane("c", 0, 0, 90, 66),
+                pane("a", 0, 66, 90, 44),
+                pane("b", 0, 110, 90, 22),
             ],
             &[
-                split("down", 0.5, 0, 0, 90, 66),
-                split("down", 0.66, 0, 33, 90, 33),
+                split("down", 0.5, 0, 0, 90, 132),
+                split("down", 0.66, 0, 66, 90, 66),
             ],
         );
         assert_eq!(
@@ -326,6 +342,21 @@ mod tests {
         assert_eq!(moves.len(), 1);
         assert_eq!((moves[0].0.as_str(), moves[0].1), ("b", "up"));
         assert!((moves[0].2 - 0.16).abs() < 1e-9);
+    }
+
+    /// A 58-row column holding three stacked workers would give a fourth about
+    /// 14 rows. Claude Code's folder-trust dialog then loses its
+    /// `Accessing workspace:` line and path off the top, brgr cannot match the
+    /// path, and the worker sits on the dialog (seen live, 2026-11-13).
+    #[test]
+    fn a_split_too_short_for_the_trust_dialog_goes_to_a_tab() {
+        let panes: Vec<Value> = (0..3)
+            .map(|index| pane(&format!("w{index}"), 104, index * 19, 104, 19))
+            .chain([pane("c", 0, 0, 104, 58)])
+            .collect();
+        let layout = layout(&panes, &[]);
+        let workers: Vec<String> = (0..3).map(|index| format!("w{index}")).collect();
+        assert_eq!(place(&layout, "c", &workers), Placement::Tab);
     }
 
     #[test]
