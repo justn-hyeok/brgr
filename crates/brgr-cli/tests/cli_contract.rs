@@ -5871,6 +5871,39 @@ fn activation_receipt(home: &Path) -> Value {
         .unwrap()
 }
 
+/// `harness add` prints the receipt it stored, including the symlink it
+/// was registered through, so its output matches the activation on disk.
+#[test]
+fn harness_add_prints_the_registered_symlink_it_stored() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("brgr");
+    let target = install_versioned_fixture(&temp.path().join("v1"));
+    let link_dir = temp.path().join("bin");
+    fs::create_dir_all(&link_dir).unwrap();
+    let link = link_dir.join("fixture");
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+    let scratch = temp.path().join("scratch");
+    fs::create_dir_all(&scratch).unwrap();
+    let printed = json_output(&run(
+        &home,
+        &[
+            "harness",
+            "add",
+            link.to_str().unwrap(),
+            "--workspace",
+            scratch.to_str().unwrap(),
+            "--prompt",
+            "BRGR_FIXTURE_OK",
+        ],
+        &[],
+    ));
+    assert_eq!(
+        printed["registered_path"].as_str(),
+        Some(link.to_str().unwrap())
+    );
+    assert_eq!(printed, activation_receipt(&home));
+}
+
 /// A re-certification while the certified path still exists (the CLI was
 /// updated in place) keeps the symlink the harness was registered through,
 /// so a later upgrade that deletes the versioned directory can still follow it.
