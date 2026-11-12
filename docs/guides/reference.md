@@ -9,7 +9,7 @@ and development.
 Install the current public v2 plugin from GitHub:
 
 ```bash
-herdr plugin install sorrellabs/brgr --ref v2.15.23
+herdr plugin install sorrellabs/brgr --ref v2.15.24
 ```
 
 The plugin builds `brgr` from the pinned Cargo lockfile, so a Rust toolchain is

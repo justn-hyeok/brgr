@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.15.24 — 2026-11-13
+
+The repository moved to `sorrellabs/brgr`, the crates.io page's links work, and `harness add` prints the receipt it stored.
+
+- The repository is now `github.com/sorrellabs/brgr`; the old `justn-hyeok/brgr` address redirects. The crates' `repository` and `homepage` point at the new address.
+- README links are absolute, so they resolve on crates.io instead of returning 404.
+- `brgr harness add` prints the activation receipt as stored, including `registered_path`.
+
 ## 2.15.23 — 2026-11-11
 
 A harness registered through a symlink survives a Homebrew upgrade, a macOS caller's pane is read only from its environment, and tests stop leaving a trampoline file per process.
