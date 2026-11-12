@@ -144,7 +144,8 @@ pub(crate) async fn add_harness(
             )
             .await?
     };
-    registry.record_registered_path(&receipt.harness_id, &args.executable)?;
+    // Returned as stored, so `harness add` prints what is on disk.
+    let receipt = registry.record_registered_path(&receipt.harness_id, &args.executable)?;
     let probed = registry.health_probed(&receipt.harness_id).await?;
     require_healthy_harness(
         &receipt.harness_id,

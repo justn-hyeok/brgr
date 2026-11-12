@@ -717,7 +717,7 @@ impl Registry {
     /// it is absolute and resolves elsewhere (a symlink). A later
     /// re-certification follows it when the certified realpath is gone. A
     /// relative or already-canonical path records nothing: it cannot be
-    /// reproduced later.
+    /// reproduced later. Returns the receipt as stored.
     ///
     /// # Errors
     ///
@@ -727,7 +727,7 @@ impl Registry {
         &self,
         harness_id: &str,
         path: &Path,
-    ) -> Result<(), RegistryError> {
+    ) -> Result<ActivationReceipt, RegistryError> {
         validate_harness_id(harness_id)?;
         let registered = (path.is_absolute()
             && path.canonicalize().is_ok_and(|canonical| canonical != path))
@@ -735,10 +735,11 @@ impl Registry {
         let receipt_path = self.activation_path(harness_id);
         let mut receipt: ActivationReceipt = serde_json::from_slice(&fs::read(&receipt_path)?)?;
         if receipt.registered_path == registered {
-            return Ok(());
+            return Ok(receipt);
         }
         receipt.registered_path = registered;
-        write_json_atomic(&receipt_path, &serde_json::to_vec_pretty(&receipt)?)
+        write_json_atomic(&receipt_path, &serde_json::to_vec_pretty(&receipt)?)?;
+        Ok(receipt)
     }
 
     /// Resolves an exact requested model through a bounded native catalog
