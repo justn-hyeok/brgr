@@ -1,6 +1,6 @@
 <p align="center"><img src="docs/assets/brgr-icon.svg" width="120" alt="brgr burger icon"></p>
 
-<p align="center"><a href="https://crates.io/crates/brgr-cli"><img src="https://img.shields.io/crates/v/brgr-cli.svg" alt="crates.io"></a> <a href="https://github.com/sorrellabs/brgr/releases/latest"><img src="https://img.shields.io/github/v/release/sorrellabs/brgr" alt="release"></a> <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT license"></a></p>
+<p align="center"><a href="https://crates.io/crates/brgr-cli"><img src="https://img.shields.io/crates/v/brgr-cli.svg" alt="crates.io"></a> <a href="https://github.com/sorrellabs/brgr/releases/latest"><img src="https://img.shields.io/github/v/release/sorrellabs/brgr" alt="release"></a> <a href="https://github.com/sorrellabs/brgr/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT license"></a></p>
 
 # brgr
 
@@ -10,7 +10,7 @@ decide on. The work outlives the session, pane or quota that started it.**
 Today brgr needs [Herdr](https://github.com/herdrdev/herdr): each worker runs in
 its own Herdr pane beside you, without anyone clicking through its prompts.
 
-![Claude Code asks brgr for three Claude Code workers. They open stacked beside it, report back, are accepted, and their panes close.](docs/assets/demo.gif)
+![Claude Code asks brgr for three Claude Code workers. They open stacked beside it, report back, are accepted, and their panes close.](https://raw.githubusercontent.com/sorrellabs/brgr/main/docs/assets/demo.gif)
 
 *Above: one request to Claude Code. brgr opens three Claude Code workers beside
 it, each worker's report comes back as a `FROM BRGR` notice, Claude accepts it,
@@ -45,7 +45,7 @@ accept or reject.
   for it.
 
 brgr calls each registered worker CLI a *harness*, and supports them in
-[tiers](docs/guides/reference.md#harness-tiers). Tier 1 is Claude Code, Codex
+[tiers](https://github.com/sorrellabs/brgr/blob/main/docs/guides/reference.md#harness-tiers). Tier 1 is Claude Code, Codex
 CLI, Cursor CLI and Devin CLI. Tier 2 is Command Code, OMP, OpenCode and Cline.
 Tier 3 is GitHub Copilot CLI, Gemini CLI and Pi. The agent that starts workers,
 the *owner*, can be a Codex, Claude Code or Cursor session.
@@ -63,11 +63,11 @@ and `brgr config set model MODEL --harness ID`.
 
 - Apple Silicon Mac with macOS 15 or newer, or x86_64 Linux. Linux means Ubuntu
   24.04 with Claude Code, Codex CLI, Cursor CLI and Devin CLI, as far as
-  [its evidence](docs/evidence/linux-real-agents-2026-11-05.md) goes.
+  [its evidence](https://github.com/sorrellabs/brgr/blob/main/docs/evidence/linux-real-agents-2026-11-05.md) goes.
 - [Herdr](https://github.com/herdrdev/herdr) 0.9 or newer, installed and
   running. Start your agent in a Herdr pane, so workers can open beside it.
 - A Rust toolchain (`cargo`) to install. Release archives exist but are unsigned
-  and not notarized; see [the unsigned distribution guide](docs/guides/unsigned-distribution.md).
+  and not notarized; see [the unsigned distribution guide](https://github.com/sorrellabs/brgr/blob/main/docs/guides/unsigned-distribution.md).
 - At least one worker CLI, installed and logged in, for example Claude Code
 
 ## Install
@@ -129,17 +129,17 @@ brgr land TASK --workspace . --reason "criteria verified"   # code: check, accep
 ## Status
 
 v2 is the current release line. Its author uses it daily on macOS, it has been
-run end to end on Linux but not used daily there, and it changes quickly; see the [changelog](CHANGELOG.md). One check from its
+run end to end on Linux but not used daily there, and it changes quickly; see the [changelog](https://github.com/sorrellabs/brgr/blob/main/CHANGELOG.md). One check from its
 readiness record is still open: a full review of the code by someone other than
-the author. See [the readiness status](docs/readiness/status.md).
+the author. See [the readiness status](https://github.com/sorrellabs/brgr/blob/main/docs/readiness/status.md).
 
-The [execution model roadmap](docs/guides/roadmap.md) plans continuity foundations,
+The [execution model roadmap](https://github.com/sorrellabs/brgr/blob/main/docs/guides/roadmap.md) plans continuity foundations,
 Head Migration, and Dynamic Workflows while preserving the existing run contract.
 
 brgr is written by AI coding agents under one maintainer's direction, so its
 code quality is not guaranteed; its behaviour is what the tests check.
-[CONTRIBUTING.md](CONTRIBUTING.md) says what that means and how to help.
+[CONTRIBUTING.md](https://github.com/sorrellabs/brgr/blob/main/CONTRIBUTING.md) says what that means and how to help.
 
 The detailed contract, covering plugin internals, routes, pane mode, recursive
 workers, the completion loop and worktree cleanup, is in
-[docs/guides/reference.md](docs/guides/reference.md).
+[docs/guides/reference.md](https://github.com/sorrellabs/brgr/blob/main/docs/guides/reference.md).
