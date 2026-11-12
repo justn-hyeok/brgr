@@ -236,7 +236,7 @@ const { results, stopped_at } = await pipeline([
 
 ## Phase 3.5. 하네스 중립 전달 경로
 
-릴리스 방향: v2.x 패치 · 상태: 결정됨, 미착수 · 추적: [#200](https://github.com/justn-hyeok/brgr/issues/200)
+릴리스 방향: v2.x 패치 · 상태: 결정됨, 미착수 · 추적: [#200](https://github.com/sorrellabs/brgr/issues/200)
 
 Unified Continuity보다 먼저 한다. 2026-10-29에 정한 순서다.
 
@@ -291,7 +291,7 @@ pane 화면을 읽지 않는 Codex owner 식별은 기존 호출 동작을 바�
 
 **함께 하는 일.**
 
-- 설치: brew 또는 curl([#230](https://github.com/justn-hyeok/brgr/issues/230)). Herdr
+- 설치: brew 또는 curl([#230](https://github.com/sorrellabs/brgr/issues/230)). Herdr
   플러그인이 `[[build]]`로 cargo 빌드를 요구하는 지금 방식을 배포 방식과 연결한다.
   yolo 켜기/끄기, 자동 신뢰 같은 기본값은 TUI에서 정하고 config에 저장한다.
 - Herdr 연동: pane 분할을 `layout.export`, `layout.apply`, `layout.set_split_ratio`,
@@ -332,10 +332,10 @@ agentdriver도 중단한다. Herdr는 brgr의 유일한 TUI 호스트로 남는�
 스파이크 결과([macOS](../evidence/pty-proxy-spike-2026-11-04.md),
 [Linux](../evidence/pty-proxy-spike-linux-2026-11-04.md))와 `spikes/pty-proxy`는
 기록으로 남긴다. 구현 이슈 #311~#314는 닫았다. 이 결정으로 빠진 옛 v3 기준 중
-실사용 검증([#225](https://github.com/justn-hyeok/brgr/issues/225)), 에이전트 경험
-측정([#226](https://github.com/justn-hyeok/brgr/issues/226)), Linux 지원
-([#229](https://github.com/justn-hyeok/brgr/issues/229)), 서명 없는 배포
-([#230](https://github.com/justn-hyeok/brgr/issues/230))는 각자 이슈로 남는다.
+실사용 검증([#225](https://github.com/sorrellabs/brgr/issues/225)), 에이전트 경험
+측정([#226](https://github.com/sorrellabs/brgr/issues/226)), Linux 지원
+([#229](https://github.com/sorrellabs/brgr/issues/229)), 서명 없는 배포
+([#230](https://github.com/sorrellabs/brgr/issues/230))는 각자 이슈로 남는다.
 
 ## Phase 4. Unified Continuity
 
